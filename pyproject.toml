@@ -41,6 +41,7 @@ all = [
 dev = [
   "black>=24.10,<26",
   "build>=1.2,<2",
+  "hatchling>=1.27,<2",
   "pytest>=8.3,<10",
   "ruff>=0.6,<1",
 ]

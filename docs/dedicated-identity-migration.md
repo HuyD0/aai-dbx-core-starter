@@ -1,5 +1,10 @@
 # Migrate CI to a dedicated dev-only identity
 
+> Completed on 2026-07-25. GitHub Actions now uses client ID
+> `a7e40167-d3f6-48a9-acd9-7998230cce34`; auth smoke and bundle deployment
+> succeeded with the dedicated principal. The legacy FIC was then removed
+> without changing the shared application.
+
 The repository currently deploys successfully through the shared
 `github-actions-dbx-platform` identity. That principal is a workspace admin in
 both `dbx-dev` and `dbx-uat`, so a token minted for this repository has a larger
@@ -49,7 +54,7 @@ export DATABRICKS_AUTH_TYPE=azure-cli
 databricks service-principals create \
   --application-id "$DEDICATED_CLIENT_ID" \
   --display-name github-actions-aai-dbx-core-starter \
-  --active true
+  --active
 ```
 
 Do not add this principal to the `admins` group and do not grant the
@@ -126,13 +131,12 @@ The result must be empty.
 
 ## 4. Remove this repository's legacy FIC
 
-After successful dedicated-identity deployment, remove these legacy declarations
-from `infra/identity.tf` and apply again:
+After successful dedicated-identity deployment, the migration removed these
+legacy declarations from `infra/identity.tf` and applied again:
 
 - `data.azuread_application.cicd`;
 - `azuread_application_federated_identity_credential.gha_main`.
 
-Then remove `cicd_app_client_id` from `variables.tf` and `terraform.tfvars`.
-Never delete the shared `github-actions-dbx-platform` application or service
-principal, and do not remove its `dbx-platform` federated credential or UAT
-assignment.
+It also removed the legacy client-ID variable and output. Never delete the
+shared `github-actions-dbx-platform` application or service principal, and do
+not remove its `dbx-platform` federated credential or UAT assignment.

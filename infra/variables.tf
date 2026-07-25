@@ -35,15 +35,6 @@ variable "repo_id" {
   EOT
 }
 
-variable "cicd_app_client_id" {
-  type        = string
-  description = <<-EOT
-    AppId (client id) of the EXISTING app registration reused as the CI OIDC
-    identity. This module does NOT own the app — it only attaches a new
-    federated credential to it. Default is github-actions-dbx-platform.
-  EOT
-}
-
 variable "dedicated_cicd_app_display_name" {
   type        = string
   description = "Display name for this repository's dedicated, secretless CI application."

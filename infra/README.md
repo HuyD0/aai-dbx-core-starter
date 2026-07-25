@@ -8,15 +8,15 @@ Databricks with **no stored secrets**.
 
 | Resource | Owned by TF? | Notes |
 |---|---|---|
-| Federated credential `gh-aai-dbx-core-starter-main` | ✅ yes | Attached to the **reused** app `github-actions-dbx-platform`. Subject: `repo:HuyD0/aai-dbx-core-starter:ref:refs/heads/main`. |
-| App registration `github-actions-dbx-platform` | ❌ no (data source) | Reused, read-only. Not created or destroyed here. |
-| Dedicated app, SP, and FIC | ✅ yes | Migration target `github-actions-aai-dbx-core-starter`; no client secret or ARM role. |
+| Dedicated app, SP, and FIC | ✅ yes | `github-actions-aai-dbx-core-starter`; no client secret, API permission, or ARM role. |
 | `rg-aai-dbx-base-template-dev` | ✅ yes | Optional empty landing zone (`create_project_rg`). |
 
 It deliberately does **not** manage the Databricks-side service-principal
 registration, Unity Catalog SDK volume, or its grants — see
 [`../docs/cloud-setup.md`](../docs/cloud-setup.md) and
 [`../docs/platform-operations.md`](../docs/platform-operations.md).
+The legacy shared application `github-actions-dbx-platform` is not referenced
+or managed by this Terraform configuration.
 
 ## Why this runs locally, not in CI
 
@@ -50,5 +50,5 @@ terraform apply  -var-file=terraform.tfvars
 terraform destroy -var-file=terraform.tfvars
 ```
 
-This removes the dedicated application/SP, both repository-owned federated
-credentials, and the optional RG. The reused application is untouched.
+This removes the dedicated application/SP/FIC and the optional RG. The legacy
+shared application is untouched.

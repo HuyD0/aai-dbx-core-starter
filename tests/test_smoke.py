@@ -101,3 +101,21 @@ def test_credentialed_jobs_do_not_use_github_environments_or_secrets():
         assert "${{ secrets." not in text
         for job in workflow["jobs"].values():
             assert "environment" not in job
+
+
+def test_cloud_environment_is_reproducible_and_credential_free():
+    setup = (ROOT / "scripts" / "codex-cloud-setup.sh").read_text()
+    maintenance = (ROOT / "scripts" / "codex-cloud-maintenance.sh").read_text()
+    verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
+    ci = (WORKFLOWS / "ci.yml").read_text()
+
+    for version in ("0.8.23", "1.12.2", "1.6.0", "2.88.0"):
+        assert version in setup
+
+    assert "sha256sum --check" in setup
+    assert "codex-cloud-setup.sh" in maintenance
+    assert "./scripts/cloud-verify.sh" in ci
+    assert "AZURE_CLIENT_SECRET" in verify
+    assert "DATABRICKS_TOKEN" in verify
+    assert "azure/login" not in verify.lower()
+    assert "az login" not in verify.lower()

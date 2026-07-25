@@ -15,21 +15,19 @@ a GitHub runner with zero stored secrets.
 
 | # | Resource | Identifier | Created by | Reused? |
 |---|---|---|---|---|
-| 1 | App registration (CI OIDC identity) | `github-actions-dbx-platform` / client id `b74a6820-d0ac-454f-8c32-02141cba3c8a` | pre-existing | ✅ reused (not owned here) |
-| 2 | Federated credential | `gh-aai-dbx-core-starter-main`, subject `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` (immutable form) | Terraform (`infra/`) | new |
-| 2a | Dedicated CI app + SP + FIC (migration target) | `github-actions-aai-dbx-core-starter` | Terraform (`infra/`) | pending human apply |
+| 1 | Dedicated CI app + SP | `github-actions-aai-dbx-core-starter` / client id `a7e40167-d3f6-48a9-acd9-7998230cce34` | Terraform (`infra/`) | no |
+| 2 | Dedicated federated credential | `gh-aai-dbx-core-starter-main`, subject `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` | Terraform (`infra/`) | no |
 | 3 | Project resource group | `rg-aai-dbx-base-template-dev` (eastus2) | Terraform (`infra/`) | new, optional |
-| 4 | Databricks SP registration | SP `b74a6820-…` in `dbx-dev` + workspace-access entitlement | Databricks CLI | verify (reuse likely) |
+| 4 | Databricks SP registration | SP `a7e40167-…` in `dbx-dev` + `CAN_USE` on policy `0005F2031B6D2319` | Databricks CLI | no |
 | 5 | GitHub repo variables | Identity/workspace ids, cost tags, owner group, and SDK volume path | `gh` | new |
 | 6 | Terraform state | `rg-terraform-state` / `tfstatee18f8286` / container `tfstate` | pre-existing account, new key | reused account |
 | 7 | SDK artifact volume | `platform.artifacts.python_packages` | human-run Databricks SQL | new |
 
 No client secrets, PATs, or access keys are created anywhere.
 
-The shared identity is currently a workspace admin in both `dbx-dev` and
-`dbx-uat`. Complete
-[`dedicated-identity-migration.md`](dedicated-identity-migration.md) to replace
-it for this repository without modifying the shared app used by `dbx-platform`.
+The dedicated migration completed on 2026-07-25. The legacy shared application
+still serves `dbx-platform`, but this repository no longer has a federated
+credential on it.
 
 ---
 
@@ -80,32 +78,27 @@ terraform apply -var-file=terraform.tfvars
 > `identity.tf` and adjust before applying. This is the one line that can't be
 > validated offline.
 
-For the original bootstrap, the expected new objects were one federated
-credential and the optional resource group. The current migration also creates
-one repository-owned Entra application, its service principal, and a second
-federated credential. The legacy shared application remains a **data source** —
-read-only, never modified.
+Expected identity objects are one repository-owned Entra application, its
+service principal, and one immutable-`main` federated credential. The legacy
+shared application is not referenced or managed.
 
 Verify the credential landed:
 
 ```bash
 # [agent] read-only
 az ad app federated-credential list \
-  --id b74a6820-d0ac-454f-8c32-02141cba3c8a \
+  --id a7e40167-d3f6-48a9-acd9-7998230cce34 \
   --query "[].{name:name, subject:subject}" -o table
 ```
 
-You should see `gh-aai-dbx-core-starter-main` alongside the pre-existing
-`dbx-platform` credential.
+You should see only `gh-aai-dbx-core-starter-main`.
 
 ---
 
 ## 3. Register / verify the SP in Databricks — resource #4
 
-**Azure RBAC does not grant in-workspace rights.** The CI SP must exist inside
-`dbx-dev` with permission to deploy. Because we reuse `github-actions-dbx-platform`
-(already used against `dbx-platform`), it is very likely already registered — so
-verify first, only create if missing.
+**Azure RBAC does not grant in-workspace rights.** The dedicated CI SP must
+exist only inside `dbx-dev` with permission to use constrained job compute.
 
 ```bash
 # Point the CLI at dev via Azure-CLI auth (no token/PAT):
@@ -114,30 +107,21 @@ export DATABRICKS_AUTH_TYPE=azure-cli
 
 # [you] VERIFY it's present (search by application id)
 databricks service-principals list \
-  --filter "applicationId eq b74a6820-d0ac-454f-8c32-02141cba3c8a"
+  --filter "applicationId eq a7e40167-d3f6-48a9-acd9-7998230cce34"
 
 # [you] CREATE only if the list above is empty
 databricks service-principals create \
-  --application-id b74a6820-d0ac-454f-8c32-02141cba3c8a \
-  --display-name github-actions-dbx-platform \
-  --active true
+  --application-id a7e40167-d3f6-48a9-acd9-7998230cce34 \
+  --display-name github-actions-aai-dbx-core-starter \
+  --active
 
-# [you] LEAST-PRIVILEGE entitlements so it can deploy bundles / create job
-# clusters. (workspace-access is implied by presence.) Grant via the workspace
-# admin UI (Settings → Identity and access → Service principals → entitlements)
-# or the entitlements API. Keep it to:
-#   - Workspace access
-#   - If jobs use new job clusters, scope cluster creation to a CLUSTER POLICY
-#     (fixed node types, NO arbitrary init scripts, capped autoscale) or a
-#     pre-created constrained instance pool — do NOT grant "unrestricted cluster
-#     creation". Unrestricted creation lets anyone holding the SP token run
-#     arbitrary code (init scripts / node config) as the SP.
+databricks permissions update cluster-policies 0005F2031B6D2319 \
+  --json '{"access_control_list":[{"service_principal_name":"a7e40167-d3f6-48a9-acd9-7998230cce34","permission_level":"CAN_USE"}]}'
 ```
 
-> Reuse does not guarantee deploy rights. `github-actions-dbx-platform` may serve
-> the `dbx-platform` repo against a *different* workspace, so confirm it is
-> present in **dbx-dev** *and* can create jobs there — authenticating is not the
-> same as being authorized. The `deploy` job (§5) is the definitive test.
+Do not add the dedicated principal to `admins` and do not grant
+`allow-cluster-create`. The `deploy` job (§5) is the definitive authorization
+test.
 
 > Data-plane note: if `databricks ...` fails locally with a TLS/cert error while
 > `az ...` works, your shell is blocking `*.azuredatabricks.net`. Run these on a
@@ -153,7 +137,7 @@ they are repository variables rather than secrets.
 
 ```bash
 # [agent] after `gh auth login`
-gh variable set AZURE_CLIENT_ID       -R HuyD0/aai-dbx-core-starter -b b74a6820-d0ac-454f-8c32-02141cba3c8a
+gh variable set AZURE_CLIENT_ID       -R HuyD0/aai-dbx-core-starter -b a7e40167-d3f6-48a9-acd9-7998230cce34
 gh variable set AZURE_TENANT_ID       -R HuyD0/aai-dbx-core-starter -b 7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6
 gh variable set AZURE_SUBSCRIPTION_ID -R HuyD0/aai-dbx-core-starter -b ea936670-dda1-4884-8467-49c225bf3e83
 gh variable set DATABRICKS_HOST       -R HuyD0/aai-dbx-core-starter -b https://adb-7405609799238491.11.azuredatabricks.net
@@ -285,19 +269,17 @@ gh api -X PUT repos/HuyD0/aai-dbx-core-starter/actions/permissions \
 Do not enable this before the pinning PR reaches `main`; otherwise the existing
 tag-based workflows on `main` will stop running.
 
-### 8.2 Shared-SP isolation (finding B — dedicated migration required)
+### 8.2 Shared-SP isolation (finding B — migration complete)
 
 `github-actions-dbx-platform` is reused across this repo and `dbx-platform`. An
 audit on 2026-07-25 confirmed it is an admin with unrestricted cluster creation
 in both `dbx-dev` and `dbx-uat`. A token minted by this repository can therefore
 reach both workspaces.
 
-Do not remove the shared app or its UAT assignment because that can break
-`dbx-platform`. Follow
-[`dedicated-identity-migration.md`](dedicated-identity-migration.md) to create a
-repository-owned principal, register it only in `dbx-dev`, grant only `CAN_USE`
-on the constrained Job Compute policy, repoint `AZURE_CLIENT_ID`, verify, and
-then remove only this repository's legacy FIC.
+The dedicated principal is registered only in `dbx-dev`, has only `CAN_USE` on
+the Job Compute policy, and has no ARM role. This repository's legacy FIC was
+removed after successful auth-smoke and deploy runs. Do not remove the shared
+app or its UAT assignment because that can break `dbx-platform`.
 
 ### 8.3 `DATABRICKS_HOST` is a bearer-token sink (finding H)
 
@@ -312,10 +294,10 @@ trusted role; audit changes to this variable.
 | Fix | Status |
 |---|---|
 | A — pin `databricks/setup-cli` to a commit SHA | ✅ applied — `@8b7b124…` (v1.9.0) in deploy.yml + auth-smoke.yml |
-| C — CODEOWNERS + `main` branch protection | ✅ CODEOWNERS added; branch protection = §8.1 (run it) |
+| C — CODEOWNERS + `main` branch protection | ✅ enforced |
 | D — `persist-credentials: false` on checkout | ✅ applied (deploy.yml, ci.yml) |
 | G — cluster policy instead of unrestricted creation | ✅ documented (§3) |
 | H — `DATABRICKS_HOST` trust assumption | ✅ documented (§8.3) |
 | E — pin ALL actions to SHAs | ✅ applied; automated dependency PRs omitted for this POC |
 | F — workflow-scoped FIC via `job_workflow_ref` sub-customization | ⬜ deferred (low; needs OIDC sub-customization + matching FIC) |
-| B — dedicated per-repo SP | 🟨 Terraform prepared; human apply/cutover required |
+| B — dedicated per-repo SP | ✅ deployed, dev-only, and verified |
