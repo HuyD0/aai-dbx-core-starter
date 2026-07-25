@@ -17,12 +17,18 @@ a GitHub runner with zero stored secrets.
 |---|---|---|---|---|
 | 1 | App registration (CI OIDC identity) | `github-actions-dbx-platform` / client id `b74a6820-d0ac-454f-8c32-02141cba3c8a` | pre-existing | ✅ reused (not owned here) |
 | 2 | Federated credential | `gh-aai-dbx-core-starter-main`, subject `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` (immutable form) | Terraform (`infra/`) | new |
+| 2a | Dedicated CI app + SP + FIC (migration target) | `github-actions-aai-dbx-core-starter` | Terraform (`infra/`) | pending human apply |
 | 3 | Project resource group | `rg-aai-dbx-base-template-dev` (eastus2) | Terraform (`infra/`) | new, optional |
 | 4 | Databricks SP registration | SP `b74a6820-…` in `dbx-dev` + workspace-access entitlement | Databricks CLI | verify (reuse likely) |
 | 5 | GitHub repo variables | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DATABRICKS_HOST` | `gh` | new |
 | 6 | Terraform state | `rg-terraform-state` / `tfstatee18f8286` / container `tfstate` | pre-existing account, new key | reused account |
 
 No client secrets, PATs, or access keys are created anywhere.
+
+The shared identity is currently a workspace admin in both `dbx-dev` and
+`dbx-uat`. Complete
+[`dedicated-identity-migration.md`](dedicated-identity-migration.md) to replace
+it for this repository without modifying the shared app used by `dbx-platform`.
 
 ---
 
@@ -73,9 +79,11 @@ terraform apply -var-file=terraform.tfvars
 > `identity.tf` and adjust before applying. This is the one line that can't be
 > validated offline.
 
-Expected new objects: one `azuread_application_federated_identity_credential`
-and (optionally) `rg-aai-dbx-base-template-dev`. The app registration itself is a
-**data source** — read-only, never modified.
+For the original bootstrap, the expected new objects were one federated
+credential and the optional resource group. The current migration also creates
+one repository-owned Entra application, its service principal, and a second
+federated credential. The legacy shared application remains a **data source** —
+read-only, never modified.
 
 Verify the credential landed:
 
@@ -250,22 +258,19 @@ write access) — branch protection alone does not gate manual dispatch. The
 `.github/CODEOWNERS` file makes review of `/.github/workflows/` and `/infra/`
 mandatory once "require code owner reviews" is on.
 
-### 8.2 Shared-SP isolation (finding B — we kept the shared identity)
+### 8.2 Shared-SP isolation (finding B — dedicated migration required)
 
-`github-actions-dbx-platform` is reused across this repo and `dbx-platform`. A
-compromise of this repo's runner mints a tenant-scoped Databricks token valid in
-**every** workspace the SP is registered in — not just `dbx-dev`. To keep the
-blast radius contained, verify the SP is registered **only** in `dbx-dev`:
+`github-actions-dbx-platform` is reused across this repo and `dbx-platform`. An
+audit on 2026-07-25 confirmed it is an admin with unrestricted cluster creation
+in both `dbx-dev` and `dbx-uat`. A token minted by this repository can therefore
+reach both workspaces.
 
-```bash
-# [you — needs Databricks account access] list workspaces the SP can reach
-databricks account service-principals list --account-id <account-id> \
-  | grep -i b74a6820   # then confirm its workspace assignments are dbx-dev only
-```
-
-If it is also entitled in `dbx-platform`'s (prod/uat) workspace, either accept
-the cross-repo blast radius knowingly or move this repo to a **dedicated** SP
-(create a new app + FIC, register it in `dbx-dev`, repoint `AZURE_CLIENT_ID`).
+Do not remove the shared app or its UAT assignment because that can break
+`dbx-platform`. Follow
+[`dedicated-identity-migration.md`](dedicated-identity-migration.md) to create a
+repository-owned principal, register it only in `dbx-dev`, grant only `CAN_USE`
+on the constrained Job Compute policy, repoint `AZURE_CLIENT_ID`, verify, and
+then remove only this repository's legacy FIC.
 
 ### 8.3 `DATABRICKS_HOST` is a bearer-token sink (finding H)
 
@@ -284,6 +289,6 @@ trusted role; audit changes to this variable.
 | D — `persist-credentials: false` on checkout | ✅ applied (deploy.yml, ci.yml) |
 | G — cluster policy instead of unrestricted creation | ✅ documented (§3) |
 | H — `DATABRICKS_HOST` trust assumption | ✅ documented (§8.3) |
-| E — pin ALL actions to SHAs + Dependabot | ⬜ deferred (low; first-party tag pins) |
+| E — pin ALL actions to SHAs + Dependabot | ✅ applied |
 | F — workflow-scoped FIC via `job_workflow_ref` sub-customization | ⬜ deferred (low; needs OIDC sub-customization + matching FIC) |
-| B — dedicated per-repo SP | ⬜ not taken — kept shared SP, mitigated by §8.2 |
+| B — dedicated per-repo SP | 🟨 Terraform prepared; human apply/cutover required |

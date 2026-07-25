@@ -36,6 +36,7 @@ GitHub Actions (permissions: id-token: write)
 | CI app registration (**reused**) | `github-actions-dbx-platform` |
 | CI app **client id** (`AZURE_CLIENT_ID`) | `b74a6820-d0ac-454f-8c32-02141cba3c8a` |
 | CI app SP object id | `f1ae1583-6b35-4d6c-a7c1-305034983307` |
+| Dedicated CI app (**migration target**) | `github-actions-aai-dbx-core-starter` — ids assigned by Terraform apply |
 | Federated credential | `gh-aai-dbx-core-starter-main` |
 | FIC subject (immutable form) | `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` |
 | Databricks dev workspace | `dbx-dev` — `https://adb-7405609799238491.11.azuredatabricks.net` (id `7405609799238491`) |
@@ -58,12 +59,16 @@ access key, **stop** — that is a design violation here.
    subject is the branch-ref form; adding an environment changes the OIDC
    subject to `:environment:<name>` and breaks the exchange. To gate on an
    environment, first add a *matching* FIC in `infra/identity.tf`, then set it.
-4. **Least privilege.** The CI SP has **no ARM RBAC** and only Databricks
-   workspace access in `dbx-dev`. Do not grant it subscription/RG roles to "make
-   something work" — solve it inside Databricks instead.
+4. **Least privilege.** The dedicated CI SP must have **no ARM RBAC**, must be
+   registered only in `dbx-dev`, must not be a workspace admin, and may use only
+   the constrained Job Compute policy. Do not grant it subscription/RG roles or
+   unrestricted cluster creation to "make something work" — solve it with
+   Databricks object permissions instead. The legacy shared identity does not
+   meet this boundary; complete `docs/dedicated-identity-migration.md`.
 5. **The reused app is shared.** `github-actions-dbx-platform` also serves the
    `dbx-platform` repo. Do not delete it, rotate it, or change its other
-   credentials. `terraform destroy` here removes only *our* FIC.
+   credentials. Terraform owns only this repo's legacy FIC plus the new
+   dedicated app; it never owns the shared app.
 6. **Bootstrap is human-run.** `infra/` (identity) and the Databricks SP
    registration are run once by a human with `az login` + Databricks account
    admin. CI never runs `terraform apply` and has no rights to.
@@ -72,12 +77,12 @@ access key, **stop** — that is a design violation here.
    there is no secret, so the only gate is who writes to `main`. Branch
    protection (PR + code-owner review, no direct/force push, enforced on admins)
    is a hard prerequisite, not optional — see `docs/cloud-setup.md §8.1`. Do not
-   weaken it. `.github/CODEOWNERS` guards `/.github/workflows/` and `/infra/`.
-8. **Shared identity = shared blast radius.** The token minted in CI is tenant-
-   scoped and reaches every Databricks workspace the shared SP is registered in,
-   not just `dbx-dev`. Keep the SP registered in `dbx-dev` only (verify per
-   `docs/cloud-setup.md §8.2`). Pin third-party actions in credentialed jobs to
-   commit SHAs — a mutable ref there can exfiltrate the live token.
+   weaken it. `.github/CODEOWNERS` requires owner review for every path.
+8. **Shared identity = shared blast radius.** The legacy shared SP is registered
+   in both `dbx-dev` and `dbx-uat`; do not expand or mutate it. Migrate this repo
+   to its dedicated dev-only SP, then remove only this repo's legacy FIC. Never
+   delete the shared application or its UAT assignment. Every action is pinned
+   to a commit SHA so mutable tags cannot exfiltrate the live token.
 
 ## 5. How to work in this repo
 

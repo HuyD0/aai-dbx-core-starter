@@ -44,6 +44,12 @@ variable "cicd_app_client_id" {
   EOT
 }
 
+variable "dedicated_cicd_app_display_name" {
+  type        = string
+  description = "Display name for this repository's dedicated, secretless CI application."
+  default     = "github-actions-aai-dbx-core-starter"
+}
+
 variable "project_name" {
   type        = string
   description = "Logical project/template name; used for tags and the RG name."

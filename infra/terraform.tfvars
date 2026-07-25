@@ -13,8 +13,11 @@ repo_name    = "aai-dbx-core-starter"
 github_owner_id = "151226205"
 repo_id         = "1311037530"
 
-# Reused app registration: github-actions-dbx-platform (Databricks-only, no ARM RBAC).
+# Legacy shared app registration. Retained only until the dedicated identity
+# below is applied, registered in dbx-dev, and verified.
 cicd_app_client_id = "b74a6820-d0ac-454f-8c32-02141cba3c8a"
+
+dedicated_cicd_app_display_name = "github-actions-aai-dbx-core-starter"
 
 project_name      = "aai-dbx-base-template"
 location          = "eastus2"

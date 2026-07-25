@@ -1,6 +1,4 @@
-# Security-critical paths require owner review before merge.
-# This is only enforced when branch protection on `main` has
-# "Require review from Code Owners" enabled — see docs/cloud-setup.md.
-/.github/workflows/   @HuyD0
-/infra/               @HuyD0
-/databricks.yml       @HuyD0
+# Every change can influence code that is validated or deployed by CI.
+# This is enforced by `main` protection; Codex and Dependabot open PRs and the
+# human owner reviews them before merge.
+* @HuyD0
