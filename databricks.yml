@@ -1,0 +1,24 @@
+bundle:
+  name: aai-dbx-base-template
+
+include:
+  - resources/*.yml
+
+# Only a `dev` target for now (per project decision). To add prod later, map it
+# to dbx-uat and add a matching federated credential — see docs/cloud-setup.md
+# "Adding a prod target".
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405609799238491.11.azuredatabricks.net
+    # run_as is left unset, so the bundle deploys and runs as the deploying
+    # principal — in CI that is the github-actions-dbx-platform service principal.
+
+  # prod:
+  #   mode: production
+  #   workspace:
+  #     host: https://adb-7405613180844632.12.azuredatabricks.net   # dbx-uat
+  #   run_as:
+  #     service_principal_name: <app-id-of-ci-sp>

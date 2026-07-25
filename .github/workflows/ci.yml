@@ -1,0 +1,56 @@
+name: CI
+
+# Credential-FREE checks for pull requests. There is intentionally NO
+# `id-token: write` permission and NO azure/login here, so a PR from any branch
+# (including forks) can never obtain Azure or Databricks credentials.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev tooling
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Black (format check)
+        run: black --check .
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2" # matches the version used for the local bootstrap
+          terraform_wrapper: false
+
+      - name: Terraform validate (no backend, no cloud creds)
+        working-directory: infra
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false
+          terraform validate
+
+      - name: Databricks bundle YAML lint (schema parse only, no workspace auth)
+        run: |
+          python - <<'PY'
+          import glob, yaml
+          for f in glob.glob("**/*.yml", recursive=True) + glob.glob("**/*.yaml", recursive=True):
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print("ok:", f)
+          PY

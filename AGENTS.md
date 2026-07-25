@@ -1,0 +1,95 @@
+# AGENTS.md — operating guide for AI coding agents
+
+This file is the shared source of truth for **both Claude and Codex**
+(`CLAUDE.md` imports it). Read it fully before acting. It documents the auth
+chain, the exact provisioned identifiers, the safety model, and the rules of
+engagement for this repo.
+
+---
+
+## 1. What this repo is
+
+A keyless CI/CD starter for Azure Databricks. Code merged to `main` deploys a
+Databricks Asset Bundle to the **dev** workspace via GitHub Actions, using
+GitHub OIDC federated with Azure AD — **no secrets are stored anywhere**.
+
+## 2. The auth chain (memorize this)
+
+```
+GitHub Actions (permissions: id-token: write)
+  → OIDC token (subject: repo:HuyD0/aai-dbx-core-starter:ref:refs/heads/main)
+  → azure/login@v2 exchanges it against a FEDERATED CREDENTIAL on the app
+    registration  →  Azure AD access token (no client secret)
+  → az CLI authenticated as the CI service principal
+  → Databricks CLI with DATABRICKS_AUTH_TYPE=azure-cli uses that token
+  → databricks bundle deploy -t dev
+```
+
+## 3. Provisioned identifiers (non-secret)
+
+| Thing | Value |
+|---|---|
+| GitHub repo | `HuyD0/aai-dbx-core-starter` |
+| Azure tenant | `7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6` |
+| Azure subscription | `ea936670-dda1-4884-8467-49c225bf3e83` (`practisesubscription`) |
+| CI app registration (**reused**) | `github-actions-dbx-platform` |
+| CI app **client id** (`AZURE_CLIENT_ID`) | `b74a6820-d0ac-454f-8c32-02141cba3c8a` |
+| CI app SP object id | `f1ae1583-6b35-4d6c-a7c1-305034983307` |
+| Federated credential | `gh-aai-dbx-core-starter-main` |
+| FIC subject | `repo:HuyD0/aai-dbx-core-starter:ref:refs/heads/main` |
+| Databricks dev workspace | `dbx-dev` — `https://adb-7405609799238491.11.azuredatabricks.net` (id `7405609799238491`) |
+| Optional project RG | `rg-aai-dbx-base-template-dev` (eastus2) |
+| Terraform state | `rg-terraform-state` / `tfstatee18f8286` / container `tfstate` / key `aai-dbx-base-template/dev.tfstate` |
+
+These are **identifiers, not secrets**. There are **no client secrets** in this
+project. If you ever find yourself creating or pasting a client secret, PAT, or
+access key, **stop** — that is a design violation here.
+
+## 4. Safety model — hard rules
+
+1. **No secrets in git, ever.** Auth is OIDC-only. The four repo *variables*
+   (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+   `DATABRICKS_HOST`) are non-secret ids. Do not add repo/environment *secrets*.
+2. **Never put `azure/login`, `id-token: write`, or any credential step on a
+   `pull_request` trigger.** PRs (including forks) must stay credential-free.
+   `ci.yml` has `permissions: contents: read` and no OIDC — keep it that way.
+3. **The deploy/smoke jobs must not declare a GitHub `environment:`.** The FIC
+   subject is the branch-ref form; adding an environment changes the OIDC
+   subject to `:environment:<name>` and breaks the exchange. To gate on an
+   environment, first add a *matching* FIC in `infra/identity.tf`, then set it.
+4. **Least privilege.** The CI SP has **no ARM RBAC** and only Databricks
+   workspace access in `dbx-dev`. Do not grant it subscription/RG roles to "make
+   something work" — solve it inside Databricks instead.
+5. **The reused app is shared.** `github-actions-dbx-platform` also serves the
+   `dbx-platform` repo. Do not delete it, rotate it, or change its other
+   credentials. `terraform destroy` here removes only *our* FIC.
+6. **Bootstrap is human-run.** `infra/` (identity) and the Databricks SP
+   registration are run once by a human with `az login` + Databricks account
+   admin. CI never runs `terraform apply` and has no rights to.
+
+## 5. How to work in this repo
+
+- **Add a Databricks job/pipeline:** create/extend a file in `resources/*.yml`;
+  put code under `src/`. Validate with `databricks bundle validate -t dev`.
+- **Change infra/identity:** edit `infra/*.tf`; a human runs `terraform plan`
+  then `apply`. Never bypass with imperative `az ad ...` mutations.
+- **Local Databricks auth** (for `bundle validate` etc.): `az login`, then
+  `export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net`
+  and `DATABRICKS_AUTH_TYPE=azure-cli`. No profile/token needed.
+- **Before committing:** `ruff check .`, `black .`, `pytest -q`,
+  `terraform fmt -recursive infra`.
+- **Verifying auth:** run the `auth-smoke` workflow (Actions tab) from `main`.
+
+## 6. Environment quirks to know
+
+- Some sandboxes/proxies block the Databricks **data plane**
+  (`*.azuredatabricks.net`) while allowing Azure ARM. If `databricks ...` fails
+  with a TLS/cert error locally but `az ...` works, that's the data plane being
+  blocked — run Databricks steps on a GitHub runner or an unrestricted shell.
+- `workflow_dispatch` must be run from `main` so the OIDC subject matches the
+  FIC.
+
+## 7. Reproduce / revoke
+
+Everything is in [`docs/cloud-setup.md`](docs/cloud-setup.md) with exact
+commands, including how to tear it all down.

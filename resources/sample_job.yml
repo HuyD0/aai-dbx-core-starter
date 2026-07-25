@@ -1,0 +1,23 @@
+resources:
+  jobs:
+    aai_dbx_base_template_sample:
+      name: "[${bundle.target}] aai-dbx-base-template sample"
+
+      tasks:
+        - task_key: sample_etl
+          notebook_task:
+            # Path is relative to this resource file's directory.
+            notebook_path: ../src/notebooks/sample_etl.py
+          job_cluster_key: default
+
+      job_clusters:
+        - job_cluster_key: default
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_DS3_v2
+            num_workers: 0
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode

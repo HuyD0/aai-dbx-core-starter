@@ -1,0 +1,41 @@
+name: auth-smoke
+
+# Proves the full keyless auth chain independent of any deployment:
+#   GitHub OIDC token  ->  azure/login (federated credential)  ->  az
+#                      ->  Databricks (Azure CLI token, DATABRICKS_AUTH_TYPE=azure-cli)
+# Run it from the `main` branch (Actions tab -> auth-smoke -> Run workflow) so the
+# OIDC subject is repo:<owner>/<repo>:ref:refs/heads/main, matching the FIC.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # required for the GitHub OIDC token
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login (OIDC — no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Confirm Azure identity
+        run: az account show -o table
+
+      - name: Install Databricks CLI
+        # Hardening: pin this to a release SHA. Kept at @main to match Databricks'
+        # own docs; to pin, run:  gh api repos/databricks/setup-cli/releases/latest
+        # and replace @main with the resolved commit SHA (leave a # vX.Y.Z comment).
+        uses: databricks/setup-cli@main
+
+      - name: Confirm Databricks auth (Azure CLI token — no secret)
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: |
+          databricks current-user me
+          echo "OIDC -> Azure -> Databricks chain verified with zero stored secrets."

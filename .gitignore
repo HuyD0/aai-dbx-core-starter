@@ -1,0 +1,25 @@
+# Terraform
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+# NOTE: infra/.terraform.lock.hcl IS committed on purpose (provider pinning).
+
+# Databricks
+.databricks/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Secrets — must never be committed
+.env
+*.env
+*.pem
+*.key
+
+# OS
+.DS_Store

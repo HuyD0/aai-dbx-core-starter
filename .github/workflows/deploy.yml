@@ -1,0 +1,49 @@
+name: deploy
+
+# Keyless deploy of the Databricks Asset Bundle to the dev workspace.
+# Triggers: push to main (fully automated) and manual dispatch.
+#
+# NOTE: this job intentionally sets NO `environment:`. The federated credential
+# subject is the branch-ref form (repo:<owner>/<repo>:ref:refs/heads/main); a
+# GitHub environment would change the OIDC subject to :environment:<name> and
+# break the token exchange. To add an environment gate, first add a matching
+# FIC in infra/identity.tf.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC — no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Databricks CLI
+        # Hardening: pin this to a release SHA. Kept at @main to match Databricks'
+        # own docs; to pin, run:  gh api repos/databricks/setup-cli/releases/latest
+        # and replace @main with the resolved commit SHA (leave a # vX.Y.Z comment).
+        uses: databricks/setup-cli@main
+
+      - name: Validate & deploy bundle (dev)
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: |
+          databricks bundle validate -t dev
+          databricks bundle deploy -t dev
