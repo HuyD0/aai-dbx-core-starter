@@ -28,10 +28,9 @@ jobs:
         run: az account show -o table || az account list --all -o table
 
       - name: Install Databricks CLI
-        # Hardening: pin this to a release SHA. Kept at @main to match Databricks'
-        # own docs; to pin, run:  gh api repos/databricks/setup-cli/releases/latest
-        # and replace @main with the resolved commit SHA (leave a # vX.Y.Z comment).
-        uses: databricks/setup-cli@main
+        # Pinned to a commit SHA (supply-chain hardening) — runs after azure/login
+        # with a live token. Bump via: gh api "repos/databricks/setup-cli/tags".
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
       - name: Confirm Databricks auth (Azure CLI token — no secret)
         env:
