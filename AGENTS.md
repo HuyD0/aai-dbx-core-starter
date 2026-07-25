@@ -52,7 +52,9 @@ There are no stored credentials in this chain.
 | Legacy CI app | `github-actions-dbx-platform` |
 | Legacy client id | `b74a6820-d0ac-454f-8c32-02141cba3c8a` |
 | Legacy SP object id | `f1ae1583-6b35-4d6c-a7c1-305034983307` |
-| Dedicated CI app target | `github-actions-aai-dbx-core-starter` |
+| Dedicated CI app | `github-actions-aai-dbx-core-starter` |
+| Dedicated client id | `a7e40167-d3f6-48a9-acd9-7998230cce34` |
+| Dedicated SP object id | `4539bb3b-b4ff-4f63-9da5-5873ececace6` |
 | Federated credential | `gh-aai-dbx-core-starter-main` |
 | FIC subject | `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` |
 | Dev workspace | `dbx-dev` / `https://adb-7405609799238491.11.azuredatabricks.net` / `7405609799238491` |
@@ -156,6 +158,26 @@ terraform fmt -check -recursive infra
 terraform -chdir=infra init -backend=false
 terraform -chdir=infra validate
 ```
+
+### Codex Cloud
+
+The repository has one supported credential-free cloud verification path:
+
+```bash
+./scripts/cloud-verify.sh
+```
+
+The Codex environment uses `scripts/codex-cloud-setup.sh` as its setup script
+and `scripts/codex-cloud-maintenance.sh` as its maintenance script. They pin
+Python 3.12, uv, Terraform, Databricks CLI, and Azure CLI, then cache all
+dependencies required by `cloud-verify.sh`. Agent-phase internet access and
+cloud credentials are intentionally absent.
+
+Codex Cloud cannot use the GitHub Actions OIDC identity. It runs offline checks,
+opens a proposed change, and relies on protected `main` to hand authenticated
+bundle validation and deployment to GitHub Actions. Never add a PAT, client
+secret, Databricks token, or other long-lived credential to a Codex environment
+to bypass this boundary.
 
 For a Databricks bundle change:
 
