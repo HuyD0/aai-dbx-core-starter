@@ -260,8 +260,21 @@ gh api -X PUT repos/HuyD0/aai-dbx-core-starter/branches/main/protection \
 
 Also restrict who can run `workflow_dispatch` (Settings → Actions, or limit repo
 write access) — branch protection alone does not gate manual dispatch. The
-`.github/CODEOWNERS` file makes review of `/.github/workflows/` and `/infra/`
-mandatory once "require code owner reviews" is on.
+`.github/CODEOWNERS` file makes owner review mandatory for every path once
+"require code owner reviews" is on.
+
+After the SHA-pinning hardening PR is merged, require immutable action
+references repository-wide:
+
+```bash
+gh api -X PUT repos/HuyD0/aai-dbx-core-starter/actions/permissions \
+  -F 'enabled=true' \
+  -f 'allowed_actions=all' \
+  -F 'sha_pinning_required=true'
+```
+
+Do not enable this before the pinning PR reaches `main`; otherwise the existing
+tag-based workflows on `main` will stop running.
 
 ### 8.2 Shared-SP isolation (finding B — dedicated migration required)
 
