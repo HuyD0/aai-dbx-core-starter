@@ -307,6 +307,6 @@ trusted role; audit changes to this variable.
 | D — `persist-credentials: false` on checkout | ✅ applied (deploy.yml, ci.yml) |
 | G — cluster policy instead of unrestricted creation | ✅ documented (§3) |
 | H — `DATABRICKS_HOST` trust assumption | ✅ documented (§8.3) |
-| E — pin ALL actions to SHAs + Dependabot | ✅ applied |
+| E — pin ALL actions to SHAs | ✅ applied; automated dependency PRs omitted for this POC |
 | F — workflow-scoped FIC via `job_workflow_ref` sub-customization | ⬜ deferred (low; needs OIDC sub-customization + matching FIC) |
 | B — dedicated per-repo SP | 🟨 Terraform prepared; human apply/cutover required |
