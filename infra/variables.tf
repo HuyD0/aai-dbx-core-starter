@@ -56,6 +56,27 @@ variable "project_name" {
   default     = "aai-dbx-base-template"
 }
 
+# Cost-attribution tags. Mirror the Databricks bundle variables of the same
+# names (databricks.yml) so Azure resources and Databricks compute attribute to
+# the same cost center/team. Set per instance in terraform.tfvars.
+variable "cost_center" {
+  type        = string
+  description = "Finance cost center these resources are charged to. Set per instance."
+  default     = "CC-1234"
+}
+
+variable "team" {
+  type        = string
+  description = "Team that owns these resources. Set per instance."
+  default     = "data-platform"
+}
+
+variable "owner" {
+  type        = string
+  description = "Primary owner (email or alias) for these resources."
+  default     = "huyydo@gmail.com"
+}
+
 variable "location" {
   type        = string
   description = "Azure region for the optional project resource group."

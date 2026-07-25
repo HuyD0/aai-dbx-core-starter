@@ -1,9 +1,12 @@
 locals {
   tags = {
-    project    = var.project_name
-    managed_by = "terraform"
-    repo       = "${var.github_owner}/${var.repo_name}"
-    template   = "aai-dbx-core-starter"
+    project     = var.project_name
+    managed_by  = "terraform"
+    repo        = "${var.github_owner}/${var.repo_name}"
+    template    = "aai-dbx-core-starter"
+    cost_center = var.cost_center
+    team        = var.team
+    owner       = var.owner
   }
 }
 

@@ -88,6 +88,18 @@ access key, **stop** — that is a design violation here.
 
 - **Add a Databricks job/pipeline:** create/extend a file in `resources/*.yml`;
   put code under `src/`. Validate with `databricks bundle validate -t dev`.
+- **Cost attribution is mandatory.** Every job cluster (`new_cluster.custom_tags`)
+  must carry the attribution keys `cost_center`, `team`, `owner`, `project`,
+  `environment` — cluster `custom_tags` are what reach Azure VM billing and the
+  `system.billing.usage` table for DBU chargeback. Bundle-wide `presets.tags`
+  (in `databricks.yml`) applies the same keys to jobs/pipelines. Values come from
+  the `cost_center`/`team`/`owner` **bundle variables**; set them per instance via
+  a target override, `--var`, or `BUNDLE_VAR_*` — never hardcode a real cost
+  center in a resource file, and never use a *secret* for them (they are
+  non-secret ids). The infra tags in `infra/main.tf` mirror the same keys so
+  Azure resources and Databricks compute roll up together. If the constrained Job
+  Compute policy ever fixes/forbids one of these tag keys, align the bundle key
+  with the policy rather than dropping attribution.
 - **Change infra/identity:** edit `infra/*.tf`; a human runs `terraform plan`
   then `apply`. Never bypass with imperative `az ad ...` mutations.
 - **Local Databricks auth** (for `bundle validate` etc.): `az login`, then

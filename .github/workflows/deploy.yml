@@ -55,6 +55,14 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
+          # Cost-attribution values, sourced from repo *variables* (non-secret;
+          # set under Settings → Secrets and variables → Actions → Variables).
+          # These feed the bundle vars in databricks.yml → presets.tags and the
+          # cluster custom_tags. The fallbacks are placeholders — set the repo
+          # variables to real values so an unset variable never emits an empty tag.
+          BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER || 'CC-1234' }}
+          BUNDLE_VAR_team: ${{ vars.TEAM || 'data-platform' }}
+          BUNDLE_VAR_owner: ${{ vars.OWNER || 'huyydo@gmail.com' }}
         run: |
           databricks bundle validate -t dev
           databricks bundle deploy -t dev

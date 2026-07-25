@@ -23,3 +23,10 @@ project_name      = "aai-dbx-base-template"
 location          = "eastus2"
 create_project_rg = true
 main_branch       = "main"
+
+# Cost attribution — placeholder values; replace with the real cost center/team
+# for this instance. Keep these in sync with the bundle vars in databricks.yml
+# and the repo variables consumed by deploy.yml.
+cost_center = "CC-1234"
+team        = "data-platform"
+owner       = "huyydo@gmail.com"
