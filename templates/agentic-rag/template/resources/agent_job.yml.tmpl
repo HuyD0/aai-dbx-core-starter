@@ -1,0 +1,46 @@
+resources:
+  jobs:
+    agentic_rag:
+      name: "[${bundle.target}] {{.application_name}}"
+      tasks:
+        - task_key: evaluate
+          spark_python_task:
+            python_file: ../evals/evaluate.py
+          job_cluster_key: default
+          libraries:
+            - whl: ../dist/*.whl
+            - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
+            - pypi:
+                package: azure-identity==1.25.3
+            - pypi:
+                package: azure-search-documents==11.6.0
+            - pypi:
+                package: databricks-ai-search==0.77
+            - pypi:
+                package: databricks-openai==0.17.0
+            - pypi:
+                package: databricks-sdk==0.122.0
+            - pypi:
+                package: mlflow[databricks]==3.14.0
+            - pypi:
+                package: openai==2.48.0
+            - pypi:
+                package: PyYAML==6.0.3
+
+      job_clusters:
+        - job_cluster_key: default
+          new_cluster:
+            spark_version: 18.0.x-scala2.13
+            node_type_id: Standard_DS3_v2
+            num_workers: 1
+            policy_id: ${var.compute_policy_id}
+            custom_tags:
+              application: {{.application_name}}
+              project: {{.project_name}}
+              environment: ${bundle.target}
+              team: ${var.team}
+              owner_group: ${var.owner_group}
+              cost_center: ${var.cost_center}
+              data_classification: internal
+              lifecycle: experimental
+              tag_schema_version: "1"

@@ -20,8 +20,9 @@ a GitHub runner with zero stored secrets.
 | 2a | Dedicated CI app + SP + FIC (migration target) | `github-actions-aai-dbx-core-starter` | Terraform (`infra/`) | pending human apply |
 | 3 | Project resource group | `rg-aai-dbx-base-template-dev` (eastus2) | Terraform (`infra/`) | new, optional |
 | 4 | Databricks SP registration | SP `b74a6820-…` in `dbx-dev` + workspace-access entitlement | Databricks CLI | verify (reuse likely) |
-| 5 | GitHub repo variables | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DATABRICKS_HOST` | `gh` | new |
+| 5 | GitHub repo variables | Identity/workspace ids, cost tags, owner group, and SDK volume path | `gh` | new |
 | 6 | Terraform state | `rg-terraform-state` / `tfstatee18f8286` / container `tfstate` | pre-existing account, new key | reused account |
+| 7 | SDK artifact volume | `platform.artifacts.python_packages` | human-run Databricks SQL | new |
 
 No client secrets, PATs, or access keys are created anywhere.
 
@@ -147,7 +148,8 @@ databricks service-principals create \
 
 ## 4. GitHub repo variables (non-secret) — resource #5
 
-All four are **identifiers, not secrets**, so they are repo *variables*.
+All values below are **identifiers or non-sensitive attribution values**, so
+they are repository variables rather than secrets.
 
 ```bash
 # [agent] after `gh auth login`
@@ -155,6 +157,10 @@ gh variable set AZURE_CLIENT_ID       -R HuyD0/aai-dbx-core-starter -b b74a6820-
 gh variable set AZURE_TENANT_ID       -R HuyD0/aai-dbx-core-starter -b 7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6
 gh variable set AZURE_SUBSCRIPTION_ID -R HuyD0/aai-dbx-core-starter -b ea936670-dda1-4884-8467-49c225bf3e83
 gh variable set DATABRICKS_HOST       -R HuyD0/aai-dbx-core-starter -b https://adb-7405609799238491.11.azuredatabricks.net
+gh variable set COST_CENTER           -R HuyD0/aai-dbx-core-starter -b CC-1234
+gh variable set TEAM                  -R HuyD0/aai-dbx-core-starter -b data-platform
+gh variable set OWNER_GROUP           -R HuyD0/aai-dbx-core-starter -b group:data-platform-owners
+gh variable set SDK_ARTIFACT_VOLUME   -R HuyD0/aai-dbx-core-starter -b /Volumes/platform/artifacts/python_packages
 
 gh variable list -R HuyD0/aai-dbx-core-starter
 ```
@@ -209,14 +215,17 @@ export DATABRICKS_AUTH_TYPE=azure-cli
 databricks service-principals delete <sp-databricks-id>
 
 # Remove GitHub variables
-for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DATABRICKS_HOST; do
+for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DATABRICKS_HOST \
+  COST_CENTER TEAM OWNER_GROUP SDK_ARTIFACT_VOLUME; do
   gh variable delete "$v" -R HuyD0/aai-dbx-core-starter
 done
 ```
 
-Because the CI identity is nothing but a federated credential on a reused app,
-revocation is a single `terraform destroy` — there is no secret to rotate or
-leak.
+Terraform removes the repository-owned dedicated identity and both
+repository-owned federated credentials while leaving the reused application
+untouched. The SDK volume and its grants are Databricks objects and must be
+revoked separately through the approved platform workflow. There is no secret
+to rotate or leak.
 
 ---
 

@@ -1,0 +1,82 @@
+name: deploy
+
+# Platform onboarding must create a branch-ref FIC for this repository's main
+# branch before this workflow is enabled. Do not add a GitHub environment
+# without first creating the matching environment-subject FIC.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build application before cloud login
+        run: |
+          python -m pip install build==1.5.0
+          python scripts/build_application.py
+
+      - name: Stage application wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: application-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-dev:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download prebuilt application
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: application-wheel
+          path: dist
+
+      - name: Azure login (OIDC — no secret)
+        uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
+
+      - name: Validate and deploy
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER }}
+          BUNDLE_VAR_team: ${{ vars.TEAM }}
+          BUNDLE_VAR_owner_group: ${{ vars.OWNER_GROUP }}
+          AAI_USE_PREBUILT_APPLICATION: "1"
+        run: |
+          databricks bundle validate -t dev
+          databricks bundle deploy -t dev

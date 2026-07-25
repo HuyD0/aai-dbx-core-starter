@@ -71,10 +71,10 @@ variable "team" {
   default     = "data-platform"
 }
 
-variable "owner" {
+variable "owner_group" {
   type        = string
-  description = "Primary owner (email or alias) for these resources."
-  default     = "huyydo@gmail.com"
+  description = "Non-personal group that owns these resources."
+  default     = "group:data-platform-owners"
 }
 
 variable "location" {

@@ -21,19 +21,28 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Install dev tooling
-        run: pip install -r requirements-dev.txt
+      - name: Install locked dev tooling
+        run: |
+          python -m pip install uv==0.8.23
+          uv lock --check
+          uv sync --python 3.12 --extra dev --locked
+
+      - name: Install Databricks CLI for local template rendering
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
       - name: Ruff (lint)
-        run: ruff check .
+        run: uv run --python 3.12 ruff check .
 
       - name: Black (format check)
-        run: black --check .
+        run: uv run --python 3.12 black --check .
 
       - name: Pytest
-        run: pytest -q
+        run: uv run --python 3.12 pytest -q
+
+      - name: Build SDK wheel
+        run: uv run --python 3.12 python -m build
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -50,10 +59,28 @@ jobs:
 
       - name: Databricks bundle YAML lint (schema parse only, no workspace auth)
         run: |
-          python - <<'PY'
+          uv run --python 3.12 python - <<'PY'
           import glob, yaml
           for f in glob.glob("**/*.yml", recursive=True) + glob.glob("**/*.yaml", recursive=True):
               with open(f) as fh:
                   yaml.safe_load(fh)
               print("ok:", f)
           PY
+
+  python-311:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install and test Python 3.11 compatibility
+        run: |
+          python -m pip install uv==0.8.23
+          uv sync --python 3.11 --extra dev --locked
+          uv run --python 3.11 pytest -q

@@ -9,7 +9,7 @@ before making changes.
 ## Quick reminders (the three that bite hardest)
 
 1. **No secrets — OIDC only.** Never add a client secret, PAT, or repo/env
-   *secret*. The four repo *variables* are non-secret ids.
+   *secret*. Repository variables contain only non-secret ids and tag values.
 2. **PRs stay credential-free.** Never add `id-token: write` or `azure/login`
    to a `pull_request` trigger. Keep it out of `ci.yml`.
 3. **No `environment:` on deploy/smoke jobs** unless you first add a matching

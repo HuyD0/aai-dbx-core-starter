@@ -6,7 +6,7 @@ locals {
     template    = "aai-dbx-core-starter"
     cost_center = var.cost_center
     team        = var.team
-    owner       = var.owner
+    owner_group = var.owner_group
   }
 }
 

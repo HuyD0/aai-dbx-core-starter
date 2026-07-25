@@ -29,4 +29,4 @@ main_branch       = "main"
 # and the repo variables consumed by deploy.yml.
 cost_center = "CC-1234"
 team        = "data-platform"
-owner       = "huyydo@gmail.com"
+owner_group = "group:data-platform-owners"

@@ -1,65 +1,129 @@
-# aai-dbx-core-starter
+# AAI Core
 
-A forkable starter template for **AI/data solutions on Azure Databricks** with
-**fully automated, keyless CI/CD**. Merge to `main` → GitHub Actions deploys a
-Databricks Asset Bundle to the workspace, authenticating with **zero stored
-secrets** via GitHub OIDC → Azure federated credentials → Databricks.
+AAI Core is the AI/ML platform SDK and project-template hub for teams building
+ML, RAG, and agentic applications on Azure Databricks.
 
-It is designed to be handed to AI coding agents (Claude, Codex) — see
-[`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md).
+It provides a paved road for:
 
-## How auth works (no secrets, anywhere)
+- Keyless Azure and Databricks authentication.
+- Azure Key Vault and Databricks secret references.
+- Ownership, governance, lifecycle, and cost-attribution tags.
+- Structured logging and MLflow tracing.
+- MLflow experiments, prompts, evaluation datasets, scorers, and feedback.
+- Databricks and Microsoft Foundry model endpoints.
+- Azure AI Search and Databricks AI Search retrieval.
+- Reproducible application releases.
+- Databricks Declarative Automation Bundles project templates.
 
-```
-GitHub Actions job (id-token: write)
-  │  requests a short-lived OIDC token
-  ▼
-azure/login@v2  ──exchanges OIDC token via a FEDERATED CREDENTIAL──▶  Azure AD token
-  │                     (no client secret involved)
-  ▼
-az CLI is now authenticated as the CI service principal
-  │
-  ▼
-Databricks CLI  (DATABRICKS_AUTH_TYPE=azure-cli)  ──uses the Azure token──▶  workspace
-```
+The SDK deliberately keeps native clients available. It standardizes platform
+contracts without hiding useful differences between providers.
 
-The only things stored in GitHub are **non-secret identifiers** (client id,
-tenant id, subscription id, workspace host) as **repo variables** — not secrets.
+## Repository layout
 
-## Layout
-
-```
-.github/workflows/
-  ci.yml           PR checks — credential-free (no OIDC, no azure/login)
-  auth-smoke.yml   manual — proves the OIDC→Azure→Databricks chain end to end
-  deploy.yml       push to main / dispatch — keyless bundle deploy
-infra/             Terraform: one-time OIDC identity bootstrap (run locally)
-databricks.yml     Databricks Asset Bundle (target: dev → dbx-dev)
-resources/         bundle resources (example job)
-src/notebooks/     notebook source
-docs/cloud-setup.md   every provisioned resource + exact, revocable commands
-AGENTS.md / CLAUDE.md  operating guide for AI agents
+```text
+src/aai_core/               installable platform SDK
+templates/agentic-rag/      custom Databricks project template
+examples/                   focused learning examples
+resources/                  this repository's bundle smoke job
+infra/                      human-run keyless CI identity bootstrap
+docs/                       developer and platform operating guides
+.github/workflows/          credential-free CI and keyless deployment/release
 ```
 
-## First-time setup
+## Install for SDK development
 
-1. **Bootstrap the identity** (once, locally): [`infra/README.md`](infra/README.md).
-2. **Register / verify the SP in Databricks**: [`docs/cloud-setup.md`](docs/cloud-setup.md).
-3. **Set repo variables** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-   `AZURE_SUBSCRIPTION_ID`, `DATABRICKS_HOST`) — see `docs/cloud-setup.md`.
-4. **Verify**: run the `auth-smoke` workflow from `main`, then merge to `main`
-   and watch `deploy`.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+pytest -q
+```
 
-## Required identity hardening
+Optional provider dependencies are separated:
 
-The original bootstrap reused `github-actions-dbx-platform`, which is also
-registered in UAT. The repository now defines a dedicated, secretless CI
-identity, but a human must apply and cut it over using
-[`docs/dedicated-identity-migration.md`](docs/dedicated-identity-migration.md).
-Until that migration is complete, deployment works but retains the shared
-identity's cross-workspace blast radius.
+```bash
+python -m pip install -e '.[databricks,genai]'
+python -m pip install -e '.[foundry,azure-search,keyvault,genai]'
+```
 
-## Day-to-day
+## Configure an application
 
-Open a PR → `ci` runs (lint/test, no cloud access). Merge to `main` → `deploy`
-ships the bundle to `dbx-dev`. That's it.
+Copy [`aai-platform.example.yml`](aai-platform.example.yml) to
+`aai-platform.yml` in a consuming project. The file contains identifiers and
+secret references, never secret values.
+
+```python
+from aai_core import bootstrap
+
+ctx = bootstrap()
+model = ctx.providers.model("general-chat")
+retriever = ctx.providers.retriever("product-knowledge")
+```
+
+Run safe local diagnostics:
+
+```bash
+aai-core doctor
+```
+
+After authenticating with Azure CLI and Databricks unified authentication:
+
+```bash
+aai-core doctor --cloud
+```
+
+## Generate an Agentic RAG project
+
+```bash
+databricks bundle init ./templates/agentic-rag \
+  --output-dir ../my-agent
+```
+
+The generated project contains:
+
+- An exploration notebook.
+- A packaged, framework-neutral RAG agent.
+- Logical model, embedding, and retrieval configuration.
+- MLflow tracing and normalized retriever documents.
+- Prompt registration.
+- An offline evaluation gate.
+- A wheel-based Databricks job.
+- Keyless local and CI setup instructions.
+
+## Publish the private SDK
+
+Wheels are released immutably to:
+
+```text
+/Volumes/platform/artifacts/python_packages/aai_core/<version>/
+```
+
+From the `main` branch, run the `publish-sdk` workflow with the exact version
+from `pyproject.toml`. The release identity uses GitHub OIDC and receives only
+the Databricks `WRITE VOLUME` permission needed for this volume. No GitHub
+secret or package-registry token is used.
+
+Generated projects pin an exact version and verify its SHA-256 checksum before
+local installation.
+
+## Security boundaries
+
+- No PAT, client secret, storage key, or API key belongs in Git.
+- Pull-request CI has no OIDC permission and performs no cloud login.
+- Credentialed workflows have no GitHub `environment:` because the configured
+  federated identity subject is the `main` branch-ref form.
+- CI has no Azure ARM role and is constrained by Databricks object privileges.
+- Tags contain no secrets or personal data.
+- Production applications must choose managed or workload identity explicitly.
+
+Read [`AGENTS.md`](AGENTS.md) before making repository changes. Provisioning and
+recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md).
+
+## Learning paths
+
+- [Developer guide](docs/developer-guide.md)
+- [Platform architecture](docs/platform-architecture.md)
+- [Secrets and identity](docs/secrets-and-identity.md)
+- [Tagging standard](docs/tagging-standard.md)
+- [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
+- [Platform operations](docs/platform-operations.md)

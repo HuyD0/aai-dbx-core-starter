@@ -66,8 +66,19 @@ databricks permissions update cluster-policies 0005F2031B6D2319 \
       \"service_principal_name\": \"$DEDICATED_CLIENT_ID\",
       \"permission_level\": \"CAN_USE\"
     }]
-  }"
+}"
 ```
+
+For SDK publication, grant the same principal only:
+
+- `USE CATALOG` on `platform`;
+- `USE SCHEMA` on `platform.artifacts`;
+- `READ VOLUME` and `WRITE VOLUME` on
+  `platform.artifacts.python_packages`.
+
+Apply these grants through Catalog Explorer or the platform's approved Unity
+Catalog administration workflow. Do not grant catalog/schema ownership,
+`CREATE VOLUME`, metastore administration, or workspace administration.
 
 Verify the principal is not registered in UAT:
 
@@ -93,10 +104,15 @@ gh workflow run auth-smoke.yml \
 gh workflow run deploy.yml \
   -R HuyD0/aai-dbx-core-starter \
   --ref main
+
+gh workflow run publish-sdk.yml \
+  -R HuyD0/aai-dbx-core-starter \
+  --ref main \
+  -f version=0.1.0
 ```
 
-Both workflows must succeed. The deploy run is the authorization proof because
-it updates the bundle using the constrained service principal.
+All workflows must succeed. The deploy and publish runs prove the constrained
+compute and volume permissions respectively.
 
 Also verify that the dedicated principal still has no ARM roles:
 

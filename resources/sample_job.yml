@@ -9,11 +9,15 @@ resources:
             # Path is relative to this resource file's directory.
             notebook_path: ../src/notebooks/sample_etl.py
           job_cluster_key: default
+          libraries:
+            - whl: ../dist/*.whl
+            - pypi:
+                package: PyYAML==6.0.3
 
       job_clusters:
         - job_cluster_key: default
           new_cluster:
-            spark_version: 15.4.x-scala2.12
+            spark_version: 18.0.x-scala2.13
             node_type_id: Standard_DS3_v2
             num_workers: 1
             # dbx-dev's constrained "Job Compute" policy. The dedicated CI
@@ -30,8 +34,12 @@ resources:
             # enforce them via the policy) if that happens. The `deploy` job in CI
             # is the definitive check (the data plane is unreachable locally).
             custom_tags:
+              application: aai-core
               cost_center: ${var.cost_center}
               team: ${var.team}
-              owner: ${var.owner}
-              project: aai-dbx-base-template
+              owner_group: ${var.owner_group}
+              project: aai-dbx-core-starter
               environment: ${bundle.target}
+              data_classification: internal
+              lifecycle: experimental
+              tag_schema_version: "1"

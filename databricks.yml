@@ -18,9 +18,16 @@ variables:
   team:
     description: Team that owns this bundle.
     default: data-platform
-  owner:
-    description: Primary owner (email or alias) for this bundle's resources.
-    default: huyydo@gmail.com
+  owner_group:
+    description: Non-personal group that owns this bundle's resources.
+    default: group:data-platform-owners
+
+artifacts:
+  default:
+    type: whl
+    # CI builds before obtaining cloud credentials. Local deploys build on
+    # demand when no wheel exists.
+    build: python scripts/build_sdk.py
 
 include:
   - resources/*.yml
@@ -43,11 +50,15 @@ targets:
       # see resources/sample_job.yml. Development mode also auto-adds a `dev` tag
       # identifying the deployer; these keys attribute the *spend*.
       tags:
+        application: aai-core
         cost_center: ${var.cost_center}
         team: ${var.team}
-        owner: ${var.owner}
-        project: aai-dbx-base-template
+        owner_group: ${var.owner_group}
+        project: aai-dbx-core-starter
         environment: ${bundle.target}
+        data_classification: internal
+        lifecycle: experimental
+        tag_schema_version: "1"
 
   # prod:
   #   mode: production
