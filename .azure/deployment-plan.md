@@ -1,6 +1,6 @@
 # Azure Deployment Plan
 
-> **Status:** Validated
+> **Status:** Deployed
 
 Generated: 2026-07-25
 
@@ -25,15 +25,14 @@ deployment to the existing GitHub Actions OIDC path on protected `main`.
 - The four required GitHub repository variables exist and contain the documented
   non-secret identifiers.
 - GitHub Actions SHA pinning is already enforced.
-- The Codex GitHub App does not currently have access to
-  `aai-dbx-core-starter`; the environment creation page lists only `agent-eval`
-  and `dbx-platform`.
-- `main` protection currently has strict `lint-test`, blocks force pushes and
-  deletions, and applies to admins, but incorrectly requires zero approvals and
-  does not require code-owner review.
-- `origin/main` contains the staged dedicated-identity migration, but the
-  dedicated Entra application does not yet exist and GitHub still points to the
-  legacy shared service principal.
+- The Codex GitHub App is scoped to this repository plus the two repositories
+  that were already selected; no organization-wide access was granted.
+- `main` protection has strict `lint-test`, one approval, code-owner review,
+  stale-review dismissal, last-push approval, conversation resolution, linear
+  history, admin enforcement, and blocks force pushes and deletions.
+- GitHub now points to the dedicated Entra service principal. The repository's
+  legacy federated credential was removed only after both authenticated
+  workflows passed; the shared application and its other credential remain.
 
 ---
 
@@ -44,8 +43,8 @@ deployment to the existing GitHub Actions OIDC path on protected `main`.
 | Classification | Development |
 | Scale | Small |
 | Budget | Cost-Optimized |
-| Subscription | `practisesubscription` (`ea936670-dda1-4884-8467-49c225bf3e83`) — awaiting approval confirmation |
-| Location | `eastus2` — awaiting approval confirmation |
+| Subscription | `practisesubscription` (`ea936670-dda1-4884-8467-49c225bf3e83`) |
+| Location | `eastus2` |
 | Secrets | None; no client secret, PAT, access key, or GitHub/Codex secret |
 | Cloud runtime | Codex Cloud `universal` container |
 | Python | 3.12 primary; 3.11 compatibility remains in CI |
@@ -142,7 +141,7 @@ No new regional Azure resources will be deployed.
 
 - Fast-forward the local checkout to `origin/main` while preserving unrelated
   untracked user files.
-- Add an idempotent, pinned cloud setup script for Python 3.11, Terraform
+- Add an idempotent, pinned cloud setup script for Python 3.12, Terraform
   1.12.2, Databricks CLI 1.6.0, and the dev dependencies.
 - Add an idempotent maintenance script for cached cloud containers.
 - Add one cloud verification entry point shared by Codex Cloud and PR CI.
@@ -175,8 +174,9 @@ No new regional Azure resources will be deployed.
   linear history, strict `lint-test`, admin enforcement, and no force pushes or
   deletions.
 - Create a Codex Cloud environment named `aai-dbx-core-starter`.
-- Configure Python 3.12, caching, manual setup and maintenance scripts, and the
-  four documented non-secret identifiers as environment variables.
+- Configure Python 3.12, caching, manual setup and maintenance scripts, the
+  four documented non-secret identifiers, and the `AAI_CLOUD_ENV=codex`
+  runtime marker as environment variables.
 - Configure no secrets.
 - Keep agent internet access off unless the clean-container verification proves
   a narrowly allowlisted dependency is required during the agent phase.
@@ -197,16 +197,41 @@ No new regional Azure resources will be deployed.
 6. Apply the identity migration, verify zero ARM RBAC and dev-only Databricks
    registration, then cut over the GitHub variable.
 7. Run and watch `auth-smoke` and `deploy` from `main`.
-8. Create the Codex environment and use its interactive terminal to run the
-   same verification command.
-9. Start an actual Codex Cloud task against the repository, make a harmless
-   temporary validation-only change, verify checks, and discard the temporary
-   diff.
+8. Create the Codex environment and start an actual Codex Cloud task against
+   the feature branch.
+9. Run the same verification command without modifying files and verify the
+   final cloud worktree is clean.
 10. Record command outputs, workflow URLs, and the final environment settings.
 
 ---
 
-## 9. Rollback
+## 9. Deployment Proof
+
+- Dedicated app client ID:
+  `a7e40167-d3f6-48a9-acd9-7998230cce34`
+- Dedicated service-principal object ID:
+  `4539bb3b-b4ff-4f63-9da5-5873ececace6`
+- The application has no password credentials, certificate credentials, or API
+  permissions and has zero Azure ARM role assignments.
+- Databricks service-principal ID `140815378372747` is registered only in
+  `dbx-dev`, has no groups or entitlements, and has direct `CAN_USE` only on
+  policy `0005F2031B6D2319`; it is absent from UAT.
+- Auth smoke:
+  <https://github.com/HuyD0/aai-dbx-core-starter/actions/runs/30177557640>
+- Authenticated Databricks deployment:
+  <https://github.com/HuyD0/aai-dbx-core-starter/actions/runs/30177577734>
+- Codex environment ID: `6a653ac1b250819192f26f2200e196e2`
+- Codex cloud task ID: `task_e_6a653aed01588328b1976b274ea8bcc3`
+- Hosted verification completed in 2m37s with exit status 0: locked offline
+  dependency sync, Ruff, Black, 34 tests, sdist/wheel builds, Terraform
+  formatting/validation, Databricks bundle schema, and YAML parsing all passed.
+  The task confirmed the Git worktree remained clean.
+- PR CI passed on both Python 3.12 (`lint-test`) and Python 3.11 compatibility:
+  <https://github.com/HuyD0/aai-dbx-core-starter/actions/runs/30177792322>
+
+---
+
+## 10. Rollback
 
 - Codex environment: delete the newly created environment or remove the
   repository from its GitHub App selection.
@@ -221,7 +246,7 @@ No new regional Azure resources will be deployed.
 
 ---
 
-## 10. Execution Checklist
+## 11. Execution Checklist
 
 ### Phase 1: Planning
 
@@ -251,12 +276,12 @@ No new regional Azure resources will be deployed.
 
 ### Phase 4: Deployment
 
-- [ ] Invoke Azure deployment guidance.
-- [ ] Provision and verify the dedicated identity.
-- [ ] Correct GitHub protection and grant repository access to Codex.
-- [ ] Create and verify the Codex Cloud environment.
-- [ ] Pass authenticated GitHub OIDC smoke and Databricks deployment.
-- [ ] Update plan status to `Deployed`.
+- [x] Invoke Azure deployment guidance.
+- [x] Provision and verify the dedicated identity.
+- [x] Correct GitHub protection and grant repository access to Codex.
+- [x] Create and verify the Codex Cloud environment.
+- [x] Pass authenticated GitHub OIDC smoke and Databricks deployment.
+- [x] Update plan status to `Deployed`.
 
 ---
 
