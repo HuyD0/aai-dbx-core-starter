@@ -279,7 +279,7 @@ trusted role; audit changes to this variable.
 
 | Fix | Status |
 |---|---|
-| A — pin `databricks/setup-cli` to a commit SHA | ⏳ pending the SHA lookup (then both credentialed workflows) |
+| A — pin `databricks/setup-cli` to a commit SHA | ✅ applied — `@8b7b124…` (v1.9.0) in deploy.yml + auth-smoke.yml |
 | C — CODEOWNERS + `main` branch protection | ✅ CODEOWNERS added; branch protection = §8.1 (run it) |
 | D — `persist-credentials: false` on checkout | ✅ applied (deploy.yml, ci.yml) |
 | G — cluster policy instead of unrestricted creation | ✅ documented (§3) |
