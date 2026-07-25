@@ -1,4 +1,4 @@
 # Every change can influence code that is validated or deployed by CI.
-# This is enforced by `main` protection; Codex and Dependabot open PRs and the
-# human owner reviews them before merge.
+# This is enforced by `main` protection; Codex opens PRs and the human owner
+# reviews them before merge.
 * @HuyD0
