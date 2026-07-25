@@ -113,12 +113,16 @@ databricks service-principals create \
   --display-name github-actions-dbx-platform \
   --active true
 
-# [you] Minimal entitlements so it can deploy bundles / create job clusters.
-# (workspace-access is implied by presence; add cluster-create for job clusters.)
-# Grant via the workspace admin UI (Settings → Identity and access → Service
-# principals → entitlements) or the entitlements API. Keep it to:
+# [you] LEAST-PRIVILEGE entitlements so it can deploy bundles / create job
+# clusters. (workspace-access is implied by presence.) Grant via the workspace
+# admin UI (Settings → Identity and access → Service principals → entitlements)
+# or the entitlements API. Keep it to:
 #   - Workspace access
-#   - Allow unrestricted cluster creation  (only if jobs use new job clusters)
+#   - If jobs use new job clusters, scope cluster creation to a CLUSTER POLICY
+#     (fixed node types, NO arbitrary init scripts, capped autoscale) or a
+#     pre-created constrained instance pool — do NOT grant "unrestricted cluster
+#     creation". Unrestricted creation lets anyone holding the SP token run
+#     arbitrary code (init scripts / node config) as the SP.
 ```
 
 > Reuse does not guarantee deploy rights. `github-actions-dbx-platform` may serve
@@ -218,3 +222,68 @@ leak.
    (immutable form), apply it.
 4. Register the SP in `dbx-uat` (repeat §3 against the uat host).
 5. Add a `deploy-prod` job that sets `environment: production` and deploys `-t prod`.
+
+---
+
+## 8. Security model, required hardening & status
+
+The keyless model has one load-bearing assumption: **whoever can land a commit
+on `main` (or run `workflow_dispatch`) can trigger a credentialed deploy.** There
+is no secret to steal, but that boundary must be enforced on the GitHub side.
+
+### 8.1 REQUIRED — protect `main` (do this)
+
+```bash
+# Require PR + 1 review (incl. code owners), block direct/force pushes, apply to admins.
+gh api -X PUT repos/HuyD0/aai-dbx-core-starter/branches/main/protection \
+  -H "Accept: application/vnd.github+json" \
+  -f 'required_pull_request_reviews[required_approving_review_count]=1' \
+  -F 'required_pull_request_reviews[require_code_owner_reviews]=true' \
+  -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
+  -F 'enforce_admins=true' \
+  -F 'required_status_checks[strict]=true' -f 'required_status_checks[contexts][]=lint-test' \
+  -F 'restrictions=null' -F 'allow_force_pushes=false' -F 'allow_deletions=false'
+```
+
+Also restrict who can run `workflow_dispatch` (Settings → Actions, or limit repo
+write access) — branch protection alone does not gate manual dispatch. The
+`.github/CODEOWNERS` file makes review of `/.github/workflows/` and `/infra/`
+mandatory once "require code owner reviews" is on.
+
+### 8.2 Shared-SP isolation (finding B — we kept the shared identity)
+
+`github-actions-dbx-platform` is reused across this repo and `dbx-platform`. A
+compromise of this repo's runner mints a tenant-scoped Databricks token valid in
+**every** workspace the SP is registered in — not just `dbx-dev`. To keep the
+blast radius contained, verify the SP is registered **only** in `dbx-dev`:
+
+```bash
+# [you — needs Databricks account access] list workspaces the SP can reach
+databricks account service-principals list --account-id <account-id> \
+  | grep -i b74a6820   # then confirm its workspace assignments are dbx-dev only
+```
+
+If it is also entitled in `dbx-platform`'s (prod/uat) workspace, either accept
+the cross-repo blast radius knowingly or move this repo to a **dedicated** SP
+(create a new app + FIC, register it in `dbx-dev`, repoint `AZURE_CLIENT_ID`).
+
+### 8.3 `DATABRICKS_HOST` is a bearer-token sink (finding H)
+
+It is a non-secret repo *variable*, but the `azure-cli` auth sends a live AAD
+token to whatever host it names (the token is for the first-party
+`AzureDatabricks` resource and is **not** host-bound). A repo **admin** could
+repoint it to capture a token — no workflow edit needed. Treat repo-admin as a
+trusted role; audit changes to this variable.
+
+### 8.4 Hardening status
+
+| Fix | Status |
+|---|---|
+| A — pin `databricks/setup-cli` to a commit SHA | ⏳ pending the SHA lookup (then both credentialed workflows) |
+| C — CODEOWNERS + `main` branch protection | ✅ CODEOWNERS added; branch protection = §8.1 (run it) |
+| D — `persist-credentials: false` on checkout | ✅ applied (deploy.yml, ci.yml) |
+| G — cluster policy instead of unrestricted creation | ✅ documented (§3) |
+| H — `DATABRICKS_HOST` trust assumption | ✅ documented (§8.3) |
+| E — pin ALL actions to SHAs + Dependabot | ⬜ deferred (low; first-party tag pins) |
+| F — workflow-scoped FIC via `job_workflow_ref` sub-customization | ⬜ deferred (low; needs OIDC sub-customization + matching FIC) |
+| B — dedicated per-repo SP | ⬜ not taken — kept shared SP, mitigated by §8.2 |

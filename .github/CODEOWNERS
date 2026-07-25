@@ -1,0 +1,6 @@
+# Security-critical paths require owner review before merge.
+# This is only enforced when branch protection on `main` has
+# "Require review from Code Owners" enabled — see docs/cloud-setup.md.
+/.github/workflows/   @HuyD0
+/infra/               @HuyD0
+/databricks.yml       @HuyD0

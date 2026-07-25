@@ -67,6 +67,17 @@ access key, **stop** — that is a design violation here.
 6. **Bootstrap is human-run.** `infra/` (identity) and the Databricks SP
    registration are run once by a human with `az login` + Databricks account
    admin. CI never runs `terraform apply` and has no rights to.
+7. **`main` protection IS the security boundary.** Anyone who can land a commit
+   on `main` (or run `workflow_dispatch`) can trigger a credentialed deploy —
+   there is no secret, so the only gate is who writes to `main`. Branch
+   protection (PR + code-owner review, no direct/force push, enforced on admins)
+   is a hard prerequisite, not optional — see `docs/cloud-setup.md §8.1`. Do not
+   weaken it. `.github/CODEOWNERS` guards `/.github/workflows/` and `/infra/`.
+8. **Shared identity = shared blast radius.** The token minted in CI is tenant-
+   scoped and reaches every Databricks workspace the shared SP is registered in,
+   not just `dbx-dev`. Keep the SP registered in `dbx-dev` only (verify per
+   `docs/cloud-setup.md §8.2`). Pin third-party actions in credentialed jobs to
+   commit SHAs — a mutable ref there can exfiltrate the live token.
 
 ## 5. How to work in this repo
 

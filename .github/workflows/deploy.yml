@@ -26,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config on a runner that later runs
+          # third-party actions (defense-in-depth for the credentialed job).
+          persist-credentials: false
 
       - name: Azure login (OIDC — no secret)
         uses: azure/login@v2
