@@ -178,6 +178,11 @@ the **immutable** form (`repo:<owner>@<owner_id>/<repo>@<repo_id>:...`); the
 readable form will not match. The numeric ids are already wired in
 `infra/terraform.tfvars` (`github_owner_id`, `repo_id`).
 
+**If `azure/login` fails with `No subscriptions found`,** the SP authenticated
+but has no ARM RBAC (by design). Both workflows set `allow-no-subscriptions:
+true` and omit `subscription-id`, so `az login` succeeds on the tenant token
+alone. Do not grant the SP a subscription role to work around this.
+
 ---
 
 ## 6. Revoke / tear down

@@ -32,7 +32,11 @@ jobs:
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # The CI SP has NO ARM RBAC (Databricks-only), so it can see no
+          # subscription. allow-no-subscriptions lets az login succeed with just
+          # the tenant token — which is all the Databricks azure-cli auth needs.
+          # (subscription-id is intentionally NOT passed for the same reason.)
+          allow-no-subscriptions: true
 
       - name: Install Databricks CLI
         # Hardening: pin this to a release SHA. Kept at @main to match Databricks'

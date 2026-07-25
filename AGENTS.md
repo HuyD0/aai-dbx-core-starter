@@ -89,6 +89,15 @@ access key, **stop** — that is a design violation here.
   blocked — run Databricks steps on a GitHub runner or an unrestricted shell.
 - `workflow_dispatch` must be run from `main` so the OIDC subject matches the
   FIC.
+- **`azure/login` needs `allow-no-subscriptions: true`.** The CI SP has no ARM
+  RBAC, so `az login` finds no subscription and errors `No subscriptions found`
+  without this flag. Do not "fix" it by granting the SP a subscription role —
+  that breaks the Databricks-only least-privilege model. The tenant token is all
+  the Databricks `azure-cli` auth needs; `subscription-id` is not passed to login.
+- GitHub mints the **immutable** OIDC subject here
+  (`repo:<owner>@<owner_id>/<repo>@<repo_id>:...`). If `azure/login` ever errors
+  `AADSTS700213`, the FIC subject and the token's `sub` claim have diverged —
+  read the exact `subject claim` from the job log and match it.
 
 ## 7. Reproduce / revoke
 
