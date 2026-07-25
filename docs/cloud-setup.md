@@ -245,12 +245,17 @@ is no secret to steal, but that boundary must be enforced on the GitHub side.
 # Require PR + 1 review (incl. code owners), block direct/force pushes, apply to admins.
 gh api -X PUT repos/HuyD0/aai-dbx-core-starter/branches/main/protection \
   -H "Accept: application/vnd.github+json" \
-  -f 'required_pull_request_reviews[required_approving_review_count]=1' \
+  -F 'required_pull_request_reviews[required_approving_review_count]=1' \
   -F 'required_pull_request_reviews[require_code_owner_reviews]=true' \
   -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
+  -F 'required_pull_request_reviews[require_last_push_approval]=true' \
   -F 'enforce_admins=true' \
   -F 'required_status_checks[strict]=true' -f 'required_status_checks[contexts][]=lint-test' \
-  -F 'restrictions=null' -F 'allow_force_pushes=false' -F 'allow_deletions=false'
+  -F 'restrictions=null' \
+  -F 'required_linear_history=true' \
+  -F 'required_conversation_resolution=true' \
+  -F 'allow_force_pushes=false' \
+  -F 'allow_deletions=false'
 ```
 
 Also restrict who can run `workflow_dispatch` (Settings → Actions, or limit repo
