@@ -16,7 +16,7 @@ a GitHub runner with zero stored secrets.
 | # | Resource | Identifier | Created by | Reused? |
 |---|---|---|---|---|
 | 1 | App registration (CI OIDC identity) | `github-actions-dbx-platform` / client id `b74a6820-d0ac-454f-8c32-02141cba3c8a` | pre-existing | ✅ reused (not owned here) |
-| 2 | Federated credential | `gh-aai-dbx-core-starter-main`, subject `repo:HuyD0/aai-dbx-core-starter:ref:refs/heads/main` | Terraform (`infra/`) | new |
+| 2 | Federated credential | `gh-aai-dbx-core-starter-main`, subject `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` (immutable form) | Terraform (`infra/`) | new |
 | 3 | Project resource group | `rg-aai-dbx-base-template-dev` (eastus2) | Terraform (`infra/`) | new, optional |
 | 4 | Databricks SP registration | SP `b74a6820-…` in `dbx-dev` + workspace-access entitlement | Databricks CLI | verify (reuse likely) |
 | 5 | GitHub repo variables | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DATABRICKS_HOST` | `gh` | new |
@@ -171,6 +171,13 @@ bundle folder. Merge to `main` (or `gh workflow run deploy.yml --ref main`) and
 confirm it succeeds. If deploy 403s while smoke passed, the SP is authenticated
 but under-entitled — revisit §3.
 
+**If `azure/login` fails with `AADSTS700213: No matching federated identity
+record`,** the FIC subject doesn't match the token. Read the exact string from
+the job log line `subject claim - ...` and set the FIC to it. This account mints
+the **immutable** form (`repo:<owner>@<owner_id>/<repo>@<repo_id>:...`); the
+readable form will not match. The numeric ids are already wired in
+`infra/terraform.tfvars` (`github_owner_id`, `repo_id`).
+
 ---
 
 ## 6. Revoke / tear down
@@ -202,6 +209,7 @@ leak.
    (`https://adb-7405613180844632.12.azuredatabricks.net`).
 2. Decide the gate: a GitHub `production` environment (with required reviewers).
 3. **Add a matching FIC** in `infra/identity.tf` with subject
-   `repo:HuyD0/aai-dbx-core-starter:environment:production`, apply it.
+   `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:environment:production`
+   (immutable form), apply it.
 4. Register the SP in `dbx-uat` (repeat §3 against the uat host).
 5. Add a `deploy-prod` job that sets `environment: production` and deploys `-t prod`.

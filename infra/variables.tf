@@ -18,6 +18,23 @@ variable "repo_name" {
   description = "GitHub repository name, without the owner."
 }
 
+variable "github_owner_id" {
+  type        = string
+  description = <<-EOT
+    GitHub owner's IMMUTABLE numeric id. GitHub now mints OIDC subjects in the
+    immutable form (repo:<owner>@<owner_id>/<repo>@<repo_id>:...). Get it from a
+    failing azure/login "subject claim" log, or `gh api users/<owner> --jq .id`.
+  EOT
+}
+
+variable "repo_id" {
+  type        = string
+  description = <<-EOT
+    GitHub repository's IMMUTABLE numeric id. Get it from the OIDC "subject
+    claim" log, or `gh api repos/<owner>/<repo> --jq .id`.
+  EOT
+}
+
 variable "cicd_app_client_id" {
   type        = string
   description = <<-EOT

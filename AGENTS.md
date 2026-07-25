@@ -17,7 +17,8 @@ GitHub OIDC federated with Azure AD — **no secrets are stored anywhere**.
 
 ```
 GitHub Actions (permissions: id-token: write)
-  → OIDC token (subject: repo:HuyD0/aai-dbx-core-starter:ref:refs/heads/main)
+  → OIDC token (immutable subject:
+    repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main)
   → azure/login@v2 exchanges it against a FEDERATED CREDENTIAL on the app
     registration  →  Azure AD access token (no client secret)
   → az CLI authenticated as the CI service principal
@@ -36,7 +37,7 @@ GitHub Actions (permissions: id-token: write)
 | CI app **client id** (`AZURE_CLIENT_ID`) | `b74a6820-d0ac-454f-8c32-02141cba3c8a` |
 | CI app SP object id | `f1ae1583-6b35-4d6c-a7c1-305034983307` |
 | Federated credential | `gh-aai-dbx-core-starter-main` |
-| FIC subject | `repo:HuyD0/aai-dbx-core-starter:ref:refs/heads/main` |
+| FIC subject (immutable form) | `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` |
 | Databricks dev workspace | `dbx-dev` — `https://adb-7405609799238491.11.azuredatabricks.net` (id `7405609799238491`) |
 | Optional project RG | `rg-aai-dbx-base-template-dev` (eastus2) |
 | Terraform state | `rg-terraform-state` / `tfstatee18f8286` / container `tfstate` / key `aai-dbx-base-template/dev.tfstate` |
