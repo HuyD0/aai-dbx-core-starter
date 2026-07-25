@@ -1,0 +1,46 @@
+platform:
+  application: example-assistant
+  project: example-ai
+  environment: dev
+  team: data-platform
+  owner_group: group:data-platform-owners
+  cost_center: CC-1234
+  data_classification: internal
+  lifecycle: experimental
+  repository: HuyD0/aai-dbx-core-starter
+  release: dev
+  tag_schema_version: "1"
+  catalog: main
+  schema: example_ai
+  experiment_name: /Shared/example-ai
+  azure_identity: azure_cli
+
+providers:
+  models:
+    general-chat:
+      provider: databricks
+      deployment: replace-with-serving-endpoint
+      capabilities:
+        streaming: true
+        tool_calling: true
+        structured_output: true
+  embeddings:
+    knowledge-embedding:
+      provider: foundry
+      endpoint: https://replace-with-foundry-resource.services.ai.azure.com
+      deployment: replace-with-embedding-deployment
+      dimensions: 1536
+  retrievers:
+    product-knowledge:
+      provider: azure_ai_search
+      endpoint: https://replace-with-search-service.search.windows.net
+      index: replace-with-index
+      id_field: id
+      content_field: content
+      source_uri_field: source_uri
+      chunk_id_field: chunk_id
+      vector_fields: [content_vector]
+
+# References only. Never place secret values in this file.
+secrets:
+  optional_vendor_key: keyvault://replace-with-vault/vendor-api-key

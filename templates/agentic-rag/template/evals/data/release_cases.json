@@ -1,0 +1,10 @@
+[
+  {
+    "inputs": {
+      "question": "Replace this case with a representative business question."
+    },
+    "expectations": {
+      "expected_response": "Replace this with a reviewed expected response."
+    }
+  }
+]

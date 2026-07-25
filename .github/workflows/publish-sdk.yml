@@ -1,0 +1,100 @@
+name: publish-sdk
+
+# Publish an immutable aai-core wheel to a Unity Catalog volume. Run this
+# workflow from main so the branch-ref OIDC subject matches the federated
+# credential. It intentionally has no GitHub environment and uses no secret.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact pyproject.toml version to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build and verify requested version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python -m pip install build==1.5.0
+          PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "$PACKAGE_VERSION" = "$REQUESTED_VERSION"
+          python -m build --wheel
+          WHEEL="dist/aai_core-${PACKAGE_VERSION}-py3-none-any.whl"
+          test -f "$WHEEL"
+          sha256sum "$WHEEL" > "${WHEEL}.sha256"
+
+      - name: Stage wheel and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aai-core-release
+          path: |
+            dist/*.whl
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download staged release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aai-core-release
+          path: dist
+
+      - name: Azure login (OIDC — no secret)
+        uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
+
+      - name: Publish immutable wheel and checksum
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          SDK_ARTIFACT_VOLUME: ${{ vars.SDK_ARTIFACT_VOLUME }}
+          PACKAGE_VERSION: ${{ inputs.version }}
+        run: |
+          test -n "$SDK_ARTIFACT_VOLUME"
+          WHEEL="aai_core-${PACKAGE_VERSION}-py3-none-any.whl"
+          DESTINATION="dbfs:${SDK_ARTIFACT_VOLUME}/aai_core/${PACKAGE_VERSION}"
+          databricks fs mkdir "$DESTINATION"
+          if databricks fs ls "${DESTINATION}/${WHEEL}" >/dev/null 2>&1; then
+            echo "Version ${PACKAGE_VERSION} already exists; releases are immutable."
+            exit 1
+          fi
+          databricks fs cp "dist/${WHEEL}" "${DESTINATION}/${WHEEL}"
+          databricks fs cp \
+            "dist/${WHEEL}.sha256" \
+            "${DESTINATION}/${WHEEL}.sha256"

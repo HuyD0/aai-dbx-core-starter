@@ -14,7 +14,6 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -22,15 +21,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build SDK wheel before cloud login
+        run: |
+          python -m pip install build==1.5.0
+          python -m build --wheel
+
+      - name: Stage SDK wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aai-core-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
   deploy-dev:
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Don't leave GITHUB_TOKEN in .git/config on a runner that later runs
           # third-party actions (defense-in-depth for the credentialed job).
           persist-credentials: false
+
+      - name: Download prebuilt SDK wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aai-core-wheel
+          path: dist
 
       - name: Azure login (OIDC — no secret)
         uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
@@ -55,6 +89,15 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
+          # Cost-attribution values, sourced from repo *variables* (non-secret;
+          # set under Settings → Secrets and variables → Actions → Variables).
+          # These feed the bundle vars in databricks.yml → presets.tags and the
+          # cluster custom_tags. The fallbacks are placeholders — set the repo
+          # variables to real values so an unset variable never emits an empty tag.
+          BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER || 'CC-1234' }}
+          BUNDLE_VAR_team: ${{ vars.TEAM || 'data-platform' }}
+          BUNDLE_VAR_owner_group: ${{ vars.OWNER_GROUP || 'group:data-platform-owners' }}
+          AAI_USE_PREBUILT_WHEEL: "1"
         run: |
           databricks bundle validate -t dev
           databricks bundle deploy -t dev

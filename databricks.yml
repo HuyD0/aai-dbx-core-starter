@@ -1,6 +1,34 @@
 bundle:
   name: aai-dbx-base-template
 
+# Cost-attribution inputs (non-secret). Each instance of this template MUST set
+# `cost_center` and `team` so Databricks usage can be charged back. Override per
+# instance without editing this file via any of:
+#   * a variable override under a target below,
+#   * `databricks bundle deploy --var="cost_center=CC1234,team=platform"`, or
+#   * env vars `BUNDLE_VAR_cost_center` / `BUNDLE_VAR_team` (wire these into
+#     deploy.yml from repo *variables* — never secrets).
+# These values feed both the job/pipeline tags (presets.tags, below) and the
+# cluster custom_tags (resources/*.yml) that reach Azure VM billing and the
+# `system.billing.usage` table.
+variables:
+  cost_center:
+    description: Finance cost center that this bundle's Databricks usage is charged to.
+    default: CC-1234
+  team:
+    description: Team that owns this bundle.
+    default: data-platform
+  owner_group:
+    description: Non-personal group that owns this bundle's resources.
+    default: group:data-platform-owners
+
+artifacts:
+  default:
+    type: whl
+    # CI builds before obtaining cloud credentials. Local deploys build on
+    # demand when no wheel exists.
+    build: python scripts/build_sdk.py
+
 include:
   - resources/*.yml
 
@@ -15,6 +43,22 @@ targets:
       host: https://adb-7405609799238491.11.azuredatabricks.net
     # run_as is left unset, so the bundle deploys and runs as the deploying
     # principal — in CI that is the github-actions-dbx-platform service principal.
+    presets:
+      # Applied to every job/pipeline in the bundle (organizational attribution
+      # + serverless usage reporting). Compute-level attribution that reaches
+      # Azure VM billing and system.billing.usage lives on cluster custom_tags —
+      # see resources/sample_job.yml. Development mode also auto-adds a `dev` tag
+      # identifying the deployer; these keys attribute the *spend*.
+      tags:
+        application: aai-core
+        cost_center: ${var.cost_center}
+        team: ${var.team}
+        owner_group: ${var.owner_group}
+        project: aai-dbx-core-starter
+        environment: ${bundle.target}
+        data_classification: internal
+        lifecycle: experimental
+        tag_schema_version: "1"
 
   # prod:
   #   mode: production
