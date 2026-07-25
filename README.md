@@ -50,6 +50,15 @@ AGENTS.md / CLAUDE.md  operating guide for AI agents
 4. **Verify**: run the `auth-smoke` workflow from `main`, then merge to `main`
    and watch `deploy`.
 
+## Required identity hardening
+
+The original bootstrap reused `github-actions-dbx-platform`, which is also
+registered in UAT. The repository now defines a dedicated, secretless CI
+identity, but a human must apply and cut it over using
+[`docs/dedicated-identity-migration.md`](docs/dedicated-identity-migration.md).
+Until that migration is complete, deployment works but retains the shared
+identity's cross-workspace blast radius.
+
 ## Day-to-day
 
 Open a PR → `ci` runs (lint/test, no cloud access). Merge to `main` → `deploy`
