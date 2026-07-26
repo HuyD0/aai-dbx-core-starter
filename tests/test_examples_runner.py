@@ -111,6 +111,34 @@ providers:
     assert "Using existing local configuration" in capsys.readouterr().out
 
 
+def test_connect_returns_nonzero_when_authentication_is_blocked(
+    runner, tmp_path, monkeypatch, capsys
+):
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: /Shared/learning
+providers:
+  models:
+    general-chat:
+      deployment: ready-endpoint
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+    monkeypatch.setattr(
+        runner,
+        "_cloud_issues",
+        lambda environment: ["Azure CLI is not authenticated; run `az login`."],
+    )
+
+    assert runner.connect() == 2
+    output = capsys.readouterr().out
+    assert "Authentication still needed" in output
+    assert "az login" in output
+
+
 def test_connected_run_stops_before_cloud_call_when_config_is_missing(
     runner, tmp_path, monkeypatch, capsys
 ):
@@ -166,6 +194,34 @@ def test_local_run_never_checks_cloud_and_reports_promotion_path(
 def test_local_run_rejects_workspace_only_example(runner, capsys):
     assert runner.run_example("first_prompt", destination="local") == 2
     assert "requires workspace services" in capsys.readouterr().err
+
+
+def test_interactive_workspace_example_prints_configured_exports(
+    runner, tmp_path, monkeypatch, capsys
+):
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+providers:
+  models:
+    general-chat:
+      deployment: ready-endpoint
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+    monkeypatch.setattr(runner, "_module_issues", lambda example: [])
+    monkeypatch.setattr(runner, "_cloud_issues", lambda environment: [])
+
+    assert runner.run_example("first_llm_call") == 0
+    output = capsys.readouterr().out
+    assert (
+        f"export DATABRICKS_HOST={runner._identifiers()['databricks_host']}" in output
+    )
+    assert "export DATABRICKS_AUTH_TYPE=azure-cli" in output
+    assert "export MLFLOW_TRACKING_URI=databricks" in output
+    assert f"export AAI_PLATFORM_CONFIG={config}" in output
+    assert f"jupyter lab {runner.ROOT / 'examples/first_llm_call.ipynb'}" in output
 
 
 def test_makefile_exposes_single_command_onboarding():

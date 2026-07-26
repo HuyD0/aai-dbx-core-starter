@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import sys
 from functools import wraps
 
@@ -16,6 +18,18 @@ class FakeMlflow:
 
     def trace(self, **trace_options):
         def decorate(target):
+            if inspect.iscoroutinefunction(target):
+
+                @wraps(target)
+                async def invoke_async(*args, **kwargs):
+                    self.active = True
+                    try:
+                        return await target(*args, **kwargs)
+                    finally:
+                        self.active = False
+
+                return invoke_async
+
             @wraps(target)
             def invoke(*args, **kwargs):
                 self.active = True
@@ -65,3 +79,21 @@ def test_configured_metadata_is_applied_inside_traced_call(monkeypatch):
     assert answer() == "ready"
     assert fake_mlflow.experiment == "/Shared/example-ai"
     assert fake_mlflow.trace_metadata == context.for_trace()
+
+
+def test_async_traced_call_stays_active_until_awaited_body_finishes(monkeypatch):
+    fake_mlflow = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    monkeypatch.setattr(tracing, "_TRACE_METADATA", {"release": "test"})
+
+    @tracing.traced(span_type="CHAIN")
+    async def answer() -> str:
+        assert fake_mlflow.active
+        await asyncio.sleep(0)
+        assert fake_mlflow.active
+        return "ready"
+
+    assert inspect.iscoroutinefunction(answer)
+    assert asyncio.run(answer()) == "ready"
+    assert fake_mlflow.active is False
+    assert fake_mlflow.trace_metadata == {"release": "test"}

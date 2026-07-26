@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from functools import wraps
@@ -44,6 +45,19 @@ def traced(
             import mlflow
         except ImportError:
             return target
+
+        if inspect.iscoroutinefunction(target):
+
+            @wraps(target)
+            async def invoke_async(*args: Any, **kwargs: Any) -> Any:
+                if _TRACE_METADATA:
+                    set_trace_context(_TRACE_METADATA)
+                return await target(*args, **kwargs)
+
+            return cast(
+                F,
+                mlflow.trace(name=name, span_type=span_type)(invoke_async),
+            )
 
         @wraps(target)
         def invoke(*args: Any, **kwargs: Any) -> Any:

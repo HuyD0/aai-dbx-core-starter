@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -290,6 +291,22 @@ def _print_issues(issues: list[str]) -> None:
         print(f"  - {issue}")
 
 
+def _print_interactive_instructions(
+    example: Example,
+    environment: dict[str, str],
+) -> None:
+    print(f"{example.path} is interactive. Export the configured environment:")
+    for name in (
+        "DATABRICKS_HOST",
+        "DATABRICKS_AUTH_TYPE",
+        "MLFLOW_TRACKING_URI",
+        "MLFLOW_REGISTRY_URI",
+        "AAI_PLATFORM_CONFIG",
+    ):
+        print(f"export {name}={shlex.quote(environment[name])}")
+    print(f"jupyter lab {shlex.quote(str(ROOT / example.path))}")
+
+
 def quickstart() -> int:
     print("Running the credential-free example...", flush=True)
     result = subprocess.run(
@@ -342,7 +359,7 @@ def connect() -> int:
     else:
         print("\nConnected identity and experiment preflight passed.")
         print("Run an example with `make workspace-example EXAMPLE=first_trace`.")
-    return 0
+    return 2 if core_issues or cloud_issues else 0
 
 
 def run_example(value: str, *, destination: str = "workspace") -> int:
@@ -374,11 +391,7 @@ def run_example(value: str, *, destination: str = "workspace") -> int:
         _print_issues(issues)
         return 2
     if example.interactive:
-        print(
-            f"{example.path} is interactive. Start Jupyter from this configured "
-            "shell or open the notebook in your IDE."
-        )
-        print(f"Notebook: {ROOT / example.path}")
+        _print_interactive_instructions(example, environment)
         return 0
     print(f"Running {example.path} against {destination}...", flush=True)
     result = subprocess.run(
