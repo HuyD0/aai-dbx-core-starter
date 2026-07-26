@@ -51,6 +51,10 @@ uv run --python "${PYTHON_VERSION}" ruff check .
 uv run --python "${PYTHON_VERSION}" black --check .
 uv run --python "${PYTHON_VERSION}" pytest -q
 uv run --python "${PYTHON_VERSION}" python -m build --no-isolation
+# Workflow security lint for this repo AND the workflows the template
+# generates into every team's project. --offline: no external audit calls.
+uv run --python "${PYTHON_VERSION}" zizmor --offline .github/workflows \
+  templates/agentic-rag/template/.github/workflows
 
 terraform fmt -check -recursive infra
 if [[ ! -d infra/.terraform/providers ]]; then

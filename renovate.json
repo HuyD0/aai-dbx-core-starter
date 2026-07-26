@@ -23,11 +23,11 @@
   ],
   "customManagers": [
     {
-      "description": "Version-pinned tools installed inline in workflows (uv, build, zizmor)",
+      "description": "Version-pinned tools installed inline in workflows (uv, build)",
       "customType": "regex",
       "fileMatch": ["^\\.github/workflows/.+\\.yml$"],
       "matchStrings": [
-        "(?<depName>uv|build|zizmor)==(?<currentValue>[0-9][0-9.]*)"
+        "(?<depName>uv|build)==(?<currentValue>[0-9][0-9.]*)"
       ],
       "datasourceTemplate": "pypi"
     },

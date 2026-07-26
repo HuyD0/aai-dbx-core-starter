@@ -175,7 +175,7 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
     ci = (WORKFLOWS / "ci.yml").read_text()
 
-    for version in ("0.8.23", "1.12.2", "1.6.0", "2.88.0"):
+    for version in ("0.8.23", "1.12.2", "2.88.0"):
         assert version in setup
 
     assert "sha256sum --check" in setup
@@ -185,3 +185,28 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     assert "DATABRICKS_TOKEN" in verify
     assert "azure/login" not in verify.lower()
     assert "az login" not in verify.lower()
+
+
+def test_databricks_cli_version_is_in_lockstep_everywhere():
+    """The Codex setup pin and every databricks/setup-cli reference (this repo
+    and the template's generated workflows) must agree, or bundle behavior
+    diverges between local/Codex and CI."""
+
+    setup = (ROOT / "scripts" / "codex-cloud-setup.sh").read_text()
+    script_version = re.search(r'DATABRICKS_CLI_VERSION="([0-9.]+)"', setup).group(1)
+
+    workflow_files = list(WORKFLOWS.glob("*.yml")) + list(
+        (
+            ROOT / "templates" / "agentic-rag" / "template" / ".github" / "workflows"
+        ).glob("*.yml")
+    )
+    pins = []
+    for workflow in workflow_files:
+        pins.extend(
+            re.findall(
+                r"databricks/setup-cli@[0-9a-f]{40}\s+#\s*v([0-9.]+)",
+                workflow.read_text(),
+            )
+        )
+    assert pins, "no databricks/setup-cli pins found"
+    assert set(pins) == {script_version}
