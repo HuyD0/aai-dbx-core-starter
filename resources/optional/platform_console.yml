@@ -30,10 +30,15 @@
 #      --key platform_console --bind` to generate and bind in one step).
 #
 #      CAUTION: bundle deployment state in `mode: development` lives under the *deploying
-#      principal's* home, so a bind performed from a laptop is not visible to CI. The bind
-#      must be recorded in the same state the deploy workflow uses — i.e. performed as the
-#      CI service principal. Confirm this against the live workspace before the first
-#      deploy; see docs/platform-console.md.
+#      principal's* home, so a bind performed from a laptop is not visible to CI. The
+#      dedicated principal exists only inside the OIDC job, so deploy.yml takes a
+#      `bind_app` dispatch input that performs the bind there:
+#
+#        gh workflow run deploy.yml --ref main -f bind_app=aai-platform-console-dev
+#
+#      Note the inherent ordering: bind needs this resource key to exist in the bundle,
+#      so the include must be merged first, and the push deploy that lands it will fail
+#      until the bind has run. docs/platform-console.md spells out the sequence.
 #   5. `app_usage_policy_id` below holds a real serverless usage policy id.
 #
 # Cost attribution note: an app resource has NO tags field (the bundle schema is

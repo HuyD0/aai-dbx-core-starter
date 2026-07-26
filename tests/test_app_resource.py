@@ -327,6 +327,16 @@ def test_dotted_volume_name_is_derived_from_the_identifier_fixture():
     )
 
 
+def test_template_repo_default_agrees_with_the_identifier_fixture():
+    """A clone that forgets this ships a console telling developers to generate their
+    projects from the UPSTREAM repository — silently wrong rather than broken, which is
+    exactly what the fixture cross-check mechanism exists to catch."""
+    bundle = yaml.safe_load((ROOT / "databricks.yml").read_text(encoding="utf-8"))
+    assert (
+        bundle["variables"]["template_repo"]["default"] == IDENTIFIERS["template_repo"]
+    )
+
+
 def test_volume_binding_is_read_only():
     """The console reads no application data; anything beyond READ_VOLUME is excess."""
     binding = _app_resource()["resources"][0]["uc_securable"]

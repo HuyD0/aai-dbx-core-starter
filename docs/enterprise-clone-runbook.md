@@ -37,6 +37,9 @@ Edit `platform-identifiers.json` first:
 - `databricks_host`
 - `job_compute_policy_id`
 - `sdk_artifact_volume`
+- `template_repo` — the clone's own Git URL. If this is left pointing at the
+  upstream repository, the platform console generates `bundle init` commands
+  that initialise projects from upstream instead of the clone.
 
 Then update the human-readable table in `AGENTS.md` and the values identified
 by the smoke tests:
@@ -44,7 +47,9 @@ by the smoke tests:
 - the literal dev workspace host and compute-policy default in
   `databricks.yml`;
 - `workspace_host`, `compute_policy_id`, and `aai_core_volume` defaults in
-  every `templates/*/databricks_template_schema.json`.
+  every `templates/*/databricks_template_schema.json`;
+- the `template_repo` and volume defaults in `databricks.yml` (only relevant if
+  you enable the platform console — see section 6).
 
 Run:
 

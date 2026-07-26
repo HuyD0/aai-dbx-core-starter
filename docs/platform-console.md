@@ -91,9 +91,16 @@ update one that already exists.
 >    through usage policies. Please create (or name an existing) usage policy carrying the
 >    standard tag set, and give us its id to record in `platform-identifiers.json`.
 >
-> The app's own auto-provisioned service principal additionally needs `READ VOLUME` on the
-> SDK artifact volume so the console can report whether the platform can read the published
-> wheel. It needs no other privilege — it reads no application data.
+> 4. **Grant the app's own service principal exactly two read privileges.** The app
+>    auto-provisions its own principal, distinct from the CI one, and the console's
+>    platform-state panel reports what *it* can reach. It needs:
+>    - `READ VOLUME` on `dbx_dev.dbx_platform.python_packages`, so it can report whether
+>      the platform can read the published SDK wheel; and
+>    - `CAN_USE` on compute policy `0005F2031B6D2319`, because the panel calls
+>      `cluster_policies.get()` and without it that row reports failure even when
+>      everything else is correctly provisioned.
+>
+>    Nothing further — the console reads no application data, no tables and no secrets.
 
 ### Binding — required, and easy to get wrong
 
@@ -113,9 +120,33 @@ be updated on the next deployment. `databricks bundle generate app --existing-ap
 **The bind must be recorded in the state CI uses.** With `mode: development`, bundle
 deployment state lives under the *deploying principal's* home, so a bind performed from a
 developer's laptop is invisible to the CI service principal and the first CI deploy would
-still plan a new app. Perform the bind as the CI principal, and confirm this behaviour
-against the live workspace before the first deploy — it is on the phase-0 checklist for
-exactly this reason.
+still plan a new app. The dedicated principal exists only inside the OIDC job, so the bind
+has to happen there — `deploy.yml` takes a `bind_app` dispatch input for exactly this, and
+runs the bind immediately before `bundle deploy` in the same job:
+
+```bash
+gh workflow run deploy.yml --ref main -f bind_app=aai-platform-console-dev
+```
+
+Leave `bind_app` empty for every normal deploy; it is a one-time step.
+
+### Ordering, and the one rough edge
+
+`bundle deployment bind` needs the resource key to exist in the bundle configuration, so
+the include must be merged *before* the bind can run. But merging also triggers a
+push deploy. So expect this sequence:
+
+1. Platform owner creates the app and grants the privileges above.
+2. Set `app_usage_policy_id` and merge the `include` line.
+3. **That push-triggered deploy will fail** — the app is not yet bound, so the bundle
+   plans a new one. This is expected and recoverable; nothing is destroyed.
+4. Dispatch the workflow with `bind_app` set. It binds and then deploys in one run.
+5. Subsequent pushes deploy normally.
+
+If a red run on `main` between steps 3 and 4 is unacceptable, do the merge and the
+dispatch in the same maintenance window, or temporarily pause the push trigger. There is
+no way to bind before the configuration exists, so this ordering is inherent rather than
+an oversight — it is called out here so it is not discovered during the deploy.
 
 Also confirm two workspace settings, either of which silently breaks deployment:
 

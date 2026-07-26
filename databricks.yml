@@ -57,8 +57,10 @@ variables:
     default: replace-with-usage-policy-id
   template_repo:
     description: >-
-      Git URL of this template hub, used to build the console's `bundle init` command.
-      Empty renders the in-checkout relative form instead.
+      Git URL of this template hub, used to build the console's `bundle init` command. A
+      clone MUST change this or its console would tell developers to generate projects
+      from the upstream repository. Cross-checked against platform-identifiers.json by
+      tests/test_app_resource.py, so editing the fixture surfaces this line.
     default: https://github.com/HuyD0/aai-dbx-core-starter
 
 artifacts:
