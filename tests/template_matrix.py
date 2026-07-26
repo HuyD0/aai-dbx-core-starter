@@ -73,16 +73,6 @@ COMBOS = {
             ],
             "expect_absent": [],
         },
-        {
-            "name": "foundry-judge",
-            "overrides": {
-                "project_name": "test-evaluation",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
-            },
-            "expect_present": ["src/app/judges.py"],
-            "expect_absent": [],
-        },
     ],
     "rag-app": [
         {
@@ -100,7 +90,6 @@ COMBOS = {
                 "src/app/rag.py",
                 "jobs/build_chunks.py",
                 "tests/test_chunks.py",
-                "resources/index.yml",
                 "scripts/promote_prompt.py",
             ],
             "expect_absent": [],
@@ -118,7 +107,6 @@ COMBOS = {
             },
             "expect_present": ["src/app/rag.py"],
             "expect_absent": [
-                "resources/index.yml",
                 "jobs/build_chunks.py",
                 "jobs",
                 "tests/test_chunks.py",
@@ -137,7 +125,7 @@ COMBOS = {
                 "embedding_deployment": "embedding",
             },
             "expect_present": ["src/app/rag.py"],
-            "expect_absent": ["resources/index.yml"],
+            "expect_absent": ["jobs/build_chunks.py"],
         },
     ],
     "agent-app": [

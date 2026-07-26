@@ -19,9 +19,8 @@ python -m pip install -e '.[dev]'
 pytest -q
 ```
 
-Replace every `replace-with-*` value in `aai-platform.yml` (and the
-`vector_search_endpoint` bundle variable for Databricks retrieval) before
-running a provider integration.
+Replace every `replace-with-*` value in `aai-platform.yml` before running
+a provider integration.
 
 ## Development lifecycle
 
@@ -29,10 +28,10 @@ running a provider integration.
    orchestration.
 2. Put tested application code under `src/app`; the chunking pipeline lives
    in `jobs/build_chunks.py` (Databricks retrieval) and writes a
-   CDF-enabled chunk table that the declared index syncs from
-   (`resources/index.yml`). For Azure AI Search, the index and ingestion
-   are managed outside this bundle; only retriever configuration lives in
-   `aai-platform.yml`.
+   CDF-enabled chunk table. The vector search index itself is human-run
+   platform bootstrap over that chunk table (AGENTS.md rule 8) — this
+   bundle only references it by name in `aai-platform.yml`. For Azure AI
+   Search, index and ingestion are likewise managed outside this bundle.
 3. Register prompts with `python scripts/register_prompt.py`; promote with
    `python scripts/promote_prompt.py --version <n> --to candidate|production`
    after the gate passes (production loads the `production` alias).

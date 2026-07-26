@@ -17,12 +17,11 @@ platform:
 
 providers:
   models:
-    # The LLM judges run through this endpoint (gateway-fronted in the
-    # enterprise). Judge cost is real cost — budget evaluation like any
-    # other workload.
+    # The LLM judges run through this gateway-fronted Databricks serving
+    # endpoint (for Foundry models, an external-model endpoint). Judge cost
+    # is real cost — budget evaluation like any other workload.
     judge-model:
-      provider: {{.model_provider}}
-      endpoint: {{.foundry_endpoint}}
+      provider: databricks
       deployment: {{.model_deployment}}
     # The application under evaluation, used by `evals/evaluate.py --mode
     # endpoint`. Leave commented while scoring recorded answer sheets.

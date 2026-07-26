@@ -32,31 +32,38 @@ def chunk_text(text: str, profile: ChunkingProfile = CHUNKING) -> list[str]:
 
 
 def main() -> None:
-    from pyspark.sql import Row, SparkSession
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import ArrayType, StringType
 
     from app.config import CHUNK_TABLE, SOURCE_TABLE
 
     spark = SparkSession.builder.getOrCreate()
-    documents = spark.table(SOURCE_TABLE).select("id", "content", "source_uri")
-
-    rows = []
-    for document in documents.collect():
-        for index, chunk in enumerate(chunk_text(document.content or "")):
-            rows.append(
-                Row(
-                    id=f"{document.id}-{index}",
-                    content=chunk,
-                    source_uri=document.source_uri,
-                    chunk_id=f"chunk-{index}",
-                )
-            )
+    # Chunking runs distributed on the executors — the corpus never
+    # materializes on the driver, so table size is bounded by the cluster,
+    # not driver memory.
+    chunk_udf = F.udf(lambda text: chunk_text(text or ""), ArrayType(StringType()))
+    chunks = (
+        spark.table(SOURCE_TABLE)
+        .select(
+            F.col("id").alias("document_id"),
+            "source_uri",
+            F.posexplode(chunk_udf(F.col("content"))).alias("position", "content"),
+        )
+        .select(
+            F.concat_ws("-", F.col("document_id"), F.col("position")).alias("id"),
+            "content",
+            "source_uri",
+            F.concat(F.lit("chunk-"), F.col("position")).alias("chunk_id"),
+        )
+    )
     (
-        spark.createDataFrame(rows)
-        .write.mode("overwrite")
+        chunks.write.mode("overwrite")
         .option("delta.enableChangeDataFeed", "true")
         .saveAsTable(CHUNK_TABLE)
     )
-    print({"source": SOURCE_TABLE, "chunks": len(rows), "table": CHUNK_TABLE})
+    written = spark.table(CHUNK_TABLE).count()
+    print({"source": SOURCE_TABLE, "chunks": written, "table": CHUNK_TABLE})
 
 
 if __name__ == "__main__":

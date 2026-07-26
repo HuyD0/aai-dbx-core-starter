@@ -22,13 +22,6 @@ variables:
   spark_version:
     description: Databricks Runtime for job clusters.
     default: 18.0.x-scala2.13
-{{- if eq .retrieval_provider "databricks_ai_search" }}
-  # Platform-provisioned vector search capacity (human-run bootstrap); the
-  # per-project index in resources/index.yml lives on this endpoint.
-  vector_search_endpoint:
-    description: Name of the platform's vector search endpoint.
-    default: replace-with-vector-search-endpoint
-{{- end }}
 
 include:
   - resources/*.yml

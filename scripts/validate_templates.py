@@ -1,8 +1,8 @@
 """Render every template and `databricks bundle validate` it for real.
 
 Runs on the credentialed path (post-merge deploy workflow) where PR CI
-cannot: resource schemas — including vector search indexes — are validated
-against the live workspace API. Configs come from each template's schema
+cannot: bundle resource schemas are validated against the live
+workspace API. Configs come from each template's schema
 defaults plus the identifier fixture, exactly like the credential-free
 render tests.
 
@@ -25,9 +25,8 @@ IDENTIFIERS = json.loads((REPO_ROOT / "platform-identifiers.json").read_text())
 # Extra wizard-answer variants to validate beyond each template's defaults —
 # combinations that render resources the default combination omits.
 VARIANTS: dict[str, list[dict[str, str]]] = {
-    # The vector_search_indexes resource only renders for Databricks
-    # retrieval; without this variant the advertised live validation of the
-    # index resource schema would never run.
+    # The chunk-pipeline job graph only renders for Databricks retrieval;
+    # validate that variant too so its conditional tasks stay deployable.
     "rag-app": [{"retrieval_provider": "databricks_ai_search"}],
 }
 
