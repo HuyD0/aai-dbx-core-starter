@@ -60,6 +60,7 @@ def test_template_renders_and_generated_unit_test_passes(tmp_path: Path):
         "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],
         "workspace_host": IDENTIFIERS["databricks_host"],
         "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
+        "aai_core_pip_source": "git+https://github.com/HuyD0/aai-dbx-core-starter",
     }
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -96,6 +97,21 @@ def test_template_renders_and_generated_unit_test_passes(tmp_path: Path):
     yaml.safe_load((output / "aai-platform.yml").read_text())
     generated_workflow = (output / ".github" / "workflows" / "deploy.yml").read_text()
     assert "${{ vars.AZURE_CLIENT_ID }}" in generated_workflow
+    assert "offline_checks.py" in generated_workflow
+
+    # Generated projects must have credential-free PR CI of their own.
+    generated_ci = (output / ".github" / "workflows" / "ci.yml").read_text()
+    ci_workflow = yaml.safe_load(generated_ci)
+    assert "pull_request" in ci_workflow[True]  # YAML parses the `on:` key as True
+    assert ci_workflow["permissions"] == {"contents": "read"}
+    ci_actions = re.findall(r"^\s*(?:-\s+)?uses:\s*(\S+)", generated_ci, re.MULTILINE)
+    assert ci_actions and not any(
+        action.lower().startswith("azure/login@") for action in ci_actions
+    )
+    assert len(ACTION_REF.findall(generated_ci)) == len(
+        ACTION_PIN.findall(generated_ci)
+    )
+    assert "aai-core @ git+" in (output / "requirements-ci.txt").read_text()
 
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(ROOT / "src"), str(output / "src")]
@@ -114,6 +130,12 @@ def test_template_renders_and_generated_unit_test_passes(tmp_path: Path):
     )
     subprocess.run(
         [sys.executable, "-m", "pytest", "-q", str(output / "tests")],
+        check=True,
+        cwd=output,
+        env=environment,
+    )
+    subprocess.run(
+        [sys.executable, str(output / "evals" / "offline_checks.py")],
         check=True,
         cwd=output,
         env=environment,

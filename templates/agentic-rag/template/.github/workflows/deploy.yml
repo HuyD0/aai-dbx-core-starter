@@ -28,6 +28,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Test before build (credential-free)
+        run: |
+          python -m pip install -r requirements-ci.txt
+          python -m pip install -e '.[dev]'
+          ruff check .
+          black --check .
+          pytest -q
+          python evals/offline_checks.py
+
       - name: Build application before cloud login
         run: |
           python -m pip install build==1.5.0

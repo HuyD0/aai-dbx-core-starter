@@ -112,6 +112,12 @@
       "default": "0005F2031B6D2319",
       "description": "Constrained Job Compute policy",
       "order": 18
+    },
+    "aai_core_pip_source": {
+      "type": "string",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@main",
+      "description": "pip-installable aai-core source used only by credential-free CI (git URL or internal index spec); runtime jobs always install the checksum-pinned volume wheel",
+      "order": 19
     }
   },
   "success_message": "Project created. Read README.md, install the pinned SDK, and run the credential-free tests."

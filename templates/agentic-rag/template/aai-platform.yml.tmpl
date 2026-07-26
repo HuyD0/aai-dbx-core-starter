@@ -17,12 +17,14 @@ platform:
 
 providers:
   models:
+    # In the enterprise this endpoint is gateway-fronted (Databricks AI
+    # Gateway on the serving endpoint, or switch the provider to azure_apim
+    # with base_url/token_scope) — application code never changes.
     general-chat:
       provider: {{.model_provider}}
       endpoint: {{.foundry_endpoint}}
       deployment: {{.model_deployment}}
       capabilities:
-        streaming: true
         tool_calling: true
         structured_output: true
   embeddings:
@@ -42,6 +44,9 @@ providers:
       chunk_id_field: chunk_id
       vector_fields: [content_vector]
       columns: [id, content, source_uri, chunk_id]
+      # Lets retriever.search(question) embed queries automatically when no
+      # vector is passed:
+      embedding: knowledge-embedding
 
 # Secret references may be added here. Never add secret values.
 secrets: {}

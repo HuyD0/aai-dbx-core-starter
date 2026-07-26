@@ -23,13 +23,26 @@ Copy `aai-platform.yml` for each environment and replace every
 
 1. Use `notebooks/01_explore.py` for exploration, not production orchestration.
 2. Put tested application code under `src/app`.
-3. Register prompts with `python scripts/register_prompt.py`.
-4. Add golden and failure cases under `evals/data`.
-5. Run `python evals/evaluate.py` before deploying.
-6. Record the evaluated code, prompt, model, and retrieval configuration with
+3. Register prompts with `python scripts/register_prompt.py` (sets the
+   `development` alias).
+4. Replace and grow the evaluation cases under `evals/data/` with your
+   domain's golden and failure cases — the seeded cases show the required
+   shape (grounded answers, refusals, injection attempts). Keep at least 10;
+   grow toward 150+.
+5. Run the release gate: `python evals/evaluate.py`. It enforces the safety,
+   groundedness, and relevance thresholds in `evals/gate_config.json`, plus
+   regression against `evals/baseline.json` once that exists. Pull-request CI
+   runs only `evals/offline_checks.py` (deterministic, credential-free); this
+   full LLM-judge run needs model access.
+6. Promote the evaluated prompt version:
+   `python scripts/promote_prompt.py --version <n> --to candidate`, and
+   `--to production` after release approval. Production deploys load the
+   `production` alias — promotion must happen before the first prod deploy.
+7. Record the evaluated code, prompt, model, and retrieval configuration with
    `python scripts/create_release.py`.
-7. Validate and deploy with `databricks bundle validate -t dev` and
-   `databricks bundle deploy -t dev`.
+8. Validate and deploy with `databricks bundle validate -t dev` and
+   `databricks bundle deploy -t dev`. After a released run passes, refresh
+   the regression baseline: `python evals/evaluate.py --update-baseline`.
 
 The application uses logical resources (`general-chat`,
 `knowledge-embedding`, and `product-knowledge`). Provider endpoints are
