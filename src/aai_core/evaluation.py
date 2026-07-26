@@ -166,6 +166,24 @@ class EvaluationSuite:
         return mlflow
 
 
+def apply_thresholds(
+    metrics: Mapping[str, float],
+    thresholds: Sequence[QualityThreshold],
+    *,
+    baseline_metrics: Mapping[str, float] | None = None,
+) -> EvaluationReport:
+    """Gate already-computed metrics without running an evaluation.
+
+    Lets LLM-free projects (for example the experiment starter) reuse the
+    same threshold/regression engine and `require_passed()` contract that
+    :class:`EvaluationSuite` applies to GenAI evaluations.
+    """
+
+    numeric = {str(key): float(value) for key, value in metrics.items()}
+    failures = _evaluate_thresholds(numeric, tuple(thresholds), baseline_metrics or {})
+    return EvaluationReport(metrics=numeric, failures=tuple(failures))
+
+
 def _extract_metrics(result: Any) -> dict[str, float]:
     source = getattr(result, "metrics", result if isinstance(result, Mapping) else {})
     return {

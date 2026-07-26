@@ -1,0 +1,17 @@
+{
+  "$comment": "Deterministic release gate for the experiment (no LLM judges). Regression checks activate once evals/baseline.json exists; refresh it from a passing run with `python evals/evaluate.py --update-baseline`.",
+  "thresholds": [
+    {
+      "metric": "accuracy",
+      "direction": "higher",
+      "required": 0.9,
+      "max_regression": 0.02
+    },
+    {
+      "metric": "precision",
+      "direction": "higher",
+      "required": 0.85,
+      "max_regression": 0.05
+    }
+  ]
+}

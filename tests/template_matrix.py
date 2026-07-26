@@ -11,6 +11,29 @@ generated pytest, offline checks), so it must render a fully working project.
 """
 
 COMBOS = {
+    "experiment-starter": [
+        {
+            "name": "with-notebook",
+            "overrides": {"project_name": "test-experiment"},
+            "expect_present": [
+                "src/app/experiment.py",
+                "jobs/run_experiment.py",
+                "data/sample.csv",
+                "notebooks/01_explore.py",
+                "evals/evaluate.py",
+            ],
+            "expect_absent": [],
+        },
+        {
+            "name": "no-notebook",
+            "overrides": {
+                "project_name": "test-experiment",
+                "include_notebook": "no",
+            },
+            "expect_present": ["src/app/experiment.py"],
+            "expect_absent": ["notebooks/01_explore.py", "notebooks"],
+        },
+    ],
     "agentic-rag": [
         {
             "name": "dbx-azure-search",

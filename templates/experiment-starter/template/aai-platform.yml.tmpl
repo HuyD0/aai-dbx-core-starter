@@ -1,0 +1,24 @@
+platform:
+  application: {{.application_name}}
+  project: {{.project_name}}
+  environment: dev
+  team: {{.team}}
+  owner_group: {{.owner_group}}
+  cost_center: {{.cost_center}}
+  data_classification: internal
+  lifecycle: experimental
+  repository: replace-with-owner/{{.project_name}}
+  release: dev
+  tag_schema_version: "1"
+  catalog: {{.catalog}}
+  schema: {{.schema}}
+  experiment_name: {{.experiment_name}}
+  azure_identity: azure_cli
+
+# This template is deliberately LLM-free: no model, embedding, or retriever
+# providers. Add provider blocks here later if the project grows into one of
+# the GenAI templates' shapes.
+providers: {}
+
+# Secret references may be added here. Never add secret values.
+secrets: {}
