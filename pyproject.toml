@@ -35,6 +35,10 @@ keyvault = [
 genai = [
   "mlflow[databricks]>=3.14,<4",
 ]
+examples = [
+  "ipykernel>=6.29,<8",
+  "jupyterlab>=4.4,<5",
+]
 all = [
   "aai-core[databricks,foundry,azure-search,keyvault,genai]",
 ]

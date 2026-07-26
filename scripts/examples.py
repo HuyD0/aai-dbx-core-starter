@@ -304,7 +304,10 @@ def _print_interactive_instructions(
         "AAI_PLATFORM_CONFIG",
     ):
         print(f"export {name}={shlex.quote(environment[name])}")
-    print(f"jupyter lab {shlex.quote(str(ROOT / example.path))}")
+    print(
+        f"{shlex.quote(sys.executable)} -m jupyter lab "
+        f"{shlex.quote(str(ROOT / example.path))}"
+    )
 
 
 def quickstart() -> int:

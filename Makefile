@@ -46,9 +46,9 @@ hooks-install: install ## Install the repository's pre-commit and pre-push hooks
 
 hooks-run: pre-commit pre-push ## Run both Git hook stages now.
 
-examples-install: check-uv ## Install the locked Databricks and GenAI example dependencies.
-	$(UV) sync --extra dev --extra databricks --extra genai --locked
-	@$(PYTHON) -c 'import sys; import databricks.sdk; import mlflow; print(f"Example dependencies ready in {sys.executable} (MLflow {mlflow.__version__})")'
+examples-install: check-uv ## Install locked Databricks, GenAI, and interactive example dependencies.
+	$(UV) sync --extra dev --extra databricks --extra genai --extra examples --locked
+	@$(PYTHON) -c 'import sys; import databricks.sdk; import ipykernel; import jupyterlab; import mlflow; print(f"Example dependencies ready in {sys.executable} (MLflow {mlflow.__version__})")'
 
 quickstart: install ## Prove a fresh clone works without credentials.
 	$(PYTHON) scripts/examples.py quickstart

@@ -221,7 +221,10 @@ providers:
     assert "export DATABRICKS_AUTH_TYPE=azure-cli" in output
     assert "export MLFLOW_TRACKING_URI=databricks" in output
     assert f"export AAI_PLATFORM_CONFIG={config}" in output
-    assert f"jupyter lab {runner.ROOT / 'examples/first_llm_call.ipynb'}" in output
+    assert (
+        f"{sys.executable} -m jupyter lab "
+        f"{runner.ROOT / 'examples/first_llm_call.ipynb'}"
+    ) in output
 
 
 def test_makefile_exposes_single_command_onboarding():
@@ -232,7 +235,8 @@ def test_makefile_exposes_single_command_onboarding():
     assert "local-ui: examples-install" in makefile
     assert "workspace-connect: examples-install" in makefile
     assert "workspace-example: examples-install" in makefile
-    assert "--extra databricks --extra genai --locked" in makefile
+    assert "--extra databricks --extra genai --extra examples --locked" in makefile
+    assert "import ipykernel; import jupyterlab" in makefile
     assert "$(PYTHON) scripts/examples.py local" in makefile
     assert "$(PYTHON) scripts/examples.py workspace" in makefile
     assert "Example dependencies ready in" in makefile
