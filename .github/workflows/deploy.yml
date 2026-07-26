@@ -101,3 +101,12 @@ jobs:
         run: |
           databricks bundle validate -t dev
           databricks bundle deploy -t dev
+
+      - name: Validate template catalog against the workspace
+        # Renders every bundle template and runs a real `bundle validate`
+        # (resource schemas incl. vector search indexes) — the check PR CI
+        # cannot do credential-free. Results land on the step summary.
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: python3 scripts/validate_templates.py

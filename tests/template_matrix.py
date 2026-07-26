@@ -84,6 +84,62 @@ COMBOS = {
             "expect_absent": [],
         },
     ],
+    "rag-app": [
+        {
+            "name": "dbx-dbx-search",
+            "overrides": {
+                "project_name": "test-rag",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+                "retrieval_provider": "databricks_ai_search",
+                "search_endpoint": "https://unused",
+                "search_index": "knowledge",
+                "embedding_deployment": "embedding",
+            },
+            "expect_present": [
+                "src/app/rag.py",
+                "jobs/build_chunks.py",
+                "tests/test_chunks.py",
+                "resources/index.yml",
+                "scripts/promote_prompt.py",
+            ],
+            "expect_absent": [],
+        },
+        {
+            "name": "dbx-azure-search",
+            "overrides": {
+                "project_name": "test-rag",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+                "retrieval_provider": "azure_ai_search",
+                "search_endpoint": "https://search.search.windows.net",
+                "search_index": "knowledge",
+                "embedding_deployment": "embedding",
+            },
+            "expect_present": ["src/app/rag.py"],
+            "expect_absent": [
+                "resources/index.yml",
+                "jobs/build_chunks.py",
+                "jobs",
+                "tests/test_chunks.py",
+            ],
+        },
+        {
+            "name": "foundry-azure-search",
+            "overrides": {
+                "project_name": "test-rag",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "model_deployment": "chat",
+                "retrieval_provider": "azure_ai_search",
+                "search_endpoint": "https://search.search.windows.net",
+                "search_index": "knowledge",
+                "embedding_deployment": "embedding",
+            },
+            "expect_present": ["src/app/rag.py"],
+            "expect_absent": ["resources/index.yml"],
+        },
+    ],
     "agentic-rag": [
         {
             "name": "dbx-azure-search",

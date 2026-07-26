@@ -1,0 +1,52 @@
+platform:
+  application: {{.application_name}}
+  project: {{.project_name}}
+  environment: dev
+  team: {{.team}}
+  owner_group: {{.owner_group}}
+  cost_center: {{.cost_center}}
+  data_classification: internal
+  lifecycle: experimental
+  repository: replace-with-owner/{{.project_name}}
+  release: dev
+  tag_schema_version: "1"
+  catalog: {{.catalog}}
+  schema: {{.schema}}
+  experiment_name: /Shared/{{.project_name}}
+  azure_identity: azure_cli
+
+providers:
+  models:
+    # In the enterprise this endpoint is gateway-fronted (Databricks AI
+    # Gateway on the serving endpoint, or switch the provider to azure_apim
+    # with base_url/token_scope) — application code never changes.
+    general-chat:
+      provider: {{.model_provider}}
+      endpoint: {{.foundry_endpoint}}
+      deployment: {{.model_deployment}}
+      capabilities:
+        tool_calling: true
+        structured_output: true
+  embeddings:
+    knowledge-embedding:
+      provider: {{.model_provider}}
+      endpoint: {{.foundry_endpoint}}
+      deployment: {{.embedding_deployment}}
+      dimensions: 1536
+  retrievers:
+    product-knowledge:
+      provider: {{.retrieval_provider}}
+      endpoint: {{.search_endpoint}}
+      index: {{.search_index}}
+      id_field: id
+      content_field: content
+      source_uri_field: source_uri
+      chunk_id_field: chunk_id
+      vector_fields: [content_vector]
+      columns: [id, content, source_uri, chunk_id]
+      # Lets retriever.search(question) embed queries automatically when no
+      # vector is passed:
+      embedding: knowledge-embedding
+
+# Secret references may be added here. Never add secret values.
+secrets: {}

@@ -1,0 +1,16 @@
+resources:
+  # Per-project vector search index as a bundle resource (DELTA_SYNC over the
+  # CDF-enabled chunk table). The vector search ENDPOINT is platform capacity:
+  # provisioned by the platform team (human-run), referenced here by name.
+  vector_search_indexes:
+    knowledge_index:
+      name: {{.catalog}}.{{.schema}}.{{.search_index}}
+      endpoint_name: ${var.vector_search_endpoint}
+      primary_key: id
+      index_type: DELTA_SYNC
+      delta_sync_index_spec:
+        source_table: {{.source_table}}_chunks
+        pipeline_type: TRIGGERED
+        embedding_source_columns:
+          - name: content
+            embedding_model_endpoint_name: {{.embedding_deployment}}

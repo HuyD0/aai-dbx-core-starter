@@ -1,0 +1,47 @@
+resources:
+  jobs:
+    rag_pipeline:
+      name: "[${bundle.target}] {{.application_name}}"
+      tasks:
+{{- if eq .retrieval_provider "databricks_ai_search" }}
+        - task_key: build_chunks
+          spark_python_task:
+            python_file: ../jobs/build_chunks.py
+          job_cluster_key: default
+          libraries:
+            - whl: ../dist/*.whl
+            - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
+            - requirements: ../requirements.lock
+{{- end }}
+        - task_key: evaluate
+{{- if eq .retrieval_provider "databricks_ai_search" }}
+          depends_on:
+            - task_key: build_chunks
+{{- end }}
+          spark_python_task:
+            python_file: ../evals/evaluate.py
+          job_cluster_key: default
+          libraries:
+            - whl: ../dist/*.whl
+            - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
+            # Single source of truth for runtime pins — the same lock file
+            # local installs use (bundle-synced to the workspace).
+            - requirements: ../requirements.lock
+
+      job_clusters:
+        - job_cluster_key: default
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            num_workers: 1
+            policy_id: ${var.compute_policy_id}
+            custom_tags:
+              application: {{.application_name}}
+              project: {{.project_name}}
+              environment: ${bundle.target}
+              team: ${var.team}
+              owner_group: ${var.owner_group}
+              cost_center: ${var.cost_center}
+              data_classification: internal
+              lifecycle: experimental
+              tag_schema_version: "1"

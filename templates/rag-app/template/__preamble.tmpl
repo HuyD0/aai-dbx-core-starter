@@ -1,0 +1,12 @@
+{{/* Conditional content. skip globs match POST-strip output names and are
+relative to this file's directory (template/ root).
+
+Azure AI Search projects manage their index and ingestion outside this
+bundle, so the Databricks vector-search index resource and the chunk
+pipeline are omitted. */}}
+{{- if eq .retrieval_provider "azure_ai_search" -}}
+{{ skip "resources/index.yml" }}
+{{ skip "jobs" }}
+{{ skip "tests/test_chunks.py" }}
+{{- end -}}
+{{ skip "__preamble" }}

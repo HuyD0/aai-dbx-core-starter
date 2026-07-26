@@ -39,22 +39,6 @@ python -m pip install -e '.[dev]'
 pytest -q
 ```
 
-## Codex Cloud development
-
-The repository includes a reproducible, credential-free Codex Cloud toolchain.
-Its setup and cached-container maintenance scripts install the pinned Azure,
-Databricks, Terraform, Python, and `uv` versions automatically. Cloud tasks run:
-
-```bash
-./scripts/cloud-verify.sh
-```
-
-This performs the locked install check, linting, formatting, unit tests, wheel
-build, Terraform validation, static Databricks bundle schema check, and YAML
-parsing. The Codex agent container contains no Azure or Databricks credential.
-After a reviewed change reaches protected `main`, GitHub Actions performs the
-authenticated bundle validation and deployment through keyless OIDC.
-
 Optional provider dependencies are separated:
 
 ```bash
