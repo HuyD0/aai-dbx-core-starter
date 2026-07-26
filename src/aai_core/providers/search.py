@@ -28,6 +28,20 @@ def _validated_mode(mode: str) -> str:
     return normalized
 
 
+def _record_retriever_span(span: Any, query: str, results: list[SearchResult]) -> None:
+    """Record query and normalized documents on the RETRIEVER span.
+
+    Groundedness judges (and trace-based evaluation generally) read documents
+    from RETRIEVER span outputs — without this, retrieval context is invisible
+    to scorers and groundedness gates fail on missing evidence.
+    """
+
+    if span is None:
+        return
+    span.set_inputs({"query": query})
+    span.set_outputs([result.as_mlflow_document() for result in results])
+
+
 def _resolve_query_vector(
     *,
     retriever: Any,
@@ -128,9 +142,11 @@ class AzureAISearchRetriever:
                 "aai.logical_name": self.logical_name,
                 "aai.retrieval_mode": mode,
             },
-        ):
+        ) as span:
             response = self.native_client.search(**options)
-            return [self._normalize(item) for item in response]
+            results = [self._normalize(item) for item in response]
+            _record_retriever_span(span, query, results)
+            return results
 
     def _normalize(self, item: Mapping[str, Any]) -> SearchResult:
         reserved = {
@@ -220,9 +236,11 @@ class DatabricksAISearchRetriever:
                 "aai.logical_name": self.logical_name,
                 "aai.retrieval_mode": mode,
             },
-        ):
+        ) as span:
             response = self.native_client.similarity_search(**options)
-        return self._normalize_response(response)
+            results = self._normalize_response(response)
+            _record_retriever_span(span, query, results)
+            return results
 
     def _normalize_response(self, response: Mapping[str, Any]) -> list[SearchResult]:
         manifest_columns = response.get("manifest", {}).get("columns", [])

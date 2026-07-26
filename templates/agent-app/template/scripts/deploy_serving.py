@@ -12,9 +12,22 @@ from pathlib import Path
 
 from aai_core import bootstrap
 from aai_core.serving import agent_resources, deploy_agent
+from app.config import AAI_CORE_WHEEL
 from app.tools import UC_FUNCTION_TOOLS
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def serving_pip_requirements() -> list[str]:
+    """The serving environment installs exactly what runtime jobs use: the
+    pinned volume wheel for aai-core plus the locked runtime versions."""
+
+    locked = [
+        line.strip()
+        for line in (ROOT / "requirements.lock").read_text("utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return [AAI_CORE_WHEEL, *locked]
 
 
 def main() -> None:
@@ -41,6 +54,12 @@ def main() -> None:
         logged = mlflow.pyfunc.log_model(
             name="agent",
             python_model=str(ROOT / "serving" / "model.py"),
+            # Everything the model needs away from this checkout: the app
+            # package, the platform configuration (references only), and the
+            # pinned dependencies incl. the aai-core volume wheel.
+            code_paths=[str(ROOT / "src" / "app")],
+            model_config=str(ROOT / "aai-platform.yml"),
+            pip_requirements=serving_pip_requirements(),
             resources=agent_resources(
                 settings,
                 models=["general-chat"],

@@ -9,20 +9,31 @@ from aai_core.tracing import traced
 
 
 class RAGAgent:
-    def __init__(self, context: PlatformContext | None = None) -> None:
+    def __init__(
+        self,
+        context: PlatformContext | None = None,
+        *,
+        prompt_version: int | None = None,
+    ) -> None:
         self.context = context or bootstrap()
         self.model = self.context.providers.model("general-chat")
         self.embedding = self.context.providers.embedding("knowledge-embedding")
         self.retriever = self.context.providers.retriever("product-knowledge")
-        prompt_alias = (
-            "production"
-            if self.context.settings.resource.environment in {"prod", "production"}
-            else "development"
-        )
-        self.prompt = self.context.prompts.load(
-            "agent-system",
-            alias=prompt_alias,
-        )
+        if prompt_version is not None:
+            # Evaluation pins an exact version so results stay reproducible.
+            self.prompt = self.context.prompts.load(
+                "agent-system", version=prompt_version
+            )
+        else:
+            prompt_alias = (
+                "production"
+                if self.context.settings.resource.environment in {"prod", "production"}
+                else "development"
+            )
+            self.prompt = self.context.prompts.load(
+                "agent-system",
+                alias=prompt_alias,
+            )
 
     @traced(name="agent.invoke", span_type="CHAIN")
     def invoke(self, request: AgentRequest) -> AgentResponse:

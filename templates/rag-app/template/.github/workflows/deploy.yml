@@ -89,3 +89,15 @@ jobs:
         run: |
           databricks bundle validate -t dev
           databricks bundle deploy -t dev
+
+      - name: Run the release gate
+        # Every template's bundle names its gate job `release_gate` (the
+        # project's tier-2 evaluation). Running it here ENFORCES the gate on
+        # the credentialed path: a failing gate fails this workflow, so a
+        # candidate that misses safety/quality thresholds never proceeds to
+        # promotion. Requires the onboarding grants documented in the README
+        # (e.g. CAN_QUERY on the endpoints the evaluation uses).
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: databricks bundle run release_gate -t dev

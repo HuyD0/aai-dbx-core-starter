@@ -128,8 +128,8 @@
     },
     "aai_core_pip_source": {
       "type": "string",
-      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@main",
-      "description": "pip-installable aai-core source used only by credential-free CI (git URL or internal index spec); runtime jobs always install the checksum-pinned volume wheel",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
       "order": 19
     },
     "source_table": {

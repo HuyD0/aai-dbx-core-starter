@@ -48,3 +48,8 @@ as a minor release with CI coverage for the new version.
 Wheels are published immutably to the Unity Catalog volume by the
 `publish-sdk` workflow; a version is never overwritten. Consuming projects
 upgrade by changing their pinned version and re-running their release gate.
+
+Each published version MUST also be git-tagged `v<version>` on the release
+commit: generated projects' credential-free CI installs aai-core from that
+tag (their `aai_core_pip_source` default), so tag and volume wheel must
+describe the same code. Never move a release tag.

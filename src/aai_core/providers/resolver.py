@@ -110,11 +110,15 @@ class ProviderResolver:
         )
 
     def _openai_client(self, provider: str, config: dict[str, Any]) -> tuple[Any, str]:
+        # The adapter owns retries (Retry-After-aware, configurable); native
+        # client retries are disabled so a persistent 429/5xx costs at most
+        # max_retries+1 attempts instead of multiplying with the SDK's own
+        # default retry policy.
         model = _required(config, "deployment")
         if provider == "databricks":
             from databricks_openai import DatabricksOpenAI
 
-            return DatabricksOpenAI(), model
+            return DatabricksOpenAI(max_retries=0), model
         if provider == "foundry":
             from openai import OpenAI
 
@@ -128,6 +132,7 @@ class ProviderResolver:
                 OpenAI(
                     base_url=f"{endpoint}/openai/v1/",
                     api_key=token_provider,
+                    max_retries=0,
                 ),
                 model,
             )
@@ -146,6 +151,7 @@ class ProviderResolver:
             client_options: dict[str, Any] = {
                 "base_url": base_url,
                 "api_key": token_provider,
+                "max_retries": 0,
             }
             headers = self._subscription_key_headers(config)
             if headers:

@@ -1,3 +1,10 @@
-"""Generated project constants (single source for the prompt identity)."""
+"""Generated project constants."""
 
 PROMPT_NAME = "{{.prompt_name}}"
+
+# The immutable SDK wheel on the Unity Catalog volume — also installed into
+# the Model Serving environment (pip supports /Volumes paths there).
+AAI_CORE_WHEEL = (
+    "{{.aai_core_volume}}/aai_core/{{.aai_core_version}}/"
+    "aai_core-{{.aai_core_version}}-py3-none-any.whl"
+)

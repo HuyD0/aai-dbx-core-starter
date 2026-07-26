@@ -103,6 +103,7 @@ def test_azure_apim_model_wires_gateway_options(monkeypatch):
     assert model.native_client.options == {
         "base_url": "https://gw.azure-api.net/llm",
         "api_key": "token-provider",
+        "max_retries": 0,  # the adapter owns retries; native retries stay off
         "default_headers": {"api-key": "subscription-key-value"},
         "default_query": {"api-version": "2025-04-01"},
     }

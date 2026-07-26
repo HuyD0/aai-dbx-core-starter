@@ -44,15 +44,26 @@ def load_baseline() -> dict[str, float]:
     return {name: float(value) for name, value in metrics.items()}
 
 
-def predict_fn(question: str) -> str:
-    response = RAGAgent().invoke(
-        AgentRequest(messages=[{"role": "user", "content": question}])
-    )
-    return response.content
+def resolve_version(context, requested: int | None) -> int:
+    """Pin the exact prompt version under evaluation (never a mutable alias),
+    so the version that passed this gate is the one promote_prompt.py and
+    create_release.py record."""
+
+    if requested is not None:
+        return requested
+    development = context.prompts.load("agent-system", alias="development")
+    return int(development.version)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--prompt-version",
+        type=int,
+        default=None,
+        help="Exact version to evaluate; defaults to the version the "
+        "development alias currently points at (resolved once, then pinned).",
+    )
     parser.add_argument(
         "--update-baseline",
         action="store_true",
@@ -62,6 +73,15 @@ def main() -> None:
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    version = resolve_version(context, args.prompt_version)
+    agent = RAGAgent(context, prompt_version=version)
+
+    def predict_fn(question: str) -> str:
+        response = agent.invoke(
+            AgentRequest(messages=[{"role": "user", "content": question}])
+        )
+        return response.content
+
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
@@ -77,7 +97,7 @@ def main() -> None:
     )
     publish_report(
         report,
-        title=f"RAG gate — {context.tags.application}",
+        title=f"RAG gate — {context.tags.application} (prompt v{version})",
         baseline=baseline,
     )
     report.require_passed()
@@ -91,6 +111,7 @@ def main() -> None:
         {
             "application": context.tags.application,
             "release": context.tags.release,
+            "prompt_version": version,
             "metrics": report.metrics,
             "baseline_updated": args.update_baseline,
         }

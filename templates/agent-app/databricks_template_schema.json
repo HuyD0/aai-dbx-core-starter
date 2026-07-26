@@ -109,14 +109,14 @@
     },
     "aai_core_pip_source": {
       "type": "string",
-      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@main",
-      "description": "pip-installable aai-core source used only by credential-free CI (git URL or internal index spec); runtime jobs always install the checksum-pinned volume wheel",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
       "order": 20
     },
     "include_serving": {
       "type": "string",
       "default": "yes",
-      "description": "Include the Model Serving deployment path (serving wrapper, deploy script, monitoring notebook)",
+      "description": "Include the Model Serving deployment path (serving wrapper, deploy script, monitoring notebook). Requires model_provider=databricks \u2014 Foundry projects omit serving until routed through a Databricks external-model endpoint",
       "enum": [
         "yes",
         "no"

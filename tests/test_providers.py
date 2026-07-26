@@ -287,3 +287,52 @@ def test_databricks_search_hybrid_sends_text_and_optional_vector():
     assert index.options["query_text"] == "question"
     assert index.options["query_vector"] == [0.1, 0.2]
     assert results[0].document_id == "doc-1"
+
+
+def test_retriever_records_documents_on_the_retriever_span(monkeypatch):
+    """Groundedness judges read documents from RETRIEVER span outputs."""
+    from contextlib import contextmanager
+
+    from conftest import install_fake_module
+
+    class FakeSpan:
+        def __init__(self):
+            self.attributes = {}
+            self.inputs = None
+            self.outputs = None
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+        def set_inputs(self, inputs):
+            self.inputs = inputs
+
+        def set_outputs(self, outputs):
+            self.outputs = outputs
+
+    recorded = {}
+
+    @contextmanager
+    def start_span(name, span_type):
+        span = FakeSpan()
+        recorded["span"] = span
+        recorded["span_type"] = span_type
+        yield span
+
+    install_fake_module(monkeypatch, "mlflow", start_span=start_span)
+
+    retriever = AzureAISearchRetriever(
+        logical_name="knowledge",
+        client=FakeSearch(),
+        content_field="content",
+        id_field="id",
+        source_uri_field="source_uri",
+        chunk_id_field="chunk_id",
+    )
+    retriever.search("question", mode="text", filters={"region": "ca"})
+
+    span = recorded["span"]
+    assert recorded["span_type"] == "RETRIEVER"
+    assert span.inputs == {"query": "question"}
+    assert span.outputs[0]["page_content"] == "grounding"
+    assert span.outputs[0]["metadata"]["doc_uri"] == "https://example/doc"

@@ -22,6 +22,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IDENTIFIERS = json.loads((REPO_ROOT / "platform-identifiers.json").read_text())
 
+# Extra wizard-answer variants to validate beyond each template's defaults —
+# combinations that render resources the default combination omits.
+VARIANTS: dict[str, list[dict[str, str]]] = {
+    # The vector_search_indexes resource only renders for Databricks
+    # retrieval; without this variant the advertised live validation of the
+    # index resource schema would never run.
+    "rag-app": [{"retrieval_provider": "databricks_ai_search"}],
+}
+
 
 def discover_templates() -> list[Path]:
     return sorted(
@@ -43,12 +52,23 @@ def config_for(template: Path) -> dict:
     return {key: value for key, value in overrides.items() if key in properties}
 
 
+def validation_runs() -> list[tuple[Path, str, dict[str, str]]]:
+    runs = []
+    for template in discover_templates():
+        runs.append((template, template.name, {}))
+        for overrides in VARIANTS.get(template.name, []):
+            label = f"{template.name}[{'/'.join(sorted(overrides.values()))}]"
+            runs.append((template, label, overrides))
+    return runs
+
+
 def main() -> int:
     failures: list[str] = []
-    for template in discover_templates():
+    results: list[tuple[str, str]] = []
+    for template, label, overrides in validation_runs():
         with tempfile.TemporaryDirectory() as scratch:
             config_path = Path(scratch) / "config.json"
-            config_path.write_text(json.dumps(config_for(template)))
+            config_path.write_text(json.dumps({**config_for(template), **overrides}))
             output = Path(scratch) / "generated"
             try:
                 subprocess.run(
@@ -72,28 +92,25 @@ def main() -> int:
                     cwd=output,
                 )
             except subprocess.CalledProcessError as error:
-                failures.append(f"{template.name}: {error}")
+                failures.append(f"{label}: {error}")
+                results.append((label, "FAILED"))
                 continue
-        print(f"validated {template.name}")
+        results.append((label, "ok"))
+        print(f"validated {label}")
 
     summary = os.getenv("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as stream:
             stream.write("## Template catalog validation\n\n")
-            for template in discover_templates():
-                status = (
-                    "FAILED"
-                    if any(line.startswith(template.name) for line in failures)
-                    else "ok"
-                )
-                stream.write(f"- {template.name}: {status}\n")
+            for label, status in results:
+                stream.write(f"- {label}: {status}\n")
             stream.write("\n")
 
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"all {len(discover_templates())} templates validated")
+    print(f"all {len(results)} template configurations validated")
     return 0
 
 

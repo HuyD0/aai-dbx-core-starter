@@ -5,7 +5,7 @@
     "project_name": {
       "type": "string",
       "default": "aai-experiment",
-      "description": "Project and bundle name. NOTE: apply template updates deliberately — generated projects record their template version in .aai-template.json",
+      "description": "Project and bundle name. NOTE: apply template updates deliberately \u2014 generated projects record their template version in .aai-template.json",
       "order": 1,
       "pattern": "^[a-z][a-z0-9-]+$",
       "pattern_match_failure_message": "Use lowercase letters, numbers, and hyphens."
@@ -56,7 +56,10 @@
       "type": "string",
       "default": "yes",
       "description": "Include an exploration notebook (notebooks stay exploratory; production logic lives in src/)",
-      "enum": ["yes", "no"],
+      "enum": [
+        "yes",
+        "no"
+      ],
       "order": 9
     },
     "aai_core_version": {
@@ -85,8 +88,8 @@
     },
     "aai_core_pip_source": {
       "type": "string",
-      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@main",
-      "description": "pip-installable aai-core source used only by credential-free CI (git URL or internal index spec); runtime jobs always install the checksum-pinned volume wheel",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
       "order": 20
     }
   },

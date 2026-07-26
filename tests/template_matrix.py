@@ -175,15 +175,17 @@ COMBOS = {
             ],
         },
         {
-            "name": "foundry-serving",
+            "name": "foundry-no-serving",
             "overrides": {
                 "project_name": "test-agent-app",
                 "model_provider": "foundry",
                 "foundry_endpoint": "https://unused.services.ai.azure.com",
                 "model_deployment": "chat",
             },
-            "expect_present": ["src/app/agent.py", "serving/model.py"],
-            "expect_absent": [],
+            # Foundry cannot satisfy serving resource declarations, so the
+            # serving path is omitted even though include_serving defaults yes.
+            "expect_present": ["src/app/agent.py"],
+            "expect_absent": ["serving/model.py", "scripts/deploy_serving.py"],
         },
     ],
 }
