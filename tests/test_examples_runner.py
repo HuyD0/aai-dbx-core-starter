@@ -28,6 +28,21 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
     assert runner.EXAMPLES["first_llm_call"].interactive is True
 
 
+def test_connected_environment_routes_mlflow_to_databricks(runner, monkeypatch):
+    for name in (
+        "MLFLOW_TRACKING_URI",
+        "MLFLOW_REGISTRY_URI",
+        "DATABRICKS_AUTH_TYPE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    environment = runner._connected_environment()
+
+    assert environment["MLFLOW_TRACKING_URI"] == "databricks"
+    assert environment["MLFLOW_REGISTRY_URI"] == "databricks-uc"
+    assert environment["DATABRICKS_AUTH_TYPE"] == "azure-cli"
+
+
 def test_config_preflight_checks_only_fields_used_by_the_example(
     runner, tmp_path, monkeypatch
 ):

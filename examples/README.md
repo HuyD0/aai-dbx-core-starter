@@ -46,11 +46,17 @@ make examples-install
 az login
 export DATABRICKS_HOST=<workspace host from platform-identifiers.json>
 export DATABRICKS_AUTH_TYPE=azure-cli
+export MLFLOW_TRACKING_URI=databricks
+export MLFLOW_REGISTRY_URI=databricks-uc
 cp aai-platform.example.yml aai-platform.yml  # then replace the placeholders
 .venv/bin/python examples/first_trace.py
 ```
 
 No example ever needs a PAT, client secret, or API key.
+
+Connected example results are stored in the configured Databricks experiment
+and viewed in the Databricks workspace. A bare `mlflow ui` command opens a
+separate local SQLite store and will not show those remote results.
 
 Do not run the connected files directly immediately after cloning. The Make
 runner installs their optional dependencies and checks configuration and

@@ -7,6 +7,7 @@ def main() -> None:
     configure_tracing(
         ctx.tags,
         experiment_name=ctx.settings.effective_experiment_name,
+        tracking_uri="databricks",
     )
 
     @traced(span_type="CHAIN")
@@ -14,6 +15,10 @@ def main() -> None:
         return f"Replace this example with a model call for: {question}"
 
     print(answer("What should this application measure?"))
+    print(
+        "Trace sent to the Databricks experiment "
+        f"{ctx.settings.effective_experiment_name!r}; view it in the workspace UI."
+    )
 
 
 if __name__ == "__main__":

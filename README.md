@@ -55,6 +55,8 @@ The connected setup creates a local, ignored `aai-platform.yml` when needed,
 checks keyless Azure CLI and Databricks authentication, detects configuration
 placeholders, and sets the MLflow tracking and registry destinations for the
 example process. It never creates or requests a PAT, client secret, or API key.
+Connected traces and runs are viewed in the configured Databricks experiment;
+they are not served by a local `mlflow ui`.
 
 List every example and its execution mode with `make examples-list`.
 
