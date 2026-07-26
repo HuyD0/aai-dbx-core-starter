@@ -15,8 +15,14 @@ from pathlib import Path
 from mlflow.genai.scorers import scorer
 
 from aai_core import bootstrap
-from aai_core.evaluation import EvaluationSuite, QualityThreshold, publish_report
+from aai_core.evaluation import (
+    EvaluationSuite,
+    QualityThreshold,
+    publish_report,
+    workspace_run_url,
+)
 from app import judges, targets
+from app.config import DATASET_NAME
 from app.scorers import CODE_SCORERS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,11 +88,25 @@ def main() -> None:
         thresholds=load_thresholds(),
     )
     baseline = load_baseline()
-    report = suite.run(data=cases, predict_fn=predict_fn, baseline_metrics=baseline)
+    dataset_name = (
+        f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
+    )
+    # A governed MLflow run: aai.* tags, the registered dataset identity,
+    # gate metrics, verdict tag, and evaluation traces attached.
+    report, run_id = suite.run_tracked(
+        experiments=context.experiments,
+        run_name=f"eval-gate-{args.mode}",
+        data=cases,
+        predict_fn=predict_fn,
+        baseline_metrics=baseline,
+        dataset_name=dataset_name,
+        parameters={"mode": args.mode},
+    )
     publish_report(
         report,
         title=f"Evaluation gate — {context.tags.application} ({args.mode})",
         baseline=baseline,
+        run_link=workspace_run_url(run_id),
     )
     report.require_passed()
     if args.update_baseline:

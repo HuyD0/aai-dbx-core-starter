@@ -31,6 +31,9 @@ provider integration.
    thresholds in `evals/gate_config.json`; evaluation always pins an exact
    version, never an alias. After a released run passes, refresh the
    regression baseline with `--update-baseline`.
+   After case changes merge, register the ground truth in Unity Catalog:
+   `python scripts/sync_dataset.py` — evaluation runs link the dataset
+   by name.
 4. Promote only after the gate passes:
    `python scripts/promote_prompt.py --version <n> --to candidate`, then
    `--to production` at release approval. Production deploys load the

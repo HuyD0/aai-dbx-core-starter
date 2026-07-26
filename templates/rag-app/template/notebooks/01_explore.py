@@ -10,10 +10,10 @@
 from aai_core import bootstrap
 from aai_core.tracing import configure_tracing
 
-ctx = bootstrap("../aai-platform.yml")
+ctx = bootstrap()  # discovers aai-platform.yml (env override / upward search)
 configure_tracing(
     ctx.tags,
-    experiment_name=ctx.settings.experiment_name,
+    experiment_name=ctx.settings.effective_experiment_name,
 )
 
 display(  # noqa: F821 - supplied by the Databricks notebook runtime

@@ -20,7 +20,13 @@ from mlflow.genai.scorers import RelevanceToQuery, RetrievalGroundedness, Safety
 
 from aai_core import bootstrap
 from aai_core.agents import AgentRequest
-from aai_core.evaluation import EvaluationSuite, QualityThreshold, publish_report
+from aai_core.evaluation import (
+    EvaluationSuite,
+    QualityThreshold,
+    publish_report,
+    workspace_run_url,
+)
+from app.config import DATASET_NAME
 from app.rag import RAGAgent
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,15 +96,27 @@ def main() -> None:
         thresholds=load_thresholds(),
     )
     baseline = load_baseline()
-    report = suite.run(
+    prompt_uri = f"prompts:/{context.prompts.qualify('agent-system')}/{version}"
+    dataset_name = (
+        f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
+    )
+    # A governed MLflow run: aai.* tags, pinned prompt URI + dataset as
+    # params, gate metrics, verdict tag, and the evaluation traces attached.
+    report, run_id = suite.run_tracked(
+        experiments=context.experiments,
+        run_name=f"rag-gate-v{version}",
         data=cases,
         predict_fn=predict_fn,
         baseline_metrics=baseline,
+        prompt_uri=prompt_uri,
+        dataset_name=dataset_name,
+        parameters={"prompt_version": version},
     )
     publish_report(
         report,
         title=f"RAG gate — {context.tags.application} (prompt v{version})",
         baseline=baseline,
+        run_link=workspace_run_url(run_id),
     )
     report.require_passed()
     if args.update_baseline:

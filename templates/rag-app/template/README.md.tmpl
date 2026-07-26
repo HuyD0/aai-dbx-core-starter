@@ -42,6 +42,9 @@ running a provider integration.
    relevance, and safety judges with the thresholds in
    `evals/gate_config.json`, publishing the report to the CI summary.
    After a released run passes: `--update-baseline`.
+   After case changes merge, register the ground truth in Unity Catalog:
+   `python scripts/sync_dataset.py` — evaluation runs link the dataset
+   by name.
 6. Record the evaluated code, prompt, model, and retrieval configuration
    with `python scripts/create_release.py`.
 7. Deploy: `databricks bundle validate -t dev` then

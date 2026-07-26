@@ -128,6 +128,55 @@ class EvaluationSuite:
         )
         return EvaluationReport(metrics=metrics, failures=tuple(failures), raw=raw)
 
+    def run_tracked(
+        self,
+        *,
+        experiments: Any,
+        run_name: str,
+        data: Any,
+        predict_fn: Any | None = None,
+        baseline_metrics: Mapping[str, float] | None = None,
+        prompt_uri: str | None = None,
+        dataset_name: str | None = None,
+        parameters: Mapping[str, Any] | None = None,
+    ) -> tuple[EvaluationReport, str | None]:
+        """Run the evaluation as a governed MLflow run and return its id.
+
+        The run carries the platform ``aai.*`` tags (via the passed
+        :class:`~aai_core.experiments.ExperimentManager`), the evaluated
+        prompt URI and dataset identity as params, the gate metrics, and an
+        ``aai.gate_passed`` tag. Traces produced by ``predict_fn`` during
+        the evaluation attach to this run, and passing a Unity Catalog
+        dataset object as ``data`` links the dataset natively — evaluation
+        runs become fully connected records instead of floating metric bags.
+        """
+
+        linked: dict[str, Any] = {"case_count": _case_count(data)}
+        if prompt_uri:
+            linked["prompt_uri"] = prompt_uri
+        if dataset_name:
+            linked["evaluation_dataset"] = dataset_name
+        linked.update(parameters or {})
+
+        run_id: str | None = None
+        with experiments.run(run_name=run_name, parameters=linked) as active_run:
+            run_id = getattr(getattr(active_run, "info", None), "run_id", None)
+            report = self.run(
+                data=data,
+                predict_fn=predict_fn,
+                baseline_metrics=baseline_metrics,
+            )
+            client = self._client()
+            numeric = {
+                name: value
+                for name, value in report.metrics.items()
+                if isinstance(value, (int, float))
+            }
+            if numeric:
+                client.log_metrics(numeric)
+            client.set_tags({"aai.gate_passed": str(report.passed).lower()})
+        return report, run_id
+
     def log_feedback(
         self,
         *,
@@ -235,6 +284,31 @@ def publish_report(
         with open(target, "a", encoding="utf-8") as stream:
             stream.write(markdown + "\n")
     return markdown
+
+
+def workspace_run_url(
+    run_id: str | None, experiment_id: str | None = None
+) -> str | None:
+    """A clickable workspace URL for an MLflow run, when derivable.
+
+    Uses ``DATABRICKS_HOST`` from the environment — the same variable every
+    credentialed path already sets — so gate reports can deep-link the
+    evaluation run without new configuration.
+    """
+
+    host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+    if not host or not run_id:
+        return None
+    if experiment_id:
+        return f"{host}/ml/experiments/{experiment_id}/runs/{run_id}"
+    return f"{host}/#mlflow/runs/{run_id}"
+
+
+def _case_count(data: Any) -> int | str:
+    try:
+        return len(data)
+    except TypeError:
+        return "unknown"
 
 
 def _extract_metrics(result: Any) -> dict[str, float]:

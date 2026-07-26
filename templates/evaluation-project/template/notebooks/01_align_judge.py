@@ -6,12 +6,12 @@
 # COMMAND ----------
 
 import json
-from pathlib import Path
 
 from aai_core import bootstrap
+from aai_core.runtime import find_platform_config
 from app.judges import judge_model_uri
 
-context = bootstrap(Path.cwd().parent / "aai-platform.yml")
+context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
 print({"judge_model": judge_model_uri(context.settings)})
 
 # COMMAND ----------
@@ -29,7 +29,6 @@ print({"judge_model": judge_model_uri(context.settings)})
 #
 # 4. Compare judge vs human agreement before raising gate thresholds.
 
-cases = json.loads(
-    (Path.cwd().parent / "evals" / "data" / "golden_cases.json").read_text()
-)
+project_root = find_platform_config().parent
+cases = json.loads((project_root / "evals" / "data" / "golden_cases.json").read_text())
 print(f"{len(cases)} golden cases available for the alignment sample")

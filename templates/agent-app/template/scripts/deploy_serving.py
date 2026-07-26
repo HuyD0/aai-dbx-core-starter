@@ -37,6 +37,12 @@ def main() -> None:
         default=None,
         help="UC model name; defaults to <catalog>.<schema>.<application>.",
     )
+    parser.add_argument(
+        "--register-only",
+        action="store_true",
+        help="Log and register the agent as code in Unity Catalog without "
+        "deploying a serving endpoint (the governed record of the release).",
+    )
     args = parser.parse_args()
 
     import mlflow
@@ -67,6 +73,15 @@ def main() -> None:
             ),
             registered_model_name=uc_model_name,
         )
+    if args.register_only:
+        print(
+            {
+                "model": uc_model_name,
+                "version": logged.registered_model_version,
+                "deployed": False,
+            }
+        )
+        return
     deployment = deploy_agent(
         context,
         uc_model_name=uc_model_name,

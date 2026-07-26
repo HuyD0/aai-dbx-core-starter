@@ -7,19 +7,17 @@
 
 # COMMAND ----------
 
-from pathlib import Path
-
 import mlflow
 from mlflow.genai.scorers import Safety, ScorerSamplingConfig
 
 from aai_core import bootstrap
 
-context = bootstrap(Path.cwd().parent / "aai-platform.yml")
-print({"experiment": context.settings.experiment_name})
+context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
+print({"experiment": context.settings.effective_experiment_name})
 
 # COMMAND ----------
 
-mlflow.set_experiment(context.settings.experiment_name)
+mlflow.set_experiment(context.settings.effective_experiment_name)
 
 safety = Safety().register(name="production_safety")
 safety.start(sampling_config=ScorerSamplingConfig(sample_rate=0.1))

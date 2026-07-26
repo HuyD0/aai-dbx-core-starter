@@ -3,13 +3,11 @@
 
 # COMMAND ----------
 
-from pathlib import Path
-
 from aai_core import bootstrap
 from aai_core.agents import AgentRequest
 from app.agent import ToolAgent
 
-context = bootstrap(Path.cwd().parent / "aai-platform.yml")
+context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
 print({"application": context.tags.application})
 
 # COMMAND ----------

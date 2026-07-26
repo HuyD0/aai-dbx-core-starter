@@ -36,3 +36,13 @@ No example ever needs a PAT, client secret, or API key.
 | `first_evaluation.py` | `templates/evaluation-project` |
 | `first_llm_call.ipynb`, `first_trace.py` | `templates/rag-app` / `templates/agent-app` |
 | `offline_hello_world.py` | every template's hermetic test pattern |
+
+## Notebook conventions
+
+- **Jupyter (`.ipynb`) for local exploration** — like `first_llm_call.ipynb`.
+- **Databricks-format `.py` notebooks for anything riding CD** — generated
+  projects ship them and bundles sync them to the workspace.
+- **No hardcoded configuration in either**: `bootstrap()` discovers
+  `aai-platform.yml` by walking up from the working directory (override with
+  `AAI_PLATFORM_CONFIG`), and experiments default to the platform naming
+  convention `/Shared/<team>-<application>-<environment>` unless configured.

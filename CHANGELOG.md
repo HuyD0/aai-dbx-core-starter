@@ -10,6 +10,17 @@ All notable changes to `aai-core` are documented here.
   gates.
 - Retired `agentic-rag` into `rag-app` + `agent-app` (last renderable at tag
   `v0.2.0-agentic-rag-final`).
+- Added platform conventions for experiments and evaluation runs:
+  `effective_experiment_name` (`/Shared/<team>-<application>-<environment>`
+  unless configured), portable `bootstrap()` config discovery
+  (`AAI_PLATFORM_CONFIG` or upward search), and
+  `EvaluationSuite.run_tracked` — every template gate is now a governed
+  MLflow run linking the pinned prompt URI, the registered UC dataset,
+  traces, params/metrics, and an `aai.gate_passed` verdict, deep-linked
+  from the published report.
+- Registered ground truth with the catalog across templates
+  (scripts/sync_dataset.py) and added agent register-as-code
+  (`deploy_serving.py --register-only`).
 - Added SDK experiment logging/reproducibility helpers, `apply_thresholds`,
   `publish_report`, the tool-execution loop (`ToolRegistry`/`run_tool_loop`),
   `structured.generate_structured`, the serving adapter

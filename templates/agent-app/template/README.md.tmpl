@@ -47,10 +47,15 @@ provider integration.
    the thresholds in `evals/gate_config.json` and baseline regression;
    report published to the CI summary. After a released run:
    `--update-baseline`.
+   After case changes merge, register the ground truth in Unity Catalog:
+   `python scripts/sync_dataset.py` — evaluation runs link the dataset
+   by name.
 4. Promote the prompt (`python scripts/promote_prompt.py --version <n>
    --to candidate|production`).
 5. Deploy — only after the gate passes:
    `python scripts/deploy_serving.py` logs the models-from-code wrapper
+   (use `--register-only` to register the agent as code in Unity Catalog
+   without deploying an endpoint)
    (`serving/model.py`) with its resource declarations, registers it in
    Unity Catalog, and deploys via Model Serving with scale-to-zero.
 6. Enable production monitoring from `notebooks/02_enable_monitoring.py`

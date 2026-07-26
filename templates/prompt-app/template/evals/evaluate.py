@@ -15,9 +15,14 @@ from pathlib import Path
 from mlflow.genai.scorers import Correctness, RelevanceToQuery, Safety
 
 from aai_core import bootstrap
-from aai_core.evaluation import EvaluationSuite, QualityThreshold, publish_report
+from aai_core.evaluation import (
+    EvaluationSuite,
+    QualityThreshold,
+    publish_report,
+    workspace_run_url,
+)
 from app.assistant import Assistant
-from app.config import PROMPT_NAME
+from app.config import DATASET_NAME, PROMPT_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE_CONFIG = ROOT / "evals" / "gate_config.json"
@@ -62,6 +67,10 @@ def main() -> None:
     context = bootstrap(ROOT / "aai-platform.yml")
     version = resolve_version(context, args.prompt_version)
     assistant = Assistant(context, prompt_version=version)
+    prompt_uri = f"prompts:/{context.prompts.qualify(PROMPT_NAME)}/{version}"
+    dataset_name = (
+        f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
+    )
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
@@ -70,15 +79,23 @@ def main() -> None:
         thresholds=load_thresholds(),
     )
     baseline = load_baseline()
-    report = suite.run(
+    # A governed MLflow run: aai.* tags, pinned prompt URI + dataset as
+    # params, gate metrics, verdict tag, and the evaluation traces attached.
+    report, run_id = suite.run_tracked(
+        experiments=context.experiments,
+        run_name=f"prompt-gate-v{version}",
         data=cases,
         predict_fn=assistant.ask,
         baseline_metrics=baseline,
+        prompt_uri=prompt_uri,
+        dataset_name=dataset_name,
+        parameters={"prompt_version": version},
     )
     publish_report(
         report,
         title=f"Prompt gate — {PROMPT_NAME} v{version}",
         baseline=baseline,
+        run_link=workspace_run_url(run_id),
     )
     report.require_passed()
     if args.update_baseline:

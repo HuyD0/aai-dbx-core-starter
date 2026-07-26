@@ -61,7 +61,7 @@ class PlatformContext:
             from aai_core.experiments import ExperimentManager
 
             self._experiments = ExperimentManager(
-                experiment_name=self.settings.experiment_name,
+                experiment_name=self.settings.effective_experiment_name,
                 context=self.tags,
             )
         return self._experiments
@@ -83,7 +83,7 @@ class PlatformContext:
 
         configure_tracing(
             self.tags,
-            experiment_name=self.settings.experiment_name,
+            experiment_name=self.settings.effective_experiment_name,
             **kwargs,
         )
 

@@ -8,3 +8,7 @@ AAI_CORE_WHEEL = (
     "{{.aai_core_volume}}/aai_core/{{.aai_core_version}}/"
     "aai_core-{{.aai_core_version}}-py3-none-any.whl"
 )
+
+# Governed evaluation dataset in Unity Catalog — the registered copy of
+# evals/data/release_cases.json (kept in sync by scripts/sync_dataset.py).
+DATASET_NAME = "{{ template "project_name_underscored" . }}_release_cases"

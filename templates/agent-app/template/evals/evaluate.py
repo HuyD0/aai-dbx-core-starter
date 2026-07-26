@@ -22,9 +22,10 @@ from aai_core.evaluation import (
     QualityThreshold,
     apply_thresholds,
     publish_report,
+    workspace_run_url,
 )
 from app.agent import ToolAgent
-from app.config import PROMPT_NAME
+from app.config import DATASET_NAME, PROMPT_NAME
 from app.scoring import tool_call_accuracy
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,24 +80,54 @@ def main() -> None:
     thresholds = load_thresholds()
     baseline = load_baseline()
     suite = EvaluationSuite(scorers=[Correctness(), Safety()], thresholds=[])
-    judged = suite.run(data=cases, predict_fn=predict_fn)
+    prompt_uri = f"prompts:/{context.prompts.qualify(PROMPT_NAME)}/{version}"
+    dataset_name = (
+        f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
+    )
 
-    accuracy_values = [
-        tool_call_accuracy(
-            trajectories.get(case["inputs"]["question"], []),
-            case["expectations"]["expected_tools"],
+    # One governed MLflow run holds the judged evaluation, the deterministic
+    # trajectory metric, the pinned prompt/dataset identity, and the verdict.
+    manager = context.experiments
+    run_id = None
+    with manager.run(
+        run_name=f"agent-gate-v{version}",
+        parameters={
+            "prompt_version": version,
+            "prompt_uri": prompt_uri,
+            "evaluation_dataset": dataset_name,
+            "case_count": len(cases),
+        },
+    ) as active_run:
+        run_id = active_run.info.run_id
+        judged = suite.run(data=cases, predict_fn=predict_fn)
+        accuracy_values = [
+            tool_call_accuracy(
+                trajectories.get(case["inputs"]["question"], []),
+                case["expectations"]["expected_tools"],
+            )
+            for case in cases
+        ]
+        metrics = {
+            **judged.metrics,
+            "tool_call_accuracy/mean": sum(accuracy_values) / len(accuracy_values),
+        }
+        report = apply_thresholds(metrics, thresholds, baseline_metrics=baseline)
+        manager.log_metrics(
+            {
+                name: value
+                for name, value in metrics.items()
+                if isinstance(value, (int, float))
+            }
         )
-        for case in cases
-    ]
-    metrics = {
-        **judged.metrics,
-        "tool_call_accuracy/mean": sum(accuracy_values) / len(accuracy_values),
-    }
-    report = apply_thresholds(metrics, thresholds, baseline_metrics=baseline)
+        import mlflow
+
+        mlflow.set_tags({"aai.gate_passed": str(report.passed).lower()})
+
     publish_report(
         report,
         title=f"Agent gate — {context.tags.application} (prompt v{version})",
         baseline=baseline,
+        run_link=workspace_run_url(run_id),
     )
     report.require_passed()
     if args.update_baseline:

@@ -7,3 +7,7 @@ application release — record them in scripts/create_release.py.
 SOURCE_TABLE = "{{.source_table}}"
 CHUNK_TABLE = "{{.source_table}}_chunks"
 SEARCH_INDEX = "{{.search_index}}"
+
+# Governed evaluation dataset in Unity Catalog — the registered copy of
+# evals/data/release_cases.json (kept in sync by scripts/sync_dataset.py).
+DATASET_NAME = "{{ template "project_name_underscored" . }}_release_cases"

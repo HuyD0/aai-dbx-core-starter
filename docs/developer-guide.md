@@ -62,7 +62,13 @@ Every meaningful comparison should have:
 - A conclusion.
 
 Use `ExperimentManager.run()` so the standard ownership and release tags are
-attached automatically.
+attached automatically. Experiments follow the platform naming convention
+(`/Shared/<team>-<application>-<environment>`) unless `experiment_name` is
+set explicitly; strict environments require an explicit name. Evaluation
+gates run through `EvaluationSuite.run_tracked(...)`, so every gate is a
+governed MLflow run carrying the pinned prompt URI, the registered Unity
+Catalog dataset name, gate metrics, an `aai.gate_passed` verdict tag, and
+the evaluation traces.
 
 ## 5. Develop prompts and retrieval
 
