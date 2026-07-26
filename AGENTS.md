@@ -188,6 +188,13 @@ run on their own machine, and reports platform state. Rules:
   serialise an SDK object wholesale (`dataclasses.asdict()` reaches
   `PlatformSettings.raw`), and scrub credential values out of any provider error
   before rendering it.
+- **An exception handler alone does not keep a message out of the log.** Starlette's
+  `ServerErrorMiddleware` sends the handler's response and then deliberately
+  re-raises so the server can log it, at which point uvicorn prints the traceback
+  *and the exception message*. It is the outermost layer Starlette builds, so
+  `add_middleware` cannot get outside it — the app object is wrapped instead
+  (`ContainExceptions`). Keep the test client strict: an earlier version swallowed
+  that re-raise and hid the leak entirely.
 - **The console is stopped by default.** A running app bills continuously with no
   scale-to-zero. `deploy.yml` deploys code only; `make app-start` / `app-stop`
   control the running state. A running app does not pick up newly deployed code —

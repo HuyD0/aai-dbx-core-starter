@@ -8,6 +8,8 @@ callable directly removes the dependency and the ambiguity, and it is about fort
 
 Only what the console's tests need: GET and POST, JSON in and out, and access to the
 response body, status and headers.
+
+It is strict about exceptions on purpose — see the note in `request`.
 """
 
 from __future__ import annotations
@@ -86,16 +88,9 @@ class ASGIClient:
             elif message["type"] == "http.response.body":
                 captured["body"] += message.get("body", b"")
 
-        async def drive():
-            try:
-                await self.app(scope, receive, send)
-            except Exception:
-                # Starlette's ServerErrorMiddleware sends the handler's response and
-                # then re-raises so a real server logs it. It is already captured,
-                # so swallow it here. Anything raised *before* a response starts still
-                # surfaces, which is what we want.
-                if not captured["headers"] and captured["status"] == 500:
-                    raise
-
-        asyncio.run(drive())
+        # Deliberately does NOT swallow. An earlier version caught the re-raise that
+        # Starlette's ServerErrorMiddleware performs, which hid a real leak: in
+        # production uvicorn logs the re-raised exception's message. The server wraps
+        # the app so nothing escapes; propagating here is what proves it.
+        asyncio.run(self.app(scope, receive, send))
         return Response(captured["status"], captured["headers"], captured["body"])

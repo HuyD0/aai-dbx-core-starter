@@ -36,6 +36,62 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 
 logger = logging.getLogger("aai_console")
 
+_GENERIC_ERROR = b'{"error":"internal error"}'
+
+
+class ContainExceptions:
+    """Outermost ASGI wrapper: stops an exception message reaching the server's log.
+
+    An `@app.exception_handler(Exception)` is not enough. Starlette's
+    ServerErrorMiddleware sends the handler's response and then deliberately re-raises
+    ("This allows servers to log the error"), so uvicorn logs the traceback *and the
+    exception message*. That message can carry a provider payload or a credential; an
+    app's log is readable by anyone with CAN MANAGE, and this process's environment
+    holds a live OAuth client secret.
+
+    ServerErrorMiddleware is the outermost layer Starlette builds, so `add_middleware`
+    cannot get outside it — the app object has to be wrapped instead. Attribute access
+    proxies through, so this stays a drop-in for the FastAPI instance.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    def __getattr__(self, name):
+        return getattr(self._app, name)
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        started = False
+
+        async def _send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self._app(scope, receive, _send)
+        except Exception as exc:
+            # Type only — never str(exc), which is the leak this class exists to stop.
+            logger.error(
+                "unhandled error serving %s: %s",
+                scope.get("path", "?"),
+                type(exc).__name__,
+            )
+            if not started:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 500,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": _GENERIC_ERROR})
+
 
 def _render_tracks(
     tracks: tuple[Track, ...], config: ConsoleConfig
@@ -86,11 +142,8 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
-        # Log the type only. A traceback reaches the app's Logs tab, which anyone with
-        # CAN MANAGE can read, and the process environment holds a live OAuth secret.
-        logger.error(
-            "unhandled error serving %s: %s", request.url.path, type(exc).__name__
-        )
+        # Shapes the client's response only. ContainExceptions does the logging, so this
+        # deliberately logs nothing — the two together would emit the same line twice.
         return JSONResponse({"error": "internal error"}, status_code=500)
 
     @app.get("/healthz")
@@ -210,7 +263,9 @@ def create_app(
                     )
         return {"results": hits[:20]}
 
-    return app
+    # Wrapped, not returned bare: the containment layer must sit outside
+    # Starlette's ServerErrorMiddleware, which always re-raises.
+    return ContainExceptions(app)
 
 
 # The Apps runtime starts `uvicorn aai_console.server:app`, which needs an instance
