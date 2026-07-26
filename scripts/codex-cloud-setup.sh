@@ -7,6 +7,11 @@ set -euo pipefail
 readonly PYTHON_VERSION="3.12"
 readonly UV_VERSION="0.8.23"
 readonly TERRAFORM_VERSION="1.12.2"
+# KEEP IN LOCKSTEP with the databricks/setup-cli SHA pinned in
+# .github/workflows/*.yml (currently v1.9.0): a version skew makes bundle
+# behavior diverge between Codex/local and CI. Bumping this requires updating
+# the per-arch SHA-256 checksums below in the same change:
+#   gh release download "v<version>" -R databricks/cli -p "*SHA256SUMS*"
 readonly DATABRICKS_CLI_VERSION="1.6.0"
 readonly AZURE_CLI_VERSION="2.88.0"
 readonly AZURE_CLI_DEB_VERSION="${AZURE_CLI_VERSION}-1~noble"

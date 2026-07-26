@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
@@ -40,6 +44,15 @@ jobs:
 
       - name: Cloud-container verification (credential-free)
         run: ./scripts/cloud-verify.sh
+
+      - name: Workflow security lint (zizmor)
+        # Version-pinned (Renovate tracks it); --offline keeps this job free
+        # of external audit calls. Covers this repo's workflows AND the ones
+        # the template generates into every team's project.
+        run: |
+          python -m pip install zizmor==1.28.0
+          zizmor --offline .github/workflows \
+            templates/agentic-rag/template/.github/workflows
 
   python-311:
     runs-on: ubuntu-latest

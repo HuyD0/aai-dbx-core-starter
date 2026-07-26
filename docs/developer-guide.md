@@ -1,14 +1,28 @@
 # Developer guide
 
+## 0. Prove the toolchain offline
+
+Before any cloud access, run the zero-credential example from a checkout of
+this repository:
+
+```bash
+python examples/offline_hello_world.py
+```
+
 ## 1. Generate a project
 
 Run the Agentic RAG bundle template and answer its non-secret configuration
-questions:
+questions. From your own machine (the normal case), point `bundle init` at
+this repository's Git URL:
 
 ```bash
-databricks bundle init ./templates/agentic-rag --output-dir ../my-agent
-cd ../my-agent
+databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+  --template-dir templates/agentic-rag --output-dir my-agent
+cd my-agent
 ```
+
+(Inside a checkout of this monorepo, `databricks bundle init
+./templates/agentic-rag` works too.)
 
 ## 2. Authenticate keylessly
 

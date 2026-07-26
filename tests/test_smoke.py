@@ -27,6 +27,15 @@ def test_sample_notebook_runs(capsys):
     assert capsys.readouterr().out.strip().endswith("package import verified")
 
 
+def test_offline_example_runs_with_zero_credentials(capsys):
+    runpy.run_path(
+        str(ROOT / "examples" / "offline_hello_world.py"), run_name="__main__"
+    )
+    output = capsys.readouterr().out
+    assert "completed with zero credentials" in output
+    assert "not-a-real-secret" not in output
+
+
 def test_first_llm_notebook_is_valid_safe_and_output_free():
     notebook = json.loads(
         (ROOT / "examples" / "first_llm_call.ipynb").read_text(encoding="utf-8")

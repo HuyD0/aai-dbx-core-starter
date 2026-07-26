@@ -137,6 +137,7 @@ recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md).
 
 ## Learning paths
 
+- [Offline hello world](examples/offline_hello_world.py) — zero credentials
 - [First LLM call notebook](examples/first_llm_call.ipynb)
 - [Developer guide](docs/developer-guide.md)
 - [Platform architecture](docs/platform-architecture.md)

@@ -1,0 +1,98 @@
+"""Hello world with zero cloud access.
+
+Runs entirely on in-memory fakes — no Azure login, no Databricks workspace,
+no endpoints. It demonstrates the SDK contracts every example and generated
+project builds on: logical resource names, the normalized model response, and
+secret redaction. Run it before any cloud onboarding:
+
+    python examples/offline_hello_world.py
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from aai_core import PlatformContext, PlatformSettings, ResourceContext
+from aai_core.providers import ModelCapabilities, OpenAICompatibleChatModel
+from aai_core.secrets import SecretResolver, SecretValue
+
+
+class FakeCompletions:
+    """Stands in for any OpenAI-compatible endpoint (Databricks serving,
+    Foundry, or an APIM gateway) — the adapter neither knows nor cares."""
+
+    def create(self, **request):
+        question = request["messages"][-1]["content"]
+        return SimpleNamespace(
+            model="fake-model",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=f"(offline) You asked: {question}",
+                        tool_calls=None,
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=8, completion_tokens=9),
+        )
+
+
+class StaticSecretProvider:
+    def resolve(self, reference):
+        return "not-a-real-secret"
+
+
+def main() -> None:
+    settings = PlatformSettings(
+        resource=ResourceContext(
+            application="offline-hello",
+            project="learning",
+            environment="dev",
+            team="my-team",
+            owner_group="group:my-team-owners",
+            cost_center="CC-0000",
+            data_classification="internal",
+            lifecycle="experimental",
+            repository="local/checkout",
+            release="dev",
+        )
+    )
+    context = PlatformContext(settings)
+
+    # Application code asks for a LOGICAL name; configuration decides what
+    # serves it. Here we inject a fake exactly like the unit tests do.
+    context.providers.register_model(
+        "general-chat",
+        OpenAICompatibleChatModel(
+            logical_name="general-chat",
+            provider="fake",
+            model="fake-model",
+            client=SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions())),
+            capabilities=ModelCapabilities(),
+        ),
+    )
+    model = context.providers.model("general-chat")
+    response = model.generate(
+        [{"role": "user", "content": "What is a logical resource name?"}]
+    )
+    print(response.content)
+    print(
+        {
+            "provider": response.provider,
+            "model": response.model,
+            "usage": dict(response.usage),
+            "platform_tags": context.tags.for_mlflow(),
+        }
+    )
+
+    # Secrets are references; values render redacted everywhere.
+    secrets = SecretResolver()
+    secrets.register("fake", StaticSecretProvider())
+    secret: SecretValue = secrets.resolve("fake://vault/example-key")
+    print({"secret_repr": repr(secret), "secret_str": str(secret)})
+
+    print("offline hello world completed with zero credentials")
+
+
+if __name__ == "__main__":
+    main()
