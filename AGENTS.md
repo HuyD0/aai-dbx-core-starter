@@ -64,6 +64,13 @@ There are no stored credentials in this chain.
 
 These are non-secret identifiers. Do not classify them as secrets.
 
+`platform-identifiers.json` at the repo root is the machine-readable copy of
+the environment-specific values above; tests and `scripts/cloud-verify.sh`
+cross-check every other occurrence against it. When cloning this repo into a
+different tenant/workspace, edit that file first and follow
+`docs/enterprise-clone-runbook.md` — the smoke tests then point at each
+remaining file that must agree (this table included).
+
 ## 4. Hard security rules
 
 1. **No secrets in Git.** Never add a client secret, PAT, storage key, API key,

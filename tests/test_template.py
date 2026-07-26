@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "templates" / "agentic-rag"
+IDENTIFIERS = json.loads((ROOT / "platform-identifiers.json").read_text())
 ACTION_PIN = re.compile(r"^\s*uses:\s*[^@\s]+@([0-9a-f]{40})", re.MULTILINE)
 ACTION_REF = re.compile(r"^\s*uses:\s*[^@\s]+@([^\s]+)", re.MULTILINE)
 
@@ -56,9 +57,9 @@ def test_template_renders_and_generated_unit_test_passes(tmp_path: Path):
         "search_index": "knowledge",
         "embedding_deployment": "embedding",
         "aai_core_version": "0.1.0",
-        "aai_core_volume": "/Volumes/platform/artifacts/python_packages",
-        "workspace_host": ("https://adb-7405609799238491.11.azuredatabricks.net"),
-        "compute_policy_id": "0005F2031B6D2319",
+        "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],
+        "workspace_host": IDENTIFIERS["databricks_host"],
+        "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
     }
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
