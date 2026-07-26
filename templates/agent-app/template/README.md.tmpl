@@ -1,0 +1,64 @@
+# {{.project_name}}
+
+Tool-using agent application generated from the AAI platform template
+(`agent-app`, successor of `agentic-rag`'s agent half): governed prompt, SDK
+tool-execution loop, structured outputs, tracing, trajectory-aware offline
+evaluation, feedback, and a gated Model Serving deployment.
+
+## Local setup
+
+Authenticate without storing credentials:
+
+```bash
+az login
+export DATABRICKS_HOST={{.workspace_host}}
+export DATABRICKS_AUTH_TYPE=azure-cli
+python scripts/install_core.py
+python -m pip install -r requirements.lock
+python -m pip install -e '.[dev]'
+pytest -q
+```
+
+Replace every `replace-with-*` value in `aai-platform.yml` before running a
+provider integration.
+
+## How the agent works
+
+- `src/app/tools.py` registers code tools (plain Python) in a
+  `ToolRegistry`; for governed structured-data lookups, create Unity
+  Catalog functions and list them in `UC_FUNCTION_TOOLS` so deployment
+  declares them as serving resources.
+- `src/app/agent.py` drives `aai_core.agents.run_tool_loop` (bounded turns,
+  every invocation recorded) and finishes with
+  `aai_core.structured.generate_structured` for a schema-validated final
+  answer (`src/app/schemas.py`).
+- Tests script the model's tool calls with
+  `aai_core.testing.FakeChatModel(tool_call_script=...)` — fully hermetic.
+
+## Release lifecycle
+
+1. Edit `prompts/system_prompt.json`; register a version:
+   `python scripts/register_prompt.py`.
+2. Grow `evals/data/release_cases.json` — every case declares
+   `expected_tools`, including no-tool cases, so trajectory regressions
+   (missing lookups OR gratuitous extra calls) fail the gate.
+3. Run the gate: `python evals/evaluate.py` — Correctness/Safety judges plus
+   deterministic `tool_call_accuracy` from the recorded trajectories, with
+   the thresholds in `evals/gate_config.json` and baseline regression;
+   report published to the CI summary. After a released run:
+   `--update-baseline`.
+4. Promote the prompt (`python scripts/promote_prompt.py --version <n>
+   --to candidate|production`).
+5. Deploy — only after the gate passes:
+   `python scripts/deploy_serving.py` logs the models-from-code wrapper
+   (`serving/model.py`) with its resource declarations, registers it in
+   Unity Catalog, and deploys via Model Serving with scale-to-zero.
+6. Enable production monitoring from `notebooks/02_enable_monitoring.py`
+   (sampled scorers are Beta and notebook-only) and attach user feedback to
+   traces; curate real failures back into the release cases.
+
+Pull-request CI runs only the deterministic checks
+(`evals/offline_checks.py`) — it never holds credentials. The platform team
+must onboard this repository (main-branch federated credential, service
+principal, constrained compute, serving permissions for the deploy step,
+non-secret repository variables) before the deploy workflow is enabled.

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.31,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "{{.project_name}}"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "azure-identity>=1.25.3,<2",
+  "databricks-agents>=1.11,<2",
+  "databricks-openai>=0.17,<1",
+  "databricks-sdk>=0.122,<1",
+  "mlflow[databricks]>=3.14,<4",
+  "openai>=2.48,<3",
+  "PyYAML>=6.0.3,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=26.5.1,<27",
+  "build>=1.5,<2",
+  "pytest>=9.1.1,<10",
+  "ruff>=0.16,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint.isort]
+known-first-party = ["aai_core", "app"]

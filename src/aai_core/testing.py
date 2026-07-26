@@ -17,7 +17,9 @@ exercises the same behavior the real adapters enforce.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 from aai_core.context import PlatformContext
@@ -29,6 +31,18 @@ from aai_core.providers.types import (
 )
 from aai_core.runtime import PlatformSettings
 from aai_core.tags import ResourceContext
+
+
+def fake_tool_call(
+    name: str, arguments: Mapping[str, Any], *, call_id: str = "call-1"
+) -> Any:
+    """An OpenAI-shaped tool call for FakeChatModel's tool_call_script."""
+
+    return SimpleNamespace(
+        id=call_id,
+        type="function",
+        function=SimpleNamespace(name=name, arguments=json.dumps(dict(arguments))),
+    )
 
 
 def dev_settings(**overrides: Any) -> PlatformSettings:
@@ -65,7 +79,13 @@ def dev_context(**overrides: Any) -> PlatformContext:
 
 
 class FakeChatModel:
-    """ChatModel fake that records requests and returns a canned reply."""
+    """ChatModel fake that records requests and returns a canned reply.
+
+    ``tool_call_script`` scripts a tool-using conversation: each entry is the
+    tool_calls tuple one ``generate()`` call returns (empty tuple = final
+    answer turn). Build entries with :func:`fake_tool_call`. When the script
+    is exhausted (or absent), the fake answers with ``reply``.
+    """
 
     def __init__(
         self,
@@ -74,6 +94,7 @@ class FakeChatModel:
         reply: str = "fake reply",
         capabilities: ModelCapabilities | None = None,
         usage: Mapping[str, int] | None = None,
+        tool_call_script: Sequence[Sequence[Any]] | None = None,
     ) -> None:
         self.logical_name = logical_name
         self.provider = "fake"
@@ -85,6 +106,7 @@ class FakeChatModel:
         self.usage = dict(usage or {"prompt_tokens": 1, "completion_tokens": 1})
         self.native_client = None
         self.requests: list[dict[str, Any]] = []
+        self._script = [tuple(turn) for turn in (tool_call_script or [])]
 
     def generate(
         self,
@@ -100,13 +122,17 @@ class FakeChatModel:
                 f"{self.logical_name} does not support structured output"
             )
         self.requests.append({"messages": list(messages), **options})
+        tool_calls: tuple[Any, ...] = ()
+        if self._script:
+            tool_calls = self._script.pop(0)
         return ModelResponse(
-            content=self.reply,
+            content="" if tool_calls else self.reply,
             provider=self.provider,
             logical_name=self.logical_name,
             model=self.model,
             latency_ms=1.0,
             usage=dict(self.usage),
+            tool_calls=tool_calls,
         )
 
 

@@ -1,0 +1,8 @@
+{{/* Conditional content. skip globs match POST-strip output names and are
+relative to this file's directory (template/ root). */}}
+{{- if eq .include_serving "no" -}}
+{{ skip "serving" }}
+{{ skip "scripts/deploy_serving.py" }}
+{{ skip "notebooks/02_enable_monitoring.py" }}
+{{- end -}}
+{{ skip "__preamble" }}

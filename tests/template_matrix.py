@@ -140,6 +140,52 @@ COMBOS = {
             "expect_absent": ["resources/index.yml"],
         },
     ],
+    "agent-app": [
+        {
+            "name": "dbx-serving",
+            "overrides": {
+                "project_name": "test-agent-app",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+            },
+            "expect_present": [
+                "src/app/agent.py",
+                "src/app/tools.py",
+                "src/app/scoring.py",
+                "serving/model.py",
+                "scripts/deploy_serving.py",
+                "notebooks/02_enable_monitoring.py",
+            ],
+            "expect_absent": [],
+        },
+        {
+            "name": "dbx-no-serving",
+            "overrides": {
+                "project_name": "test-agent-app",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+                "include_serving": "no",
+            },
+            "expect_present": ["src/app/agent.py", "notebooks/01_explore.py"],
+            "expect_absent": [
+                "serving/model.py",
+                "serving",
+                "scripts/deploy_serving.py",
+                "notebooks/02_enable_monitoring.py",
+            ],
+        },
+        {
+            "name": "foundry-serving",
+            "overrides": {
+                "project_name": "test-agent-app",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "model_deployment": "chat",
+            },
+            "expect_present": ["src/app/agent.py", "serving/model.py"],
+            "expect_absent": [],
+        },
+    ],
     "agentic-rag": [
         {
             "name": "dbx-azure-search",
