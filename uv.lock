@@ -38,10 +38,13 @@ databricks = [
 dev = [
     { name = "black" },
     { name = "build" },
+    { name = "fastapi" },
     { name = "hatchling" },
+    { name = "jinja2" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "uvicorn" },
     { name = "zizmor" },
 ]
 examples = [
@@ -75,8 +78,10 @@ requires-dist = [
     { name = "databricks-ai-search", marker = "extra == 'databricks'", specifier = ">=0.77,<1" },
     { name = "databricks-openai", marker = "extra == 'databricks'", specifier = ">=0.17,<1" },
     { name = "databricks-sdk", marker = "extra == 'databricks'", specifier = ">=0.122,<1" },
+    { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.140,<1" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.31,<2" },
     { name = "ipykernel", marker = "extra == 'examples'", specifier = ">=6.29,<8" },
+    { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1.6,<4" },
     { name = "jupyterlab", marker = "extra == 'examples'", specifier = ">=4.4,<5" },
     { name = "mlflow", extras = ["databricks"], marker = "extra == 'genai'", specifier = ">=3.14,<4" },
     { name = "openai", marker = "extra == 'foundry'", specifier = ">=2.48,<3" },
@@ -84,6 +89,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1,<10" },
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16,<1" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.51,<1" },
     { name = "zizmor", marker = "extra == 'dev'", specifier = ">=1.5,<2" },
 ]
 provides-extras = ["databricks", "foundry", "azure-search", "keyvault", "genai", "examples", "all", "dev"]

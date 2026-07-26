@@ -1,0 +1,19 @@
+# Databricks Apps entry point.
+#
+# Only two keys exist here: `command` and `env`. The command is NOT run through a shell,
+# so no environment variable is expanded in it except DATABRICKS_APP_PORT. The Apps
+# runtime pre-sets UVICORN_HOST=0.0.0.0 and UVICORN_PORT for FastAPI, so no port wiring
+# is needed here.
+#
+# --no-access-log is deliberate: the process environment holds a live OAuth client secret
+# and request logs reach the app's Logs tab, readable by anyone with CAN MANAGE.
+#
+# There is intentionally NO `env:` block. Every AAI_CONSOLE_* value is environment
+# specific, so it is supplied by the bundle (resources.apps.<key>.config.env) from bundle
+# variables — see resources/optional/platform_console.yml. Hardcoding one here would
+# break the clone-into-another-tenant path that platform-identifiers.json exists to keep
+# working, and tests/test_app_content.py fails the build if one appears.
+command:
+  - uvicorn
+  - aai_console.server:app
+  - --no-access-log

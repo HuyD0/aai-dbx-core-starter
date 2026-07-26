@@ -1,0 +1,103 @@
+# Platform console (Databricks App) — OPT-IN, NOT DEPLOYED BY DEFAULT.
+#
+# This file sits in resources/optional/ on purpose: databricks.yml globs `resources/*.yml`
+# (one level only), so nothing here is deployed until someone adds an explicit include:
+#
+#     include:
+#       - resources/*.yml
+#       - resources/optional/platform_console.yml   # <- opt in
+#
+# Do NOT add that line until all of the following are true, or `databricks bundle deploy`
+# on main will fail and take the existing sample-job deployment down with it. The full
+# grant request to send the platform identity owner is in docs/platform-console.md.
+#
+#   1. Databricks Apps is enabled in the target workspace.
+#   2. The workspace setting "Only allow app deployments from Git" is OFF, otherwise a
+#      workspace-folder source_code_path deploy fails and this needs git_source instead.
+#   3. The platform owner has ALREADY CREATED the app out-of-band with
+#      `databricks apps create`. Creating an app auto-provisions a workspace service
+#      principal, which AGENTS.md section 4 rule 8 reserves for the human-run platform
+#      process — CI may only ever update an app that already exists.
+#   4. That existing app has been BOUND to this resource key. `bundle deploy` does NOT
+#      adopt a workspace resource just because the name matches: without a binding in the
+#      deployment state it plans a new app, and then either fails on the duplicate name or
+#      attempts the app creation that rule 8 forbids. The one-time bind is:
+#
+#        databricks bundle deployment bind platform_console \
+#          aai-platform-console-<suffix> --auto-approve
+#
+#      (or `databricks bundle generate app --existing-app-name <name> \
+#      --key platform_console --bind` to generate and bind in one step).
+#
+#      CAUTION: bundle deployment state in `mode: development` lives under the *deploying
+#      principal's* home, so a bind performed from a laptop is not visible to CI. The
+#      dedicated principal exists only inside the OIDC job, so deploy.yml takes a
+#      `bind_app` dispatch input that performs the bind there:
+#
+#        gh workflow run deploy.yml --ref main -f bind_app=aai-platform-console-dev
+#
+#      Note the inherent ordering: bind needs this resource key to exist in the bundle,
+#      so the include must be merged first, and the push deploy that lands it will fail
+#      until the bind has run. docs/platform-console.md spells out the sequence.
+#   5. `app_usage_policy_id` below holds a real serverless usage policy id.
+#
+# Cost attribution note: an app resource has NO tags field (the bundle schema is
+# additionalProperties: false and the CLI applies no presets to apps), so the nine
+# platform tags cannot be attached the way they are to a job cluster. Serverless spend
+# attributes through a usage policy instead — see AGENTS.md section 9 and
+# docs/tagging-standard.md. Removing usage_policy_id drops cost attribution entirely.
+#
+# The console bills continuously while running and has no scale-to-zero, so it is stopped
+# by default: deploy.yml deploys code only, and `make app-start` / `make app-stop` control
+# the running state. A running app does NOT pick up newly deployed code — `make
+# app-restart` does.
+
+resources:
+  apps:
+    platform_console:
+      # App names accept only lowercase alphanumerics and hyphens, so the house
+      # "[${bundle.target}] ..." naming used for jobs is ILLEGAL here. The CLI applies no
+      # name prefix to apps in development mode either, which means this name is
+      # workspace-global: every deployer would otherwise collide on one app. app_suffix
+      # keeps CI and any individual developer apart.
+      name: aai-platform-console-${var.app_suffix}
+      description: Guided onboarding console for the AAI platform.
+
+      # Uploads only this directory. The container treats it as the top-level directory
+      # and cannot read anything outside it — which is why no identifier is baked into the
+      # source and every environment value arrives through config.env below.
+      source_code_path: ../../src/platform_app
+
+      # 2 vCPU / 6 GB. The console serves static guidance; it has no reason to be larger.
+      compute_size: MEDIUM
+
+      # The only cost-attribution surface an app has.
+      usage_policy_id: ${var.app_usage_policy_id}
+
+      config:
+        # Kept identical to src/platform_app/app.yaml; tests/test_app_resource.py asserts
+        # they agree so the two cannot drift. --no-access-log is deliberate: the process
+        # environment holds a live OAuth client secret and app logs are readable by anyone
+        # with CAN MANAGE.
+        command:
+          - uvicorn
+          - aai_console.server:app
+          - --no-access-log
+        env:
+          - name: AAI_CONSOLE_DATABRICKS_HOST
+            value: ${workspace.host}
+          - name: AAI_CONSOLE_SDK_ARTIFACT_VOLUME
+            value: ${var.sdk_artifact_volume}
+          - name: AAI_CONSOLE_JOB_COMPUTE_POLICY_ID
+            value: ${var.job_compute_policy_id}
+          - name: AAI_CONSOLE_TEMPLATE_REPO
+            value: ${var.template_repo}
+
+      resources:
+        # Lets the console report whether the platform can read the published SDK wheel.
+        # READ only — the console reads no application data and needs nothing else.
+        - name: sdk-artifact-volume
+          uc_securable:
+            securable_type: VOLUME
+            securable_full_name: ${var.sdk_artifact_volume_full_name}
+            permission: READ_VOLUME

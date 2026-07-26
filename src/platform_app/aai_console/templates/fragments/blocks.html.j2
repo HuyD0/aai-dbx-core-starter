@@ -1,0 +1,12 @@
+{% for block in blocks %}
+  <figure class="code">
+    <figcaption class="code__bar">
+      <span class="code__lang">{{ block.lang }}</span>
+      <button class="code__copy" type="button" data-copy aria-label="Copy to clipboard">
+        <span class="code__copyicon" aria-hidden="true"></span>
+        <span class="code__copytext">Copy</span>
+      </button>
+    </figcaption>
+    <pre class="code__pre"><code>{{ block.code }}</code></pre>
+  </figure>
+{% endfor %}

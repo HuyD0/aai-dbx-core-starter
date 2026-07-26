@@ -1,0 +1,98 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ active.title }} — AAI platform console{% endblock %}
+
+{% block main %}
+<header class="topbar">
+  <div class="topbar__title">
+    <h1>{{ active.title }}</h1>
+    <span class="topbar__sub">{{ active.subtitle }}</span>
+  </div>
+  <div class="topbar__actions">
+    <button class="iconbtn" type="button" id="checks-run" title="Check platform state">
+      {% include "fragments/icon_pulse.svg.j2" %}
+    </button>
+  </div>
+</header>
+
+<div class="scroll" id="scroll">
+  <article class="prose">
+    {% if active.summary %}
+      <p class="lede">{{ active.summary | icode }}</p>
+    {% endif %}
+
+    {% for step in active.steps %}
+      <section class="step" id="step-{{ step.id }}">
+        <h2 class="step__title">
+          <span class="step__index">{{ loop.index }}</span>{{ step.title }}
+        </h2>
+
+        {% if step.body %}<p>{{ step.body | icode }}</p>{% endif %}
+
+        {% if step.checklist %}
+          <ul class="checklist">
+            {% for item in step.checklist %}<li>{{ item | icode }}</li>{% endfor %}
+          </ul>
+        {% endif %}
+
+        {% if step.choices %}
+          <div class="choices" data-choices>
+            {% for choice in step.choices %}
+              <button class="choice" type="button" data-template="{{ choice.id }}">
+                <span class="choice__label">{{ choice.label }}</span>
+                <span class="choice__detail">{{ choice.detail }}</span>
+              </button>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% if step.blocks %}
+          {% with blocks = step.blocks %}
+            {% include "fragments/blocks.html.j2" %}
+          {% endwith %}
+        {% endif %}
+
+        {% if step.generate %}
+          <div class="generate" id="generate-target">
+            <p class="muted">Pick a template above to build your exact command.</p>
+          </div>
+        {% endif %}
+
+        {% if step.verify %}
+          <div class="verify">
+            <button class="ghostbtn" type="button" data-run-checks>Check platform state</button>
+          </div>
+        {% endif %}
+
+        {% if step.source %}
+          <p class="source">Source: <code>{{ step.source }}</code></p>
+        {% endif %}
+      </section>
+    {% endfor %}
+
+    <div id="checks-target" class="checks-target"></div>
+  </article>
+</div>
+
+<div class="composer">
+  <div class="composer__box">
+    <button class="iconbtn composer__add" type="button" aria-label="Add">+</button>
+    <textarea
+      class="composer__input"
+      id="composer-input"
+      rows="1"
+      placeholder="Search the guide…  (press / )"
+      aria-label="Search the guide"
+    ></textarea>
+    <div class="composer__meta">
+      <span class="mode">
+        {% include "fragments/icon_shield.svg.j2" %}
+        Guide &amp; generate
+      </span>
+      <button class="sendbtn" type="button" id="composer-send" aria-label="Search">
+        {% include "fragments/icon_arrow.svg.j2" %}
+      </button>
+    </div>
+  </div>
+  <p class="composer__note">{{ platform_state_heading }}</p>
+</div>
+{% endblock %}

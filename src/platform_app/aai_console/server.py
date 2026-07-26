@@ -1,0 +1,273 @@
+"""FastAPI application for the AAI platform console.
+
+Serves a small server-rendered UI: full pages for navigation, HTML fragments for
+in-place swaps, and a narrow JSON surface. There is no bundler and no third-party
+client library — `scripts/cloud-verify.sh` performs an offline `uv sync --locked`, so
+an npm lockfile ecosystem would be a change of security posture, not a dependency.
+
+Responses are assembled field by field. Never serialise an SDK object wholesale:
+`dataclasses.asdict()` recurses into `PlatformSettings.raw`, and `repr=False` does not
+prevent it.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from . import __version__
+from .checks import (
+    PLATFORM_STATE_HEADING,
+    PlatformCheck,
+    assert_platform_state,
+    run_checks,
+)
+from .config import ConfigError, ConsoleConfig, load_config
+from .content import Track, inline_code, resolve_placeholders
+from .generate import GenerateError, GenerateRequest, bundle_init
+from .registry import TrackRegistry
+
+PACKAGE_DIR = Path(__file__).resolve().parent
+
+logger = logging.getLogger("aai_console")
+
+_GENERIC_ERROR = b'{"error":"internal error"}'
+
+
+class ContainExceptions:
+    """Outermost ASGI wrapper: stops an exception message reaching the server's log.
+
+    An `@app.exception_handler(Exception)` is not enough. Starlette's
+    ServerErrorMiddleware sends the handler's response and then deliberately re-raises
+    ("This allows servers to log the error"), so uvicorn logs the traceback *and the
+    exception message*. That message can carry a provider payload or a credential; an
+    app's log is readable by anyone with CAN MANAGE, and this process's environment
+    holds a live OAuth client secret.
+
+    ServerErrorMiddleware is the outermost layer Starlette builds, so `add_middleware`
+    cannot get outside it — the app object has to be wrapped instead. Attribute access
+    proxies through, so this stays a drop-in for the FastAPI instance.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    def __getattr__(self, name):
+        return getattr(self._app, name)
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        started = False
+
+        async def _send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self._app(scope, receive, _send)
+        except Exception as exc:
+            # Type only — never str(exc), which is the leak this class exists to stop.
+            logger.error(
+                "unhandled error serving %s: %s",
+                scope.get("path", "?"),
+                type(exc).__name__,
+            )
+            if not started:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 500,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": _GENERIC_ERROR})
+
+
+def _render_tracks(
+    tracks: tuple[Track, ...], config: ConsoleConfig
+) -> tuple[Track, ...]:
+    """Substitute identifier placeholders in every code block."""
+    rendered = []
+    for track in tracks:
+        steps = []
+        for step in track.steps:
+            blocks = tuple(
+                type(block)(
+                    lang=block.lang,
+                    code=resolve_placeholders(block.code, config),
+                )
+                for block in step.blocks
+            )
+            steps.append(type(step)(**{**step.__dict__, "blocks": blocks}))
+        rendered.append(type(track)(**{**track.__dict__, "steps": tuple(steps)}))
+    return tuple(rendered)
+
+
+def create_app(
+    config: ConsoleConfig | None = None,
+    *,
+    probe=None,
+    registry: TrackRegistry | None = None,
+) -> FastAPI:
+    app = FastAPI(title="AAI platform console", docs_url=None, redoc_url=None)
+
+    app.state.config = config if config is not None else load_config()
+    app.state.probe = probe
+    app.state.registry = registry if registry is not None else TrackRegistry.default()
+
+    templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+    # The only markup content may use. Escapes first, so it cannot inject an element.
+    templates.env.filters["icode"] = inline_code
+    app.mount(
+        "/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static"
+    )
+
+    # Content is static for the life of the process, so parse and render it once.
+    # Re-reading the YAML per request would put blocking disk I/O on the event loop of a
+    # single-worker server for no benefit.
+    app.state.tracks = _render_tracks(app.state.registry.tracks(), app.state.config)
+
+    def tracks_for(request: Request) -> tuple[Track, ...]:
+        return request.app.state.tracks
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        # Shapes the client's response only. ContainExceptions does the logging, so this
+        # deliberately logs nothing — the two together would emit the same line twice.
+        return JSONResponse({"error": "internal error"}, status_code=500)
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"status": "ok", "version": __version__}
+
+    @app.get("/api/session")
+    async def session(request: Request) -> dict:
+        config: ConsoleConfig = request.app.state.config
+        return {
+            "hosted": config.hosted,
+            "app_name": config.app_name,
+            "version": __version__,
+            "capability": "guide-and-generate",
+        }
+
+    @app.get("/api/content")
+    async def content(request: Request) -> dict:
+        return {
+            "tracks": [
+                {
+                    "id": track.id,
+                    "title": track.title,
+                    "subtitle": track.subtitle,
+                    "glyph": track.glyph,
+                    "steps": [
+                        {"id": step.id, "title": step.title} for step in track.steps
+                    ],
+                }
+                for track in tracks_for(request)
+            ]
+        }
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index(request: Request) -> HTMLResponse:
+        tracks = tracks_for(request)
+        return templates.TemplateResponse(
+            request,
+            "index.html.j2",
+            {
+                "tracks": tracks,
+                "active": tracks[0],
+                "session": request.app.state.config,
+                "platform_state_heading": PLATFORM_STATE_HEADING,
+            },
+        )
+
+    @app.get("/track/{track_id}", response_class=HTMLResponse)
+    async def track_page(request: Request, track_id: str) -> HTMLResponse:
+        tracks = tracks_for(request)
+        match = next((t for t in tracks if t.id == track_id), None)
+        if match is None:
+            raise HTTPException(status_code=404, detail="unknown track")
+        return templates.TemplateResponse(
+            request,
+            "index.html.j2",
+            {
+                "tracks": tracks,
+                "active": match,
+                "session": request.app.state.config,
+                "platform_state_heading": PLATFORM_STATE_HEADING,
+            },
+        )
+
+    # Deliberately `def`, not `async def`. run_checks makes blocking Databricks SDK
+    # network calls and app.yaml starts a single-worker uvicorn, so on an async route
+    # an unreachable workspace would stall the event loop for the whole SDK timeout
+    # and take health, navigation and generation down with it. A sync route runs in
+    # Starlette's worker threadpool instead.
+    @app.post("/api/checks/run", response_class=HTMLResponse)
+    def checks(request: Request) -> HTMLResponse:
+        results: list[PlatformCheck] = run_checks(
+            request.app.state.config, request.app.state.probe
+        )
+        # Raises if anyone ever tries to present these as the viewer's own access.
+        assert_platform_state(results, PLATFORM_STATE_HEADING)
+        return templates.TemplateResponse(
+            request,
+            "fragments/checks.html.j2",
+            {"checks": results, "heading": PLATFORM_STATE_HEADING},
+        )
+
+    @app.post("/api/generate", response_class=HTMLResponse)
+    async def generate(request: Request) -> HTMLResponse:
+        payload = await request.json()
+        try:
+            blocks = bundle_init(
+                GenerateRequest(
+                    template=str(payload.get("template", "")),
+                    project_name=str(payload.get("project_name") or "my-project"),
+                ),
+                request.app.state.config,
+            )
+        except GenerateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except ConfigError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return templates.TemplateResponse(
+            request, "fragments/blocks.html.j2", {"blocks": blocks}
+        )
+
+    @app.get("/api/palette")
+    async def palette(request: Request, q: str = "") -> dict:
+        needle = q.strip().lower()
+        hits = []
+        for track in tracks_for(request):
+            for step in track.steps:
+                haystack = f"{track.title} {step.title} {step.body}".lower()
+                if not needle or needle in haystack:
+                    hits.append(
+                        {
+                            "track": track.id,
+                            "track_title": track.title,
+                            "step": step.id,
+                            "title": step.title,
+                        }
+                    )
+        return {"results": hits[:20]}
+
+    # Wrapped, not returned bare: the containment layer must sit outside
+    # Starlette's ServerErrorMiddleware, which always re-raises.
+    return ContainExceptions(app)
+
+
+# The Apps runtime starts `uvicorn aai_console.server:app`, which needs an instance
+# rather than a factory. Building it at import keeps a config failure loud and early.
+app = create_app()

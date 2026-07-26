@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}AAI platform console{% endblock %}</title>
+    <link rel="stylesheet" href="/static/console.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar__head">
+          <button class="switcher" type="button" aria-label="Track set">
+            <span class="switcher__name">AAI Console</span>
+            {% include "fragments/icon_chevron.svg.j2" %}
+          </button>
+          <button class="iconbtn" type="button" id="palette-open" aria-label="Search steps" title="Search steps  /">
+            {% include "fragments/icon_search.svg.j2" %}
+          </button>
+        </div>
+
+        <nav class="sidebar__nav" aria-label="Guided tracks">
+          <p class="sidebar__group">Getting started</p>
+          {% for track in tracks %}
+            <a
+              class="navrow {% if track.id == active.id %}navrow--active{% endif %}"
+              href="/track/{{ track.id }}"
+            >
+              <span class="navrow__glyph navrow__glyph--{{ track.glyph }}" aria-hidden="true"></span>
+              <span class="navrow__text">
+                <span class="navrow__title">{{ track.title }}</span>
+                <span class="navrow__sub">{{ track.subtitle }}</span>
+              </span>
+            </a>
+          {% endfor %}
+        </nav>
+
+        <div class="sidebar__foot">
+          <span class="chip {% if session.hosted %}chip--live{% endif %}">
+            {% if session.hosted %}Hosted{% else %}Local{% endif %}
+          </span>
+          <span class="chip chip--muted">Guide &amp; generate</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        {% block main %}{% endblock %}
+      </main>
+    </div>
+
+    <dialog class="palette" id="palette">
+      <input
+        class="palette__input"
+        id="palette-input"
+        type="search"
+        placeholder="Search steps…"
+        autocomplete="off"
+        aria-label="Search steps"
+      />
+      <ul class="palette__list" id="palette-list"></ul>
+    </dialog>
+
+    <script src="/static/console.js" type="module"></script>
+  </body>
+</html>

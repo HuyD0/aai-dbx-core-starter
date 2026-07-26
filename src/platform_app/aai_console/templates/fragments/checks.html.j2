@@ -1,0 +1,14 @@
+<section class="checks" aria-live="polite">
+  <h3 class="checks__heading">{{ heading }}</h3>
+  <table class="checks__table">
+    <tbody>
+      {% for check in checks %}
+        <tr class="checks__row checks__row--{{ check.status }}">
+          <td class="checks__status"><span class="dot dot--{{ check.status }}"></span>{{ check.status }}</td>
+          <td class="checks__label">{{ check.label }}</td>
+          <td class="checks__detail">{{ check.detail }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>

@@ -11,7 +11,17 @@ name: deploy
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      bind_app:
+        description: >-
+          One-time only. Name of the pre-created platform console app to bind to the
+          bundle before deploying (for example aai-platform-console-dev). The dedicated
+          principal exists only inside this OIDC job, so this is the only place the bind
+          can be performed in the deployment state CI actually uses. Leave empty for
+          every normal deploy. See docs/platform-console.md.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -84,6 +94,26 @@ jobs:
         #   gh api "repos/databricks/setup-cli/tags?per_page=8"
         # then update the SHA and the trailing version comment.
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
+
+      - name: Bind the pre-created console app (one-time, manual dispatch only)
+        # `bundle deploy` does NOT adopt a workspace app because the name matches: without
+        # a binding in the deployment state it plans a new app and attempts the creation
+        # that AGENTS.md rule 8 reserves for the platform owner. Deployment state under
+        # `mode: development` lives in the deploying principal's home, so a bind run from
+        # a laptop is invisible here — it has to happen in this job.
+        #
+        # Runs before deploy in the same job so one dispatch binds and deploys atomically.
+        # The app name goes through `env` and is referenced as a shell variable, never
+        # interpolated into the script body (zizmor template-injection; this job holds a
+        # live service-principal token).
+        if: inputs.bind_app != ''
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          CONSOLE_APP_NAME: ${{ inputs.bind_app }}
+        run: |
+          databricks bundle deployment bind platform_console "$CONSOLE_APP_NAME" \
+            -t dev --auto-approve
 
       - name: Validate & deploy bundle (dev)
         env:
