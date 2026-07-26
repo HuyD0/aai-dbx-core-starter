@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
-PYTHON ?= python
+PYTHON ?= .venv/bin/python
 DATABRICKS ?= databricks
 TARGET ?= dev
 
