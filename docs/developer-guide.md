@@ -1,5 +1,9 @@
 # Developer guide
 
+Complete the [developer onboarding checklist](developer-onboarding.md) before
+generating a project. The platform team prepares group-based access; the
+generated setup command verifies it without granting permissions.
+
 ## 0. Start locally, then use the workspace
 
 From a fresh checkout, create the locked environment and run the zero-credential
@@ -41,9 +45,13 @@ From your own machine (the normal case), point `bundle init` at this
 repository's Git URL:
 
 ```bash
+az login
+export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
+export DATABRICKS_AUTH_TYPE=azure-cli
 databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
   --template-dir templates/rag-app --output-dir my-project
 cd my-project
+python3.12 scripts/setup_dev.py
 ```
 
 (Inside a checkout of this monorepo, `databricks bundle init
@@ -57,7 +65,9 @@ export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
 export DATABRICKS_AUTH_TYPE=azure-cli
 ```
 
-Do not create a PAT or client secret. Run `aai-core doctor --cloud` when an
+Do not create a PAT or client secret. The generated `scripts/setup_dev.py`
+checks authentication, SDK volume access, and compute-policy visibility before
+installing anything. Run `aai-core doctor --cloud` when a later provider
 identity or permission error is unclear.
 
 ## 3. Explore deliberately

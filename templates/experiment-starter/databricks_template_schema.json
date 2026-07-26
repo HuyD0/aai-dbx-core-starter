@@ -93,5 +93,5 @@
       "order": 20
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. make install                  # pinned SDK + project dependencies\n  3. make check                    # hermetic tests + deterministic gate\n  4. python jobs/run_experiment.py # first tracked run (needs keyless auth)\n  5. make evaluate                 # the release gate\n\nRun `make help` for every available target."
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py # preflight + isolated setup\n  3. make check                      # hermetic tests + deterministic gate\n  4. python jobs/run_experiment.py   # first tracked run\n  5. make evaluate                   # the release gate\n\nRun `make help` for every available target."
 }
