@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,18 +30,30 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
 
 
 def test_connected_environment_routes_mlflow_to_databricks(runner, monkeypatch):
-    for name in (
-        "MLFLOW_TRACKING_URI",
-        "MLFLOW_REGISTRY_URI",
-        "DATABRICKS_AUTH_TYPE",
-    ):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "sqlite:///wrong.db")
+    monkeypatch.setenv("MLFLOW_REGISTRY_URI", "sqlite:///wrong.db")
+    monkeypatch.setenv("DATABRICKS_AUTH_TYPE", "pat")
 
     environment = runner._connected_environment()
 
     assert environment["MLFLOW_TRACKING_URI"] == "databricks"
     assert environment["MLFLOW_REGISTRY_URI"] == "databricks-uc"
     assert environment["DATABRICKS_AUTH_TYPE"] == "azure-cli"
+
+
+def test_local_environment_uses_isolated_store(runner, tmp_path, monkeypatch):
+    local_dir = tmp_path / ".aai" / "local"
+    monkeypatch.setattr(runner, "LOCAL_DIR", local_dir)
+    monkeypatch.setattr(runner, "LOCAL_DB", local_dir / "mlflow.db")
+    monkeypatch.setattr(runner, "LOCAL_ARTIFACTS", local_dir / "mlruns")
+
+    environment = runner._local_environment()
+
+    assert environment["MLFLOW_TRACKING_URI"] == (
+        f"sqlite:///{(local_dir / 'mlflow.db').resolve()}"
+    )
+    assert environment["MLFLOW_REGISTRY_URI"] == environment["MLFLOW_TRACKING_URI"]
+    assert environment["AAI_PLATFORM_CONFIG"] == str(runner.CONFIG_EXAMPLE)
 
 
 def test_config_preflight_checks_only_fields_used_by_the_example(
@@ -112,15 +125,58 @@ def test_connected_run_stops_before_cloud_call_when_config_is_missing(
     assert runner.run_example("first_trace.py") == 2
     output = capsys.readouterr().out
     assert "aai-platform.yml is missing" in output
-    assert "make examples-connect" in output
+    assert "make workspace-connect" in output
+
+
+def test_local_run_never_checks_cloud_and_reports_promotion_path(
+    runner, tmp_path, monkeypatch, capsys
+):
+    local_dir = tmp_path / ".aai" / "local"
+    monkeypatch.setattr(runner, "LOCAL_DIR", local_dir)
+    monkeypatch.setattr(runner, "LOCAL_DB", local_dir / "mlflow.db")
+    monkeypatch.setattr(runner, "LOCAL_ARTIFACTS", local_dir / "mlruns")
+    monkeypatch.setattr(runner, "_module_issues", lambda example: [])
+
+    def unexpected_cloud_check(environment):
+        raise AssertionError("local execution must not check cloud access")
+
+    monkeypatch.setattr(runner, "_cloud_issues", unexpected_cloud_check)
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["cwd"] = kwargs["cwd"]
+        observed["environment"] = kwargs["env"]
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner.run_example("first_trace", destination="local") == 0
+    assert observed["command"][0] == sys.executable
+    assert observed["cwd"] == local_dir
+    assert observed["environment"]["AAI_PLATFORM_CONFIG"] == str(runner.CONFIG_EXAMPLE)
+    assert observed["environment"]["MLFLOW_TRACKING_URI"].endswith(
+        "/.aai/local/mlflow.db"
+    )
+    output = capsys.readouterr().out
+    assert "make local-ui" in output
+    assert "make workspace-connect" in output
+
+
+def test_local_run_rejects_workspace_only_example(runner, capsys):
+    assert runner.run_example("first_prompt", destination="local") == 2
+    assert "requires workspace services" in capsys.readouterr().err
 
 
 def test_makefile_exposes_single_command_onboarding():
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "check-uv:" in makefile
     assert "quickstart: install" in makefile
-    assert "examples-connect: examples-install" in makefile
-    assert "example: examples-install" in makefile
+    assert "local-start: examples-install" in makefile
+    assert "local-ui: examples-install" in makefile
+    assert "workspace-connect: examples-install" in makefile
+    assert "workspace-example: examples-install" in makefile
     assert "--extra databricks --extra genai --locked" in makefile
-    assert "$(PYTHON) scripts/examples.py run" in makefile
+    assert "$(PYTHON) scripts/examples.py local" in makefile
+    assert "$(PYTHON) scripts/examples.py workspace" in makefile
     assert "Example dependencies ready in" in makefile

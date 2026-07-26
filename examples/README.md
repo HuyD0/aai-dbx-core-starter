@@ -1,44 +1,46 @@
 # Learning examples
 
-From a fresh clone, start with:
+From a fresh clone, prove the SDK works and then create a local MLflow trace:
 
 ```bash
 make quickstart
+make local-start
+make local-ui
 ```
 
-That command creates or synchronizes the locked development environment and
-runs the offline example. It needs no cloud configuration or credentials.
+`quickstart` creates or synchronizes the locked development environment and
+runs the offline example. `local-start` writes to the isolated
+`.aai/local/mlflow.db`; `local-ui` serves only that store at
+`http://127.0.0.1:5000`. These steps need no cloud configuration or credentials.
 
-Every other example talks to real platform services. Prepare them with:
+Next, prepare keyless Databricks access and send the same trace to the workspace:
 
 ```bash
-make examples-connect
+make workspace-connect
+# Complete any reported authentication or configuration actions.
+make workspace-example EXAMPLE=first_trace
 ```
 
 The command creates a local, Git-ignored `aai-platform.yml` if needed and
 reports incomplete configuration, Azure CLI authentication, or Databricks
 connectivity without asking for a stored credential. After addressing its
-reported actions, rerun the check and then run an example:
-
-```bash
-make example EXAMPLE=first_trace
-```
+reported actions, rerun `make workspace-connect` before the workspace example.
 
 Use `make examples-list` to see all accepted names.
 
 | Example | Requires |
 |---|---|
 | `offline_hello_world.py` | Nothing. No cloud, no config, no credentials. |
+| `first_trace.py` | Local: `make local-start`. Workspace: keyless auth + `aai-platform.yml`. |
+| `first_experiment.py` | Local: `make local-example EXAMPLE=first_experiment`. Workspace: keyless auth + `aai-platform.yml`. |
 | `first_llm_call.ipynb` | `az login`, `DATABRICKS_HOST`, `aai-platform.yml`, and a serving endpoint with `CAN_QUERY`. |
-| `first_experiment.py` | Keyless auth + `aai-platform.yml` + a Databricks MLflow experiment path. |
-| `first_trace.py` | Keyless auth + `aai-platform.yml` (writes traces to the workspace). |
 | `first_prompt.py` | Keyless auth + `aai-platform.yml` + Unity Catalog prompt registry access. |
 | `first_evaluation.py` | Keyless auth + `aai-platform.yml` + model access for LLM judges. |
 
-Suggested order: offline hello world → first LLM call → first experiment →
-first trace → first prompt → first evaluation.
+Suggested order: offline hello world → local trace → local experiment →
+workspace trace → first prompt → first evaluation → first LLM call.
 
-The connected runner supplies the non-secret Databricks host and MLflow routing
+The workspace runner supplies the non-secret Databricks host and MLflow routing
 to the child process. If running a file directly instead, configure the shell:
 
 ```bash
@@ -54,9 +56,10 @@ cp aai-platform.example.yml aai-platform.yml  # then replace the placeholders
 
 No example ever needs a PAT, client secret, or API key.
 
-Connected example results are stored in the configured Databricks experiment
-and viewed in the Databricks workspace. A bare `mlflow ui` command opens a
-separate local SQLite store and will not show those remote results.
+Workspace example results are stored in the configured Databricks experiment
+and viewed in the Databricks workspace. `make local-ui` is deliberately pinned
+to `.aai/local/mlflow.db`; a bare `mlflow ui` may select another Python and an
+unrelated root database.
 
 Do not run the connected files directly immediately after cloning. The Make
 runner installs their optional dependencies and checks configuration and

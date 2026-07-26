@@ -1,22 +1,29 @@
 # Developer guide
 
-## 0. Prove the toolchain offline
+## 0. Start locally, then use the workspace
 
 From a fresh checkout, create the locked environment and run the zero-credential
 example:
 
 ```bash
 make quickstart
+make local-start
+make local-ui  # open http://127.0.0.1:5000; Ctrl-C stops it
 ```
 
-Before running a connected learning example, create and preflight its local
-configuration:
+`local-start` records a trace in `.aai/local/mlflow.db`; it does not use cloud
+credentials or the legacy root `mlflow.db`. Once the local trace is visible,
+create and preflight the keyless workspace configuration:
 
 ```bash
-make examples-connect
+make workspace-connect
 # Complete the reported keyless authentication/configuration actions.
-make example EXAMPLE=first_trace
+make workspace-example EXAMPLE=first_trace
 ```
+
+The second run sends the same example to the configured Databricks experiment.
+View it in the workspace UI. Application deployment comes later through a
+generated template's `make bundle-validate bundle-deploy` targets.
 
 ## 1. Generate a project
 

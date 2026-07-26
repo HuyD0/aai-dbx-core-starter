@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "aai-platform.yml"
 CONFIG_EXAMPLE = ROOT / "aai-platform.example.yml"
 IDENTIFIERS_FILE = ROOT / "platform-identifiers.json"
+LOCAL_DIR = ROOT / ".aai" / "local"
+LOCAL_DB = LOCAL_DIR / "mlflow.db"
+LOCAL_ARTIFACTS = LOCAL_DIR / "mlruns"
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class Example:
     path: str
     description: str
     connected: bool
+    local: bool = False
     modules: tuple[str, ...] = ()
     config_fields: tuple[str, ...] = ()
     interactive: bool = False
@@ -45,16 +49,18 @@ EXAMPLES = {
         Example(
             name="first_trace",
             path="examples/first_trace.py",
-            description="MLflow trace written to the configured workspace experiment",
+            description="MLflow trace, first local and then in Databricks",
             connected=True,
+            local=True,
             modules=("mlflow", "databricks.sdk"),
             config_fields=("platform.experiment_name",),
         ),
         Example(
             name="first_experiment",
             path="examples/first_experiment.py",
-            description="Tagged MLflow experiment run",
+            description="Tagged MLflow run, first local and then in Databricks",
             connected=True,
+            local=True,
             modules=("mlflow", "databricks.sdk"),
             config_fields=("platform.experiment_name",),
         ),
@@ -101,11 +107,19 @@ def _display_path(path: Path) -> str:
 def _connected_environment() -> dict[str, str]:
     identifiers = _identifiers()
     environment = dict(os.environ)
-    environment.setdefault("DATABRICKS_HOST", identifiers["databricks_host"])
-    environment.setdefault("DATABRICKS_AUTH_TYPE", "azure-cli")
-    environment.setdefault("MLFLOW_TRACKING_URI", "databricks")
-    environment.setdefault("MLFLOW_REGISTRY_URI", "databricks-uc")
-    environment.setdefault("AAI_PLATFORM_CONFIG", str(CONFIG))
+    environment["DATABRICKS_HOST"] = identifiers["databricks_host"]
+    environment["DATABRICKS_AUTH_TYPE"] = "azure-cli"
+    environment["MLFLOW_TRACKING_URI"] = "databricks"
+    environment["MLFLOW_REGISTRY_URI"] = "databricks-uc"
+    environment["AAI_PLATFORM_CONFIG"] = str(CONFIG)
+    return environment
+
+
+def _local_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment["MLFLOW_TRACKING_URI"] = f"sqlite:///{LOCAL_DB.resolve()}"
+    environment["MLFLOW_REGISTRY_URI"] = environment["MLFLOW_TRACKING_URI"]
+    environment["AAI_PLATFORM_CONFIG"] = str(CONFIG_EXAMPLE)
     return environment
 
 
@@ -127,8 +141,8 @@ def _module_issues(example: Example) -> list[str]:
         if not available:
             issues.append(
                 f"Python module {module!r} is missing from {sys.executable}; "
-                "run `make examples-install`, then use `make example "
-                "EXAMPLE=<name>` or `.venv/bin/python` for direct execution."
+                "run `make examples-install`, then use a `make local-*` or "
+                "`make workspace-*` target."
             )
     return issues
 
@@ -167,7 +181,7 @@ def _config_issues(example: Example) -> list[str]:
         return []
     if not CONFIG.is_file():
         return [
-            "aai-platform.yml is missing; run `make examples-connect` to create it."
+            "aai-platform.yml is missing; run `make workspace-connect` to create it."
         ]
     try:
         document = _load_config()
@@ -271,7 +285,7 @@ def _cloud_issues(environment: dict[str, str]) -> list[str]:
 
 
 def _print_issues(issues: list[str]) -> None:
-    print("Connected example preflight did not pass:")
+    print("Example preflight did not pass:")
     for issue in issues:
         print(f"  - {issue}")
 
@@ -286,7 +300,7 @@ def quickstart() -> int:
     if result.returncode:
         return result.returncode
     print("\nQuickstart passed. No credentials or cloud configuration were used.")
-    print("Next: run `make examples-connect` to prepare the connected examples.")
+    print("Next: run `make local-start` to create a local MLflow trace.")
     return 0
 
 
@@ -322,26 +336,40 @@ def connect() -> int:
             print(f"  - {issue}")
     if core_issues or cloud_issues:
         print(
-            "\nAfter addressing the items above, rerun `make examples-connect`, "
-            "then use `make example EXAMPLE=first_trace`."
+            "\nAfter addressing the items above, rerun `make workspace-connect`, "
+            "then use `make workspace-example EXAMPLE=first_trace`."
         )
     else:
         print("\nConnected identity and experiment preflight passed.")
-        print("Run an example with `make example EXAMPLE=first_trace`.")
+        print("Run an example with `make workspace-example EXAMPLE=first_trace`.")
     return 0
 
 
-def run_example(value: str) -> int:
+def run_example(value: str, *, destination: str = "workspace") -> int:
     try:
         name = _normalize_example_name(value)
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
     example = EXAMPLES[name]
-    environment = _connected_environment() if example.connected else dict(os.environ)
-    issues = [*_module_issues(example), *_config_issues(example)]
-    if example.connected and not issues:
-        issues.extend(_cloud_issues(environment))
+    if destination == "local":
+        if not example.local:
+            print(
+                f"{example.name} requires workspace services and cannot run locally. "
+                "Choose first_trace or first_experiment.",
+                file=sys.stderr,
+            )
+            return 2
+        LOCAL_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        environment = _local_environment()
+        issues = _module_issues(example)
+    else:
+        environment = (
+            _connected_environment() if example.connected else dict(os.environ)
+        )
+        issues = [*_module_issues(example), *_config_issues(example)]
+        if example.connected and not issues:
+            issues.extend(_cloud_issues(environment))
     if issues:
         _print_issues(issues)
         return 2
@@ -352,22 +380,36 @@ def run_example(value: str) -> int:
         )
         print(f"Notebook: {ROOT / example.path}")
         return 0
-    print(f"Running {example.path}...")
+    print(f"Running {example.path} against {destination}...", flush=True)
     result = subprocess.run(
         [sys.executable, str(ROOT / example.path)],
-        cwd=ROOT,
+        cwd=LOCAL_DIR if destination == "local" else ROOT,
         env=environment,
         check=False,
     )
+    if result.returncode == 0 and destination == "local":
+        print(f"\nLocal MLflow data: {LOCAL_DB}")
+        print("View it with `make local-ui` (Ctrl-C stops the server).")
+        print(
+            "Next: run `make workspace-connect`, then "
+            f"`make workspace-example EXAMPLE={example.name}`."
+        )
+    elif result.returncode == 0 and example.connected:
+        print(
+            "\nWorkspace run complete. View the configured experiment in "
+            f"{environment['DATABRICKS_HOST']}."
+        )
     return result.returncode
 
 
 def list_examples() -> int:
     print("Available learning examples:")
     for example in EXAMPLES.values():
-        mode = "connected"
+        mode = "workspace"
         if not example.connected:
             mode = "offline"
+        elif example.local:
+            mode = "local → workspace"
         if example.interactive:
             mode += ", interactive"
         print(f"  {example.name:<22} [{mode}] {example.description}")
@@ -380,6 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     subcommands.add_parser("quickstart")
     subcommands.add_parser("connect")
     subcommands.add_parser("list")
+    local_parser = subcommands.add_parser("local")
+    local_parser.add_argument("example")
+    workspace_parser = subcommands.add_parser("workspace")
+    workspace_parser.add_argument("example")
+    # Backward-compatible alias for the original connected runner command.
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("example")
     arguments = parser.parse_args(argv)
@@ -389,7 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         return connect()
     if arguments.command == "list":
         return list_examples()
-    return run_example(arguments.example)
+    destination = "local" if arguments.command == "local" else "workspace"
+    return run_example(arguments.example, destination=destination)
 
 
 if __name__ == "__main__":

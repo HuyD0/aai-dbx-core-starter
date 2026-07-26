@@ -10,7 +10,6 @@ def main() -> None:
     configure_tracing(
         ctx.tags,
         experiment_name=ctx.settings.effective_experiment_name,
-        tracking_uri="databricks",
     )
     suite = EvaluationSuite(
         scorers=[RelevanceToQuery()],

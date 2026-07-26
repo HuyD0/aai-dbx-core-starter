@@ -9,11 +9,15 @@ TERRAFORM ?= terraform
 DATABRICKS ?= databricks
 TARGET ?= dev
 EXAMPLE ?=
+LOCAL_MLFLOW_DIR ?= $(CURDIR)/.aai/local
+LOCAL_MLFLOW_DB ?= $(LOCAL_MLFLOW_DIR)/mlflow.db
+LOCAL_MLFLOW_URI = sqlite:///$(LOCAL_MLFLOW_DB)
 
 .PHONY: help check-uv install lint format format-check test build check verify \
 	sync-templates check-templates terraform-format terraform-format-check \
 	terraform-init terraform-validate bundle-validate validate-templates doctor \
-	doctor-cloud quickstart examples-install examples-connect examples-list example
+	doctor-cloud quickstart examples-install examples-list local-start local-example \
+	local-ui workspace-connect workspace-example examples-connect example
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -35,18 +39,38 @@ examples-install: check-uv ## Install the locked Databricks and GenAI example de
 quickstart: install ## Prove a fresh clone works without credentials.
 	$(PYTHON) scripts/examples.py quickstart
 
-examples-connect: examples-install ## Prepare and check the keyless cloud example setup.
+local-start: examples-install ## Write a trace to a clean, repository-local MLflow store.
+	$(PYTHON) scripts/examples.py local first_trace
+
+local-example: examples-install ## Run a local-capable example: make local-example EXAMPLE=first_trace
+	@test -n "$(EXAMPLE)" || { \
+		echo "EXAMPLE is required. Choose first_trace or first_experiment."; \
+		exit 2; \
+	}
+	$(PYTHON) scripts/examples.py local "$(EXAMPLE)"
+
+local-ui: examples-install ## Serve the isolated local MLflow store at http://127.0.0.1:5000.
+	@mkdir -p "$(LOCAL_MLFLOW_DIR)/mlruns"
+	$(PYTHON) -m mlflow ui \
+		--backend-store-uri "$(LOCAL_MLFLOW_URI)" \
+		--default-artifact-root "$(LOCAL_MLFLOW_DIR)/mlruns"
+
+workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect
+
+examples-connect: workspace-connect ## Backward-compatible alias for workspace-connect.
 
 examples-list: install ## List learning examples and their execution mode.
 	$(PYTHON) scripts/examples.py list
 
-example: examples-install ## Preflight and run one example: make example EXAMPLE=first_trace
+workspace-example: examples-install ## Send an example to Databricks: make workspace-example EXAMPLE=first_trace
 	@test -n "$(EXAMPLE)" || { \
 		echo "EXAMPLE is required. Run 'make examples-list' to see valid names."; \
 		exit 2; \
 	}
-	$(PYTHON) scripts/examples.py run "$(EXAMPLE)"
+	$(PYTHON) scripts/examples.py workspace "$(EXAMPLE)"
+
+example: workspace-example ## Backward-compatible alias for workspace-example.
 
 lint: ## Run Ruff lint checks.
 	$(PYTHON) -m ruff check .
