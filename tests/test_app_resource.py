@@ -10,7 +10,6 @@ import re
 import tomllib
 from pathlib import Path
 
-import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,19 +49,89 @@ def _locked_versions() -> dict[str, str]:
     }
 
 
+# The Databricks Apps runtime: Ubuntu 22.04, CPython 3.11, x86_64. Markers in the
+# closure are evaluated against this, which is why colorama (click's win32-only
+# dependency) must not appear in the container's install list.
+APPS_RUNTIME_ENV = {
+    "sys_platform": "linux",
+    "platform_system": "Linux",
+    "platform_machine": "x86_64",
+    "os_name": "posix",
+    "python_version": "3.11",
+    "python_full_version": "3.11.13",
+    "implementation_name": "cpython",
+    "platform_python_implementation": "CPython",
+    "platform_release": "",
+    "platform_version": "",
+    "extra": "",
+}
+
+DIRECT_REQUIREMENTS = ("fastapi", "jinja2", "uvicorn", "databricks-sdk", "pyyaml")
+
+
+def _normalise(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _expected_closure() -> dict[str, str]:
+    """Every package pip will install in the container, resolved from uv.lock.
+
+    Walks dependency edges whose marker holds on the Apps runtime, so the answer is the
+    set that a `pip install -r requirements.txt` must be pinned to.
+    """
+    from packaging.markers import Marker
+
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = {_normalise(p["name"]): p for p in lock["package"]}
+
+    resolved: dict[str, str] = {}
+    queue = [_normalise(name) for name in DIRECT_REQUIREMENTS]
+    while queue:
+        name = queue.pop()
+        if name in resolved:
+            continue
+        package = packages[name]
+        resolved[name] = package["version"]
+        for dependency in package.get("dependencies", []):
+            marker = dependency.get("marker")
+            if marker and not Marker(marker).evaluate(APPS_RUNTIME_ENV):
+                continue
+            queue.append(_normalise(dependency["name"]))
+    return resolved
+
+
 def test_container_requirements_are_all_exactly_pinned():
     assert _pins(), "the container needs an explicit install list"
+    assert all(version for version in _pins().values())
 
 
-@pytest.mark.parametrize("package", sorted(_pins()))
-def test_container_pin_matches_the_locked_version(package):
-    """Tested versions and deployed versions must not diverge silently."""
-    locked = _locked_versions()
-    assert package in locked, f"{package} is not resolved in uv.lock"
-    assert _pins()[package] == locked[package], (
-        f"{package} is pinned to {_pins()[package]} for the container but uv.lock "
-        f"resolves {locked[package]}"
+def test_container_pins_the_entire_dependency_closure():
+    """Pinning only the direct requirements is not reproducibility.
+
+    `pip install -r requirements.txt` runs at DEPLOY time and resolves anything
+    unpinned then, so a newer starlette, pydantic or requests could reach the container
+    long after CI tested the locked set — and a test comparing only direct pins could
+    not see it. The whole closure is pinned, and this recomputes it from uv.lock rather
+    than trusting the file.
+    """
+    expected = _expected_closure()
+    actual = _pins()
+    mismatched = {
+        name: (actual[name], expected[name])
+        for name in set(actual) & set(expected)
+        if actual[name] != expected[name]
+    }
+    assert actual == expected, (
+        "src/platform_app/requirements.txt is out of sync with uv.lock.\n"
+        f"missing: {sorted(set(expected) - set(actual))}\n"
+        f"unexpected: {sorted(set(actual) - set(expected))}\n"
+        f"version mismatches: {mismatched}"
     )
+
+
+def test_container_excludes_dependencies_whose_marker_is_false_on_the_runtime():
+    """colorama is click's win32-only dependency; the Apps runtime is Linux."""
+    assert "colorama" not in _pins()
 
 
 def test_container_requirements_declare_no_extras():

@@ -1,13 +1,50 @@
-# Container install list for the Databricks Apps runtime (Python 3.11, Ubuntu 22.04).
+# Container install list for the Databricks Apps runtime
+# (Ubuntu 22.04, CPython 3.11, x86_64).
 #
-# This is a SECOND dependency channel that `uv lock --check` does not see. Every pin here
-# must equal the version uv.lock resolves for this repository;
-# tests/test_app_resource.py enforces that so the two cannot drift silently.
+# GENERATED — the FULL dependency closure, pinned. Do not hand-edit:
+# tests/test_app_resource.py recomputes this from uv.lock and fails on any
+# difference, printing the expected content.
 #
-# Plain `uvicorn`, never uvicorn[standard]: uvloop/httptools/watchfiles are absent from
-# uv.lock and would be an unpinned, unaudited addition.
+# Why the whole closure and not just the five direct requirements: `pip install
+# -r requirements.txt` resolves anything unpinned at DEPLOY time, so a newer
+# starlette or pydantic could reach the container months after CI tested the
+# locked set. This is a second dependency channel that `uv lock --check` never
+# sees, so reproducibility has to be written down here.
+#
+# Markers are pre-evaluated for the runtime above, which is why colorama
+# (click's win32-only dependency) is absent.
+#
+# Plain `uvicorn`, never uvicorn[standard]: uvloop/httptools/watchfiles are
+# absent from uv.lock and would be an unpinned, unaudited addition.
+
+# Direct requirements.
+databricks-sdk==0.122.0
 fastapi==0.140.0
 jinja2==3.1.6
+pyyaml==6.0.3
 uvicorn==0.51.0
-databricks-sdk==0.122.0
-PyYAML==6.0.3
+
+# Transitive closure, pinned so the deployed set equals the tested set.
+annotated-doc==0.0.4
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+click==8.4.2
+cryptography==48.0.1
+google-auth==2.56.2
+h11==0.16.0
+idna==3.18
+markupsafe==3.0.3
+protobuf==6.33.6
+pyasn1==0.6.4
+pyasn1-modules==0.4.2
+pycparser==3.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+requests==2.34.2
+starlette==1.3.1
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+urllib3==2.7.0

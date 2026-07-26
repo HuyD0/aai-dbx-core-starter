@@ -199,6 +199,13 @@ run on their own machine, and reports platform state. Rules:
   scale-to-zero. `deploy.yml` deploys code only; `make app-start` / `app-stop`
   control the running state. A running app does not pick up newly deployed code —
   `make app-restart` does.
+- **The container's `requirements.txt` pins the whole dependency closure.** It is a
+  second dependency channel that `uv lock --check` never sees, and
+  `pip install -r requirements.txt` runs at *deploy* time — so pinning only the
+  direct requirements would let a newer transitive reach the container long after
+  CI tested the locked set. The file is generated from `uv.lock` with markers
+  pre-evaluated for the runtime (Ubuntu 22.04, CPython 3.11), and a test
+  recomputes it rather than trusting it.
 - **No node, no bundler, no `package.json`.** `scripts/cloud-verify.sh` performs an
   offline `uv sync --locked`; an npm lockfile ecosystem is a change of security
   posture, not a dependency. The console's web dependencies live in the `dev`
