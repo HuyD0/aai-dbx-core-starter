@@ -1,10 +1,10 @@
-"""Release gate: LLM judges plus deterministic trajectory scoring.
+"""Release gate: LLM judges plus exact MLflow tool-call scoring.
 
-Runs the real agent per case (pinned prompt version), records which tools it
-used, scores answers with Correctness/Safety judges, computes
-tool_call_accuracy from the recorded trajectories, and applies every
-threshold plus baseline regression. Publishes the report to the CI summary.
-Credentialed path only; pull-request CI runs evals/offline_checks.py.
+Runs the real agent per case (pinned prompt version), scores its traced TOOL
+spans against expected names and arguments, applies Correctness/Safety judges,
+and enforces every threshold plus baseline regression. Publishes the report
+to the CI summary. Credentialed path only; pull-request CI runs
+evals/offline_checks.py.
 """
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ from aai_core.agents import AgentRequest
 from aai_core.evaluation import (
     EvaluationSuite,
     QualityThreshold,
-    apply_thresholds,
+    judge_model_uri,
     publish_report,
     workspace_run_url,
 )
 from app.agent import ToolAgent
 from app.config import DATASET_NAME, PROMPT_NAME
-from app.scoring import tool_call_accuracy
+from app.tool_scoring import exact_tool_call_scorer
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "evals" / "baseline.json"
@@ -68,25 +68,30 @@ def main() -> None:
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
 
-    trajectories: dict[str, list[str]] = {}
-
     def predict_fn(question: str) -> str:
         response = agent.invoke(
             AgentRequest(messages=[{"role": "user", "content": question}])
         )
-        trajectories[question] = list(response.metadata.get("tools_used", []))
         return response.content
 
     thresholds = load_thresholds()
     baseline = load_baseline()
-    suite = EvaluationSuite(scorers=[Correctness(), Safety()], thresholds=[])
+    judge_model = judge_model_uri(context.settings)
+    suite = EvaluationSuite(
+        scorers=[
+            exact_tool_call_scorer(),
+            Correctness(model=judge_model),
+            Safety(model=judge_model),
+        ],
+        thresholds=thresholds,
+    )
     prompt_uri = f"prompts:/{context.prompts.qualify(PROMPT_NAME)}/{version}"
     dataset_name = (
         f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
     )
 
-    # One governed MLflow run holds the judged evaluation, the deterministic
-    # trajectory metric, the pinned prompt/dataset identity, and the verdict.
+    # One governed MLflow run holds the judged evaluation, exact tool-call
+    # score, pinned prompt/dataset identity, and verdict.
     manager = context.experiments
     run_id = None
     with manager.run(
@@ -99,23 +104,15 @@ def main() -> None:
         },
     ) as active_run:
         run_id = active_run.info.run_id
-        judged = suite.run(data=cases, predict_fn=predict_fn)
-        accuracy_values = [
-            tool_call_accuracy(
-                trajectories.get(case["inputs"]["question"], []),
-                case["expectations"]["expected_tools"],
-            )
-            for case in cases
-        ]
-        metrics = {
-            **judged.metrics,
-            "tool_call_accuracy/mean": sum(accuracy_values) / len(accuracy_values),
-        }
-        report = apply_thresholds(metrics, thresholds, baseline_metrics=baseline)
+        report = suite.run(
+            data=cases,
+            predict_fn=predict_fn,
+            baseline_metrics=baseline,
+        )
         manager.log_metrics(
             {
                 name: value
-                for name, value in metrics.items()
+                for name, value in report.metrics.items()
                 if isinstance(value, (int, float))
             }
         )

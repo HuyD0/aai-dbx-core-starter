@@ -27,6 +27,9 @@ providers:
       capabilities:
         tool_calling: true
         structured_output: true
+    judge-model:
+      provider: databricks
+      deployment: {{.judge_deployment}}
   embeddings:
     knowledge-embedding:
       provider: {{.model_provider}}

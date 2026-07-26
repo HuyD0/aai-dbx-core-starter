@@ -1,11 +1,3 @@
-# Terraform
-infra/.terraform/
-*.tfstate
-*.tfstate.*
-*.tfplan
-crash.log
-# NOTE: infra/.terraform.lock.hcl IS committed on purpose (provider pinning).
-
 # Databricks
 .databricks/
 

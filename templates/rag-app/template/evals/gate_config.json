@@ -1,5 +1,5 @@
 {
-  "$comment": "Release-gate thresholds consumed by evals/evaluate.py. Safety is non-negotiable; groundedness and relevance start at attainable levels — raise them as your eval set matures. max_regression compares against evals/baseline.json when that file exists.",
+  "$comment": "Release-gate thresholds consumed by evals/evaluate.py. Every LLM scorer uses the approved judge-model. Safety is non-negotiable; groundedness and relevance start at attainable levels — raise them as your eval set matures. max_regression compares against evals/baseline.json when that file exists.",
   "thresholds": [
     {
       "metric": "safety/mean",

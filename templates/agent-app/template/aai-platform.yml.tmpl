@@ -27,6 +27,11 @@ providers:
       capabilities:
         tool_calling: true
         structured_output: true
+    # Evaluation judges always use an approved gateway-fronted Databricks
+    # endpoint, including an external-model endpoint for Foundry judges.
+    judge-model:
+      provider: databricks
+      deployment: {{.judge_deployment}}
 
 # Secret references may be added here. Never add secret values.
 secrets: {}

@@ -10,6 +10,7 @@ from typing import Any
 from aai_core.providers.types import (
     ModelCapabilities,
     ModelResponse,
+    ProviderConfigurationError,
     ProviderError,
     ProviderRequestError,
     UnsupportedCapabilityError,
@@ -19,6 +20,22 @@ from aai_core.tracing import provider_span
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_RETRIES = 2
 _MAX_BACKOFF_SECONDS = 8.0
+_CONTROLLED_CHAT_OPTIONS = {
+    "max_tokens",
+    "messages",
+    "model",
+    "response_format",
+    "stream",
+    "temperature",
+    "timeout",
+    "tools",
+}
+_FORBIDDEN_PER_CALL_OPTIONS = {
+    "default_headers",
+    "extra_body",
+    "extra_headers",
+    "headers",
+}
 
 _REMEDIATIONS = {
     401: "The request was not authenticated. Verify your keyless login "
@@ -144,6 +161,23 @@ class OpenAICompatibleChatModel:
         if response_format:
             request["response_format"] = dict(response_format)
         if provider_options:
+            collisions = set(provider_options) & _CONTROLLED_CHAT_OPTIONS
+            if collisions:
+                raise ProviderConfigurationError(
+                    "provider_options cannot override controlled chat fields: "
+                    f"{', '.join(sorted(collisions))}",
+                    remediation="Use the corresponding generate() argument; "
+                    "streaming remains available only through native_client.",
+                )
+            forbidden = set(provider_options) & _FORBIDDEN_PER_CALL_OPTIONS
+            if forbidden:
+                raise ProviderConfigurationError(
+                    "Per-call provider headers and raw request bodies are not allowed",
+                    remediation="Configure keyless authentication or a governed "
+                    "secret reference on the provider client. Use explicit "
+                    "generate() arguments for request fields; never pass "
+                    "credentials or extra_body through provider_options.",
+                )
             request.update(provider_options)
         if self.timeout_seconds is not None and "timeout" not in request:
             request["timeout"] = self.timeout_seconds
@@ -157,7 +191,17 @@ class OpenAICompatibleChatModel:
                 "aai.logical_name": self.logical_name,
                 "aai.model": self.model,
             },
-        ):
+        ) as span:
+            if span is not None:
+                trace_inputs: dict[str, Any] = {"messages": list(messages)}
+                if tools:
+                    # MLflow's agent scorers discover the available tool
+                    # definitions from the LLM span's standard ``tools``
+                    # input. This bounded manual span excludes additive
+                    # provider-only options; framework autologging is a
+                    # separate, explicit data-policy decision.
+                    trace_inputs["tools"] = list(tools)
+                span.set_inputs(trace_inputs)
             response = call_with_resilience(
                 lambda: self.native_client.chat.completions.create(**request),
                 description="chat completion",
@@ -165,19 +209,24 @@ class OpenAICompatibleChatModel:
                 logical_name=self.logical_name,
                 max_retries=self.max_retries,
             )
+
+            choice = response.choices[0]
+            message = choice.message
+            content = message.content or ""
+            if not isinstance(content, str):
+                content = str(content)
+            usage = _as_mapping(getattr(response, "usage", None))
+            normalized_usage = {
+                str(key): int(value)
+                for key, value in usage.items()
+                if isinstance(value, (int, float))
+            }
+            if span is not None:
+                span.set_outputs({"content": content})
+                if canonical_usage := _canonical_token_usage(normalized_usage):
+                    span.set_attribute("mlflow.chat.tokenUsage", canonical_usage)
         elapsed = (monotonic() - started) * 1000
 
-        choice = response.choices[0]
-        message = choice.message
-        content = message.content or ""
-        if not isinstance(content, str):
-            content = str(content)
-        usage = _as_mapping(getattr(response, "usage", None))
-        normalized_usage = {
-            str(key): int(value)
-            for key, value in usage.items()
-            if isinstance(value, (int, float))
-        }
         return ModelResponse(
             content=content,
             provider=self.provider,
@@ -250,3 +299,19 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
         if hasattr(value, key)
     }
+
+
+def _canonical_token_usage(usage: Mapping[str, int]) -> dict[str, int]:
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    total_tokens = usage.get("total_tokens")
+    canonical = {}
+    if isinstance(input_tokens, int):
+        canonical["input_tokens"] = input_tokens
+    if isinstance(output_tokens, int):
+        canonical["output_tokens"] = output_tokens
+    if isinstance(total_tokens, int):
+        canonical["total_tokens"] = total_tokens
+    elif isinstance(input_tokens, int) and isinstance(output_tokens, int):
+        canonical["total_tokens"] = input_tokens + output_tokens
+    return canonical

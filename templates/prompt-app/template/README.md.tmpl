@@ -29,7 +29,8 @@ provider integration.
 1. Edit `prompts/system_prompt.json` — the versioned prompt source.
 2. Register a new immutable version: `python scripts/register_prompt.py`
    (also points the `development` alias at it).
-3. Gate the version: `python evals/evaluate.py` — LLM judges (Correctness,
+3. Configure the approved `judge-model`, then gate the version:
+   `python evals/evaluate.py` — explicitly routed LLM judges (Correctness,
    RelevanceToQuery, Safety) against `evals/data/release_cases.json` with the
    thresholds in `evals/gate_config.json`; evaluation always pins an exact
    version, never an alias. After a released run passes, refresh the

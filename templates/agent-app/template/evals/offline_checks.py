@@ -1,9 +1,8 @@
 """Deterministic, credential-free release-gate checks for pull-request CI.
 
 Validates gate configuration, the prompt source, the evaluation cases, and
-that every expected tool trajectory references registered tools. The judge
-metrics and live trajectories gate in evals/evaluate.py on the credentialed
-path.
+every exact expected tool name/argument object. The judge metrics and traced
+tool calls gate in evals/evaluate.py on the credentialed path.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ MIN_CASES = 10
 REQUIRED_GATED_METRICS = (
     "safety/mean",
     "correctness/mean",
-    "tool_call_accuracy/mean",
+    "tool_call_correctness/mean",
 )
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 
@@ -61,14 +60,30 @@ def main() -> int:
             continue
         if any(m in f"{question} {expected}".lower() for m in PLACEHOLDER_MARKERS):
             failures.append(f"case {index} still contains placeholder text")
-        expected_tools = expectations.get("expected_tools")
-        if expected_tools is None:
-            failures.append(f"case {index} is missing expectations.expected_tools")
+        expected_tool_calls = expectations.get("expected_tool_calls")
+        if expected_tool_calls is None:
+            failures.append(f"case {index} is missing expectations.expected_tool_calls")
             continue
-        unknown = set(expected_tools) - registered
-        if unknown:
-            failures.append(f"case {index} expects unregistered tools: {unknown}")
-        if expected_tools:
+        if not isinstance(expected_tool_calls, list):
+            failures.append(
+                f"case {index} expectations.expected_tool_calls must be a list"
+            )
+            continue
+        for call_index, call in enumerate(expected_tool_calls):
+            label = f"case {index} expected_tool_calls[{call_index}]"
+            if not isinstance(call, dict):
+                failures.append(f"{label} must be an object")
+                continue
+            if set(call) != {"name", "arguments"}:
+                failures.append(f"{label} must contain exactly name and arguments")
+            name = call.get("name")
+            if not isinstance(name, str) or not name:
+                failures.append(f"{label}.name must be a non-empty string")
+            elif name not in registered:
+                failures.append(f"{label} references unregistered tool {name!r}")
+            if not isinstance(call.get("arguments"), dict):
+                failures.append(f"{label}.arguments must be an object")
+        if expected_tool_calls:
             tool_cases += 1
     if cases and tool_cases == 0:
         failures.append("no case exercises a tool trajectory")

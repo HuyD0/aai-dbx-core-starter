@@ -1,10 +1,18 @@
 """Unit tests for the tool loop, structured output, and serving adapter."""
 
 import json
+from contextlib import contextmanager
 
 import pytest
 
-from aai_core.agents import ToolLoopError, ToolRegistry, ToolSpec, run_tool_loop
+from aai_core.agents import (
+    ToolLoopError,
+    ToolLoopResult,
+    ToolRegistry,
+    ToolSpec,
+    run_tool_loop,
+)
+from aai_core.providers.types import ModelResponse
 from aai_core.serving import ServingError, agent_resources
 from aai_core.structured import StructuredOutputError, generate_structured
 from aai_core.testing import FakeChatModel, dev_settings, fake_tool_call
@@ -19,6 +27,15 @@ LOOKUP = ToolSpec(
     },
     handler=lambda order_id: {"order_id": order_id, "status": "shipped"},
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_tool_spans(monkeypatch):
+    @contextmanager
+    def no_op_span(*args, **kwargs):
+        yield None
+
+    monkeypatch.setattr("aai_core.agents.provider_span", no_op_span)
 
 
 def _registry():
@@ -43,10 +60,94 @@ def test_tool_loop_executes_calls_and_returns_final_answer():
     )
 
     assert result.response.content == "Order A-1 has shipped."
+    assert len(result.model_responses) == 2
+    assert result.total_latency_ms == 2.0
+    assert result.usage == {
+        "input_tokens": 2,
+        "output_tokens": 2,
+        "total_tokens": 4,
+    }
     assert result.tool_names == ("lookup_order_status",)
     assert json.loads(result.tool_invocations[0].result)["status"] == "shipped"
     tool_message = next(m for m in model.requests[1]["messages"] if m["role"] == "tool")
     assert "shipped" in tool_message["content"]
+
+
+def test_tool_execution_records_inputs_and_serialized_outputs(monkeypatch):
+    recorded = {}
+
+    class FakeSpan:
+        def set_inputs(self, inputs):
+            recorded["inputs"] = inputs
+
+        def set_outputs(self, outputs):
+            recorded["outputs"] = outputs
+
+    @contextmanager
+    def fake_provider_span(name, *, span_type):
+        recorded.update(name=name, span_type=span_type)
+        yield FakeSpan()
+
+    monkeypatch.setattr("aai_core.agents.provider_span", fake_provider_span)
+
+    result = _registry().execute("lookup_order_status", {"order_id": "A-1"})
+
+    assert recorded == {
+        "name": "lookup_order_status",
+        "span_type": "TOOL",
+        "inputs": {"order_id": "A-1"},
+        "outputs": result,
+    }
+    assert json.loads(recorded["outputs"])["status"] == "shipped"
+
+
+def test_tool_loop_aggregates_canonical_and_legacy_token_names():
+    legacy = ModelResponse(
+        content="tool call",
+        provider="fake",
+        logical_name="general-chat",
+        model="fake-model",
+        latency_ms=10.5,
+        usage={"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+    )
+    canonical = ModelResponse(
+        content="answer",
+        provider="fake",
+        logical_name="general-chat",
+        model="fake-model",
+        latency_ms=20.0,
+        usage={"input_tokens": 3, "output_tokens": 5},
+    )
+    result = ToolLoopResult(
+        response=canonical,
+        transcript=(),
+        tool_invocations=(),
+        model_responses=(legacy, canonical),
+    )
+
+    assert result.total_latency_ms == 30.5
+    assert result.usage == {
+        "input_tokens": 7,
+        "output_tokens": 7,
+        "total_tokens": 14,
+    }
+
+
+def test_tool_loop_aggregate_falls_back_to_final_response():
+    response = ModelResponse(
+        content="answer",
+        provider="fake",
+        logical_name="general-chat",
+        model="fake-model",
+        latency_ms=5.0,
+        usage={"prompt_tokens": 2, "completion_tokens": 1},
+    )
+
+    result = ToolLoopResult(response=response, transcript=(), tool_invocations=())
+
+    assert result.model_responses == ()
+    assert result.total_latency_ms == 5.0
+    assert result.usage["total_tokens"] == 3
 
 
 def test_tool_loop_rejects_unknown_tools_and_runaway_loops():

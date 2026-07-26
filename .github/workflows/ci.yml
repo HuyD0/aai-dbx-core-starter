@@ -36,12 +36,6 @@ jobs:
       - name: Install Databricks CLI for local template rendering
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "1.12.2" # matches the version used for the local bootstrap
-          terraform_wrapper: false
-
       - name: Cloud-container verification (credential-free)
         # Includes the zizmor workflow-security lint via the locked dev env.
         run: ./scripts/cloud-verify.sh

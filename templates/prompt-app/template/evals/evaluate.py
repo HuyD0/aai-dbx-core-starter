@@ -18,6 +18,7 @@ from aai_core import bootstrap
 from aai_core.evaluation import (
     EvaluationSuite,
     QualityThreshold,
+    judge_model_uri,
     publish_report,
     workspace_run_url,
 )
@@ -74,8 +75,13 @@ def main() -> None:
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
+    judge_model = judge_model_uri(context.settings)
     suite = EvaluationSuite(
-        scorers=[Correctness(), RelevanceToQuery(), Safety()],
+        scorers=[
+            Correctness(model=judge_model),
+            RelevanceToQuery(model=judge_model),
+            Safety(model=judge_model),
+        ],
         thresholds=load_thresholds(),
     )
     baseline = load_baseline()

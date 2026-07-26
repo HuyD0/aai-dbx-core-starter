@@ -3,7 +3,9 @@
 Runs in pull-request CI with zero credentials: validates configuration and
 datasets, then scores the recorded answer sheet with the deterministic code
 scorers and applies THEIR thresholds through the shared gate engine. Judge
-metrics gate only in the full run (evals/evaluate.py).
+metrics cannot execute here, but this tier verifies that every gated metric is
+categorized and that report-only judges are not accidentally promoted into a
+release threshold. Judges execute only in evals/evaluate.py.
 """
 
 from __future__ import annotations
@@ -19,10 +21,15 @@ MIN_GOLDEN_CASES = 10
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 
 
-def load_gate() -> tuple[list[QualityThreshold], set[str]]:
+def load_gate() -> tuple[list[QualityThreshold], set[str], set[str], set[str]]:
     config = json.loads((ROOT / "evals" / "gate_config.json").read_text("utf-8"))
     thresholds = [QualityThreshold(**threshold) for threshold in config["thresholds"]]
-    return thresholds, set(config["code_metrics"])
+    return (
+        thresholds,
+        set(config["code_metrics"]),
+        set(config["judge_metrics"]),
+        set(config["report_only_judge_metrics"]),
+    )
 
 
 def main() -> int:
@@ -30,11 +37,26 @@ def main() -> int:
     from app.scorers import score_all
 
     failures: list[str] = []
-    thresholds, code_metrics = load_gate()
+    thresholds, code_metrics, judge_metrics, report_only_judge_metrics = load_gate()
     gated = {threshold.metric for threshold in thresholds}
-    for metric in code_metrics:
+    gated_categories = code_metrics | judge_metrics
+    all_categories = [code_metrics, judge_metrics, report_only_judge_metrics]
+    overlap = set()
+    for index, category in enumerate(all_categories):
+        for other in all_categories[index + 1 :]:
+            overlap.update(category & other)
+    if overlap:
+        failures.append(
+            "metrics must appear in exactly one code, judge, or report-only "
+            f"category: {sorted(overlap)}"
+        )
+    for metric in gated_categories:
         if metric not in gated:
-            failures.append(f"code metric {metric} is not gated in gate_config.json")
+            failures.append(f"categorized metric {metric} is not gated")
+    for metric in gated - gated_categories:
+        failures.append(f"gated metric {metric} is not categorized")
+    for metric in report_only_judge_metrics & gated:
+        failures.append(f"report-only judge metric {metric} must not be gated")
 
     golden = json.loads(
         (ROOT / "evals" / "data" / "golden_cases.json").read_text("utf-8")

@@ -19,8 +19,19 @@ def configure_tracing(
     *,
     experiment_name: str,
     tracking_uri: str | None = None,
-    enable_openai_autolog: bool = True,
+    enable_openai_autolog: bool = False,
+    enable_langchain_autolog: bool = False,
 ) -> None:
+    """Configure governed tracing integrations for an experiment.
+
+    OpenAI and LangChain autologging are opt-in because framework integrations
+    can capture raw SDK/framework arguments. The stable provider adapters emit
+    their own bounded spans and token usage; do not combine their calls with
+    OpenAI autologging because duplicate spans also double-count usage. Enable
+    an autologger for direct native/framework calls only after confirming its
+    inputs comply with the application's trace data policy.
+    """
+
     global _TRACE_METADATA
 
     mlflow = _require_mlflow()
@@ -29,6 +40,8 @@ def configure_tracing(
     mlflow.set_experiment(experiment_name)
     if enable_openai_autolog:
         mlflow.openai.autolog()
+    if enable_langchain_autolog:
+        mlflow.langchain.autolog()
     _TRACE_METADATA = dict(context.for_trace())
 
 
@@ -105,6 +118,25 @@ def set_trace_context(metadata: Mapping[str, str]) -> None:
     except Exception:
         # No trace is active. Configuration remains valid and the metadata will
         # be applied by callers when a trace starts.
+        return
+
+
+def set_trace_session(session_id: str) -> None:
+    """Group the active trace into an MLflow conversation session.
+
+    Uses MLflow's dedicated ``session_id`` field rather than ordinary trace
+    metadata. Calling this when no trace is active is a no-op, matching
+    :func:`set_trace_context`.
+    """
+
+    try:
+        import mlflow
+    except ImportError:
+        return
+    try:
+        mlflow.update_current_trace(session_id=session_id)
+    except Exception:
+        # Session context can only be attached while a trace is active.
         return
 
 

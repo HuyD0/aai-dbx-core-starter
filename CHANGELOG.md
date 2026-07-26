@@ -2,6 +2,26 @@
 
 All notable changes to `aai-core` are documented here.
 
+## Unreleased
+
+- Added session-aware traces, secure opt-in MLflow OpenAI/LangChain
+  autologging (including compatible LangGraph agents), bounded LLM/tool span
+  inputs, outputs, and token usage, complete tool-loop response/usage
+  aggregation, and assessment provenance passthrough.
+- Added approved logical judge-model resolution and made every generated
+  GenAI gate route judges explicitly. Gated row-level scorer errors now fail
+  releases instead of disappearing from partial aggregates.
+- Upgraded the agent template to preserve governed multi-turn history and gate
+  exact tool names, arguments, empty trajectories, and duplicate multiplicity
+  with an MLflow `ToolCallCorrectness` compatibility scorer. Responses API
+  text parts are normalized while unsupported multimodal input and raw user
+  identifiers are rejected or omitted from traced application requests.
+- Added an executable domain-policy judge, explicit judge-metric gates,
+  human-alignment guidance, and bounded failure-rationale triage to the
+  evaluation template.
+- Expanded the evaluation lifecycle guidance for judge alignment, held-out
+  prompt optimization, conversational evaluation, and cost-quality decisions.
+
 ## 0.2.0
 
 - Added the five-template catalog (experiment-starter, prompt-app,

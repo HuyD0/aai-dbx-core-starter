@@ -75,11 +75,17 @@
         }
       }
     },
+    "judge_deployment": {
+      "type": "string",
+      "default": "replace-with-judge-endpoint",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "order": 11
+    },
     "prompt_name": {
       "type": "string",
       "default": "agent_system",
       "description": "Registered prompt name in the Unity Catalog prompt registry",
-      "order": 11,
+      "order": 12,
       "pattern": "^[a-z][a-z0-9_]+$",
       "pattern_match_failure_message": "Use lowercase letters, numbers, and underscores."
     },
@@ -121,7 +127,7 @@
         "yes",
         "no"
       ],
-      "order": 12
+      "order": 13
     }
   },
   "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make evaluate                       # judges + trajectories\n  6. python scripts/deploy_serving.py    # only after the gate passes\n\nRun `make help` for every available target."

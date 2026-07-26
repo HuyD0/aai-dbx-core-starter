@@ -27,6 +27,9 @@ providers:
       capabilities:
         tool_calling: true
         structured_output: true
+    judge-model:
+      provider: databricks
+      deployment: {{.judge_deployment}}
 
 # Secret references may be added here. Never add secret values.
 secrets: {}

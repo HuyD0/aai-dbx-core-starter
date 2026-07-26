@@ -138,13 +138,14 @@ COMBOS = {
             },
             "expect_present": [
                 "src/app/agent.py",
+                "src/app/messages.py",
+                "src/app/tool_scoring.py",
                 "src/app/tools.py",
-                "src/app/scoring.py",
                 "serving/model.py",
                 "scripts/deploy_serving.py",
                 "notebooks/02_enable_monitoring.py",
             ],
-            "expect_absent": [],
+            "expect_absent": ["src/app/scoring.py"],
         },
         {
             "name": "dbx-no-serving",

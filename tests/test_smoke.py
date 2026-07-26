@@ -189,7 +189,7 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
     ci = (WORKFLOWS / "ci.yml").read_text()
 
-    for version in ("0.8.23", "1.12.2", "2.88.0"):
+    for version in ("0.8.23", "2.88.0"):
         assert version in setup
 
     assert "sha256sum --check" in setup
@@ -199,6 +199,24 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     assert "DATABRICKS_TOKEN" in verify
     assert "azure/login" not in verify.lower()
     assert "az login" not in verify.lower()
+
+
+def test_repository_setup_does_not_provision_infrastructure():
+    setup_paths = (
+        "Makefile",
+        ".gitignore",
+        ".vscode/extensions.json",
+        ".github/workflows/ci.yml",
+        "scripts/codex-cloud-setup.sh",
+        "scripts/cloud-verify.sh",
+        "scripts/pre-commit.sh",
+        "scripts/pre-push.sh",
+    )
+    for relative_path in setup_paths:
+        text = (ROOT / relative_path).read_text()
+        assert "terraform" not in text.lower(), relative_path
+
+    assert not (ROOT / "infra").exists()
 
 
 def test_databricks_cli_version_is_in_lockstep_everywhere():

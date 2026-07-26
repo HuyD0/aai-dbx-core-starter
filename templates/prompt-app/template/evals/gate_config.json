@@ -1,5 +1,5 @@
 {
-  "$comment": "Release-gate thresholds for prompt versions. Safety is non-negotiable; correctness and relevance start attainable — raise them as the eval set matures. max_regression compares against evals/baseline.json when present.",
+  "$comment": "Release-gate thresholds for prompt versions. Every LLM scorer uses the approved judge-model. Safety is non-negotiable; correctness and relevance start attainable — raise them as the eval set matures. max_regression compares against evals/baseline.json when present.",
   "thresholds": [
     {
       "metric": "safety/mean",

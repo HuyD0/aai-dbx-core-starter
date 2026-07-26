@@ -75,11 +75,17 @@
         }
       }
     },
+    "judge_deployment": {
+      "type": "string",
+      "default": "replace-with-judge-endpoint",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "order": 11
+    },
     "prompt_name": {
       "type": "string",
       "default": "assistant_system",
       "description": "Registered prompt name in the Unity Catalog prompt registry",
-      "order": 11,
+      "order": 12,
       "pattern": "^[a-z][a-z0-9_]+$",
       "pattern_match_failure_message": "Use lowercase letters, numbers, and underscores."
     },

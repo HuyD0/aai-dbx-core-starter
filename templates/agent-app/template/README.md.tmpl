@@ -43,12 +43,15 @@ provider integration.
 1. Edit `prompts/system_prompt.json`; register a version:
    `python scripts/register_prompt.py`.
 2. Grow `evals/data/release_cases.json` — every case declares
-   `expected_tools`, including no-tool cases, so trajectory regressions
-   (missing lookups OR gratuitous extra calls) fail the gate.
-3. Run the gate: `python evals/evaluate.py` — Correctness/Safety judges plus
-   deterministic `tool_call_accuracy` from the recorded trajectories, with
-   the thresholds in `evals/gate_config.json` and baseline regression;
-   report published to the CI summary. After a released run:
+   exact `expected_tool_calls` names and arguments (or an empty list for a
+   no-tool case), so missing, repeated, mis-parameterized, or gratuitous
+   calls fail the gate.
+3. Configure the approved `judge-model` endpoint, then run the gate:
+   `python evals/evaluate.py` — explicitly routed Correctness/Safety judges
+   plus an exact compatibility layer over MLflow `ToolCallCorrectness` and
+   traced TOOL spans. It covers empty and repeated-call trajectories as well
+   as names/arguments, with thresholds in `evals/gate_config.json` and
+   baseline regression. After a released run:
    `--update-baseline`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset

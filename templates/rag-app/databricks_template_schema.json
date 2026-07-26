@@ -74,6 +74,12 @@
         }
       }
     },
+    "judge_deployment": {
+      "type": "string",
+      "default": "replace-with-judge-endpoint",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "order": 11
+    },
     "retrieval_provider": {
       "type": "string",
       "default": "azure_ai_search",
@@ -82,61 +88,61 @@
         "azure_ai_search",
         "databricks_ai_search"
       ],
-      "order": 11
+      "order": 12
     },
     "search_endpoint": {
       "type": "string",
       "default": "https://replace-with-search-service.search.windows.net",
       "description": "Azure AI Search service or Databricks AI Search endpoint",
-      "order": 12
+      "order": 13
     },
     "search_index": {
       "type": "string",
       "default": "replace-with-search-index",
       "description": "Search index name",
-      "order": 13
+      "order": 14
     },
     "embedding_deployment": {
       "type": "string",
       "default": "replace-with-embedding-endpoint",
       "description": "Embedding deployment or endpoint name. Its embedding dimension must match the search index's vector field (the config default assumes 1536, e.g. text-embedding-3-small); index, embeddings, and chunking change together as one release",
-      "order": 14
+      "order": 15
     },
     "aai_core_version": {
       "type": "string",
       "default": "0.2.0",
       "description": "Pinned aai-core SDK version",
-      "order": 15
+      "order": 17
     },
     "aai_core_volume": {
       "type": "string",
       "default": "/Volumes/dbx_dev/dbx_platform/python_packages",
       "description": "Unity Catalog volume holding aai-core wheels",
-      "order": 16
+      "order": 18
     },
     "workspace_host": {
       "type": "string",
       "default": "https://adb-7405609799238491.11.azuredatabricks.net",
       "description": "Development Azure Databricks workspace",
-      "order": 17
+      "order": 19
     },
     "compute_policy_id": {
       "type": "string",
       "default": "0005F2031B6D2319",
       "description": "Constrained Job Compute policy",
-      "order": 18
+      "order": 20
     },
     "aai_core_pip_source": {
       "type": "string",
       "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
       "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
-      "order": 19
+      "order": 21
     },
     "source_table": {
       "type": "string",
       "default": "{{.catalog}}.{{.schema}}.documents",
       "description": "Governed source table of documents (columns: id, content, source_uri). The chunk pipeline writes <source_table>_chunks with Change Data Feed enabled (Databricks retrieval only)",
-      "order": 15
+      "order": 16
     }
   },
   "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",

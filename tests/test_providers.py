@@ -72,6 +72,102 @@ def test_openai_adapter_normalizes_response():
     assert response.usage["total_tokens"] == 6
 
 
+def test_openai_adapter_records_standard_llm_inputs_and_outputs(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+
+    from conftest import install_fake_module
+
+    class FakeSpan:
+        def __init__(self):
+            self.inputs = None
+            self.outputs = None
+            self.attributes = {}
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+        def set_inputs(self, inputs):
+            self.inputs = inputs
+
+        def set_outputs(self, outputs):
+            self.outputs = outputs
+
+    recorded = {}
+
+    @contextmanager
+    def start_span(name, span_type):
+        span = FakeSpan()
+        recorded.update(name=name, span_type=span_type, span=span)
+        yield span
+
+    install_fake_module(monkeypatch, "mlflow", start_span=start_span)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_order_status",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    model = OpenAICompatibleChatModel(
+        logical_name="general-chat",
+        provider="databricks",
+        model="chat-deployment",
+        client=FakeOpenAI(),
+    )
+
+    model.generate(
+        [{"role": "user", "content": "Where is A-1001?"}],
+        tools=tools,
+        provider_options={"seed": 7},
+    )
+
+    assert recorded["name"] == "model.generate"
+    assert recorded["span_type"] == "LLM"
+    assert recorded["span"].inputs == {
+        "messages": [{"role": "user", "content": "Where is A-1001?"}],
+        "tools": tools,
+    }
+    assert recorded["span"].outputs == {"content": "answer"}
+    assert recorded["span"].attributes["mlflow.chat.tokenUsage"] == {
+        "input_tokens": 4,
+        "output_tokens": 2,
+        "total_tokens": 6,
+    }
+
+
+@pytest.mark.parametrize(
+    "provider_options",
+    [
+        {"messages": [{"role": "user", "content": "hidden override"}]},
+        {"model": "hidden-model"},
+        {"tools": []},
+        {"stream": True},
+        {"extra_headers": {"authorization": "sensitive"}},
+        {"extra_body": {"model": "hidden-model"}},
+        {"extra_body": {"messages": [{"role": "user", "content": "hidden"}]}},
+    ],
+)
+def test_openai_adapter_rejects_trace_bypasses_and_per_call_headers(
+    provider_options,
+):
+    model = OpenAICompatibleChatModel(
+        logical_name="general-chat",
+        provider="databricks",
+        model="chat-deployment",
+        client=FakeOpenAI(),
+    )
+
+    with pytest.raises(ProviderConfigurationError):
+        model.generate(
+            [{"role": "user", "content": "governed request"}],
+            provider_options=provider_options,
+        )
+
+
 def test_model_capabilities_fail_before_provider_call():
     model = OpenAICompatibleChatModel(
         logical_name="limited",
