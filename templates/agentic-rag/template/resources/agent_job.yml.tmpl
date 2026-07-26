@@ -10,28 +10,15 @@ resources:
           libraries:
             - whl: ../dist/*.whl
             - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
-            - pypi:
-                package: azure-identity==1.25.3
-            - pypi:
-                package: azure-search-documents==12.0.0
-            - pypi:
-                package: databricks-ai-search==0.77
-            - pypi:
-                package: databricks-openai==0.17.0
-            - pypi:
-                package: databricks-sdk==0.122.0
-            - pypi:
-                package: mlflow[databricks]==3.14.0
-            - pypi:
-                package: openai==2.48.0
-            - pypi:
-                package: PyYAML==6.0.3
+            # Single source of truth for runtime pins — the same lock file
+            # local installs use (bundle-synced to the workspace).
+            - requirements: ../requirements.lock
 
       job_clusters:
         - job_cluster_key: default
           new_cluster:
-            spark_version: 18.0.x-scala2.13
-            node_type_id: Standard_DS3_v2
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
             num_workers: 1
             policy_id: ${var.compute_policy_id}
             custom_tags:

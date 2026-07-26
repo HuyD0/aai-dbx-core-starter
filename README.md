@@ -142,6 +142,8 @@ recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md).
 - [Developer guide](docs/developer-guide.md)
 - [Platform architecture](docs/platform-architecture.md)
 - [Secrets and identity](docs/secrets-and-identity.md)
+- [SDK versioning policy](docs/versioning.md)
+- [Enterprise clone runbook](docs/enterprise-clone-runbook.md)
 - [Tagging standard](docs/tagging-standard.md)
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)

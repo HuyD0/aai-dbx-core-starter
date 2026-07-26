@@ -113,6 +113,11 @@ def test_template_renders_and_generated_unit_test_passes(tmp_path: Path):
     )
     assert "aai-core @ git+" in (output / "requirements-ci.txt").read_text()
 
+    stamp = json.loads((output / ".aai-template.json").read_text())
+    assert stamp["template"] == "agentic-rag"
+    assert stamp["template_version"]
+    assert stamp["generated_with"]["model_provider"] == "databricks"
+
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(ROOT / "src"), str(output / "src")]
     )

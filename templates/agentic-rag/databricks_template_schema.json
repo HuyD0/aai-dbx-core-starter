@@ -48,26 +48,33 @@
     "model_provider": {
       "type": "string",
       "default": "databricks",
-      "description": "Model provider",
+      "description": "Model provider. Choose `databricks` (recommended default: gateway-ready serving endpoint, no extra auth wiring; the enterprise attaches AI Gateway rate limits and usage tracking) unless your team already operates its own Foundry resource — then `foundry` calls it directly with Entra tokens. Either way, application code only uses the logical name",
       "enum": ["databricks", "foundry"],
       "order": 8
     },
     "model_deployment": {
       "type": "string",
       "default": "replace-with-model-endpoint",
-      "description": "Databricks endpoint or Foundry deployment name",
+      "description": "Databricks serving endpoint name or Foundry deployment name",
       "order": 9
     },
     "foundry_endpoint": {
       "type": "string",
       "default": "https://replace-with-foundry-resource.services.ai.azure.com",
-      "description": "Foundry resource endpoint; ignored for Databricks models",
-      "order": 10
+      "description": "Foundry resource endpoint (only asked for Foundry models)",
+      "order": 10,
+      "skip_prompt_if": {
+        "properties": {
+          "model_provider": {
+            "const": "databricks"
+          }
+        }
+      }
     },
     "retrieval_provider": {
       "type": "string",
       "default": "azure_ai_search",
-      "description": "Retrieval provider",
+      "description": "Retrieval provider. `databricks_ai_search` keeps data, governance, and billing inside the workspace (best when your documents already live in Unity Catalog); `azure_ai_search` fits corpora indexed outside Databricks or shared with non-Databricks consumers. Both are keyless and expose the same search contract",
       "enum": ["azure_ai_search", "databricks_ai_search"],
       "order": 11
     },
@@ -86,7 +93,7 @@
     "embedding_deployment": {
       "type": "string",
       "default": "replace-with-embedding-endpoint",
-      "description": "Embedding deployment or endpoint name",
+      "description": "Embedding deployment or endpoint name. Its embedding dimension must match the search index's vector field (the config default assumes 1536, e.g. text-embedding-3-small); index, embeddings, and chunking change together as one release",
       "order": 14
     },
     "aai_core_version": {
