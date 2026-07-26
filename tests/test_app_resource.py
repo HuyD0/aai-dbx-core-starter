@@ -172,18 +172,39 @@ def test_workflow_directory_contains_no_yaml_extension_files():
     ), "workflows must use .yml so the pinning and credential guards see them"
 
 
-def test_app_resource_is_outside_the_auto_included_glob():
-    """databricks.yml globs `resources/*.yml`. The console must not be swept in: the CI
-    principal has no app permission, so an auto-deployed app would fail every push to
-    main and take the sample-job deployment down with it."""
+def test_app_resource_is_not_swept_in_by_the_wildcard_include():
+    """`resources/*.yml` is one level deep, so a file in resources/optional/ is only
+    deployed by an explicit, deliberate include. That is the safety property: the CI
+    principal has no app permission until the external grants land."""
     bundle = yaml.safe_load((ROOT / "databricks.yml").read_text(encoding="utf-8"))
-    includes = bundle["include"]
+    assert "resources/*.yml" in bundle["include"]
     assert RESOURCE.parent.name == "optional"
-    assert (
-        "resources/optional/platform_console.yml" not in includes
-    ), "opting the console in is a deliberate act gated on external grants"
-    # The glob is one level deep, so a nested file is genuinely not matched.
-    assert not list((ROOT / "resources").glob("*.yml")) == [RESOURCE]
+    assert RESOURCE not in set((ROOT / "resources").glob("*.yml"))
+
+
+def test_opting_the_console_in_requires_a_real_usage_policy():
+    """Opting in must stay *possible*. This gate previously forbade the include
+    outright, making the documented deployment path unmergeable on protected main.
+
+    So the include is allowed; what is enforced is that enabling it comes with the
+    provisioned inputs. An app has no tags field, so deploying with the placeholder
+    policy id would put an always-on billable app in the workspace, unattributed.
+    """
+    bundle = yaml.safe_load((ROOT / "databricks.yml").read_text(encoding="utf-8"))
+    included = any(
+        "resources/optional/platform_console.yml" in str(entry)
+        for entry in bundle["include"]
+    )
+    if not included:
+        return  # default-off, nothing to validate
+
+    policy = bundle["variables"]["app_usage_policy_id"]["default"]
+    assert not policy.startswith("replace-with"), (
+        "set app_usage_policy_id to the real serverless usage policy id before "
+        "including the console — see docs/platform-console.md"
+    )
+    suffix = bundle["variables"]["app_suffix"]["default"]
+    assert suffix, "app_suffix must be set; app names are workspace-global"
 
 
 def test_app_resource_carries_cost_attribution_and_no_tags():

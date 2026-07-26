@@ -77,8 +77,8 @@ update one that already exists.
 > 1. **Create the app out-of-band.** Please run `databricks apps create` for an app named
 >    `aai-platform-console-dev` in the `dbx-dev` workspace. Creating it through CI would
 >    mint a workspace service principal from a repository pipeline, which our operating
->    contract reserves for your process. Once it exists, we bind to it with
->    `databricks bundle deploy`, which only ever updates it.
+>    contract reserves for your process. We then bind to that existing app so CI only ever
+>    updates it — see "Binding" below.
 > 2. **Grant the CI principal update rights on that app only.** Principal:
 >    `github-actions-aai-dbx-core-starter`, client id
 >    `a7e40167-d3f6-48a9-acd9-7998230cce34`, service principal object id
@@ -94,6 +94,28 @@ update one that already exists.
 > The app's own auto-provisioned service principal additionally needs `READ VOLUME` on the
 > SDK artifact volume so the console can report whether the platform can read the published
 > wheel. It needs no other privilege — it reads no application data.
+
+### Binding — required, and easy to get wrong
+
+`databricks bundle deploy` does **not** adopt an existing workspace app just because the
+name matches. Without a binding in the deployment state it plans a *new* app, and then
+either fails on the duplicate name or attempts the creation that rule 8 forbids. The
+one-time bind, after the platform owner has created the app:
+
+```bash
+databricks bundle deployment bind platform_console aai-platform-console-dev --auto-approve
+```
+
+The CLI's own help is explicit that this is what causes the existing workspace resource to
+be updated on the next deployment. `databricks bundle generate app --existing-app-name
+<name> --key platform_console --bind` does the generate-and-bind in one step instead.
+
+**The bind must be recorded in the state CI uses.** With `mode: development`, bundle
+deployment state lives under the *deploying principal's* home, so a bind performed from a
+developer's laptop is invisible to the CI service principal and the first CI deploy would
+still plan a new app. Perform the bind as the CI principal, and confirm this behaviour
+against the live workspace before the first deploy — it is on the phase-0 checklist for
+exactly this reason.
 
 Also confirm two workspace settings, either of which silently breaks deployment:
 

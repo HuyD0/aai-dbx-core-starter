@@ -17,9 +17,24 @@
 #   3. The platform owner has ALREADY CREATED the app out-of-band with
 #      `databricks apps create`. Creating an app auto-provisions a workspace service
 #      principal, which AGENTS.md section 4 rule 8 reserves for the human-run platform
-#      process — CI may only ever update an app that already exists. Bind with
-#      `databricks bundle deploy` after `databricks bundle generate app`.
-#   4. `app_usage_policy_id` below holds a real serverless usage policy id.
+#      process — CI may only ever update an app that already exists.
+#   4. That existing app has been BOUND to this resource key. `bundle deploy` does NOT
+#      adopt a workspace resource just because the name matches: without a binding in the
+#      deployment state it plans a new app, and then either fails on the duplicate name or
+#      attempts the app creation that rule 8 forbids. The one-time bind is:
+#
+#        databricks bundle deployment bind platform_console \
+#          aai-platform-console-<suffix> --auto-approve
+#
+#      (or `databricks bundle generate app --existing-app-name <name> \
+#      --key platform_console --bind` to generate and bind in one step).
+#
+#      CAUTION: bundle deployment state in `mode: development` lives under the *deploying
+#      principal's* home, so a bind performed from a laptop is not visible to CI. The bind
+#      must be recorded in the same state the deploy workflow uses — i.e. performed as the
+#      CI service principal. Confirm this against the live workspace before the first
+#      deploy; see docs/platform-console.md.
+#   5. `app_usage_policy_id` below holds a real serverless usage policy id.
 #
 # Cost attribution note: an app resource has NO tags field (the bundle schema is
 # additionalProperties: false and the CLI applies no presets to apps), so the nine

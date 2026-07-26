@@ -169,3 +169,40 @@ def test_content_is_parsed_once_rather_than_per_request(config):
     client.get("/")
     client.get("/api/content")
     assert app.state.tracks is before, "tracks must not be re-rendered per request"
+
+
+def test_local_runs_never_probe_the_workspace_as_the_developer(config, monkeypatch):
+    """Outside the hosted app, ambient auth is the developer's own identity.
+
+    Probing it would report personal permissions under a heading that claims they are
+    platform state — the conflation this module exists to prevent. A local run must skip
+    instead, even when databricks-sdk is installed and `az login` has been run.
+    """
+    called = False
+
+    class _ShouldNotBeUsed:
+        def __init__(self, *a, **k):
+            nonlocal called
+            called = True
+
+    monkeypatch.setattr("aai_console.checks.WorkspaceProbe", _ShouldNotBeUsed)
+    assert config.hosted is False
+    checks = run_checks(config)  # no probe injected: the ambient path
+
+    assert not called, "a local run must not construct a workspace client"
+    assert {c.status for c in checks} == {"skip"}
+    assert all("hosted app" in c.detail for c in checks)
+
+
+def test_hosted_runs_do_probe(monkeypatch):
+    """The gate is on `hosted`, not a blanket disable — the app must still report."""
+    hosted = ConsoleConfig(
+        identifiers={key: IDENTIFIERS[key] for key in IDENTIFIER_KEYS},
+        hosted=True,
+        app_name="aai-platform-console-dev",
+    )
+    monkeypatch.setattr(
+        "aai_console.checks.WorkspaceProbe", lambda: WorkspaceProbe(_FakeWorkspace())
+    )
+    checks = run_checks(hosted)
+    assert [c.status for c in checks] == ["pass", "pass", "pass"]

@@ -116,7 +116,18 @@ def _skip_all(reason: str) -> list[PlatformCheck]:
 def run_checks(
     config: ConsoleConfig, probe: WorkspaceProbe | None = None
 ) -> list[PlatformCheck]:
-    probe = probe if probe is not None else WorkspaceProbe()
+    if probe is None:
+        if not config.hosted:
+            # Outside the hosted app there is no app service principal. Ambient auth
+            # here is the *developer's* own identity, so probing would report personal
+            # permissions under a heading claiming they are platform state — the exact
+            # conflation this module exists to prevent. Refuse rather than mislabel.
+            return _skip_all(
+                "platform state is only reported by the hosted app; locally, run "
+                "`python3.12 scripts/setup_dev.py --check-only` to check your access"
+            )
+        probe = WorkspaceProbe()
+
     if not probe.available:
         return _skip_all(probe.unavailable_reason or "the workspace is not reachable")
 
