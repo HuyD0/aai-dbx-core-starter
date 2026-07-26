@@ -60,7 +60,7 @@ There are no stored credentials in this chain.
 | Dev workspace | `dbx-dev` / `https://adb-7405609799238491.11.azuredatabricks.net` / `7405609799238491` |
 | Project RG | `rg-aai-dbx-base-template-dev` (`eastus2`) |
 | Terraform state | `rg-terraform-state` / `tfstatee18f8286` / `tfstate` / `aai-dbx-base-template/dev.tfstate` |
-| SDK artifact path | `/Volumes/platform/artifacts/python_packages/aai_core/<version>/` |
+| SDK artifact path | `/Volumes/dbx_dev/dbx_platform/python_packages/aai_core/<version>/` |
 
 These are non-secret identifiers. Do not classify them as secrets.
 
@@ -220,7 +220,7 @@ attribution.
   builds the wheel, creates a checksum, and refuses to overwrite an existing
   artifact.
 - The non-secret repo variable `SDK_ARTIFACT_VOLUME` points to
-  `/Volumes/platform/artifacts/python_packages`.
+  `/Volumes/dbx_dev/dbx_platform/python_packages`.
 - Generated projects download and checksum the exact pinned wheel locally and
   install the same volume path in Databricks jobs.
 

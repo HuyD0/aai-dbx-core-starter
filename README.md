@@ -103,7 +103,7 @@ workflow, hermetic tests on `aai_core.testing` fakes, and an
 Wheels are released immutably to:
 
 ```text
-/Volumes/platform/artifacts/python_packages/aai_core/<version>/
+/Volumes/dbx_dev/dbx_platform/python_packages/aai_core/<version>/
 ```
 
 From the `main` branch, run the `publish-sdk` workflow with the exact version

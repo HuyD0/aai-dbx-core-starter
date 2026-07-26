@@ -26,7 +26,7 @@ a GitHub runner with zero stored secrets.
 | 4 | Databricks SP registration | SP `a7e40167-…` in `dbx-dev` + `CAN_USE` on policy `0005F2031B6D2319` | Databricks CLI | no |
 | 5 | GitHub repo variables | Identity/workspace ids, cost tags, owner group, and SDK volume path | `gh` | new |
 | 6 | Terraform state | `rg-terraform-state` / `tfstatee18f8286` / container `tfstate` | pre-existing account, new key | reused account |
-| 7 | SDK artifact volume | `platform.artifacts.python_packages` | human-run Databricks SQL | new |
+| 7 | SDK artifact volume | `dbx_dev.dbx_platform.python_packages` | human-run Databricks SQL | new |
 
 No client secrets, PATs, or access keys are created anywhere.
 
@@ -149,7 +149,7 @@ gh variable set DATABRICKS_HOST       -R HuyD0/aai-dbx-core-starter -b https://a
 gh variable set COST_CENTER           -R HuyD0/aai-dbx-core-starter -b CC-1234
 gh variable set TEAM                  -R HuyD0/aai-dbx-core-starter -b data-platform
 gh variable set OWNER_GROUP           -R HuyD0/aai-dbx-core-starter -b group:data-platform-owners
-gh variable set SDK_ARTIFACT_VOLUME   -R HuyD0/aai-dbx-core-starter -b /Volumes/platform/artifacts/python_packages
+gh variable set SDK_ARTIFACT_VOLUME   -R HuyD0/aai-dbx-core-starter -b /Volumes/dbx_dev/dbx_platform/python_packages
 
 gh variable list -R HuyD0/aai-dbx-core-starter
 ```

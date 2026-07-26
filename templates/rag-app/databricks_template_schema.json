@@ -110,7 +110,7 @@
     },
     "aai_core_volume": {
       "type": "string",
-      "default": "/Volumes/platform/artifacts/python_packages",
+      "default": "/Volumes/dbx_dev/dbx_platform/python_packages",
       "description": "Unity Catalog volume holding aai-core wheels",
       "order": 16
     },
