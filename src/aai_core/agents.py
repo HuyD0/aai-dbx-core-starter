@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from aai_core.exceptions import AaiCoreError
+from aai_core.tracing import provider_span
 
 if TYPE_CHECKING:  # avoids a runtime import cycle with providers
     from aai_core.providers.types import ChatModel, ModelResponse
@@ -60,10 +61,51 @@ class ToolLoopResult:
     response: ModelResponse
     transcript: tuple[Mapping[str, Any], ...]
     tool_invocations: tuple[ToolInvocation, ...]
+    model_responses: tuple[ModelResponse, ...] = ()
 
     @property
     def tool_names(self) -> tuple[str, ...]:
         return tuple(invocation.name for invocation in self.tool_invocations)
+
+    @property
+    def total_latency_ms(self) -> float:
+        """Total model latency across every turn in the tool loop."""
+
+        return sum(response.latency_ms for response in self._all_model_responses())
+
+    @property
+    def usage(self) -> Mapping[str, int]:
+        """Aggregate canonical token usage across every model turn.
+
+        OpenAI chat-completions responses use ``prompt_tokens`` and
+        ``completion_tokens`` while newer APIs use ``input_tokens`` and
+        ``output_tokens``. The loop result always exposes the latter names.
+        """
+
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+        for response in self._all_model_responses():
+            usage = response.usage
+            response_input = _token_count(usage, "input_tokens", "prompt_tokens")
+            response_output = _token_count(usage, "output_tokens", "completion_tokens")
+            input_tokens += response_input
+            output_tokens += response_output
+            total_tokens += _token_count(
+                usage,
+                "total_tokens",
+                default=response_input + response_output,
+            )
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    def _all_model_responses(self) -> tuple[ModelResponse, ...]:
+        # The fallback preserves useful aggregates for callers that construct
+        # ToolLoopResult with the original three-field API.
+        return self.model_responses or (self.response,)
 
 
 class ToolRegistry:
@@ -100,8 +142,15 @@ class ToolRegistry:
                 remediation="Register the tool in the ToolRegistry or tighten "
                 "the tool descriptions so the model stops inventing names.",
             ) from error
-        result = spec.handler(**dict(arguments))
-        return result if isinstance(result, str) else json.dumps(result)
+        with provider_span(name, span_type="TOOL") as span:
+            inputs = dict(arguments)
+            if span is not None:
+                span.set_inputs(inputs)
+            result = spec.handler(**inputs)
+            serialized = result if isinstance(result, str) else json.dumps(result)
+            if span is not None:
+                span.set_outputs(serialized)
+            return serialized
 
 
 def run_tool_loop(
@@ -122,13 +171,16 @@ def run_tool_loop(
 
     transcript: list[Mapping[str, Any]] = list(messages)
     invocations: list[ToolInvocation] = []
+    responses: list[ModelResponse] = []
     for _ in range(max_turns):
         response = model.generate(transcript, tools=registry.openai_tools(), **options)
+        responses.append(response)
         if not response.tool_calls:
             return ToolLoopResult(
                 response=response,
                 transcript=tuple(transcript),
                 tool_invocations=tuple(invocations),
+                model_responses=tuple(responses),
             )
         transcript.append(
             {
@@ -166,3 +218,15 @@ def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
         "type": "function",
         "function": {"name": function.name, "arguments": function.arguments},
     }
+
+
+def _token_count(
+    usage: Mapping[str, int],
+    *names: str,
+    default: int = 0,
+) -> int:
+    for name in names:
+        value = usage.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+    return default

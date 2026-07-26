@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from numbers import Real
 from pathlib import Path
 from typing import Any, Literal
 
 from aai_core.exceptions import AaiCoreError
+from aai_core.providers.types import ProviderConfigurationError
 from aai_core.tags import ResourceContext
 
 
@@ -128,6 +130,7 @@ class EvaluationSuite:
         failures = _evaluate_thresholds(
             metrics, self.thresholds, baseline_metrics or {}
         )
+        failures.extend(_gated_scorer_error_failures(raw, self.thresholds))
         return EvaluationReport(metrics=metrics, failures=tuple(failures), raw=raw)
 
     def run_tracked(
@@ -186,13 +189,24 @@ class EvaluationSuite:
         name: str,
         value: Any,
         rationale: str | None = None,
+        source: Any | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        span_id: str | None = None,
     ) -> None:
-        self._client().log_feedback(
-            trace_id=trace_id,
-            name=name,
-            value=value,
-            rationale=rationale,
-        )
+        options: dict[str, Any] = {
+            "trace_id": trace_id,
+            "name": name,
+            "value": value,
+        }
+        if rationale is not None:
+            options["rationale"] = rationale
+        if source is not None:
+            options["source"] = source
+        if metadata is not None:
+            options["metadata"] = dict(metadata)
+        if span_id is not None:
+            options["span_id"] = span_id
+        self._client().log_feedback(**options)
 
     def log_expectation(
         self,
@@ -237,6 +251,39 @@ def apply_thresholds(
     numeric = {str(key): float(value) for key, value in metrics.items()}
     failures = _evaluate_thresholds(numeric, tuple(thresholds), baseline_metrics or {})
     return EvaluationReport(metrics=numeric, failures=tuple(failures))
+
+
+def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
+    """Resolve an approved logical judge into MLflow's model URI.
+
+    Judges run through a Databricks serving endpoint so authentication,
+    gateway policy, and cost controls stay platform-owned. A Foundry model
+    must first be exposed through a governed Databricks external-model
+    endpoint.
+    """
+
+    models = getattr(settings, "models", {})
+    config = models.get(logical_name) if isinstance(models, Mapping) else None
+    if not isinstance(config, Mapping):
+        raise ProviderConfigurationError(
+            f"aai-platform.yml has no {logical_name!r} model entry",
+            remediation=f"Add providers.models.{logical_name} with the "
+            "gateway-fronted Databricks serving endpoint approved for judges.",
+        )
+    if config.get("provider") != "databricks":
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} must use provider 'databricks'",
+            remediation="Route the judge through a Databricks serving "
+            "endpoint; for Foundry models, use an external-model endpoint.",
+        )
+    deployment = config.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} has no deployment",
+            remediation=f"Set providers.models.{logical_name}.deployment to "
+            "the approved serving endpoint name.",
+        )
+    return f"endpoints:/{deployment.strip()}"
 
 
 def publish_report(
@@ -322,6 +369,53 @@ def _extract_metrics(result: Any) -> dict[str, float]:
         for key, value in source.items()
         if isinstance(value, (int, float))
     }
+
+
+def _gated_scorer_error_failures(
+    result: Any,
+    thresholds: Sequence[QualityThreshold],
+) -> list[GateFailure]:
+    """Fail thresholds whose aggregate silently excluded scorer errors."""
+
+    frame = getattr(result, "result_df", None)
+    columns = getattr(frame, "columns", ()) if frame is not None else ()
+    error_counts: dict[str, int] = {}
+    for column in columns:
+        name = str(column)
+        if not name.endswith("/error_message"):
+            continue
+        try:
+            values = frame[column]
+        except (KeyError, TypeError):
+            continue
+        count = sum(1 for value in values if _has_error_value(value))
+        if count:
+            error_counts[name.removesuffix("/error_message")] = count
+
+    failures: list[GateFailure] = []
+    for threshold in thresholds:
+        scorer_name = threshold.metric.rsplit("/", 1)[0]
+        if count := error_counts.get(scorer_name):
+            failures.append(
+                GateFailure(
+                    threshold.metric,
+                    f"{count} evaluation row(s) failed scoring; the aggregate "
+                    "excludes failed rows",
+                )
+            )
+    return failures
+
+
+def _has_error_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, Real) and not isinstance(value, bool):
+        try:
+            number = float(value)
+            return number == number
+        except (TypeError, ValueError):
+            return True
+    return str(value).strip().lower() not in {"", "nan", "nat", "none", "<na>"}
 
 
 def _evaluate_thresholds(
