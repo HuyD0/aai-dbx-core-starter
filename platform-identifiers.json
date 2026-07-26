@@ -4,5 +4,5 @@
   "azure_subscription_id": "ea936670-dda1-4884-8467-49c225bf3e83",
   "databricks_host": "https://adb-7405609799238491.11.azuredatabricks.net",
   "job_compute_policy_id": "0005F2031B6D2319",
-  "sdk_artifact_volume": "/Volumes/platform/artifacts/python_packages"
+  "sdk_artifact_volume": "/Volumes/dbx_dev/dbx_platform/python_packages"
 }
