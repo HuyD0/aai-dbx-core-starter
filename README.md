@@ -74,13 +74,17 @@ List every example and its execution mode with `make examples-list`.
 
 ```bash
 make install
+make hooks-install
 make check
 ```
 
 `make install` creates or synchronizes `.venv` from `uv.lock`. Run `make help`
 to see focused targets for formatting, tests, builds, Terraform validation,
 template synchronization, and authenticated Databricks bundle validation.
-`make verify` runs the complete credential-free verification path used by CI.
+`make hooks-install` installs a fast credential-free commit hook and the full
+CI-equivalent verifier as a pre-push hook. Both use only repository-local hook
+definitions—no third-party hook repository is downloaded or executed. Run them
+manually with `make pre-commit`, `make pre-push`, or `make hooks-run`.
 
 Optional provider dependencies are separated:
 

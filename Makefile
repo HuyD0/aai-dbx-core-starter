@@ -17,7 +17,8 @@ LOCAL_MLFLOW_URI = sqlite:///$(LOCAL_MLFLOW_DB)
 	sync-templates check-templates terraform-format terraform-format-check \
 	terraform-init terraform-validate bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
-	local-ui workspace-connect workspace-example examples-connect example
+	local-ui workspace-connect workspace-example examples-connect example \
+	pre-commit pre-push hooks-install hooks-run
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -31,6 +32,19 @@ check-uv: ## Check that the pinned environment manager is available.
 
 install: check-uv ## Create/sync the locked SDK development environment with uv.
 	$(UV) sync --extra dev --locked
+
+pre-commit: ## Run the fast credential-free commit gate.
+	./scripts/pre-commit.sh
+
+pre-push: ## Run the complete credential-free verification gate.
+	./scripts/pre-push.sh
+
+hooks-install: install ## Install the repository's pre-commit and pre-push hooks.
+	$(PYTHON) -m pre_commit install \
+		--hook-type pre-commit \
+		--hook-type pre-push
+
+hooks-run: pre-commit pre-push ## Run both Git hook stages now.
 
 examples-install: check-uv ## Install the locked Databricks and GenAI example dependencies.
 	$(UV) sync --extra dev --extra databricks --extra genai --locked

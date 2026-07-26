@@ -159,6 +159,7 @@ The root `Makefile` provides the same workflow as discoverable shortcuts:
 ```bash
 make help
 make install
+make hooks-install
 make check
 make verify
 ```

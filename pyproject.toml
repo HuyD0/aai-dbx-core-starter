@@ -42,6 +42,7 @@ dev = [
   "black>=26.5.1,<27",
   "build>=1.5,<2",
   "hatchling>=1.31,<2",
+  "pre-commit>=4.6.1,<5",
   "pytest>=9.1.1,<10",
   "ruff>=0.16,<1",
   "zizmor>=1.5,<2",
