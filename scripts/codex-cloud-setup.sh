@@ -6,7 +6,6 @@ set -euo pipefail
 
 readonly PYTHON_VERSION="3.12"
 readonly UV_VERSION="0.8.23"
-readonly TERRAFORM_VERSION="1.12.2"
 # KEEP IN LOCKSTEP with the databricks/setup-cli SHA pinned in
 # .github/workflows/*.yml (tests/test_smoke.py enforces the match): a version
 # skew makes bundle behavior diverge between Codex/local and CI. Bumping this
@@ -31,12 +30,10 @@ fi
 case "$(uname -m)" in
   x86_64)
     archive_arch="amd64"
-    terraform_sha256="1eaed12ca41fcfe094da3d76a7e9aa0639ad3409c43be0103ee9f5a1ff4b7437"
     databricks_sha256="10938da31db7f89e6e90f6be41d340e3387231e5da5125cfc97ecb8cb66f6394"
     ;;
   aarch64 | arm64)
     archive_arch="arm64"
-    terraform_sha256="f8a0347dc5e68e6d60a9fa2db361762e7943ed084a773f28a981d988ceb6fdc9"
     databricks_sha256="a4fcc3b70ed4b26f0e8064e39287d0692218cf3d2f549042d66d04c9ad2d692a"
     ;;
   *)
@@ -63,16 +60,6 @@ if ! command -v pipx >/dev/null 2>&1; then
 fi
 if [[ "$(uv --version 2>/dev/null | awk '{print $2}' || true)" != "${UV_VERSION}" ]]; then
   pipx install --force "uv==${UV_VERSION}"
-fi
-
-if [[ "$(terraform version -json 2>/dev/null | jq -r '.terraform_version' || true)" != "${TERRAFORM_VERSION}" ]]; then
-  terraform_archive="${tmp_dir}/terraform.zip"
-  curl -fsSL \
-    "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${archive_arch}.zip" \
-    -o "${terraform_archive}"
-  echo "${terraform_sha256}  ${terraform_archive}" | sha256sum --check -
-  unzip -qo "${terraform_archive}" -d "${local_bin}"
-  chmod 0755 "${local_bin}/terraform"
 fi
 
 if [[ "$(databricks version 2>/dev/null | awk '{print $3}' || true)" != "v${DATABRICKS_CLI_VERSION}" ]]; then
@@ -113,6 +100,5 @@ fi
 cd "${repo_root}"
 uv lock --check
 uv sync --python "${PYTHON_VERSION}" --extra dev --locked
-terraform -chdir=infra init -backend=false -input=false
 
 ./scripts/cloud-verify.sh

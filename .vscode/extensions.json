@@ -4,7 +4,6 @@
     "ms-python.vscode-pylance",
     "charliermarsh.ruff",
     "ms-python.black-formatter",
-    "hashicorp.terraform",
     "redhat.vscode-yaml",
     "databricks.databricks"
   ]

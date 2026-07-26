@@ -5,7 +5,6 @@ SHELL := /bin/bash
 PYTHON ?= .venv/bin/python
 UV ?= uv
 UV_VERSION ?= 0.8.23
-TERRAFORM ?= terraform
 DATABRICKS ?= databricks
 TARGET ?= dev
 EXAMPLE ?=
@@ -14,8 +13,7 @@ LOCAL_MLFLOW_DB ?= $(LOCAL_MLFLOW_DIR)/mlflow.db
 LOCAL_MLFLOW_URI = sqlite:///$(LOCAL_MLFLOW_DB)
 
 .PHONY: help check-uv install lint format format-check test build check verify \
-	sync-templates check-templates terraform-format terraform-format-check \
-	terraform-init terraform-validate bundle-validate validate-templates doctor \
+	sync-templates check-templates bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run
@@ -109,19 +107,7 @@ sync-templates: ## Copy the canonical shared scaffold into every template.
 check-templates: ## Check that generated template scaffold files are in sync.
 	$(PYTHON) scripts/sync_template_shared.py --check
 
-terraform-format: ## Format Terraform configuration.
-	$(TERRAFORM) fmt -recursive infra
-
-terraform-format-check: ## Check Terraform formatting.
-	$(TERRAFORM) fmt -check -recursive infra
-
-terraform-init: ## Initialize Terraform without the remote backend.
-	$(TERRAFORM) -chdir=infra init -backend=false -input=false
-
-terraform-validate: terraform-init ## Validate Terraform configuration.
-	$(TERRAFORM) -chdir=infra validate
-
-check: check-templates format-check test build terraform-format-check terraform-validate ## Run the standard pre-commit checks.
+check: check-templates format-check test build ## Run the standard pre-commit checks.
 
 verify: ## Run the complete credential-free verification used by CI.
 	./scripts/cloud-verify.sh

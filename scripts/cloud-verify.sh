@@ -57,12 +57,6 @@ uv run --python "${PYTHON_VERSION}" python -m build --no-isolation
 uv run --python "${PYTHON_VERSION}" zizmor --offline .github/workflows \
   templates/*/template/.github/workflows
 
-terraform fmt -check -recursive infra
-if [[ ! -d infra/.terraform/providers ]]; then
-  terraform -chdir=infra init -backend=false -input=false
-fi
-terraform -chdir=infra validate
-
 databricks bundle schema >/dev/null
 uv run --python "${PYTHON_VERSION}" python - <<'PY'
 from pathlib import Path

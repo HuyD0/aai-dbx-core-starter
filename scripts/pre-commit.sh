@@ -10,5 +10,5 @@ if [[ ! -x .venv/bin/python ]]; then
 fi
 
 # Keep the commit gate credential-free and fast. The pre-push hook runs the
-# complete build, workflow-security, Terraform, and schema verification tier.
+# complete build, workflow-security, and schema verification tier.
 make check-templates format-check test

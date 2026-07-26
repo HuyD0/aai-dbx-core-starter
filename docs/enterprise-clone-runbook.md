@@ -1,110 +1,86 @@
 # Enterprise clone runbook
 
-Ordered checklist to stand this repository up in another GitHub org and Azure
-tenant (for example, cloning the personal proving ground into the enterprise).
-Nothing in this flow creates or stores a secret; the clone re-establishes the
-same keyless chain against the new tenant.
+Use this checklist to connect a clone of this repository to resources managed
+by another GitHub organization, Azure tenant, and Databricks workspace. The
+repository does not provision those resources.
 
-**Why identity cannot be reused:** the federated credential subject embeds the
-*immutable* GitHub owner and repo ids
-(`repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main`). A clone has
-new ids, so the existing app registration and FIC are useless to it — the
-bootstrap must be re-run, which is by design (AGENTS.md rule 8: bootstrap is
-human-run).
-
-Estimated effort once prerequisites are met: under an hour of hands-on work.
-
----
-
-## 1. Clone and capture the new immutable ids
+## 1. Capture the clone's immutable GitHub IDs
 
 ```bash
-# [you] after creating <org>/<repo> in the enterprise
-gh api users/<org>  --jq .id          # or orgs/<org> for an organization
+gh api users/<org> --jq .id
 gh api repos/<org>/<repo> --jq .id
 ```
 
-## 2. Edit the identifier sources (two files + one table)
+The federated credential subject embeds these numeric owner and repository
+IDs. A clone cannot reuse the current repository's subject.
 
-1. `platform-identifiers.json` — tenant id, subscription id, workspace host,
-   job compute policy id, SDK artifact volume. **Edit this first**; the smoke
-   tests then fail on every other file that must agree until step 3 is done.
-2. `infra/terraform.tfvars` — `tenant_id`, `subscription_id`, `github_owner`,
-   `repo_name`, `github_owner_id`, `repo_id` (from step 1), app display name,
-   cost tags, region.
-3. `AGENTS.md` §3 — the human-readable identifier table.
+## 2. Request the external platform prerequisites
 
-Also update, as pointed out by the failing cross-check tests:
+Ask the enterprise identity and platform owners for:
 
-- `databricks.yml`: `targets.dev.workspace.host` (must be a literal — the CLI
-  forbids variables in authentication fields) and the
-  `job_compute_policy_id` variable default.
-- every `templates/*/databricks_template_schema.json`: `workspace_host`,
-  `compute_policy_id`, and `aai_core_volume` defaults.
-- `infra/backend.tf`: enterprise state storage account/container/key — or
-  delete the file to bootstrap with local state.
+- a repository-specific Entra application and service principal;
+- a `main` branch federated credential using the new immutable IDs;
+- registration in the target Databricks workspace;
+- `CAN_USE` on the approved job-compute policy;
+- least-privilege access to the SDK artifact volume.
 
-Run `pytest -q tests/test_smoke.py` until green: the identifier fixture test
-enumerates anything still inconsistent.
+The identity must have no client secret and should have no Azure ARM role
+unless an independently reviewed workload requirement needs one. Do not add
+infrastructure provisioning to this repository or its CI.
 
-## 3. Bootstrap the OIDC identity (human-run Terraform)
+## 3. Update repository identifiers
 
-Follow `docs/cloud-setup.md` §2 against the enterprise tenant: `terraform
-init` (multi-platform provider lock), `plan`, `apply`. Output: one secretless
-app registration + one federated credential whose subject uses the new
-immutable ids. Verify with `az ad app federated-credential list`.
+Edit `platform-identifiers.json` first:
 
-## 4. Register the CI service principal in the enterprise workspace
+- `azure_tenant_id`
+- `azure_subscription_id`
+- `databricks_host`
+- `job_compute_policy_id`
+- `sdk_artifact_volume`
 
-Follow `docs/cloud-setup.md` §3 with the enterprise workspace host and the new
-client id: create the SP in the workspace, grant `CAN_USE` on the enterprise
-job-compute policy (the id you put in `platform-identifiers.json`), and grant
-`READ VOLUME`/`WRITE VOLUME` on the enterprise SDK artifact volume. Do not
-grant admin or cluster-create.
+Then update the human-readable table in `AGENTS.md` and the values identified
+by the smoke tests:
 
-## 5. Set repository variables (non-secret)
+- the literal dev workspace host and compute-policy default in
+  `databricks.yml`;
+- `workspace_host`, `compute_policy_id`, and `aai_core_volume` defaults in
+  every `templates/*/databricks_template_schema.json`.
 
-Follow `docs/cloud-setup.md` §4 substituting the enterprise values:
-`AZURE_CLIENT_ID` (new app), `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
-`DATABRICKS_HOST`, `SDK_ARTIFACT_VOLUME`, `COST_CENTER`, `TEAM`,
-`OWNER_GROUP`. No `gh secret set`, ever.
+Run:
 
-## 6. Wire model access through the enterprise gateway
+```bash
+pytest -q tests/test_smoke.py
+```
 
-The enterprise reaches LLMs through Azure APIM or Databricks AI Gateway —
-never direct Foundry. This is configuration only (`aai-platform.yml` in
-consuming projects); application code keeps using logical names:
+The identifier cross-checks report each remaining value that must agree.
 
-- **Databricks AI Gateway**: point the logical model's `provider: databricks`
-  `deployment` at the gateway-enabled serving endpoint name. Nothing else
-  changes.
-- **Azure APIM**: use `provider: azure_apim` with the APIM `base_url`, the
-  enterprise `token_scope` (the APIM app registration audience), and — only if
-  the enterprise mandates subscription keys for chargeback — a
-  `subscription_key` secret *reference* (`keyvault://…` or
-  `databricks-secret://…`), never a value.
+## 4. Configure repository variables
 
-See `aai-platform.example.yml` for the same logical name resolved all three
-ways (direct dev, APIM, gateway-fronted serving endpoint).
+Follow `docs/cloud-setup.md` with the enterprise client ID, tenant,
+subscription, workspace, artifact path, and attribution values. Use GitHub
+repository variables, never secrets.
 
-## 7. Protect `main`, then verify end-to-end
+## 5. Configure model access
 
-1. Apply branch protection + CODEOWNERS per `docs/cloud-setup.md` §8.1 (and
-   enterprise org policy: secret scanning, push protection).
-2. `gh workflow run auth-smoke.yml --ref main` — proves the OIDC exchange.
-3. Merge to `main` (or dispatch `deploy.yml`) — the `deploy` job going green is
-   the definitive authorization test.
-4. `./scripts/cloud-verify.sh` locally for the offline checks.
+Enterprise LLM access should flow through Azure API Management or Databricks AI
+Gateway. This is application configuration in `aai-platform.yml`; application
+code continues to use logical resource names.
 
-## Enterprise deltas
+- For Databricks AI Gateway, configure the logical model's
+  `provider: databricks` deployment as the gateway-enabled serving endpoint.
+- For Azure API Management, use `provider: azure_apim`, the enterprise
+  `base_url`, and `token_scope`. If a subscription key is mandatory, store
+  only a secret reference such as `keyvault://...` or
+  `databricks-secret://...`.
 
-- **Multiple workspaces (staging/prod)**: each additional target needs its own
-  federated credential first (environment-subject form), then the GitHub
-  protected environment, then the target in `databricks.yml` — in that order.
-  See `docs/cloud-setup.md` §7.
-- **Enterprise Key Vaults / AI Search**: `aai-platform.yml` entries only
-  (secret *references* and endpoint identifiers). The SDK is logical-name
-  based; no code changes.
-- **Sandboxed shells**: if `databricks` CLI calls fail on TLS while `az`
-  works, the network blocks `*.azuredatabricks.net`; use a GitHub runner
-  (AGENTS.md §7).
+## 6. Protect and verify
+
+1. Protect `main` and require code-owner review.
+2. Run `gh workflow run auth-smoke.yml --ref main`.
+3. Run or merge into `deploy.yml`; a green deployment is the definitive
+   authorization test.
+4. Run `./scripts/cloud-verify.sh` for the credential-free local checks.
+
+Each additional staging or production target needs its externally managed
+federated credential and workspace registration before its GitHub environment
+or deployment job is enabled.

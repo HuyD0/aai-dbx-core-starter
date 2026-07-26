@@ -58,9 +58,7 @@ There are no stored credentials in this chain.
 | Federated credential | `gh-aai-dbx-core-starter-main` |
 | FIC subject | `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` |
 | Dev workspace | `dbx-dev` / `https://adb-7405609799238491.11.azuredatabricks.net` / `7405609799238491` |
-| Project RG | `rg-aai-dbx-base-template-dev` (`eastus2`) |
-| Terraform state | `rg-terraform-state` / `tfstatee18f8286` / `tfstate` / `aai-dbx-base-template/dev.tfstate` |
-| SDK artifact path | `/Volumes/dbx_dev/dbx_platform/python_packages/aai_core/<version>/` |
+| SDK artifact path | `/Volumes/platform/artifacts/python_packages/aai_core/<version>/` |
 
 These are non-secret identifiers. Do not classify them as secrets.
 
@@ -83,8 +81,8 @@ remaining file that must agree (this table included).
    `id-token: write`, a real credential, or cloud integration calls to the
    `pull_request` workflow.
 4. **Credentialed jobs have no GitHub `environment:`.** The FIC uses a
-   branch-ref subject. Add a matching environment FIC in Terraform before
-   introducing an environment gate.
+   branch-ref subject. Have the platform identity owner add a matching
+   environment FIC before introducing an environment gate.
 5. **Least privilege.** The dedicated CI principal has no ARM RBAC, is
    registered only in `dbx-dev`, is not workspace admin, and uses constrained
    compute. Wheel publication adds only `READ VOLUME` and `WRITE VOLUME` on the
@@ -94,9 +92,10 @@ remaining file that must agree (this table included).
    policy, or FIC.
 7. **The legacy app is shared.** Do not delete, rotate, or mutate
    `github-actions-dbx-platform` or its other credentials/assignments.
-8. **Bootstrap is human-run.** Terraform identity changes, Databricks
+8. **Bootstrap is external and human-run.** Identity changes, Databricks
    principal registration, catalogs, volumes, permissions, model endpoints,
-   search services, and indexes are not provisioned by CI or application code.
+   search services, and indexes are provisioned through approved platform
+   processes, not this repository, CI, or application code.
 9. **`main` protection is the security boundary.** Require PR and code-owner
    review, block direct/force push, and enforce protection on administrators.
 10. **Pin every GitHub Action to a full commit SHA.** Credentialed workflows
@@ -171,9 +170,6 @@ ruff check .
 black --check .
 pytest -q
 python -m build
-terraform fmt -check -recursive infra
-terraform -chdir=infra init -backend=false
-terraform -chdir=infra validate
 ```
 
 ### Codex Cloud
@@ -186,9 +182,9 @@ The repository has one supported credential-free cloud verification path:
 
 The Codex environment uses `scripts/codex-cloud-setup.sh` as its setup script
 and `scripts/codex-cloud-maintenance.sh` as its maintenance script. They pin
-Python 3.12, uv, Terraform, Databricks CLI, and Azure CLI, then cache all
-dependencies required by `cloud-verify.sh`. Agent-phase internet access and
-cloud credentials are intentionally absent.
+Python 3.12, uv, Databricks CLI, and Azure CLI, then cache all dependencies
+required by `cloud-verify.sh`. Agent-phase internet access and cloud credentials
+are intentionally absent.
 
 Codex Cloud cannot use the GitHub Actions OIDC identity. It runs offline checks,
 opens a proposed change, and relies on protected `main` to hand authenticated
@@ -221,16 +217,18 @@ Unity Catalog governed tags control supported securables. If a compute policy
 fixes or forbids a tag, align the template and policy rather than dropping cost
 attribution.
 
-## 9. Infrastructure and release changes
+## 9. External infrastructure and release changes
 
-- Identity changes go through `infra/*.tf`; never use imperative `az ad`
-  mutations.
-- A human runs `terraform plan` and `apply`.
+- This repository does not own or provision cloud infrastructure. Do not add
+  infrastructure-as-code tooling to its setup, CI, verification, or templates.
+- Identity and platform-resource changes go through an approved external
+  platform process. Do not use repository scripts or CI for imperative
+  identity mutations.
 - The `publish-sdk` workflow runs from `main`, verifies the requested version,
   builds the wheel, creates a checksum, and refuses to overwrite an existing
   artifact.
 - The non-secret repo variable `SDK_ARTIFACT_VOLUME` points to
-  `/Volumes/dbx_dev/dbx_platform/python_packages`.
+  `/Volumes/platform/artifacts/python_packages`.
 - Generated projects download and checksum the exact pinned wheel locally and
   install the same volume path in Databricks jobs.
 
@@ -238,7 +236,8 @@ attribution.
 
 Use:
 
-- `docs/cloud-setup.md` for provision/revoke instructions.
+- `docs/cloud-setup.md` for connecting to externally provisioned resources and
+  requesting revocation.
 - `docs/enterprise-clone-runbook.md` to stand this repository up in another
   GitHub org and Azure tenant (the identity must be re-minted — the FIC
   subject embeds immutable repo/owner ids).

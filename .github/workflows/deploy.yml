@@ -6,8 +6,8 @@ name: deploy
 # NOTE: this job intentionally sets NO `environment:`. The federated credential
 # subject is the branch-ref form (repo:<owner>/<repo>:ref:refs/heads/main); a
 # GitHub environment would change the OIDC subject to :environment:<name> and
-# break the token exchange. To add an environment gate, first add a matching
-# FIC in infra/identity.tf.
+# break the token exchange. Before adding an environment gate, have the
+# platform identity owner add a matching federated credential externally.
 on:
   push:
     branches: [main]

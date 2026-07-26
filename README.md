@@ -26,7 +26,6 @@ templates/                  five lifecycle-ladder Databricks project templates
 templates/_shared/          canonical scaffold synced into every template
 examples/                   focused learning examples
 resources/                  this repository's bundle smoke job
-infra/                      human-run keyless CI identity bootstrap
 docs/                       developer and platform operating guides
 .github/workflows/          credential-free CI and keyless deployment/release
 ```
@@ -79,8 +78,8 @@ make check
 ```
 
 `make install` creates or synchronizes `.venv` from `uv.lock`. Run `make help`
-to see focused targets for formatting, tests, builds, Terraform validation,
-template synchronization, and authenticated Databricks bundle validation.
+to see focused targets for formatting, tests, builds, template synchronization,
+and authenticated Databricks bundle validation.
 `make hooks-install` installs a fast credential-free commit hook and the full
 CI-equivalent verifier as a pre-push hook. Both use only repository-local hook
 definitions—no third-party hook repository is downloaded or executed. Run them
@@ -180,8 +179,9 @@ local installation.
 - Tags contain no secrets or personal data.
 - Production applications must choose managed or workload identity explicitly.
 
-Read [`AGENTS.md`](AGENTS.md) before making repository changes. Provisioning and
-recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md).
+Read [`AGENTS.md`](AGENTS.md) before making repository changes. Connection and
+recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md);
+cloud and identity resources are provisioned outside this repository.
 
 ## Learning paths
 
