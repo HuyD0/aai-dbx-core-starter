@@ -40,9 +40,10 @@ a provider integration.
    after the gate passes (production loads the `production` alias).
 4. Grow `evals/data/release_cases.json` with your domain's golden and
    failure cases (the seeded cases show the shape). Keep at least 10.
-5. Run the release gate: `python evals/evaluate.py` — groundedness,
-   relevance, and safety judges with the thresholds in
-   `evals/gate_config.json`, publishing the report to the CI summary.
+5. Configure the approved `judge-model`, then run the release gate:
+   `python evals/evaluate.py` — explicitly routed groundedness, relevance,
+   and safety judges with the thresholds in `evals/gate_config.json`,
+   publishing the report to the CI summary.
    After a released run passes: `--update-baseline`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset

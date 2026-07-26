@@ -11,6 +11,7 @@ import mlflow
 from mlflow.genai.scorers import Safety, ScorerSamplingConfig
 
 from aai_core import bootstrap
+from aai_core.evaluation import judge_model_uri
 
 context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
 print({"experiment": context.settings.effective_experiment_name})
@@ -19,7 +20,9 @@ print({"experiment": context.settings.effective_experiment_name})
 
 mlflow.set_experiment(context.settings.effective_experiment_name)
 
-safety = Safety().register(name="production_safety")
+safety = Safety(model=judge_model_uri(context.settings)).register(
+    name="production_safety"
+)
 safety.start(sampling_config=ScorerSamplingConfig(sample_rate=0.1))
 print("registered production_safety at 10% sampling")
 

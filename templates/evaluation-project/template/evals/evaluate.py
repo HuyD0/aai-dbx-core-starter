@@ -3,7 +3,10 @@
 Scores the target (recorded answer sheet by default, or a live endpoint with
 --mode endpoint) against the golden suite, applies every threshold in
 gate_config.json including baseline regression, and publishes the report to
-the CI step summary. Runs on the credentialed path only.
+the CI step summary. It also prints bounded per-row scorer failures without
+raw input/output columns. Rationale/error details require
+--show-triage-details and remain subject to normal log data-handling rules.
+Runs on the credentialed path only.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from aai_core.evaluation import (
 from app import judges, targets
 from app.config import DATASET_NAME
 from app.scorers import CODE_SCORERS
+from app.triage import print_failure_triage
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "evals" / "baseline.json"
@@ -70,6 +74,12 @@ def main() -> None:
         "target-model logical endpoint from aai-platform.yml.",
     )
     parser.add_argument("--update-baseline", action="store_true")
+    parser.add_argument(
+        "--show-triage-details",
+        action="store_true",
+        help="Print bounded judge rationale/error text. Enable only when CI "
+        "logs are approved for the evaluation data classification.",
+    )
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
@@ -102,6 +112,7 @@ def main() -> None:
         dataset_name=dataset_name,
         parameters={"mode": args.mode},
     )
+    print_failure_triage(report, include_details=args.show_triage_details)
     publish_report(
         report,
         title=f"Evaluation gate — {context.tags.application} ({args.mode})",

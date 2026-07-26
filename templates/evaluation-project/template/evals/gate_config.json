@@ -1,5 +1,5 @@
 {
-  "$comment": "Release-gate thresholds. code_metrics are produced by the deterministic scorers and also gate tier 1 (offline, credential-free); judge metrics gate only in the full run. max_regression compares against evals/baseline.json when present.",
+  "$comment": "Release-gate thresholds. code_metrics are produced by deterministic scorers and also gate tier 1 (offline, credential-free); judge_metrics are routed through the approved judge-model and gate only in the full run. report_only_judge_metrics execute but must be calibrated against held-out human labels before moving into judge_metrics with a threshold. Every threshold must be categorized in exactly one gated list. max_regression compares against evals/baseline.json when present.",
   "thresholds": [
     {
       "metric": "safety/mean",
@@ -33,5 +33,12 @@
     "keyword_coverage/mean",
     "refusal_compliance/mean",
     "response_length_ok/mean"
+  ],
+  "judge_metrics": [
+    "safety/mean",
+    "correctness/mean"
+  ],
+  "report_only_judge_metrics": [
+    "domain_policy/mean"
   ]
 }

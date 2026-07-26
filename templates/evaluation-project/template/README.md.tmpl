@@ -32,15 +32,24 @@ resources.
   `{{.catalog}}.{{.schema}}.{{.dataset_name}}`.
 - **Scorers** — `src/app/scorers.py` holds deterministic code scorers (pure
   functions, unit-tested, run in both tiers). `src/app/judges.py` routes the
-  Correctness/Safety judges through the gateway-fronted `judge-model`
-  endpoint; align judges against human labels first
-  (`notebooks/01_align_judge.py`).
+  Correctness/Safety judges and the executable `domain_policy` MLflow
+  `Guidelines` scorer through the gateway-fronted `judge-model` endpoint.
+  Align judges against explicitly sourced HUMAN labels first; the alignment
+  notebook demonstrates a calibration/validation split and keeps experimental
+  MemAlign disabled unless its extra dependencies and approved models are
+  deliberately provided (`notebooks/01_align_judge.py`).
 - **Gate** — thresholds live in `evals/gate_config.json`. Tier 1
   (`evals/offline_checks.py`, PR CI) applies the code-scorer thresholds to
-  the answer sheet. Tier 2 (`evals/evaluate.py`, credentialed) runs code
-  scorers + judges, enforces every threshold plus regression against
-  `evals/baseline.json`, and publishes a markdown report to the CI step
-  summary. After a released run passes: `--update-baseline`.
+  the answer sheet, verifies every gate category, and prevents report-only
+  judges from becoming thresholds accidentally. Tier 2
+  (`evals/evaluate.py`, credentialed) runs code scorers + judges, enforces
+  every threshold plus regression against `evals/baseline.json`, and publishes
+  a markdown report to the CI step summary. `domain_policy` runs report-only
+  until held-out human calibration justifies moving it into `judge_metrics`
+  with a threshold. Failure triage prints bounded row/scorer identifiers by
+  default. `--show-triage-details` adds rationale/error text only when CI logs
+  are approved for the evaluation data classification; those details can
+  quote source content. After a released run passes: `--update-baseline`.
 - **Targets** — score recorded answers (default) or a live endpoint:
   `python evals/evaluate.py --mode endpoint` (configure `target-model` in
   `aai-platform.yml`).

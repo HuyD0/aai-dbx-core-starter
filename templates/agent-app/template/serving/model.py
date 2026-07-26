@@ -8,7 +8,9 @@ is unit-tested; this wrapper only adapts the Responses API shape.
 """
 
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import mlflow
 import yaml
@@ -19,6 +21,7 @@ from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
 from aai_core import PlatformContext, bootstrap
 from aai_core.agents import AgentRequest
 from app.agent import ToolAgent
+from app.messages import response_message_text
 
 _PROJECT_CONFIG = Path(__file__).resolve().parents[1] / "aai-platform.yml"
 
@@ -49,18 +52,54 @@ class ServedToolAgent(ResponsesAgent):
         self._agent = ToolAgent(_load_platform_context())
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+        # ResponsesAgent auto-traces predict() before this body runs, so its
+        # initial span inputs contain the complete request. Replace them
+        # immediately with a safe placeholder: if text normalization rejects
+        # the request, context.user_id and unsupported content still cannot be
+        # persisted on the failed trace.
+        span = mlflow.get_current_active_span()
+        if span is not None:
+            span.set_inputs({"input": []})
+
         messages = [
-            {"role": item.role, "content": item.content}
+            {"role": item.role, "content": response_message_text(item)}
             for item in request.input
-            if getattr(item, "role", None)
+            if getattr(item, "role", None) in {"user", "assistant"}
         ]
-        response = self._agent.invoke(AgentRequest(messages=messages))
+        context = request.context
+        conversation_id = _context_value(context, "conversation_id")
+        if span is not None:
+            trace_inputs: dict[str, Any] = {"input": messages}
+            if conversation_id:
+                trace_inputs["context"] = {"conversation_id": conversation_id}
+            span.set_inputs(trace_inputs)
+
+        response = self._agent.invoke(
+            AgentRequest(
+                messages=messages,
+                # Group turns with an opaque conversation id. This template
+                # intentionally does not propagate context.user_id into the
+                # traced application request.
+                session_id=conversation_id,
+            )
+        )
         return ResponsesAgentResponse(
             output=[
                 self.create_text_output_item(text=response.content, id="agent-answer")
             ],
             custom_outputs=dict(response.metadata),
         )
+
+
+def _context_value(context: Any, field: str) -> str | None:
+    if context is None:
+        return None
+    value = (
+        context.get(field)
+        if isinstance(context, Mapping)
+        else getattr(context, field, None)
+    )
+    return value if isinstance(value, str) and value else None
 
 
 mlflow.models.set_model(ServedToolAgent())
