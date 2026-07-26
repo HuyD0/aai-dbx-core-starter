@@ -94,6 +94,8 @@ class PromptManager:
             import mlflow
         except ImportError as error:
             raise RuntimeError(
-                "Prompt support requires `pip install 'aai-core[genai]'`"
+                "Prompt support requires the `genai` extra. From an aai-core "
+                "checkout run `make examples-install` and use `.venv/bin/python`; "
+                "in a consuming environment install `aai-core[genai]`."
             ) from error
         return mlflow

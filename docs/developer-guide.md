@@ -2,11 +2,20 @@
 
 ## 0. Prove the toolchain offline
 
-Before any cloud access, run the zero-credential example from a checkout of
-this repository:
+From a fresh checkout, create the locked environment and run the zero-credential
+example:
 
 ```bash
-python examples/offline_hello_world.py
+make quickstart
+```
+
+Before running a connected learning example, create and preflight its local
+configuration:
+
+```bash
+make examples-connect
+# Complete the reported keyless authentication/configuration actions.
+make example EXAMPLE=first_trace
 ```
 
 ## 1. Generate a project

@@ -106,7 +106,9 @@ class ExperimentManager:
             import mlflow
         except ImportError as error:
             raise RuntimeError(
-                "Experiment support requires `pip install 'aai-core[genai]'`"
+                "Experiment support requires the `genai` extra. From an aai-core "
+                "checkout run `make examples-install` and use `.venv/bin/python`; "
+                "in a consuming environment install `aai-core[genai]`."
             ) from error
         return mlflow
 

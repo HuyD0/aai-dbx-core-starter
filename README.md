@@ -31,25 +31,50 @@ docs/                       developer and platform operating guides
 .github/workflows/          credential-free CI and keyless deployment/release
 ```
 
+## Start from a fresh clone
+
+```bash
+git clone https://github.com/HuyD0/aai-dbx-core-starter
+cd aai-dbx-core-starter
+make quickstart
+```
+
+`make quickstart` uses the locked `uv` environment and runs the offline example.
+It requires Python 3.11 or 3.12 and `uv` 0.8.23, but no cloud configuration or
+credentials. If `uv` is unavailable, the target prints the pinned installation
+command instead of continuing with a partial environment. To continue into
+examples that write to Azure Databricks:
+
+```bash
+make examples-connect
+# Follow the reported configuration/authentication actions, then rerun it.
+make example EXAMPLE=first_trace
+```
+
+The connected setup creates a local, ignored `aai-platform.yml` when needed,
+checks keyless Azure CLI and Databricks authentication, detects configuration
+placeholders, and sets the MLflow tracking and registry destinations for the
+example process. It never creates or requests a PAT, client secret, or API key.
+
+List every example and its execution mode with `make examples-list`.
+
 ## Install for SDK development
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 make install
 make check
 ```
 
-Run `make help` to see focused targets for formatting, tests, builds,
-Terraform validation, template synchronization, and authenticated Databricks
-bundle validation. `make verify` runs the complete credential-free verification
-path used by CI.
+`make install` creates or synchronizes `.venv` from `uv.lock`. Run `make help`
+to see focused targets for formatting, tests, builds, Terraform validation,
+template synchronization, and authenticated Databricks bundle validation.
+`make verify` runs the complete credential-free verification path used by CI.
 
 Optional provider dependencies are separated:
 
 ```bash
-python -m pip install -e '.[databricks,genai]'
-python -m pip install -e '.[foundry,azure-search,keyvault,genai]'
+uv sync --extra databricks --extra genai --locked
+uv sync --extra foundry --extra azure-search --extra keyvault --extra genai --locked
 ```
 
 ## Configure an application
@@ -134,6 +159,8 @@ recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md).
 
 ## Learning paths
 
+- `make quickstart` — clone-to-running, with zero credentials
+- `make examples-connect` — guided keyless setup for connected examples
 - [Offline hello world](examples/offline_hello_world.py) — zero credentials
 - [First LLM call notebook](examples/first_llm_call.ipynb)
 - [Developer guide](docs/developer-guide.md)

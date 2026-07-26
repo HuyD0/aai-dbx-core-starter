@@ -2,21 +2,51 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
-PYTHON ?= python
+PYTHON ?= .venv/bin/python
+UV ?= uv
+UV_VERSION ?= 0.8.23
 TERRAFORM ?= terraform
 DATABRICKS ?= databricks
 TARGET ?= dev
+EXAMPLE ?=
 
-.PHONY: help install lint format format-check test build check verify \
+.PHONY: help check-uv install lint format format-check test build check verify \
 	sync-templates check-templates terraform-format terraform-format-check \
 	terraform-init terraform-validate bundle-validate validate-templates doctor \
-	doctor-cloud
+	doctor-cloud quickstart examples-install examples-connect examples-list example
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-install: ## Install the SDK and development dependencies.
-	$(PYTHON) -m pip install -e '.[dev]'
+check-uv: ## Check that the pinned environment manager is available.
+	@command -v "$(UV)" >/dev/null 2>&1 || { \
+		echo "uv is required. Install uv $(UV_VERSION), then rerun this target."; \
+		echo "For example: pipx install 'uv==$(UV_VERSION)'"; \
+		exit 2; \
+	}
+
+install: check-uv ## Create/sync the locked SDK development environment with uv.
+	$(UV) sync --extra dev --locked
+
+examples-install: check-uv ## Install the locked Databricks and GenAI example dependencies.
+	$(UV) sync --extra dev --extra databricks --extra genai --locked
+	@$(PYTHON) -c 'import sys; import databricks.sdk; import mlflow; print(f"Example dependencies ready in {sys.executable} (MLflow {mlflow.__version__})")'
+
+quickstart: install ## Prove a fresh clone works without credentials.
+	$(PYTHON) scripts/examples.py quickstart
+
+examples-connect: examples-install ## Prepare and check the keyless cloud example setup.
+	$(PYTHON) scripts/examples.py connect
+
+examples-list: install ## List learning examples and their execution mode.
+	$(PYTHON) scripts/examples.py list
+
+example: examples-install ## Preflight and run one example: make example EXAMPLE=first_trace
+	@test -n "$(EXAMPLE)" || { \
+		echo "EXAMPLE is required. Run 'make examples-list' to see valid names."; \
+		exit 2; \
+	}
+	$(PYTHON) scripts/examples.py run "$(EXAMPLE)"
 
 lint: ## Run Ruff lint checks.
 	$(PYTHON) -m ruff check .

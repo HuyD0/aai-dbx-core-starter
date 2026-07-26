@@ -1,8 +1,30 @@
 # Learning examples
 
-Start with the offline example — it needs nothing but this checkout. Every
-other example talks to real platform services and states its prerequisites
-explicitly.
+From a fresh clone, start with:
+
+```bash
+make quickstart
+```
+
+That command creates or synchronizes the locked development environment and
+runs the offline example. It needs no cloud configuration or credentials.
+
+Every other example talks to real platform services. Prepare them with:
+
+```bash
+make examples-connect
+```
+
+The command creates a local, Git-ignored `aai-platform.yml` if needed and
+reports incomplete configuration, Azure CLI authentication, or Databricks
+connectivity without asking for a stored credential. After addressing its
+reported actions, rerun the check and then run an example:
+
+```bash
+make example EXAMPLE=first_trace
+```
+
+Use `make examples-list` to see all accepted names.
 
 | Example | Requires |
 |---|---|
@@ -16,16 +38,23 @@ explicitly.
 Suggested order: offline hello world → first LLM call → first experiment →
 first trace → first prompt → first evaluation.
 
-Keyless auth for the cloud examples:
+The connected runner supplies the non-secret Databricks host and MLflow routing
+to the child process. If running a file directly instead, configure the shell:
 
 ```bash
+make examples-install
 az login
 export DATABRICKS_HOST=<workspace host from platform-identifiers.json>
 export DATABRICKS_AUTH_TYPE=azure-cli
 cp aai-platform.example.yml aai-platform.yml  # then replace the placeholders
+.venv/bin/python examples/first_trace.py
 ```
 
 No example ever needs a PAT, client secret, or API key.
+
+Do not run the connected files directly immediately after cloning. The Make
+runner installs their optional dependencies and checks configuration and
+identity before allowing an expensive or state-changing platform request.
 
 ## Where each example leads
 

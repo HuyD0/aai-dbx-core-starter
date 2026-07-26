@@ -86,6 +86,8 @@ def _require_mlflow():
         import mlflow
     except ImportError as error:
         raise RuntimeError(
-            "MLflow support requires `pip install 'aai-core[genai]'`"
+            "MLflow support requires the `genai` extra. From an aai-core "
+            "checkout run `make examples-install` and use `.venv/bin/python`; "
+            "in a consuming environment install `aai-core[genai]`."
         ) from error
     return mlflow
