@@ -34,6 +34,31 @@ COMBOS = {
             "expect_absent": ["notebooks/01_explore.py", "notebooks"],
         },
     ],
+    "prompt-app": [
+        {
+            "name": "databricks",
+            "overrides": {"project_name": "test-prompt-app"},
+            "expect_present": [
+                "src/app/assistant.py",
+                "src/app/config.py",
+                "prompts/system_prompt.json",
+                "scripts/register_prompt.py",
+                "scripts/promote_prompt.py",
+                "evals/evaluate.py",
+            ],
+            "expect_absent": [],
+        },
+        {
+            "name": "foundry",
+            "overrides": {
+                "project_name": "test-prompt-app",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com",
+            },
+            "expect_present": ["src/app/assistant.py"],
+            "expect_absent": [],
+        },
+    ],
     "agentic-rag": [
         {
             "name": "dbx-azure-search",

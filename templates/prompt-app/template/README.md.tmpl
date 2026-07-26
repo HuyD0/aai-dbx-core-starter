@@ -1,0 +1,48 @@
+# {{.project_name}}
+
+Prompt application generated from the AAI platform template (`prompt-app`):
+governed prompt lifecycle with pinned-version evaluation and gated alias
+promotion.
+
+## Local setup
+
+Authenticate without storing credentials:
+
+```bash
+az login
+export DATABRICKS_HOST={{.workspace_host}}
+export DATABRICKS_AUTH_TYPE=azure-cli
+python scripts/install_core.py
+python -m pip install -r requirements.lock
+python -m pip install -e '.[dev]'
+pytest -q
+```
+
+Replace every `replace-with-*` value in `aai-platform.yml` before running a
+provider integration.
+
+## Prompt lifecycle
+
+1. Edit `prompts/system_prompt.json` — the versioned prompt source.
+2. Register a new immutable version: `python scripts/register_prompt.py`
+   (also points the `development` alias at it).
+3. Gate the version: `python evals/evaluate.py` — LLM judges (Correctness,
+   RelevanceToQuery, Safety) against `evals/data/release_cases.json` with the
+   thresholds in `evals/gate_config.json`; evaluation always pins an exact
+   version, never an alias. After a released run passes, refresh the
+   regression baseline with `--update-baseline`.
+4. Promote only after the gate passes:
+   `python scripts/promote_prompt.py --version <n> --to candidate`, then
+   `--to production` at release approval. Production deploys load the
+   `production` alias — promotion must happen before the first prod deploy.
+5. Deploy the evaluation job: `databricks bundle validate -t dev` then
+   `databricks bundle deploy -t dev`.
+
+Prompt changes are application releases: record them, evaluate them, and
+promote them deliberately. Pull-request CI runs only the deterministic
+checks in `evals/offline_checks.py` — it never holds credentials.
+
+The platform team must onboard this repository (main-branch federated
+credential, Databricks service principal, constrained compute permission,
+non-secret repository variables) before the deploy workflow is enabled. The
+Unity Catalog prompt registry (Beta) must be enabled in the workspace.
