@@ -36,9 +36,14 @@ docs/                       developer and platform operating guides
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
-pytest -q
+make install
+make check
 ```
+
+Run `make help` to see focused targets for formatting, tests, builds,
+Terraform validation, template synchronization, and authenticated Databricks
+bundle validation. `make verify` runs the complete credential-free verification
+path used by CI.
 
 Optional provider dependencies are separated:
 

@@ -154,6 +154,15 @@ Install:
 python -m pip install -e '.[dev]'
 ```
 
+The root `Makefile` provides the same workflow as discoverable shortcuts:
+
+```bash
+make help
+make install
+make check
+make verify
+```
+
 Before committing:
 
 ```bash

@@ -13,11 +13,11 @@ Authenticate without storing credentials:
 az login
 export DATABRICKS_HOST={{.workspace_host}}
 export DATABRICKS_AUTH_TYPE=azure-cli
-python scripts/install_core.py
-python -m pip install -r requirements.lock
-python -m pip install -e '.[dev]'
-pytest -q
+make install
+make check
 ```
+
+Run `make help` for individual development, evaluation, and bundle targets.
 
 ## Lifecycle
 

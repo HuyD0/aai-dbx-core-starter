@@ -10,12 +10,11 @@ baselines, a two-tier CI gate, and published results.
 az login
 export DATABRICKS_HOST={{.workspace_host}}
 export DATABRICKS_AUTH_TYPE=azure-cli
-python scripts/install_core.py
-python -m pip install -r requirements.lock
-python -m pip install -e '.[dev]'
-pytest -q
-python evals/offline_checks.py   # tier 1 — deterministic, zero credentials
+make install
+make check
 ```
+
+Run `make help` for individual development, evaluation, and bundle targets.
 
 ## How this project evaluates
 

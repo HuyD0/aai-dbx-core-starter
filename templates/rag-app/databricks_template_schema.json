@@ -139,6 +139,6 @@
       "order": 15
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}} && python scripts/install_core.py\n  2. python -m pip install -r requirements.lock && python -m pip install -e '.[dev]'\n  3. pytest -q && python evals/offline_checks.py\n  4. python scripts/register_prompt.py\n  5. databricks bundle validate -t dev && databricks bundle deploy -t dev",
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. make install                       # pinned SDK + dependencies\n  3. make check                         # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
   "min_databricks_cli_version": "v1.6.0"
 }
