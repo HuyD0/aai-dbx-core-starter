@@ -1,0 +1,12 @@
+{
+  "$comment": "Canonical shared-scaffold manifest consumed by scripts/sync_template_shared.py. Every path under files/ is copied byte-for-byte into each template's template/ directory, and every library/*.tmpl into each template's library/. A template listed in opt_out for a path does not receive it. CI runs the sync in --check mode, so editing a copy inside a template without editing the canonical file here fails the drift test.",
+  "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/deploy.yml",
+    ".gitignore",
+    "requirements-ci.txt.tmpl",
+    "scripts/build_application.py",
+    "scripts/install_core.py.tmpl"
+  ],
+  "opt_out": {}
+}

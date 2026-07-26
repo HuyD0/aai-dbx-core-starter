@@ -1,0 +1,34 @@
+"""Render combinations and expectations per template.
+
+Each combo renders the template with schema defaults + platform-identifier
+overrides + the combo's `overrides`, then asserts `expect_present` /
+`expect_absent` paths (relative to the rendered project root). Every file
+toggled by a template's __preamble must be asserted present in one combo and
+absent in a sibling — that is the dead-skip-glob guard.
+
+The first combo of each template is also the deep-tier combo (ruff, black,
+generated pytest, offline checks), so it must render a fully working project.
+"""
+
+COMBOS = {
+    "agentic-rag": [
+        {
+            "name": "dbx-azure-search",
+            "overrides": {
+                "project_name": "test-agent",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+                "retrieval_provider": "azure_ai_search",
+                "search_endpoint": "https://search.search.windows.net",
+                "search_index": "knowledge",
+                "embedding_deployment": "embedding",
+            },
+            "expect_present": [
+                "src/app/agent.py",
+                "evals/evaluate.py",
+                "scripts/promote_prompt.py",
+            ],
+            "expect_absent": [],
+        },
+    ],
+}

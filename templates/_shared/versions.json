@@ -1,0 +1,13 @@
+{
+  "$comment": "Canonical version pins for packages that appear in more than one template's requirements.lock or pyproject.toml.tmpl. Templates only pin the packages they actually use, but where they pin one of these, the version must match — tests/test_template.py enforces agreement so templates never drift apart on shared runtime dependencies.",
+  "pins": {
+    "azure-identity": "1.25.3",
+    "azure-search-documents": "12.0.0",
+    "databricks-ai-search": "0.77",
+    "databricks-openai": "0.17.0",
+    "databricks-sdk": "0.122.0",
+    "mlflow[databricks]": "3.14.0",
+    "openai": "2.48.0",
+    "PyYAML": "6.0.3"
+  }
+}

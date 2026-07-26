@@ -80,19 +80,33 @@ def test_sample_job_uses_constrained_job_compute_policy():
     assert "spark_conf" not in cluster
 
 
+def _discovered_templates():
+    templates_dir = ROOT / "templates"
+    return sorted(
+        entry
+        for entry in templates_dir.iterdir()
+        if entry.is_dir() and (entry / "databricks_template_schema.json").is_file()
+    )
+
+
 def test_identifier_fixture_is_the_single_source_of_truth():
     """Every other file holding an environment identifier must agree with
     platform-identifiers.json; a clone edits the fixture and this test lists
     each remaining literal that must follow."""
-    schema = json.loads(
-        (
-            ROOT / "templates" / "agentic-rag" / "databricks_template_schema.json"
-        ).read_text()
-    )
-    defaults = {name: prop["default"] for name, prop in schema["properties"].items()}
-    assert defaults["workspace_host"] == IDENTIFIERS["databricks_host"]
-    assert defaults["compute_policy_id"] == IDENTIFIERS["job_compute_policy_id"]
-    assert defaults["aai_core_volume"] == IDENTIFIERS["sdk_artifact_volume"]
+    templates = _discovered_templates()
+    assert templates, "no bundle templates discovered"
+    for template in templates:
+        schema = json.loads((template / "databricks_template_schema.json").read_text())
+        defaults = {
+            name: prop["default"] for name, prop in schema["properties"].items()
+        }
+        assert defaults["workspace_host"] == IDENTIFIERS["databricks_host"], template
+        assert (
+            defaults["compute_policy_id"] == IDENTIFIERS["job_compute_policy_id"]
+        ), template
+        assert (
+            defaults["aai_core_volume"] == IDENTIFIERS["sdk_artifact_volume"]
+        ), template
 
     verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
     assert "platform-identifiers.json" in verify
@@ -195,11 +209,11 @@ def test_databricks_cli_version_is_in_lockstep_everywhere():
     setup = (ROOT / "scripts" / "codex-cloud-setup.sh").read_text()
     script_version = re.search(r'DATABRICKS_CLI_VERSION="([0-9.]+)"', setup).group(1)
 
-    workflow_files = list(WORKFLOWS.glob("*.yml")) + list(
-        (
-            ROOT / "templates" / "agentic-rag" / "template" / ".github" / "workflows"
-        ).glob("*.yml")
-    )
+    workflow_files = list(WORKFLOWS.glob("*.yml"))
+    for template in _discovered_templates():
+        workflow_files.extend(
+            (template / "template" / ".github" / "workflows").glob("*.yml")
+        )
     pins = []
     for workflow in workflow_files:
         pins.extend(
