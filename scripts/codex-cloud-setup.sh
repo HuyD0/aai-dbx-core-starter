@@ -7,7 +7,14 @@ set -euo pipefail
 readonly PYTHON_VERSION="3.12"
 readonly UV_VERSION="0.8.23"
 readonly TERRAFORM_VERSION="1.12.2"
-readonly DATABRICKS_CLI_VERSION="1.6.0"
+# KEEP IN LOCKSTEP with the databricks/setup-cli SHA pinned in
+# .github/workflows/*.yml (tests/test_smoke.py enforces the match): a version
+# skew makes bundle behavior diverge between Codex/local and CI. Bumping this
+# requires updating the per-arch SHA-256 checksums below in the same change:
+#   gh release download "v<version>" -R databricks/cli -p "*SHA256SUMS*"
+# (equivalently, Databricks' official Formula/databricks.rb in
+# github.com/databricks/homebrew-tap records the same zip checksums).
+readonly DATABRICKS_CLI_VERSION="1.9.0"
 readonly AZURE_CLI_VERSION="2.88.0"
 readonly AZURE_CLI_DEB_VERSION="${AZURE_CLI_VERSION}-1~noble"
 
@@ -25,12 +32,12 @@ case "$(uname -m)" in
   x86_64)
     archive_arch="amd64"
     terraform_sha256="1eaed12ca41fcfe094da3d76a7e9aa0639ad3409c43be0103ee9f5a1ff4b7437"
-    databricks_sha256="08fe396fe67545cbfafa74be5e03eb624ff4e80424d298db196ffc54982b309b"
+    databricks_sha256="10938da31db7f89e6e90f6be41d340e3387231e5da5125cfc97ecb8cb66f6394"
     ;;
   aarch64 | arm64)
     archive_arch="arm64"
     terraform_sha256="f8a0347dc5e68e6d60a9fa2db361762e7943ed084a773f28a981d988ceb6fdc9"
-    databricks_sha256="98a1e6cdd89505d455a4472ec158901f2a48f0791dbfe710b0d1ee14f8aa3ca5"
+    databricks_sha256="a4fcc3b70ed4b26f0e8064e39287d0692218cf3d2f549042d66d04c9ad2d692a"
     ;;
   *)
     echo "Unsupported Codex Cloud architecture: $(uname -m)" >&2
@@ -69,12 +76,14 @@ if [[ "$(terraform version -json 2>/dev/null | jq -r '.terraform_version' || tru
 fi
 
 if [[ "$(databricks version 2>/dev/null | awk '{print $3}' || true)" != "v${DATABRICKS_CLI_VERSION}" ]]; then
-  databricks_archive="${tmp_dir}/databricks.tar.gz"
+  # CLI 1.x releases publish zip archives; the pinned checksums above are the
+  # zip checksums Databricks records in its official Homebrew formula.
+  databricks_archive="${tmp_dir}/databricks.zip"
   curl -fsSL \
-    "https://github.com/databricks/cli/releases/download/v${DATABRICKS_CLI_VERSION}/databricks_cli_${DATABRICKS_CLI_VERSION}_linux_${archive_arch}.tar.gz" \
+    "https://github.com/databricks/cli/releases/download/v${DATABRICKS_CLI_VERSION}/databricks_cli_${DATABRICKS_CLI_VERSION}_linux_${archive_arch}.zip" \
     -o "${databricks_archive}"
   echo "${databricks_sha256}  ${databricks_archive}" | sha256sum --check -
-  tar -xzf "${databricks_archive}" -C "${local_bin}" databricks
+  unzip -qo "${databricks_archive}" databricks -d "${local_bin}"
   chmod 0755 "${local_bin}/databricks"
 fi
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aai-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Paved-road SDK for AI and ML applications on Azure Databricks."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -44,6 +44,7 @@ dev = [
   "hatchling>=1.31,<2",
   "pytest>=9.1.1,<10",
   "ruff>=0.16,<1",
+  "zizmor>=1.5,<2",
 ]
 
 [project.scripts]
@@ -65,7 +66,7 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aai_core", "app"]
+known-first-party = ["aai_core", "app", "jobs"]
 
 [tool.black]
 target-version = ["py311", "py312"]

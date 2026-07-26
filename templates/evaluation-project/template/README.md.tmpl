@@ -1,0 +1,50 @@
+# {{.project_name}}
+
+Standalone evaluation project generated from the AAI platform template
+(`evaluation-project`): curated datasets, reusable scorers, pinned
+baselines, a two-tier CI gate, and published results.
+
+## Local setup
+
+```bash
+az login
+export DATABRICKS_HOST={{.workspace_host}}
+export DATABRICKS_AUTH_TYPE=azure-cli
+python scripts/install_core.py
+python -m pip install -r requirements.lock
+python -m pip install -e '.[dev]'
+pytest -q
+python evals/offline_checks.py   # tier 1 — deterministic, zero credentials
+```
+
+## How this project evaluates
+
+- **Datasets** — `evals/data/golden_cases.json` is the reviewed regression
+  suite (gates releases; grow it toward 150+ cases and convert every
+  production failure into a case). `edge_cases.json` is the capability suite
+  (deliberately hard; report-only). `answer_sheet.json` holds recorded
+  answers so scoring works without calling the application.
+  `scripts/sync_dataset.py` publishes cases to the governed UC dataset
+  `{{.catalog}}.{{.schema}}.{{.dataset_name}}`.
+- **Scorers** — `src/app/scorers.py` holds deterministic code scorers (pure
+  functions, unit-tested, run in both tiers). `src/app/judges.py` routes the
+  Correctness/Safety judges through the gateway-fronted `judge-model`
+  endpoint; align judges against human labels first
+  (`notebooks/01_align_judge.py`).
+- **Gate** — thresholds live in `evals/gate_config.json`. Tier 1
+  (`evals/offline_checks.py`, PR CI) applies the code-scorer thresholds to
+  the answer sheet. Tier 2 (`evals/evaluate.py`, credentialed) runs code
+  scorers + judges, enforces every threshold plus regression against
+  `evals/baseline.json`, and publishes a markdown report to the CI step
+  summary. After a released run passes: `--update-baseline`.
+- **Targets** — score recorded answers (default) or a live endpoint:
+  `python evals/evaluate.py --mode endpoint` (configure `target-model` in
+  `aai-platform.yml`).
+
+Deploy the scheduled suite with `databricks bundle validate -t dev` and
+`databricks bundle deploy -t dev` (uncomment the cron block in
+`resources/evaluation_job.yml` for continuous evaluation).
+
+The platform team must onboard this repository (main-branch federated
+credential, service principal, constrained compute, non-secret repository
+variables) before the deploy workflow is enabled.

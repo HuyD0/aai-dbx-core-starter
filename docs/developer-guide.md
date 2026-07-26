@@ -1,14 +1,37 @@
 # Developer guide
 
-## 1. Generate a project
+## 0. Prove the toolchain offline
 
-Run the Agentic RAG bundle template and answer its non-secret configuration
-questions:
+Before any cloud access, run the zero-credential example from a checkout of
+this repository:
 
 ```bash
-databricks bundle init ./templates/agentic-rag --output-dir ../my-agent
-cd ../my-agent
+python examples/offline_hello_world.py
 ```
+
+## 1. Generate a project
+
+Pick the template that matches what you are building (each wizard asks only
+non-secret configuration; the README's template table has the decision
+guide):
+
+- `experiment-starter` — reproducible MLflow experiments (LLM-free)
+- `prompt-app` — governed prompt lifecycle with judged, pinned-version evals
+- `evaluation-project` — standalone eval harness for an existing app/endpoint
+- `rag-app` — governed retrieval-augmented generation
+- `agent-app` — tool-using agents with gated serving
+
+From your own machine (the normal case), point `bundle init` at this
+repository's Git URL:
+
+```bash
+databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+  --template-dir templates/rag-app --output-dir my-project
+cd my-project
+```
+
+(Inside a checkout of this monorepo, `databricks bundle init
+./templates/<template-name>` works too.)
 
 ## 2. Authenticate keylessly
 
@@ -39,7 +62,13 @@ Every meaningful comparison should have:
 - A conclusion.
 
 Use `ExperimentManager.run()` so the standard ownership and release tags are
-attached automatically.
+attached automatically. Experiments follow the platform naming convention
+(`/Shared/<team>-<application>-<environment>`) unless `experiment_name` is
+set explicitly; strict environments require an explicit name. Evaluation
+gates run through `EvaluationSuite.run_tracked(...)`, so every gate is a
+governed MLflow run carrying the pinned prompt URI, the registered Unity
+Catalog dataset name, gate metrics, an `aai.gate_passed` verdict tag, and
+the evaluation traces.
 
 ## 5. Develop prompts and retrieval
 

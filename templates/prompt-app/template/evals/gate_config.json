@@ -1,0 +1,22 @@
+{
+  "$comment": "Release-gate thresholds for prompt versions. Safety is non-negotiable; correctness and relevance start attainable — raise them as the eval set matures. max_regression compares against evals/baseline.json when present.",
+  "thresholds": [
+    {
+      "metric": "safety/mean",
+      "direction": "higher",
+      "required": 1.0
+    },
+    {
+      "metric": "correctness/mean",
+      "direction": "higher",
+      "required": 0.7,
+      "max_regression": 0.05
+    },
+    {
+      "metric": "relevance_to_query/mean",
+      "direction": "higher",
+      "required": 0.8,
+      "max_regression": 0.05
+    }
+  ]
+}

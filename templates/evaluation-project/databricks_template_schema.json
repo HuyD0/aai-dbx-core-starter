@@ -1,0 +1,95 @@
+{
+  "welcome_message": "Create an AAI evaluation project\n\nA standalone evaluation harness for an existing application or endpoint: curated Unity Catalog datasets, reusable deterministic scorers plus LLM judges, pinned baselines, a CI regression gate, and published results.",
+  "min_databricks_cli_version": "v1.6.0",
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "default": "aai-evaluation",
+      "description": "Project and bundle name. NOTE: apply template updates deliberately \u2014 generated projects record their template version in .aai-template.json",
+      "order": 1,
+      "pattern": "^[a-z][a-z0-9-]+$",
+      "pattern_match_failure_message": "Use lowercase letters, numbers, and hyphens."
+    },
+    "application_name": {
+      "type": "string",
+      "default": "evaluation-suite",
+      "description": "Application identifier used in tags and traces",
+      "order": 2
+    },
+    "team": {
+      "type": "string",
+      "default": "data-platform",
+      "description": "Owning team",
+      "order": 3
+    },
+    "owner_group": {
+      "type": "string",
+      "default": "group:data-platform-owners",
+      "description": "Non-personal owning group",
+      "order": 4
+    },
+    "cost_center": {
+      "type": "string",
+      "default": "CC-1234",
+      "description": "Non-secret finance cost center",
+      "order": 5
+    },
+    "catalog": {
+      "type": "string",
+      "default": "main",
+      "description": "Unity Catalog catalog (hosts the evaluation datasets)",
+      "order": 6
+    },
+    "schema": {
+      "type": "string",
+      "default": "evaluation",
+      "description": "Unity Catalog schema for evaluation datasets",
+      "order": 7
+    },
+    "model_deployment": {
+      "type": "string",
+      "default": "replace-with-judge-endpoint",
+      "description": "Databricks serving endpoint used by the LLM judges (gateway-fronted; route Foundry models through an external-model endpoint first)",
+      "order": 9
+    },
+    "dataset_name": {
+      "type": "string",
+      "default": "eval_golden_set",
+      "description": "Unity Catalog evaluation dataset name (created by scripts/sync_dataset.py)",
+      "order": 11,
+      "pattern": "^[a-z][a-z0-9_]+$",
+      "pattern_match_failure_message": "Use lowercase letters, numbers, and underscores."
+    },
+    "aai_core_version": {
+      "type": "string",
+      "default": "0.2.0",
+      "description": "Pinned aai-core SDK version",
+      "order": 16
+    },
+    "aai_core_volume": {
+      "type": "string",
+      "default": "/Volumes/platform/artifacts/python_packages",
+      "description": "Unity Catalog volume holding aai-core wheels",
+      "order": 17
+    },
+    "workspace_host": {
+      "type": "string",
+      "default": "https://adb-7405609799238491.11.azuredatabricks.net",
+      "description": "Development Azure Databricks workspace",
+      "order": 18
+    },
+    "compute_policy_id": {
+      "type": "string",
+      "default": "0005F2031B6D2319",
+      "description": "Constrained Job Compute policy",
+      "order": 19
+    },
+    "aai_core_pip_source": {
+      "type": "string",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
+      "order": 20
+    }
+  },
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}} && python scripts/install_core.py\n  2. python -m pip install -r requirements.lock && python -m pip install -e '.[dev]'\n  3. pytest -q && python evals/offline_checks.py   # deterministic tier, zero credentials\n  4. python scripts/sync_dataset.py                # publish cases to the UC dataset\n  5. python evals/evaluate.py                      # full judge gate + published report"
+}

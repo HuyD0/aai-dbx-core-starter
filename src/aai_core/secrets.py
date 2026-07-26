@@ -97,10 +97,12 @@ class AzureKeyVaultSecretProvider(_CachingProvider):
         credential: object | None = None,
         client_factory: Callable[[str, object], object] | None = None,
         ttl_seconds: float = 300,
+        azure_identity: str = "auto",
     ) -> None:
         super().__init__(ttl_seconds=ttl_seconds)
         self._credential = credential
         self._client_factory = client_factory
+        self._azure_identity = azure_identity
         self._clients: dict[str, object] = {}
 
     def resolve(self, reference: SecretRef) -> str:
@@ -117,7 +119,9 @@ class AzureKeyVaultSecretProvider(_CachingProvider):
         if self._credential is None:
             from aai_core.identity import azure_credential
 
-            self._credential = azure_credential("auto")
+            # Honor the configured identity mode; falling back to the
+            # DefaultAzureCredential chain is for local development only.
+            self._credential = azure_credential(self._azure_identity)
         if self._client_factory is None:
             from azure.keyvault.secrets import SecretClient
 
@@ -190,9 +194,12 @@ def default_secret_resolver(
     *,
     redactor: Redactor | None = None,
     allow_environment: bool = False,
+    azure_identity: str = "auto",
 ) -> SecretResolver:
     resolver = SecretResolver(redactor=redactor)
-    resolver.register("keyvault", AzureKeyVaultSecretProvider())
+    resolver.register(
+        "keyvault", AzureKeyVaultSecretProvider(azure_identity=azure_identity)
+    )
     resolver.register("databricks-secret", DatabricksSecretProvider())
     if allow_environment:
         resolver.register("env", EnvironmentSecretProvider())

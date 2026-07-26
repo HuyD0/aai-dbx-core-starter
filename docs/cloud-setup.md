@@ -5,6 +5,11 @@ This is the authoritative record of what is provisioned for
 stores a secret; auth is keyless (GitHub OIDC → Azure federated credential →
 Databricks).
 
+> **Cloning into another org/tenant?** All concrete ids below belong to *this*
+> instance and mirror `platform-identifiers.json` / AGENTS.md §3. Follow
+> `docs/enterprise-clone-runbook.md`, substituting your own values into the
+> same commands.
+
 Legend: **[you]** = a human with `az login` + Databricks account admin, run once,
 locally. **[agent]** = safe to run from the assistant's shell. **[CI]** = runs on
 a GitHub runner with zero stored secrets.

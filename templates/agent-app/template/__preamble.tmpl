@@ -1,0 +1,14 @@
+{{/* Conditional content. skip globs match POST-strip output names and are
+relative to this file's directory (template/ root).
+
+The serving path requires a Databricks model provider: agent_resources
+declares the serving endpoint for auth passthrough, which direct-Foundry
+models cannot satisfy (route Foundry through a Databricks external-model
+endpoint first, then select provider databricks). Foundry projects
+therefore omit the serving path regardless of include_serving. */}}
+{{- if or (eq .include_serving "no") (eq .model_provider "foundry") -}}
+{{ skip "serving" }}
+{{ skip "scripts/deploy_serving.py" }}
+{{ skip "notebooks/02_enable_monitoring.py" }}
+{{- end -}}
+{{ skip "__preamble" }}

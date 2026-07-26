@@ -6,21 +6,43 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from aai_core.exceptions import AaiCoreError
 
-class ProviderError(RuntimeError):
+
+class ProviderError(AaiCoreError):
     """Base error for a provider operation."""
+
+    code = "aai_core.provider.error"
 
 
 class ProviderConfigurationError(ProviderError):
     """The logical resource cannot be resolved or is misconfigured."""
 
+    code = "aai_core.provider.configuration"
+
 
 class UnsupportedCapabilityError(ProviderError):
     """The selected provider does not support a requested capability."""
 
+    code = "aai_core.provider.unsupported_capability"
+
+
+class ProviderRequestError(ProviderError):
+    """A provider request failed at runtime; the native error is chained."""
+
+    code = "aai_core.provider.request_failed"
+
 
 @dataclass(frozen=True)
 class ModelCapabilities:
+    """Capabilities the stable adapter can honor for an endpoint.
+
+    ``streaming`` and ``responses_api`` are reserved for future adapter
+    support; declaring them true is rejected at resolution time because the
+    stable ``generate()`` surface cannot honor them yet (use
+    ``native_client`` for provider-specific streaming).
+    """
+
     streaming: bool = False
     tool_calling: bool = True
     structured_output: bool = False

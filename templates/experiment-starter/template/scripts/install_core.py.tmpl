@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_VERSION = "{{.aai_core_version}}"
+DEFAULT_VOLUME = "{{.aai_core_volume}}"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", default=DEFAULT_VERSION)
+    parser.add_argument("--volume", default=DEFAULT_VOLUME)
+    arguments = parser.parse_args()
+    version_pattern = r"[0-9]+\.[0-9]+\.[0-9]+(?:[a-zA-Z0-9.-]+)?"
+    if not re.fullmatch(version_pattern, arguments.version):
+        raise ValueError("version must be a semantic version")
+    if not arguments.volume.startswith("/Volumes/") or ".." in arguments.volume:
+        raise ValueError("volume must be an absolute Unity Catalog volume path")
+
+    wheel_name = f"aai_core-{arguments.version}-py3-none-any.whl"
+    remote_directory = f"dbfs:{arguments.volume}/aai_core/{arguments.version}"
+    destination = Path(".aai") / arguments.version
+    destination.mkdir(parents=True, exist_ok=True)
+    wheel = destination / wheel_name
+    checksum = destination / f"{wheel_name}.sha256"
+
+    for remote_name, local_path in (
+        (wheel_name, wheel),
+        (f"{wheel_name}.sha256", checksum),
+    ):
+        subprocess.run(
+            [
+                "databricks",
+                "fs",
+                "cp",
+                "--overwrite",
+                f"{remote_directory}/{remote_name}",
+                str(local_path),
+            ],
+            check=True,
+        )
+
+    expected = checksum.read_text(encoding="utf-8").split()[0]
+    actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"Checksum mismatch for {wheel_name}: expected {expected}, got {actual}"
+        )
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", str(wheel)],
+        check=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

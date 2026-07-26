@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,8 +54,26 @@ class PlatformSettings:
 
     @property
     def strict(self) -> bool:
-        strict_environments = {"test", "uat", "prod", "production"}
+        strict_environments = {"test", "staging", "uat", "prod", "production"}
         return self.resource.environment.lower() in strict_environments
+
+    @property
+    def effective_experiment_name(self) -> str:
+        """The experiment every SDK surface uses.
+
+        Explicit configuration wins; otherwise the platform naming convention
+        applies: ``/Shared/<team>-<application>-<environment>`` — derived from
+        the governed tags so experiments are attributable and consistent
+        across teams without per-project invention. Strict environments still
+        require an explicit name (validated in :meth:`validate`).
+        """
+
+        if self.experiment_name not in {"", "unset"}:
+            return self.experiment_name
+        resource = self.resource
+        return (
+            f"/Shared/{resource.team}-{resource.application}-" f"{resource.environment}"
+        )
 
     def validate(self) -> None:
         self.resource.validate(strict=self.strict)
@@ -81,10 +100,19 @@ class PlatformSettings:
         environ: dict[str, str] | None = None,
         **overrides: Any,
     ) -> PlatformSettings:
-        """Load YAML, then apply ``AAI_*`` environment and explicit overrides."""
+        """Load YAML, then apply ``AAI_*`` environment and explicit overrides.
+
+        When ``path`` is omitted, the configuration file is discovered
+        portably (see :func:`find_platform_config`) so notebooks and scripts
+        work unchanged regardless of the working directory they run from.
+        """
 
         environment = environ if environ is not None else dict(os.environ)
-        config_path = Path(path or "aai-platform.yml")
+        config_path = (
+            Path(path)
+            if path is not None
+            else find_platform_config(environ=environment)
+        )
         document: dict[str, Any] = {}
         if config_path.exists():
             with config_path.open(encoding="utf-8") as stream:
@@ -130,6 +158,34 @@ class PlatformSettings:
         )
         settings.validate()
         return settings
+
+
+def find_platform_config(
+    start: str | Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Locate ``aai-platform.yml`` without hardcoding paths.
+
+    Resolution order: the ``AAI_PLATFORM_CONFIG`` environment variable, then
+    an upward search from ``start`` (default: the working directory) through
+    its parents. Notebooks and jobs therefore never embed repo-relative
+    paths — ``bootstrap()`` with no arguments finds the project
+    configuration wherever the process starts. Returns the conventional
+    ``aai-platform.yml`` in the start directory when nothing is found, so
+    missing-file errors stay clear.
+    """
+
+    env = environ if environ is not None else os.environ
+    override = env.get("AAI_PLATFORM_CONFIG")
+    if override:
+        return Path(override)
+    base = Path(start) if start is not None else Path.cwd()
+    for directory in (base, *base.parents):
+        candidate = directory / "aai-platform.yml"
+        if candidate.is_file():
+            return candidate
+    return base / "aai-platform.yml"
 
 
 def _resource_default(field_name: str) -> str:

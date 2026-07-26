@@ -21,6 +21,16 @@ variables:
   owner_group:
     description: Non-personal group that owns this bundle's resources.
     default: group:data-platform-owners
+  # Environment identifier. The default is this instance's dev policy; a clone
+  # overrides it per target or via BUNDLE_VAR_* without editing resource files.
+  # tests/test_smoke.py cross-checks this default against
+  # platform-identifiers.json (the single source of truth for identifiers).
+  # NOTE: workspace.host below must stay a literal — the Databricks CLI forbids
+  # variable interpolation in authentication fields. The same smoke test keeps
+  # it in sync with platform-identifiers.json.
+  job_compute_policy_id:
+    description: Constrained Job Compute policy that job clusters must use.
+    default: "0005F2031B6D2319"
 
 artifacts:
   default:

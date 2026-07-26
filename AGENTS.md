@@ -64,6 +64,13 @@ There are no stored credentials in this chain.
 
 These are non-secret identifiers. Do not classify them as secrets.
 
+`platform-identifiers.json` at the repo root is the machine-readable copy of
+the environment-specific values above; tests and `scripts/cloud-verify.sh`
+cross-check every other occurrence against it. When cloning this repo into a
+different tenant/workspace, edit that file first and follow
+`docs/enterprise-clone-runbook.md` — the smoke tests then point at each
+remaining file that must agree (this table included).
+
 ## 4. Hard security rules
 
 1. **No secrets in Git.** Never add a client secret, PAT, storage key, API key,
@@ -222,8 +229,10 @@ attribution.
 Use:
 
 - `docs/cloud-setup.md` for provision/revoke instructions.
-- `docs/dedicated-identity-migration.md` to complete the dev-only dedicated
-  identity migration.
+- `docs/enterprise-clone-runbook.md` to stand this repository up in another
+  GitHub org and Azure tenant (the identity must be re-minted — the FIC
+  subject embeds immutable repo/owner ids).
 - `docs/platform-operations.md` for the SDK volume and platform controls.
+- `docs/archive/` for completed one-time migrations (historical record).
 
 Never delete the shared legacy application or its UAT assignment.

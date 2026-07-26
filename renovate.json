@@ -1,0 +1,44 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Dependency automation for a security boundary built on pins: SHA-pinned actions, uv.lock, and tool version pins all rot without an updater. Grouped weekly PRs keep the noise low; every update still lands through protected main.",
+  "extends": ["config:best-practices", ":dependencyDashboard", "schedule:weekly"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "One grouped PR for all GitHub Actions bumps, always digest-pinned with a version comment",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "pinDigests": true
+    },
+    {
+      "description": "Group Python dependency updates (pyproject ranges resolve into uv.lock)",
+      "matchManagers": ["pep621"],
+      "groupName": "python-dependencies"
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Version-pinned tools installed inline in workflows (uv, build)",
+      "customType": "regex",
+      "fileMatch": ["^\\.github/workflows/.+\\.yml$"],
+      "matchStrings": [
+        "(?<depName>uv|build)==(?<currentValue>[0-9][0-9.]*)"
+      ],
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "description": "Databricks CLI pin in the Codex setup script; its per-arch SHA-256 checksums and the databricks/setup-cli action SHA must be updated in the same PR",
+      "customType": "regex",
+      "fileMatch": ["^scripts/codex-cloud-setup\\.sh$"],
+      "matchStrings": ["DATABRICKS_CLI_VERSION=\"(?<currentValue>[0-9.]+)\""],
+      "depNameTemplate": "databricks/cli",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ]
+}

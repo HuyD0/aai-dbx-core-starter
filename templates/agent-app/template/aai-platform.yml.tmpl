@@ -1,0 +1,32 @@
+platform:
+  application: {{.application_name}}
+  project: {{.project_name}}
+  environment: dev
+  team: {{.team}}
+  owner_group: {{.owner_group}}
+  cost_center: {{.cost_center}}
+  data_classification: internal
+  lifecycle: experimental
+  repository: replace-with-owner/{{.project_name}}
+  release: dev
+  tag_schema_version: "1"
+  catalog: {{.catalog}}
+  schema: {{.schema}}
+  experiment_name: /Shared/{{.project_name}}
+  azure_identity: azure_cli
+
+providers:
+  models:
+    # In the enterprise this endpoint is gateway-fronted (Databricks AI
+    # Gateway on the serving endpoint, or switch the provider to azure_apim
+    # with base_url/token_scope) — application code never changes.
+    general-chat:
+      provider: {{.model_provider}}
+      endpoint: {{.foundry_endpoint}}
+      deployment: {{.model_deployment}}
+      capabilities:
+        tool_calling: true
+        structured_output: true
+
+# Secret references may be added here. Never add secret values.
+secrets: {}

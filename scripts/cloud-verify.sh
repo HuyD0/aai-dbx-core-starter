@@ -6,10 +6,15 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 if [[ "${AAI_CLOUD_ENV:-}" == "codex" ]]; then
+  # Expected identifiers come from platform-identifiers.json — the single
+  # source of truth a clone edits (see docs/enterprise-clone-runbook.md).
+  identifier() {
+    python3 -c "import json; print(json.load(open('platform-identifiers.json'))['$1'])"
+  }
   required_values=(
-    "AZURE_TENANT_ID=7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6"
-    "AZURE_SUBSCRIPTION_ID=ea936670-dda1-4884-8467-49c225bf3e83"
-    "DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net"
+    "AZURE_TENANT_ID=$(identifier azure_tenant_id)"
+    "AZURE_SUBSCRIPTION_ID=$(identifier azure_subscription_id)"
+    "DATABRICKS_HOST=$(identifier databricks_host)"
   )
   for required in "${required_values[@]}"; do
     name="${required%%=*}"
@@ -46,6 +51,11 @@ uv run --python "${PYTHON_VERSION}" ruff check .
 uv run --python "${PYTHON_VERSION}" black --check .
 uv run --python "${PYTHON_VERSION}" pytest -q
 uv run --python "${PYTHON_VERSION}" python -m build --no-isolation
+# Workflow security lint for this repo AND the workflows every template
+# generates into team projects. --offline: no external audit calls.
+# shellcheck disable=SC2086
+uv run --python "${PYTHON_VERSION}" zizmor --offline .github/workflows \
+  templates/*/template/.github/workflows
 
 terraform fmt -check -recursive infra
 if [[ ! -d infra/.terraform/providers ]]; then

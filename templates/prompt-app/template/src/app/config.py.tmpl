@@ -1,0 +1,7 @@
+"""Generated project constants (single source for the prompt identity)."""
+
+PROMPT_NAME = "{{.prompt_name}}"
+
+# Governed evaluation dataset in Unity Catalog — the registered copy of
+# evals/data/release_cases.json (kept in sync by scripts/sync_dataset.py).
+DATASET_NAME = "{{ template "project_name_underscored" . }}_release_cases"

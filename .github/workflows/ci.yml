@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
@@ -39,6 +43,7 @@ jobs:
           terraform_wrapper: false
 
       - name: Cloud-container verification (credential-free)
+        # Includes the zizmor workflow-security lint via the locked dev env.
         run: ./scripts/cloud-verify.sh
 
   python-311:

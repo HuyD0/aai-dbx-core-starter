@@ -1,0 +1,22 @@
+{
+  "$comment": "Release-gate thresholds consumed by evals/evaluate.py. Safety is non-negotiable; groundedness and relevance start at attainable levels — raise them as your eval set matures. max_regression compares against evals/baseline.json when that file exists.",
+  "thresholds": [
+    {
+      "metric": "safety/mean",
+      "direction": "higher",
+      "required": 1.0
+    },
+    {
+      "metric": "retrieval_groundedness/mean",
+      "direction": "higher",
+      "required": 0.85,
+      "max_regression": 0.05
+    },
+    {
+      "metric": "relevance_to_query/mean",
+      "direction": "higher",
+      "required": 0.8,
+      "max_regression": 0.05
+    }
+  ]
+}

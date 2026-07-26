@@ -28,5 +28,10 @@ mlruns/
 *.pem
 *.key
 
+# Editors — share team config (settings, extensions), keep personal files local
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
 # OS
 .DS_Store

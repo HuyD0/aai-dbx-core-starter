@@ -22,7 +22,8 @@ contracts without hiding useful differences between providers.
 
 ```text
 src/aai_core/               installable platform SDK
-templates/agentic-rag/      custom Databricks project template
+templates/                  five lifecycle-ladder Databricks project templates
+templates/_shared/          canonical scaffold synced into every template
 examples/                   focused learning examples
 resources/                  this repository's bundle smoke job
 infra/                      human-run keyless CI identity bootstrap
@@ -38,22 +39,6 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 pytest -q
 ```
-
-## Codex Cloud development
-
-The repository includes a reproducible, credential-free Codex Cloud toolchain.
-Its setup and cached-container maintenance scripts install the pinned Azure,
-Databricks, Terraform, Python, and `uv` versions automatically. Cloud tasks run:
-
-```bash
-./scripts/cloud-verify.sh
-```
-
-This performs the locked install check, linting, formatting, unit tests, wheel
-build, Terraform validation, static Databricks bundle schema check, and YAML
-parsing. The Codex agent container contains no Azure or Databricks credential.
-After a reviewed change reaches protected `main`, GitHub Actions performs the
-authenticated bundle validation and deployment through keyless OIDC.
 
 Optional provider dependencies are separated:
 
@@ -88,23 +73,30 @@ After authenticating with Azure CLI and Databricks unified authentication:
 aai-core doctor --cloud
 ```
 
-## Generate an Agentic RAG project
+## Generate a project
+
+Five templates cover the lifecycle ladder; pick by what the team is
+building:
+
+| Template | Use when you want |
+|---|---|
+| `experiment-starter` | Reproducible MLflow experiments (LLM-free): dataset lineage, tags, metrics, artifacts, deterministic gate |
+| `prompt-app` | A governed prompt lifecycle: versioned registration, pinned-version LLM-judge evaluation, gated alias promotion |
+| `evaluation-project` | A standalone eval harness for an existing app/endpoint: UC datasets, reusable scorers, baselines, CI regression gate, published results |
+| `rag-app` | Governed RAG: chunking pipeline, declared vector index (or Azure AI Search), traced grounded generation, groundedness gate |
+| `agent-app` | Tool-using agents: SDK tool loop, structured outputs, trajectory-aware evals, feedback, gated Model Serving deploy, monitoring |
 
 ```bash
-databricks bundle init ./templates/agentic-rag \
-  --output-dir ../my-agent
+databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+  --template-dir templates/<template-name> --output-dir my-project
 ```
 
-The generated project contains:
-
-- An exploration notebook.
-- A packaged, framework-neutral RAG agent.
-- Logical model, embedding, and retrieval configuration.
-- MLflow tracing and normalized retriever documents.
-- Prompt registration.
-- An offline evaluation gate.
-- A wheel-based Databricks job.
-- Keyless local and CI setup instructions.
+Every generated project shares the same spine: pinned checksum-verified
+`aai-core`, the 9 mandatory cost tags on bundle presets and job clusters,
+credential-free PR CI with a deterministic gate tier, a keyless OIDC deploy
+workflow, hermetic tests on `aai_core.testing` fakes, and an
+`.aai-template.json` provenance stamp. (`agentic-rag` retired into
+`rag-app` + `agent-app` — see `templates/agentic-rag/README.md`.)
 
 ## Publish the private SDK
 
@@ -137,9 +129,13 @@ recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md).
 
 ## Learning paths
 
+- [Offline hello world](examples/offline_hello_world.py) — zero credentials
+- [First LLM call notebook](examples/first_llm_call.ipynb)
 - [Developer guide](docs/developer-guide.md)
 - [Platform architecture](docs/platform-architecture.md)
 - [Secrets and identity](docs/secrets-and-identity.md)
+- [SDK versioning policy](docs/versioning.md)
+- [Enterprise clone runbook](docs/enterprise-clone-runbook.md)
 - [Tagging standard](docs/tagging-standard.md)
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)

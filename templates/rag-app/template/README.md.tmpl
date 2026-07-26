@@ -1,0 +1,63 @@
+# {{.project_name}}
+
+Governed RAG application generated from the AAI platform template
+(`rag-app`, successor of `agentic-rag`): chunking pipeline over governed
+source data, a declared retrieval index, traced grounded generation, and a
+groundedness release gate.
+
+## Local setup
+
+Authenticate without storing credentials:
+
+```bash
+az login
+export DATABRICKS_HOST={{.workspace_host}}
+export DATABRICKS_AUTH_TYPE=azure-cli
+python scripts/install_core.py
+python -m pip install -r requirements.lock
+python -m pip install -e '.[dev]'
+pytest -q
+```
+
+Replace every `replace-with-*` value in `aai-platform.yml` before running
+a provider integration.
+
+## Development lifecycle
+
+1. Use `notebooks/01_explore.py` for exploration, not production
+   orchestration.
+2. Put tested application code under `src/app`; the chunking pipeline lives
+   in `jobs/build_chunks.py` (Databricks retrieval) and writes a
+   CDF-enabled chunk table. The vector search index itself is human-run
+   platform bootstrap over that chunk table (AGENTS.md rule 8) — this
+   bundle only references it by name in `aai-platform.yml`. For Azure AI
+   Search, index and ingestion are likewise managed outside this bundle.
+3. Register prompts with `python scripts/register_prompt.py`; promote with
+   `python scripts/promote_prompt.py --version <n> --to candidate|production`
+   after the gate passes (production loads the `production` alias).
+4. Grow `evals/data/release_cases.json` with your domain's golden and
+   failure cases (the seeded cases show the shape). Keep at least 10.
+5. Run the release gate: `python evals/evaluate.py` — groundedness,
+   relevance, and safety judges with the thresholds in
+   `evals/gate_config.json`, publishing the report to the CI summary.
+   After a released run passes: `--update-baseline`.
+   After case changes merge, register the ground truth in Unity Catalog:
+   `python scripts/sync_dataset.py` — evaluation runs link the dataset
+   by name.
+6. Record the evaluated code, prompt, model, and retrieval configuration
+   with `python scripts/create_release.py`.
+7. Deploy: `databricks bundle validate -t dev` then
+   `databricks bundle deploy -t dev`.
+
+**Index, embeddings, and chunking change together as one release.** To
+rebuild: point `search_index`/chunk table at a version-suffixed successor
+(e.g. `knowledge_v002`), run the pipeline and the evaluation gate against
+it, then switch `aai-platform.yml` to the new index and keep the previous
+one for rollback.
+
+Pull-request CI runs only the deterministic checks
+(`evals/offline_checks.py`) — it never holds credentials. The platform team
+must onboard this repository (main-branch federated credential, service
+principal, constrained compute, non-secret repository variables, and — for
+Databricks retrieval — a platform-provisioned vector search endpoint)
+before the deploy workflow is enabled.

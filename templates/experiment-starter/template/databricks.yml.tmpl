@@ -1,0 +1,50 @@
+bundle:
+  name: {{.project_name}}
+
+variables:
+  cost_center:
+    default: {{.cost_center}}
+  team:
+    default: {{.team}}
+  owner_group:
+    default: {{.owner_group}}
+  aai_core_version:
+    default: {{.aai_core_version}}
+  aai_core_volume:
+    default: {{.aai_core_volume}}
+  compute_policy_id:
+    default: {{.compute_policy_id}}
+  # Compute shape as variables so environments/policies can override them
+  # without editing resource files (the compute policy remains the enforcer).
+  node_type_id:
+    description: Azure VM type for job clusters.
+    default: Standard_DS3_v2
+  spark_version:
+    description: Databricks Runtime for job clusters.
+    default: 18.0.x-scala2.13
+
+include:
+  - resources/*.yml
+
+artifacts:
+  application:
+    type: whl
+    build: python scripts/build_application.py
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: {{.workspace_host}}
+    presets:
+      tags:
+        application: {{.application_name}}
+        project: {{.project_name}}
+        environment: ${bundle.target}
+        team: ${var.team}
+        owner_group: ${var.owner_group}
+        cost_center: ${var.cost_center}
+        data_classification: internal
+        lifecycle: experimental
+        tag_schema_version: "1"

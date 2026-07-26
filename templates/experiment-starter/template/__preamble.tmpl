@@ -1,0 +1,6 @@
+{{/* Conditional content. skip globs match POST-strip output names and are
+relative to this file's directory (template/ root). */}}
+{{- if eq .include_notebook "no" -}}
+{{ skip "notebooks" }}
+{{- end -}}
+{{ skip "__preamble" }}

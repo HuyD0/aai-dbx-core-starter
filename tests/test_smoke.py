@@ -1,5 +1,6 @@
 """Credential-free regression tests for the platform's security boundaries."""
 
+import json
 import re
 import runpy
 from pathlib import Path
@@ -10,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 SHA_PIN = re.compile(r"^\s*uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s+#.*)?$", re.MULTILINE)
 USES = re.compile(r"^\s*uses:\s*[^@\s]+@([^\s]+)", re.MULTILINE)
+# Single source of truth for environment-specific identifiers. These tests
+# cross-check every other occurrence against it so a clone that edits the
+# fixture is pointed at each file that must agree.
+IDENTIFIERS = json.loads((ROOT / "platform-identifiers.json").read_text())
 
 
 def load_yaml(relative_path):
@@ -22,22 +27,97 @@ def test_sample_notebook_runs(capsys):
     assert capsys.readouterr().out.strip().endswith("package import verified")
 
 
+def test_offline_example_runs_with_zero_credentials(capsys):
+    runpy.run_path(
+        str(ROOT / "examples" / "offline_hello_world.py"), run_name="__main__"
+    )
+    output = capsys.readouterr().out
+    assert "completed with zero credentials" in output
+    assert "not-a-real-secret" not in output
+
+
+def test_first_llm_notebook_is_valid_safe_and_output_free():
+    notebook = json.loads(
+        (ROOT / "examples" / "first_llm_call.ipynb").read_text(encoding="utf-8")
+    )
+    assert notebook["nbformat"] == 4
+    assert notebook["cells"]
+
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    assert 'ctx.providers.model("general-chat")' in source
+    assert "model.generate(" in source
+    assert "DATABRICKS_TOKEN" not in source
+    assert "AZURE_CLIENT_SECRET" not in source
+
+    code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    assert all(cell["execution_count"] is None for cell in code_cells)
+    assert all(cell["outputs"] == [] for cell in code_cells)
+
+
 def test_dev_target_is_pinned_to_dev_workspace():
     bundle = load_yaml("databricks.yml")
-    assert bundle["targets"]["dev"]["workspace"]["host"] == (
-        "https://adb-7405609799238491.11.azuredatabricks.net"
-    )
+    host = bundle["targets"]["dev"]["workspace"]["host"]
+    # workspace.host must stay a literal (the Databricks CLI forbids variable
+    # interpolation in authentication fields), so this cross-check keeps it in
+    # sync with the identifiers fixture.
+    assert host == IDENTIFIERS["databricks_host"]
+    assert host.startswith("https://") and host.endswith(".azuredatabricks.net")
 
 
 def test_sample_job_uses_constrained_job_compute_policy():
+    bundle = load_yaml("databricks.yml")
     resources = load_yaml("resources/sample_job.yml")
     cluster = resources["resources"]["jobs"]["aai_dbx_base_template_sample"][
         "job_clusters"
     ][0]["new_cluster"]
-    assert cluster["policy_id"] == "0005F2031B6D2319"
+    assert cluster["policy_id"] == "${var.job_compute_policy_id}"
+    assert (
+        bundle["variables"]["job_compute_policy_id"]["default"]
+        == IDENTIFIERS["job_compute_policy_id"]
+    )
     assert cluster["num_workers"] == 1
     assert cluster["spark_version"] == "18.0.x-scala2.13"
     assert "spark_conf" not in cluster
+
+
+def _discovered_templates():
+    templates_dir = ROOT / "templates"
+    return sorted(
+        entry
+        for entry in templates_dir.iterdir()
+        if entry.is_dir() and (entry / "databricks_template_schema.json").is_file()
+    )
+
+
+def test_identifier_fixture_is_the_single_source_of_truth():
+    """Every other file holding an environment identifier must agree with
+    platform-identifiers.json; a clone edits the fixture and this test lists
+    each remaining literal that must follow."""
+    templates = _discovered_templates()
+    assert templates, "no bundle templates discovered"
+    for template in templates:
+        schema = json.loads((template / "databricks_template_schema.json").read_text())
+        defaults = {
+            name: prop["default"] for name, prop in schema["properties"].items()
+        }
+        assert defaults["workspace_host"] == IDENTIFIERS["databricks_host"], template
+        assert (
+            defaults["compute_policy_id"] == IDENTIFIERS["job_compute_policy_id"]
+        ), template
+        assert (
+            defaults["aai_core_volume"] == IDENTIFIERS["sdk_artifact_volume"]
+        ), template
+
+    verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
+    assert "platform-identifiers.json" in verify
+    for value in (
+        IDENTIFIERS["azure_tenant_id"],
+        IDENTIFIERS["azure_subscription_id"],
+        IDENTIFIERS["databricks_host"],
+    ):
+        assert (
+            value not in verify
+        ), "cloud-verify.sh must read the fixture, not inline ids"
 
 
 def test_bundle_and_compute_use_required_platform_tags():
@@ -109,7 +189,7 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
     ci = (WORKFLOWS / "ci.yml").read_text()
 
-    for version in ("0.8.23", "1.12.2", "1.6.0", "2.88.0"):
+    for version in ("0.8.23", "1.12.2", "2.88.0"):
         assert version in setup
 
     assert "sha256sum --check" in setup
@@ -119,3 +199,28 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     assert "DATABRICKS_TOKEN" in verify
     assert "azure/login" not in verify.lower()
     assert "az login" not in verify.lower()
+
+
+def test_databricks_cli_version_is_in_lockstep_everywhere():
+    """The Codex setup pin and every databricks/setup-cli reference (this repo
+    and the template's generated workflows) must agree, or bundle behavior
+    diverges between local/Codex and CI."""
+
+    setup = (ROOT / "scripts" / "codex-cloud-setup.sh").read_text()
+    script_version = re.search(r'DATABRICKS_CLI_VERSION="([0-9.]+)"', setup).group(1)
+
+    workflow_files = list(WORKFLOWS.glob("*.yml"))
+    for template in _discovered_templates():
+        workflow_files.extend(
+            (template / "template" / ".github" / "workflows").glob("*.yml")
+        )
+    pins = []
+    for workflow in workflow_files:
+        pins.extend(
+            re.findall(
+                r"databricks/setup-cli@[0-9a-f]{40}\s+#\s*v([0-9.]+)",
+                workflow.read_text(),
+            )
+        )
+    assert pins, "no databricks/setup-cli pins found"
+    assert set(pins) == {script_version}

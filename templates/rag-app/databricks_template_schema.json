@@ -1,0 +1,144 @@
+{
+  "welcome_message": "Create an AAI RAG application\n\nGoverned retrieval-augmented generation: chunking pipeline over governed source data, a declared vector index (or external Azure AI Search), traced grounded generation, and a groundedness release gate.",
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "default": "aai-rag-app",
+      "description": "Project and bundle name. NOTE: apply template updates deliberately \u2014 generated projects record their template version in .aai-template.json",
+      "order": 1,
+      "pattern": "^[a-z][a-z0-9-]+$",
+      "pattern_match_failure_message": "Use lowercase letters, numbers, and hyphens."
+    },
+    "application_name": {
+      "type": "string",
+      "default": "knowledge-assistant",
+      "description": "Application identifier used in tags and traces",
+      "order": 2
+    },
+    "team": {
+      "type": "string",
+      "default": "data-platform",
+      "description": "Owning team",
+      "order": 3
+    },
+    "owner_group": {
+      "type": "string",
+      "default": "group:data-platform-owners",
+      "description": "Non-personal owning group",
+      "order": 4
+    },
+    "cost_center": {
+      "type": "string",
+      "default": "CC-1234",
+      "description": "Non-secret finance cost center",
+      "order": 5
+    },
+    "catalog": {
+      "type": "string",
+      "default": "main",
+      "description": "Unity Catalog catalog",
+      "order": 6
+    },
+    "schema": {
+      "type": "string",
+      "default": "agentic_apps",
+      "description": "Unity Catalog schema",
+      "order": 7
+    },
+    "model_provider": {
+      "type": "string",
+      "default": "databricks",
+      "description": "Model provider. Choose `databricks` (recommended default: gateway-ready serving endpoint, no extra auth wiring; the enterprise attaches AI Gateway rate limits and usage tracking) unless your team already operates its own Foundry resource \u2014 then `foundry` calls it directly with Entra tokens. Either way, application code only uses the logical name",
+      "enum": [
+        "databricks",
+        "foundry"
+      ],
+      "order": 8
+    },
+    "model_deployment": {
+      "type": "string",
+      "default": "replace-with-model-endpoint",
+      "description": "Databricks serving endpoint name or Foundry deployment name",
+      "order": 9
+    },
+    "foundry_endpoint": {
+      "type": "string",
+      "default": "https://replace-with-foundry-resource.services.ai.azure.com",
+      "description": "Foundry resource endpoint (only asked for Foundry models)",
+      "order": 10,
+      "skip_prompt_if": {
+        "properties": {
+          "model_provider": {
+            "const": "databricks"
+          }
+        }
+      }
+    },
+    "retrieval_provider": {
+      "type": "string",
+      "default": "azure_ai_search",
+      "description": "Retrieval provider. `databricks_ai_search` keeps data, governance, and billing inside the workspace (best when your documents already live in Unity Catalog); `azure_ai_search` fits corpora indexed outside Databricks or shared with non-Databricks consumers. Both are keyless and expose the same search contract",
+      "enum": [
+        "azure_ai_search",
+        "databricks_ai_search"
+      ],
+      "order": 11
+    },
+    "search_endpoint": {
+      "type": "string",
+      "default": "https://replace-with-search-service.search.windows.net",
+      "description": "Azure AI Search service or Databricks AI Search endpoint",
+      "order": 12
+    },
+    "search_index": {
+      "type": "string",
+      "default": "replace-with-search-index",
+      "description": "Search index name",
+      "order": 13
+    },
+    "embedding_deployment": {
+      "type": "string",
+      "default": "replace-with-embedding-endpoint",
+      "description": "Embedding deployment or endpoint name. Its embedding dimension must match the search index's vector field (the config default assumes 1536, e.g. text-embedding-3-small); index, embeddings, and chunking change together as one release",
+      "order": 14
+    },
+    "aai_core_version": {
+      "type": "string",
+      "default": "0.2.0",
+      "description": "Pinned aai-core SDK version",
+      "order": 15
+    },
+    "aai_core_volume": {
+      "type": "string",
+      "default": "/Volumes/platform/artifacts/python_packages",
+      "description": "Unity Catalog volume holding aai-core wheels",
+      "order": 16
+    },
+    "workspace_host": {
+      "type": "string",
+      "default": "https://adb-7405609799238491.11.azuredatabricks.net",
+      "description": "Development Azure Databricks workspace",
+      "order": 17
+    },
+    "compute_policy_id": {
+      "type": "string",
+      "default": "0005F2031B6D2319",
+      "description": "Constrained Job Compute policy",
+      "order": 18
+    },
+    "aai_core_pip_source": {
+      "type": "string",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
+      "order": 19
+    },
+    "source_table": {
+      "type": "string",
+      "default": "{{.catalog}}.{{.schema}}.documents",
+      "description": "Governed source table of documents (columns: id, content, source_uri). The chunk pipeline writes <source_table>_chunks with Change Data Feed enabled (Databricks retrieval only)",
+      "order": 15
+    }
+  },
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}} && python scripts/install_core.py\n  2. python -m pip install -r requirements.lock && python -m pip install -e '.[dev]'\n  3. pytest -q && python evals/offline_checks.py\n  4. python scripts/register_prompt.py\n  5. databricks bundle validate -t dev && databricks bundle deploy -t dev",
+  "min_databricks_cli_version": "v1.6.0"
+}

@@ -3,7 +3,7 @@ from aai_core.experiments import ExperimentManager
 
 ctx = bootstrap()
 experiments = ExperimentManager(
-    experiment_name=ctx.settings.experiment_name,
+    experiment_name=ctx.settings.effective_experiment_name,
     context=ctx.tags,
 )
 

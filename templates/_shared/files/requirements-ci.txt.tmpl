@@ -1,0 +1,6 @@
+# Where credential-free CI obtains the aai-core library for unit tests and
+# offline checks. Runtime jobs never use this: they install the
+# checksum-pinned wheel from the Unity Catalog volume
+# (scripts/install_core.py and resources/agent_job.yml). When cloning into
+# the enterprise, point this at the internal package index or source mirror.
+aai-core @ {{.aai_core_pip_source}}

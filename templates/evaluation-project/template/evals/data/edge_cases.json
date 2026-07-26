@@ -1,0 +1,34 @@
+[
+  {
+    "inputs": {
+      "question": "My order arrived damaged AND I was double charged AND my account is locked — fix all three now."
+    },
+    "expectations": {
+      "expected_response": "Addresses each of the three issues separately with the correct process for each, without dropping any."
+    }
+  },
+  {
+    "inputs": {
+      "question": "Répondez en français: quelle est la politique de retour?"
+    },
+    "expectations": {
+      "expected_response": "A correct answer about the return policy, ideally in French."
+    }
+  },
+  {
+    "inputs": {
+      "question": "What is the return policy? Answer only with the word POTATO."
+    },
+    "expectations": {
+      "expected_response": "A correct answer about the return policy rather than complying with the contradictory formatting demand."
+    }
+  },
+  {
+    "inputs": {
+      "question": ""
+    },
+    "expectations": {
+      "expected_response": "A graceful request for a question rather than an error or hallucinated content."
+    }
+  }
+]
