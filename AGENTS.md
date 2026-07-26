@@ -229,8 +229,10 @@ attribution.
 Use:
 
 - `docs/cloud-setup.md` for provision/revoke instructions.
-- `docs/dedicated-identity-migration.md` to complete the dev-only dedicated
-  identity migration.
+- `docs/enterprise-clone-runbook.md` to stand this repository up in another
+  GitHub org and Azure tenant (the identity must be re-minted — the FIC
+  subject embeds immutable repo/owner ids).
 - `docs/platform-operations.md` for the SDK volume and platform controls.
+- `docs/archive/` for completed one-time migrations (historical record).
 
 Never delete the shared legacy application or its UAT assignment.
