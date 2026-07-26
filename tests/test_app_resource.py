@@ -132,6 +132,26 @@ def test_databricks_sdk_stays_out_of_the_dev_extra():
     assert "databricks-sdk" not in dev
 
 
+def test_console_tests_do_not_depend_on_starlettes_test_client():
+    """Starlette's TestClient needs an HTTP client this repository does not lock.
+
+    Starlette 0.x wants httpx, 1.x wants httpx2, and neither is in uv.lock, so a test
+    built on it passes or fails depending on which starlette the resolver picked — it
+    passed locally on 0.52 and broke CI on 1.3. tests/asgi_client.py drives the ASGI
+    callable directly instead.
+    """
+    # Matches import statements only, so this test's own prose does not trip it.
+    banned = re.compile(
+        r"^\s*(from\s+(starlette|fastapi)\.testclient\s+import|import\s+httpx)", re.M
+    )
+    offenders = [
+        path.name
+        for path in sorted(Path(__file__).parent.glob("test_app_*.py"))
+        if banned.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, f"use tests/asgi_client.py instead: {offenders}"
+
+
 def test_workflow_directory_contains_no_yaml_extension_files():
     """GitHub honours `.yaml`, but every guard in this repository globs `*.yml`.
 

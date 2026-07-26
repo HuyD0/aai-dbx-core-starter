@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from asgi_client import ASGIClient
 
 from aai_console.config import IDENTIFIER_KEYS, ConsoleConfig
 from aai_console.server import create_app
@@ -53,7 +53,7 @@ def client(monkeypatch):
         hosted=False,
         app_name=None,
     )
-    return TestClient(create_app(config), raise_server_exceptions=False)
+    return ASGIClient(create_app(config))
 
 
 @pytest.mark.parametrize("path", sorted(ALLOWED_KEYS))

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from asgi_client import ASGIClient
 
 from aai_console.checks import PLATFORM_STATE_HEADING, WorkspaceProbe, run_checks
 from aai_console.config import IDENTIFIER_KEYS, ConsoleConfig, load_config
@@ -62,7 +62,7 @@ def config():
 def client(config, monkeypatch):
     for name in CREDENTIAL_VARS:
         monkeypatch.delenv(name, raising=False)
-    return TestClient(create_app(config, probe=WorkspaceProbe(_FakeWorkspace())))
+    return ASGIClient(create_app(config, probe=WorkspaceProbe(_FakeWorkspace())))
 
 
 def test_healthz_and_session_respond_without_any_cloud_identity(client):
