@@ -1,0 +1,285 @@
+# The guided onboarding ladder.
+#
+# This file is the console's copy of the lifecycle that docs/ already teaches. It
+# deliberately does NOT re-author that lifecycle: tests/test_app_content.py asserts that
+# every command block here appears verbatim in the `source` file it cites, so the console
+# and the docs cannot drift. Prose may be paraphrased; commands may not.
+#
+# `${identifier:<key>}` placeholders resolve at request time from environment values the
+# bundle supplies (see aai_console/config.py). Never inline a workspace identifier here —
+# tests/test_app_content.py fails the build if one appears.
+#
+# Commands with no `source` must be listed in SYNTHESIZED_COMMANDS in
+# tests/test_app_content.py with a written rationale.
+
+version: 1
+
+tracks:
+  - id: local-first
+    title: Prove it locally
+    subtitle: Zero credentials
+    glyph: local
+    summary: >
+      Before any cloud access, prove a fresh clone works on your machine. Nothing in this
+      track touches Databricks or Azure.
+    steps:
+      - id: quickstart
+        title: Create the locked environment
+        body: >
+          From a fresh clone, create the locked environment and run the zero-credential
+          example. This needs Python 3.11 or 3.12 and uv — no cloud configuration and no
+          credentials at all.
+        source: docs/developer-guide.md
+        blocks:
+          - lang: bash
+            code: make quickstart
+
+      - id: local-trace
+        title: Write your first trace to a local store
+        body: >
+          `local-start` records a trace in `.aai/local/mlflow.db`. It does not use cloud
+          credentials. `local-ui` then serves that store so you can see the trace.
+        source: docs/developer-guide.md
+        blocks:
+          - lang: bash
+            code: make local-start
+          - lang: bash
+            code: "make local-ui  # open http://127.0.0.1:5000; Ctrl-C stops it"
+
+      - id: local-explore
+        title: See what else runs locally
+        body: >
+          Each example declares whether it runs locally, needs a workspace, or both. Start
+          with the offline hello world and work up.
+        source: Makefile
+        blocks:
+          - lang: bash
+            code: make examples-list
+
+  - id: prerequisites
+    title: Prerequisites
+    subtitle: Workstation and access
+    glyph: check
+    summary: >
+      Two checklists must be satisfied before you generate a project: what you install,
+      and what the platform team grants your group. The console can see the platform side
+      only — see the platform-state panel.
+    steps:
+      - id: workstation
+        title: Install the toolchain
+        body: >
+          Install Git, Python 3.12 (3.11 is also supported), the Azure CLI and the
+          Databricks CLI. The generated project's preflight enforces exactly this set and
+          rejects a Python outside 3.11–3.12.
+        source: docs/developer-onboarding.md
+        checklist:
+          - Git
+          - Python 3.12 (Python 3.11 is also supported)
+          - Azure CLI
+          - Databricks CLI
+
+      - id: grants
+        title: Confirm the platform team has granted access
+        body: >
+          Permissions are granted to groups, never to individuals. Application developers
+          never need WRITE VOLUME, workspace admin, a PAT, or a client secret.
+        source: docs/developer-onboarding.md
+        checklist:
+          - Access to the dbx-dev Databricks workspace
+          - READ VOLUME on the SDK artifact volume
+          - CAN_USE on the constrained job compute policy
+          - The catalog, schema, endpoint and search permissions your template needs
+          - Access to create or push the consuming GitHub repository
+        verify:
+          - sdk_volume
+          - compute_policy
+
+  - id: connect
+    title: Connect keylessly
+    subtitle: Azure CLI, no secrets
+    glyph: cloud
+    summary: >
+      Authenticate through the Azure CLI. Do not create a personal access token or a
+      client secret — the platform is keyless by design.
+    steps:
+      - id: az-login
+        title: Sign in and point at the workspace
+        body: >
+          `az login` obtains your Azure identity; the two exports tell the Databricks CLI
+          and the SDK to reuse it. Nothing here stores a credential.
+        source: docs/developer-onboarding.md
+        blocks:
+          - lang: bash
+            code: az login
+          - lang: bash
+            code: export DATABRICKS_HOST=${identifier:databricks_host}
+          - lang: bash
+            code: export DATABRICKS_AUTH_TYPE=azure-cli
+
+      - id: workspace-connect
+        title: Prepare and check workspace access
+        body: >
+          `workspace-connect` creates the local platform configuration and reports any
+          keyless authentication action still outstanding. Then send the same example you
+          ran locally to the workspace.
+        source: docs/developer-guide.md
+        blocks:
+          - lang: bash
+            code: make workspace-connect
+          - lang: bash
+            code: make workspace-example EXAMPLE=first_trace
+
+      - id: doctor
+        title: Diagnose an unclear permission error
+        body: >
+          When a later provider identity or permission error is unclear, the SDK's
+          diagnostics print a structured check list with the exact remediation for each
+          row.
+        source: docs/developer-guide.md
+        blocks:
+          - lang: bash
+            code: aai-core doctor --cloud
+
+  # Choosing and generating live on one page on purpose: picking a template immediately
+  # rewrites the command below it, which is the console's one genuinely additive move.
+  - id: generate
+    title: Choose and generate
+    subtitle: Pick a template, get the command
+    glyph: spark
+    summary: >
+      Pick the template that matches what you are building, and the exact `bundle init`
+      command appears below it — already carrying this workspace's identifiers. Each
+      wizard asks only non-secret configuration; platform-controlled fields already
+      default to the approved workspace, compute policy, SDK version and artifact volume.
+    steps:
+      - id: decide
+        title: Match the template to the work
+        body: >
+          These are the five supported starting points.
+        source: docs/developer-guide.md
+        choices:
+          - id: experiment-starter
+            label: experiment-starter
+            detail: reproducible MLflow experiments (LLM-free)
+          - id: prompt-app
+            label: prompt-app
+            detail: governed prompt lifecycle with judged, pinned-version evals
+          - id: evaluation-project
+            label: evaluation-project
+            detail: standalone eval harness for an existing app/endpoint
+          - id: rag-app
+            label: rag-app
+            detail: governed retrieval-augmented generation
+          - id: agent-app
+            label: agent-app
+            detail: tool-using agents with gated serving
+
+      - id: init
+        title: Run the template wizard
+        body: >
+          Point `bundle init` at this repository's Git URL. Inside a checkout of the
+          monorepo, a local `./templates/<template-name>` path works too.
+        source: docs/developer-onboarding.md
+        generate: bundle_init
+
+  - id: setup
+    title: Set the project up
+    subtitle: Preflight and verify
+    glyph: check
+    summary: >
+      The generated setup verifies your access; it never grants permissions or creates
+      cloud resources. A failure names the missing prerequisite and what to request.
+    steps:
+      - id: setup-dev
+        title: Run the generated preflight
+        body: >
+          The preflight verifies the local toolchain, Azure and Databricks authentication,
+          both pinned SDK release artifacts, and compute-policy visibility — then creates
+          the virtual environment and installs the pinned SDK.
+        source: docs/developer-onboarding.md
+        blocks:
+          - lang: bash
+            code: python3.12 scripts/setup_dev.py
+
+      - id: check-only
+        title: Check access without changing anything
+        body: >
+          For a non-mutating access check that creates no virtual environment and installs
+          no packages.
+        source: docs/developer-onboarding.md
+        blocks:
+          - lang: bash
+            code: python3.12 scripts/setup_dev.py --check-only
+
+  - id: build
+    title: Build deliberately
+    subtitle: Explore, then package
+    glyph: spark
+    summary: >
+      Use the generated notebook to inspect data and test an idea. Once behaviour is
+      reusable, move it into packaged Python and give it a typed interface and tests.
+      Production jobs invoke packaged Python rather than treating a notebook as the
+      application boundary.
+    steps:
+      - id: experiments
+        title: Record experiments that answer a question
+        body: >
+          Every meaningful comparison should carry a hypothesis, a dataset or trace-set
+          reference, parameters and application release, quality/latency/cost
+          measurements, and a conclusion. Use the SDK's experiment manager so the standard
+          ownership and release tags attach automatically.
+        source: docs/developer-guide.md
+
+      - id: prompts
+        title: Register prompts instead of copying strings
+        body: >
+          Reference immutable prompt versions during evaluation and production, and use
+          the controlled development, candidate and production aliases for promotion. For
+          RAG, a change to the source snapshot, parser, chunking profile, embedding
+          profile, index, filters or reranker is an application change.
+        source: docs/developer-guide.md
+
+  - id: evaluate
+    title: Evaluate and gate
+    subtitle: Thresholds and regressions
+    glyph: check
+    summary: >
+      Begin with manually reviewed golden cases and known safety and failure cases, then
+      add representative production traces as the application is used.
+    steps:
+      - id: dimensions
+        title: Evaluate the dimensions that matter
+        body: >
+          The candidate must pass absolute thresholds and allowed regression limits
+          against the deployed baseline.
+        source: docs/developer-guide.md
+        checklist:
+          - Retrieval relevance and recall
+          - Access-filter correctness
+          - Groundedness and citation correctness
+          - Answer relevance and safe abstention
+          - Tool selection and arguments
+          - Latency and provider cost
+
+  - id: deploy
+    title: Deploy and monitor
+    subtitle: Bundle validate and deploy
+    glyph: cloud
+    summary: >
+      The platform team must first onboard your generated repository with its own
+      main-branch federated credential, a dev-only Databricks service principal,
+      constrained compute permission and non-secret repository variables. Do not reuse
+      this template hub's identity.
+    steps:
+      - id: bundle-deploy
+        title: Validate and deploy the generated bundle
+        body: >
+          Production applications emit sampled asynchronous traces. Attach end-user and
+          expert feedback to the originating trace, and promote real failures into the
+          regression dataset.
+        source: docs/developer-guide.md
+        blocks:
+          - lang: bash
+            code: databricks bundle validate -t dev
+          - lang: bash
+            code: databricks bundle deploy -t dev

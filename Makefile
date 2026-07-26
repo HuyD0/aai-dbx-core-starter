@@ -11,12 +11,16 @@ EXAMPLE ?=
 LOCAL_MLFLOW_DIR ?= $(CURDIR)/.aai/local
 LOCAL_MLFLOW_DB ?= $(LOCAL_MLFLOW_DIR)/mlflow.db
 LOCAL_MLFLOW_URI = sqlite:///$(LOCAL_MLFLOW_DB)
+# Platform console (src/platform_app). APP_NAME must match the `name` of the app
+# resource; it is stopped by default so a forgotten console cannot bill.
+APP_PORT ?= 8000
+APP_NAME ?= aai-platform-console-dev
 
 .PHONY: help check-uv install lint format format-check test build check verify \
 	sync-templates check-templates bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-ui workspace-connect workspace-example examples-connect example \
-	pre-commit pre-push hooks-install hooks-run
+	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -117,6 +121,20 @@ bundle-validate: ## Validate this repository's Databricks bundle (requires auth)
 
 validate-templates: ## Render and validate all bundles against Databricks (requires auth).
 	$(PYTHON) scripts/validate_templates.py
+
+app-run: install ## Serve the platform console locally at http://127.0.0.1:8000.
+	cd src/platform_app && ../../$(PYTHON) -m uvicorn aai_console.server:app \
+		--host 127.0.0.1 --port $(APP_PORT) --reload
+
+app-start: ## Start the deployed console (it is stopped by default to avoid standing cost).
+	$(DATABRICKS) apps start "$(APP_NAME)"
+
+app-stop: ## Stop the deployed console. Stopped apps do not bill.
+	$(DATABRICKS) apps stop "$(APP_NAME)"
+
+app-restart: ## Restart the console so it picks up newly deployed code.
+	$(DATABRICKS) apps stop "$(APP_NAME)"
+	$(DATABRICKS) apps start "$(APP_NAME)"
 
 doctor: ## Run safe local SDK diagnostics.
 	$(PYTHON) -m aai_core.diagnostics doctor

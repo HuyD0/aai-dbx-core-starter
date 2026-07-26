@@ -20,6 +20,7 @@ The contract is:
 
 ```text
 templates teach the lifecycle
+  -> the platform console guides developers into them
   -> aai-core supplies stable runtime contracts
   -> native provider clients remain available
   -> platform infrastructure enforces identity, policy, governance, and cost
@@ -145,7 +146,59 @@ remaining file that must agree (this table included).
   incompatible application architectures.
 - Render each template in credential-free CI and run the generated unit tests.
 
-## 7. Development workflow
+## 7. Platform console (Databricks App) rules
+
+The guided console lives at `src/platform_app` and is deployed as a Databricks
+App. It renders the lifecycle for a developer, generates the exact commands they
+run on their own machine, and reports platform state. Rules:
+
+- **Platform-level only. Never templated.** Templates render through Go
+  `text/template`, whose `{{ }}` delimiters collide with the console's Jinja
+  syntax, and `templates/_shared/versions.json` would have to pin a web stack
+  into every generated project. Generated projects link to the console's URL.
+- **The console never verifies a developer's own access.** On-behalf-of-user
+  authorization is not used: consent is irrevocable, and its scopes do not cover
+  compute policies, Unity Catalog volumes or catalog grants. Every check runs as
+  the app service principal and is labelled platform state. This is enforced by
+  `assert_platform_state`, not by convention.
+- **An app cannot carry the nine platform tags.** `resources.App` is
+  `additionalProperties: false` and has no `tags` field, and the CLI applies no
+  presets to apps (`// Apps: No presets`). Cost attributes through
+  `usage_policy_id`, which section 9 already prescribes for serverless. Do not
+  attempt to add tags to an app resource — it is a hard schema rejection.
+- **The app identity is provisioned externally.** Creating an app auto-provisions
+  a service principal, and section 4 rule 8 reserves principal registration for
+  the human-run platform process. CI only ever *updates* an existing app; the
+  platform owner runs `databricks apps create` and the app SP is recorded in
+  section 3.
+- **The app resource stays out of `resources/*.yml`.** `databricks.yml` globs that
+  directory, so an app resource there would make every clone require Apps to be
+  enabled. It lives in `resources/optional/` behind an explicit opt-in `include`.
+- **Never add a workflow to deploy it.** Extend `.github/workflows/deploy.yml`.
+  A new workflow file would need its own SHA-pinned action to satisfy the pinning
+  test and would silently escape the credentialed-workflow tuple in
+  `tests/test_smoke.py`.
+- **No environment identifier may appear under `src/platform_app`.** The app's
+  `source_code_path` uploads only that directory, so it cannot read
+  `platform-identifiers.json`; values arrive as bundle-supplied environment
+  configuration. A test enforces this because it is what keeps a clone portable.
+- **The runtime environment holds a live OAuth secret.** `DATABRICKS_CLIENT_SECRET`
+  is injected into the app process and app logs are readable by anyone with
+  `CAN MANAGE`. Run with `--no-access-log`, never echo the environment, never
+  serialise an SDK object wholesale (`dataclasses.asdict()` reaches
+  `PlatformSettings.raw`), and scrub credential values out of any provider error
+  before rendering it.
+- **The console is stopped by default.** A running app bills continuously with no
+  scale-to-zero. `deploy.yml` deploys code only; `make app-start` / `app-stop`
+  control the running state. A running app does not pick up newly deployed code —
+  `make app-restart` does.
+- **No node, no bundler, no `package.json`.** `scripts/cloud-verify.sh` performs an
+  offline `uv sync --locked`; an npm lockfile ecosystem is a change of security
+  posture, not a dependency. The console's web dependencies live in the `dev`
+  extra, never in a public `app` extra that would ship a web server to SDK
+  consumers.
+
+## 8. Development workflow
 
 Install:
 
@@ -205,7 +258,7 @@ Some sandboxes block `*.azuredatabricks.net`. A TLS failure with successful
 Azure ARM access may be a data-plane network restriction; use a GitHub runner
 or unrestricted shell rather than weakening identity.
 
-## 8. Tagging and cost attribution
+## 9. Tagging and cost attribution
 
 The canonical tag fields are documented in `docs/tagging-standard.md`. Bundle
 variables provide `cost_center`, `team`, and `owner_group`; never hardcode a
@@ -217,7 +270,7 @@ Unity Catalog governed tags control supported securables. If a compute policy
 fixes or forbids a tag, align the template and policy rather than dropping cost
 attribution.
 
-## 9. External infrastructure and release changes
+## 10. External infrastructure and release changes
 
 - This repository does not own or provision cloud infrastructure. Do not add
   infrastructure-as-code tooling to its setup, CI, verification, or templates.
@@ -232,7 +285,7 @@ attribution.
 - Generated projects download and checksum the exact pinned wheel locally and
   install the same volume path in Databricks jobs.
 
-## 10. Reproduce, migrate, and revoke
+## 11. Reproduce, migrate, and revoke
 
 Use:
 

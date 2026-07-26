@@ -50,6 +50,15 @@ dev = [
   "pytest>=9.1.1,<10",
   "ruff>=0.16,<1",
   "zizmor>=1.5,<2",
+  # Platform console (src/platform_app). Deliberately NOT a public `app` extra:
+  # `pip install aai-core[app]` handing an SDK consumer a web server would misrepresent
+  # the published package. Plain `uvicorn`, never uvicorn[standard] — uvloop/httptools/
+  # watchfiles are absent from uv.lock. databricks-sdk stays out on purpose so the
+  # `dependency:databricks.sdk` doctor check keeps exercising its skip path
+  # (tests/conftest.py); the console imports it lazily and degrades to `skip`.
+  "fastapi>=0.140,<1",
+  "jinja2>=3.1.6,<4",
+  "uvicorn>=0.51,<1",
 ]
 
 [project.scripts]
@@ -60,7 +69,10 @@ packages = ["src/aai_core"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-pythonpath = ["src"]
+# src/platform_app is on the path so tests import `aai_console.server` by exactly the
+# name the Apps container uses (its source root is src/platform_app). One import path,
+# no namespace-package trickery, nothing that can diverge between test and container.
+pythonpath = ["src", "src/platform_app"]
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -71,7 +83,7 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aai_core", "app", "jobs"]
+known-first-party = ["aai_core", "aai_console", "app", "jobs"]
 
 [tool.black]
 target-version = ["py311", "py312"]

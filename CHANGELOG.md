@@ -4,6 +4,14 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added the platform console (`src/platform_app`), a Databricks App that renders
+  the onboarding lifecycle, generates the exact `bundle init` command for a
+  chosen template with this workspace's identifiers substituted, and reports
+  app-service-principal platform state. It deliberately does not verify a
+  developer's personal access: on-behalf-of-user consent is irrevocable and its
+  scopes do not reach compute policies, volumes or catalog grants. Served
+  locally with `make app-run`; stopped by default once deployed. See
+  `docs/platform-console.md`.
 - Added session-aware traces, secure opt-in MLflow OpenAI/LangChain
   autologging (including compatible LangGraph agents), bounded LLM/tool span
   inputs, outputs, and token usage, complete tool-loop response/usage

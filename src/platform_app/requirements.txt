@@ -1,0 +1,13 @@
+# Container install list for the Databricks Apps runtime (Python 3.11, Ubuntu 22.04).
+#
+# This is a SECOND dependency channel that `uv lock --check` does not see. Every pin here
+# must equal the version uv.lock resolves for this repository;
+# tests/test_app_resource.py enforces that so the two cannot drift silently.
+#
+# Plain `uvicorn`, never uvicorn[standard]: uvloop/httptools/watchfiles are absent from
+# uv.lock and would be an unpinned, unaudited addition.
+fastapi==0.140.0
+jinja2==3.1.6
+uvicorn==0.51.0
+databricks-sdk==0.122.0
+PyYAML==6.0.3

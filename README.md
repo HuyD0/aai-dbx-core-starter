@@ -22,6 +22,7 @@ contracts without hiding useful differences between providers.
 
 ```text
 src/aai_core/               installable platform SDK
+src/platform_app/           guided onboarding console (a Databricks App)
 templates/                  five lifecycle-ladder Databricks project templates
 templates/_shared/          canonical scaffold synced into every template
 examples/                   focused learning examples
@@ -188,6 +189,7 @@ cloud and identity resources are provisioned outside this repository.
 - `make quickstart` — clone-to-running, with zero credentials
 - `make local-start` / `make local-ui` — local MLflow learning loop
 - `make workspace-connect` — guided keyless setup for workspace examples
+- `make app-run` — the guided platform console, served locally ([docs](docs/platform-console.md))
 - [Offline hello world](examples/offline_hello_world.py) — zero credentials
 - [First LLM call notebook](examples/first_llm_call.ipynb)
 - [Developer guide](docs/developer-guide.md)
