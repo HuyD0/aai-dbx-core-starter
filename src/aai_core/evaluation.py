@@ -94,7 +94,9 @@ class EvaluationDatasetManager:
             import mlflow
         except ImportError as error:
             raise RuntimeError(
-                "Dataset support requires `pip install 'aai-core[genai]'`"
+                "Dataset support requires the `genai` extra. From an aai-core "
+                "checkout run `make examples-install` and use `.venv/bin/python`; "
+                "in a consuming environment install `aai-core[genai]`."
             ) from error
         return mlflow
 
@@ -212,7 +214,9 @@ class EvaluationSuite:
             import mlflow
         except ImportError as error:
             raise RuntimeError(
-                "Evaluation support requires `pip install 'aai-core[genai]'`"
+                "Evaluation support requires the `genai` extra. From an aai-core "
+                "checkout run `make examples-install` and use `.venv/bin/python`; "
+                "in a consuming environment install `aai-core[genai]`."
             ) from error
         return mlflow
 

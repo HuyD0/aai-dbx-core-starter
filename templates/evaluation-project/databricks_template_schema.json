@@ -91,5 +91,5 @@
       "order": 20
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py              # preflight + isolated setup\n  3. python scripts/sync_dataset.py               # publish cases to the UC dataset\n  4. python evals/evaluate.py                     # full judge gate + published report"
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # deterministic tier, zero credentials\n  4. python scripts/sync_dataset.py      # publish cases to the UC dataset\n  5. make evaluate                       # full judge gate + published report\n\nRun `make help` for every available target."
 }

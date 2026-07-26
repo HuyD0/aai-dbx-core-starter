@@ -1,0 +1,139 @@
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DEFAULT_GOAL := help
+
+PYTHON ?= .venv/bin/python
+UV ?= uv
+UV_VERSION ?= 0.8.23
+TERRAFORM ?= terraform
+DATABRICKS ?= databricks
+TARGET ?= dev
+EXAMPLE ?=
+LOCAL_MLFLOW_DIR ?= $(CURDIR)/.aai/local
+LOCAL_MLFLOW_DB ?= $(LOCAL_MLFLOW_DIR)/mlflow.db
+LOCAL_MLFLOW_URI = sqlite:///$(LOCAL_MLFLOW_DB)
+
+.PHONY: help check-uv install lint format format-check test build check verify \
+	sync-templates check-templates terraform-format terraform-format-check \
+	terraform-init terraform-validate bundle-validate validate-templates doctor \
+	doctor-cloud quickstart examples-install examples-list local-start local-example \
+	local-ui workspace-connect workspace-example examples-connect example \
+	pre-commit pre-push hooks-install hooks-run
+
+help: ## Show the available targets.
+	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+check-uv: ## Check that the pinned environment manager is available.
+	@command -v "$(UV)" >/dev/null 2>&1 || { \
+		echo "uv is required. Install uv $(UV_VERSION), then rerun this target."; \
+		echo "For example: pipx install 'uv==$(UV_VERSION)'"; \
+		exit 2; \
+	}
+
+install: check-uv ## Create/sync the locked SDK development environment with uv.
+	$(UV) sync --extra dev --locked
+
+pre-commit: ## Run the fast credential-free commit gate.
+	./scripts/pre-commit.sh
+
+pre-push: ## Run the complete credential-free verification gate.
+	./scripts/pre-push.sh
+
+hooks-install: install ## Install the repository's pre-commit and pre-push hooks.
+	$(PYTHON) -m pre_commit install \
+		--hook-type pre-commit \
+		--hook-type pre-push
+
+hooks-run: pre-commit pre-push ## Run both Git hook stages now.
+
+examples-install: check-uv ## Install locked Databricks, GenAI, and interactive example dependencies.
+	$(UV) sync --extra dev --extra databricks --extra genai --extra examples --locked
+	@$(PYTHON) -c 'import sys; import databricks.sdk; import ipykernel; import jupyterlab; import mlflow; print(f"Example dependencies ready in {sys.executable} (MLflow {mlflow.__version__})")'
+
+quickstart: install ## Prove a fresh clone works without credentials.
+	$(PYTHON) scripts/examples.py quickstart
+
+local-start: examples-install ## Write a trace to a clean, repository-local MLflow store.
+	$(PYTHON) scripts/examples.py local first_trace
+
+local-example: examples-install ## Run a local-capable example: make local-example EXAMPLE=first_trace
+	@test -n "$(EXAMPLE)" || { \
+		echo "EXAMPLE is required. Choose first_trace or first_experiment."; \
+		exit 2; \
+	}
+	$(PYTHON) scripts/examples.py local "$(EXAMPLE)"
+
+local-ui: examples-install ## Serve the isolated local MLflow store at http://127.0.0.1:5000.
+	@mkdir -p "$(LOCAL_MLFLOW_DIR)/mlruns"
+	$(PYTHON) -m mlflow ui \
+		--backend-store-uri "$(LOCAL_MLFLOW_URI)" \
+		--default-artifact-root "$(LOCAL_MLFLOW_DIR)/mlruns"
+
+workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
+	$(PYTHON) scripts/examples.py connect
+
+examples-connect: workspace-connect ## Backward-compatible alias for workspace-connect.
+
+examples-list: install ## List learning examples and their execution mode.
+	$(PYTHON) scripts/examples.py list
+
+workspace-example: examples-install ## Send an example to Databricks: make workspace-example EXAMPLE=first_trace
+	@test -n "$(EXAMPLE)" || { \
+		echo "EXAMPLE is required. Run 'make examples-list' to see valid names."; \
+		exit 2; \
+	}
+	$(PYTHON) scripts/examples.py workspace "$(EXAMPLE)"
+
+example: workspace-example ## Backward-compatible alias for workspace-example.
+
+lint: ## Run Ruff lint checks.
+	$(PYTHON) -m ruff check .
+
+format: ## Apply Ruff auto-fixes and Black formatting.
+	$(PYTHON) -m ruff check --fix .
+	$(PYTHON) -m black .
+
+format-check: ## Check Ruff and Black formatting without changing files.
+	$(PYTHON) -m ruff check .
+	$(PYTHON) -m black --check .
+
+test: ## Run the credential-free test suite.
+	$(PYTHON) -m pytest -q
+
+build: ## Build the SDK source distribution and wheel.
+	$(PYTHON) -m build
+
+sync-templates: ## Copy the canonical shared scaffold into every template.
+	$(PYTHON) scripts/sync_template_shared.py
+
+check-templates: ## Check that generated template scaffold files are in sync.
+	$(PYTHON) scripts/sync_template_shared.py --check
+
+terraform-format: ## Format Terraform configuration.
+	$(TERRAFORM) fmt -recursive infra
+
+terraform-format-check: ## Check Terraform formatting.
+	$(TERRAFORM) fmt -check -recursive infra
+
+terraform-init: ## Initialize Terraform without the remote backend.
+	$(TERRAFORM) -chdir=infra init -backend=false -input=false
+
+terraform-validate: terraform-init ## Validate Terraform configuration.
+	$(TERRAFORM) -chdir=infra validate
+
+check: check-templates format-check test build terraform-format-check terraform-validate ## Run the standard pre-commit checks.
+
+verify: ## Run the complete credential-free verification used by CI.
+	./scripts/cloud-verify.sh
+
+bundle-validate: ## Validate this repository's Databricks bundle (requires auth).
+	$(DATABRICKS) bundle validate -t "$(TARGET)"
+
+validate-templates: ## Render and validate all bundles against Databricks (requires auth).
+	$(PYTHON) scripts/validate_templates.py
+
+doctor: ## Run safe local SDK diagnostics.
+	$(PYTHON) -m aai_core.diagnostics doctor
+
+doctor-cloud: ## Run SDK diagnostics with cloud connectivity checks.
+	$(PYTHON) -m aai_core.diagnostics doctor --cloud

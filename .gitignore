@@ -27,6 +27,8 @@ mlruns/
 *.env
 *.pem
 *.key
+# Local connected-example configuration (the reusable example stays tracked).
+/aai-platform.yml
 
 # Editors — share team config (settings, extensions), keep personal files local
 .vscode/*

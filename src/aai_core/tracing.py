@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, TypeVar
+from functools import wraps
+from typing import Any, TypeVar, cast
 
 from aai_core.tags import ResourceContext
 
 F = TypeVar("F", bound=Callable[..., Any])
+_TRACE_METADATA: dict[str, str] = {}
 
 
 def configure_tracing(
@@ -18,13 +21,15 @@ def configure_tracing(
     tracking_uri: str | None = None,
     enable_openai_autolog: bool = True,
 ) -> None:
+    global _TRACE_METADATA
+
     mlflow = _require_mlflow()
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
     if enable_openai_autolog:
         mlflow.openai.autolog()
-    set_trace_context(context.for_trace())
+    _TRACE_METADATA = dict(context.for_trace())
 
 
 def traced(
@@ -40,7 +45,27 @@ def traced(
             import mlflow
         except ImportError:
             return target
-        return mlflow.trace(name=name, span_type=span_type)(target)
+
+        if inspect.iscoroutinefunction(target):
+
+            @wraps(target)
+            async def invoke_async(*args: Any, **kwargs: Any) -> Any:
+                if _TRACE_METADATA:
+                    set_trace_context(_TRACE_METADATA)
+                return await target(*args, **kwargs)
+
+            return cast(
+                F,
+                mlflow.trace(name=name, span_type=span_type)(invoke_async),
+            )
+
+        @wraps(target)
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            if _TRACE_METADATA:
+                set_trace_context(_TRACE_METADATA)
+            return target(*args, **kwargs)
+
+        return cast(F, mlflow.trace(name=name, span_type=span_type)(invoke))
 
     if function is None:
         return decorate
@@ -63,6 +88,8 @@ def provider_span(
         return
 
     with mlflow.start_span(name=name, span_type=span_type) as span:
+        if _TRACE_METADATA:
+            set_trace_context(_TRACE_METADATA)
         for key, value in (attributes or {}).items():
             span.set_attribute(key, value)
         yield span
@@ -86,6 +113,8 @@ def _require_mlflow():
         import mlflow
     except ImportError as error:
         raise RuntimeError(
-            "MLflow support requires `pip install 'aai-core[genai]'`"
+            "MLflow support requires the `genai` extra. From an aai-core "
+            "checkout run `make examples-install` and use `.venv/bin/python`; "
+            "in a consuming environment install `aai-core[genai]`."
         ) from error
     return mlflow

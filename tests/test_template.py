@@ -163,6 +163,12 @@ def test_template_deploy_workflow_is_pinned_and_environment_free(template: Path)
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
+def test_template_makefile_uses_generated_virtual_environment(template: Path):
+    makefile = template / "template" / "Makefile"
+    assert "PYTHON ?= .venv/bin/python" in makefile.read_text()
+
+
+@pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
 def test_template_schema_shared_contract(template: Path):
     schema = schema_for(template)
     properties = schema["properties"]

@@ -4,14 +4,30 @@ Complete the [developer onboarding checklist](developer-onboarding.md) before
 generating a project. The platform team prepares group-based access; the
 generated setup command verifies it without granting permissions.
 
-## 0. Prove the toolchain offline
+## 0. Start locally, then use the workspace
 
-Before any cloud access, run the zero-credential example from a checkout of
-this repository:
+From a fresh checkout, create the locked environment and run the zero-credential
+example:
 
 ```bash
-python examples/offline_hello_world.py
+make quickstart
+make local-start
+make local-ui  # open http://127.0.0.1:5000; Ctrl-C stops it
 ```
+
+`local-start` records a trace in `.aai/local/mlflow.db`; it does not use cloud
+credentials or the legacy root `mlflow.db`. Once the local trace is visible,
+create and preflight the keyless workspace configuration:
+
+```bash
+make workspace-connect
+# Complete the reported keyless authentication/configuration actions.
+make workspace-example EXAMPLE=first_trace
+```
+
+The second run sends the same example to the configured Databricks experiment.
+View it in the workspace UI. Application deployment comes later through a
+generated template's `make bundle-validate bundle-deploy` targets.
 
 ## 1. Generate a project
 
