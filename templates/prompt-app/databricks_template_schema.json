@@ -114,5 +114,5 @@
       "order": 20
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}} && python scripts/install_core.py\n  2. python -m pip install -r requirements.lock && python -m pip install -e '.[dev]'\n  3. pytest -q\n  4. python scripts/register_prompt.py            # registers v1, sets development alias\n  5. python evals/evaluate.py                     # LLM-judge gate on the pinned version\n  6. python scripts/promote_prompt.py --version 1 --to candidate"
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py              # preflight + isolated setup\n  3. python scripts/register_prompt.py            # registers v1, sets development alias\n  4. python evals/evaluate.py                     # LLM-judge gate on the pinned version\n  5. python scripts/promote_prompt.py --version 1 --to candidate"
 }

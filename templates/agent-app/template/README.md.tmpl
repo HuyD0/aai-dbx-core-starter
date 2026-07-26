@@ -7,17 +7,17 @@ evaluation, feedback, and a gated Model Serving deployment.
 
 ## Local setup
 
-Authenticate without storing credentials:
+Before generation, complete the platform's developer onboarding checklist.
+Then run the generated preflight and setup:
 
 ```bash
-az login
-export DATABRICKS_HOST={{.workspace_host}}
-export DATABRICKS_AUTH_TYPE=azure-cli
-python scripts/install_core.py
-python -m pip install -r requirements.lock
-python -m pip install -e '.[dev]'
-pytest -q
+python3.12 scripts/setup_dev.py
 ```
+
+Use `python3.12 scripts/setup_dev.py --check-only` to verify tools,
+authentication, SDK volume access, and compute-policy visibility without
+installing anything. The setup never grants permissions or creates cloud
+resources.
 
 Replace every `replace-with-*` value in `aai-platform.yml` before running a
 provider integration.

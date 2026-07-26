@@ -239,7 +239,21 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
     assert stamp["template"] == template.name
     assert stamp["template_version"]
 
-    # T6: combo file toggles (doubles as the dead-skip-glob guard).
+    # T6: generated setup is rendered, parseable, and exposes safe preflight.
+    setup = output / "scripts" / "setup_dev.py"
+    setup_text = setup.read_text()
+    assert IDENTIFIERS["databricks_host"] in setup_text
+    assert IDENTIFIERS["sdk_artifact_volume"] in setup_text
+    subprocess.run(
+        [sys.executable, str(setup), "--help"],
+        check=True,
+        cwd=output,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+
+    # T7: combo file toggles (doubles as the dead-skip-glob guard).
     for expected in combo["expect_present"]:
         assert (output / expected).is_file(), f"missing {expected}"
     for unexpected in combo["expect_absent"]:
