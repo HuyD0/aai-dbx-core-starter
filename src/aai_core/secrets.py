@@ -62,6 +62,12 @@ class SecretValue:
     def __format__(self, format_spec: str) -> str:
         return format(str(self), format_spec)
 
+    def __reduce_ex__(self, protocol: int):
+        raise TypeError("SecretValue cannot be serialized")
+
+    def __getstate__(self):
+        raise TypeError("SecretValue cannot be serialized")
+
 
 class SecretProvider(Protocol):
     def resolve(self, reference: SecretRef) -> str: ...

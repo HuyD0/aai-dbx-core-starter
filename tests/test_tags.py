@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from aai_core.tags import ResourceContext
 
@@ -36,3 +37,20 @@ def test_application_cannot_override_controlled_tags():
 def test_production_owner_must_be_group_not_email():
     with pytest.raises(ValueError, match="group identifier"):
         context(owner_group="person@example.com").validate(strict=True)
+
+
+def test_resource_context_is_strict_and_forbids_unknown_fields():
+    with pytest.raises(ValidationError):
+        context(application=123)
+
+    values = context().model_dump()
+    values["invented_term"] = "value"
+    with pytest.raises(ValidationError):
+        ResourceContext(**values)
+
+
+def test_lifecycle_uses_a_small_descriptive_vocabulary():
+    assert context(lifecycle="CANDIDATE").lifecycle.value == "candidate"
+
+    with pytest.raises(ValidationError, match="lifecycle must be one of"):
+        context(lifecycle="validation")

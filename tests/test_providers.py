@@ -1,21 +1,36 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
-from aai_core.exceptions import AaiCoreError
+from aai_core import tracing
 from aai_core.providers import (
     AzureAISearchRetriever,
     ModelCapabilities,
     OpenAICompatibleChatModel,
     UnsupportedCapabilityError,
 )
-from aai_core.providers.openai_compatible import call_with_resilience
 from aai_core.providers.search import DatabricksAISearchRetriever
 from aai_core.providers.types import (
     ProviderConfigurationError,
-    ProviderError,
     ProviderRequestError,
 )
+
+
+@contextmanager
+def _sdk_trace_state():
+    """Activate bounded SDK instrumentation without configuring real MLflow."""
+
+    state = tracing.TraceState(
+        metadata={},
+        policy=tracing.TracePolicy(),
+        integration=tracing.TraceIntegration.SDK,
+    )
+    token = tracing._TRACE_STATE.set(state)
+    try:
+        yield
+    finally:
+        tracing._TRACE_STATE.reset(token)
 
 
 class FakeCompletions:
@@ -39,6 +54,10 @@ class FakeCompletions:
 class FakeOpenAI:
     def __init__(self):
         self.chat = SimpleNamespace(completions=FakeCompletions())
+
+
+class FakeAsyncOpenAI:
+    pass
 
 
 class FakeSearch:
@@ -72,11 +91,46 @@ def test_openai_adapter_normalizes_response():
     assert response.usage["total_tokens"] == 6
 
 
+def test_openai_adapter_exposes_caller_owned_native_async_client():
+    clients = []
+    model = OpenAICompatibleChatModel(
+        logical_name="general-chat",
+        provider="databricks",
+        model="chat-deployment",
+        client=FakeOpenAI(),
+        async_client_factory=lambda: clients.append(FakeAsyncOpenAI()) or clients[-1],
+    )
+
+    first = model.create_native_async_client()
+    second = model.create_native_async_client()
+
+    assert isinstance(first, FakeAsyncOpenAI)
+    assert isinstance(second, FakeAsyncOpenAI)
+    assert first is not second
+
+
+def test_sync_generate_fails_before_provider_call_inside_event_loop():
+    import asyncio
+
+    model = OpenAICompatibleChatModel(
+        logical_name="general-chat",
+        provider="databricks",
+        model="chat-deployment",
+        client=FakeOpenAI(),
+        async_client_factory=FakeAsyncOpenAI,
+    )
+
+    async def invoke():
+        with pytest.raises(UnsupportedCapabilityError) as excinfo:
+            model.generate([{"role": "user", "content": "question"}])
+        assert "create_native_async_client" in str(excinfo.value.remediation)
+
+    asyncio.run(invoke())
+
+
 def test_openai_adapter_records_standard_llm_inputs_and_outputs(
     monkeypatch,
 ):
-    from contextlib import contextmanager
-
     from conftest import install_fake_module
 
     class FakeSpan:
@@ -119,11 +173,12 @@ def test_openai_adapter_records_standard_llm_inputs_and_outputs(
         client=FakeOpenAI(),
     )
 
-    model.generate(
-        [{"role": "user", "content": "Where is A-1001?"}],
-        tools=tools,
-        provider_options={"seed": 7},
-    )
+    with _sdk_trace_state():
+        model.generate(
+            [{"role": "user", "content": "Where is A-1001?"}],
+            tools=tools,
+            provider_options={"seed": 7},
+        )
 
     assert recorded["name"] == "model.generate"
     assert recorded["span_type"] == "LLM"
@@ -132,6 +187,9 @@ def test_openai_adapter_records_standard_llm_inputs_and_outputs(
         "tools": tools,
     }
     assert recorded["span"].outputs == {"content": "answer"}
+    assert recorded["span"].attributes["mlflow.llm.provider"] == "databricks"
+    assert recorded["span"].attributes["mlflow.llm.model"] == "chat-deployment"
+    assert recorded["span"].attributes["mlflow.message.format"] == "openai"
     assert recorded["span"].attributes["mlflow.chat.tokenUsage"] == {
         "input_tokens": 4,
         "output_tokens": 2,
@@ -205,74 +263,34 @@ def test_azure_search_normalizes_mlflow_document():
     assert result.as_mlflow_document()["metadata"]["doc_uri"] == ("https://example/doc")
 
 
-class _RateLimitError(Exception):
-    def __init__(self, status_code, retry_after=None):
+class _ProviderFailure(Exception):
+    def __init__(self, status_code):
         super().__init__(f"status {status_code}")
         self.status_code = status_code
-        headers = {"retry-after": str(retry_after)} if retry_after else {}
-        self.response = SimpleNamespace(headers=headers)
 
 
-def test_resilience_retries_429_honoring_retry_after():
-    delays = []
-    attempts = {"count": 0}
+def test_adapter_translates_final_native_failure_without_retrying():
+    attempts = []
 
-    def operation():
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            raise _RateLimitError(429, retry_after=1.5)
-        return "ok"
+    class FailingCompletions:
+        def create(self, **request):
+            attempts.append(request)
+            raise _ProviderFailure(429)
 
-    result = call_with_resilience(
-        operation,
-        description="chat completion",
-        provider="azure_apim",
+    client = SimpleNamespace(chat=SimpleNamespace(completions=FailingCompletions()))
+    model = OpenAICompatibleChatModel(
         logical_name="general-chat",
-        sleep=delays.append,
+        provider="databricks",
+        model="chat-deployment",
+        client=client,
     )
 
-    assert result == "ok"
-    assert delays == [1.5]
-
-
-def test_resilience_wraps_exhausted_retries_with_remediation():
-    def operation():
-        raise _RateLimitError(429)
-
     with pytest.raises(ProviderRequestError) as excinfo:
-        call_with_resilience(
-            operation,
-            description="chat completion",
-            provider="databricks",
-            logical_name="general-chat",
-            max_retries=1,
-            sleep=lambda _: None,
-        )
+        model.generate([{"role": "user", "content": "question"}])
 
-    assert isinstance(excinfo.value, ProviderError)
-    assert isinstance(excinfo.value, AaiCoreError)
-    assert isinstance(excinfo.value.__cause__, _RateLimitError)
+    assert len(attempts) == 1
+    assert isinstance(excinfo.value.__cause__, _ProviderFailure)
     assert "rate limit" in str(excinfo.value.remediation)
-
-
-def test_resilience_does_not_retry_authorization_failures():
-    attempts = {"count": 0}
-
-    def operation():
-        attempts["count"] += 1
-        raise _RateLimitError(403)
-
-    with pytest.raises(ProviderRequestError) as excinfo:
-        call_with_resilience(
-            operation,
-            description="chat completion",
-            provider="databricks",
-            logical_name="general-chat",
-            sleep=lambda _: pytest.fail("must not sleep on 403"),
-        )
-
-    assert attempts["count"] == 1
-    assert "CAN_QUERY" in str(excinfo.value.remediation)
 
 
 class FakeEmbedding:
@@ -387,8 +405,6 @@ def test_databricks_search_hybrid_sends_text_and_optional_vector():
 
 def test_retriever_records_documents_on_the_retriever_span(monkeypatch):
     """Groundedness judges read documents from RETRIEVER span outputs."""
-    from contextlib import contextmanager
-
     from conftest import install_fake_module
 
     class FakeSpan:
@@ -425,7 +441,8 @@ def test_retriever_records_documents_on_the_retriever_span(monkeypatch):
         source_uri_field="source_uri",
         chunk_id_field="chunk_id",
     )
-    retriever.search("question", mode="text", filters={"region": "ca"})
+    with _sdk_trace_state():
+        retriever.search("question", mode="text", filters={"region": "ca"})
 
     span = recorded["span"]
     assert recorded["span_type"] == "RETRIEVER"

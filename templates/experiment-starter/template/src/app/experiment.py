@@ -77,15 +77,23 @@ def run_experiment(
         context=context.tags,
         mlflow_module=mlflow_module,
     )
-    with manager.run(run_name=f"experiment-seed-{seed}", parameters={"seed": seed}):
-        record_reproducibility(seed=seed, mlflow_module=mlflow_module)
-        manager.log_dataset(data, name="sample", source=str(DATA_PATH))
+    mlflow = manager.native_client
+    with manager.run(
+        run_name=f"signal-threshold-seed-{seed}-validation",
+        parameters={"seed": seed},
+    ):
+        record_reproducibility(seed=seed, mlflow_module=mlflow)
+        dataset = mlflow.data.from_pandas(data, name="sample", source=str(DATA_PATH))
+        mlflow.log_input(dataset, context="evaluation")
+        mlflow.log_params(
+            {"dataset_name": "sample", "dataset_digest": str(dataset.digest)}
+        )
         metrics = evaluate_rows(rows, seed=seed)
-        manager.log_metrics(metrics)
+        mlflow.log_metrics(metrics)
         with tempfile.TemporaryDirectory() as scratch:
             summary = Path(scratch) / "summary.json"
             summary.write_text(
                 json.dumps({"seed": seed, "metrics": metrics}, indent=2, sort_keys=True)
             )
-            manager.log_artifact(summary, artifact_path="reports")
+            mlflow.log_artifact(str(summary), artifact_path="reports")
     return metrics

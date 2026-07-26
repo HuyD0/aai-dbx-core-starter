@@ -8,7 +8,9 @@ notebooks/01_align_judge.py.
 
 from __future__ import annotations
 
-from aai_core.evaluation import judge_model_uri
+from collections.abc import Mapping
+
+from aai_core.providers.types import ProviderConfigurationError
 
 DOMAIN_POLICY_GUIDELINES = [
     (
@@ -47,3 +49,15 @@ def judge_scorers(settings) -> list:
             model=model,
         ),
     ]
+
+
+def judge_model_uri(settings) -> str:
+    config = settings.models.get("judge-model")
+    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
+        raise ProviderConfigurationError(
+            "judge-model must resolve to a governed Databricks serving endpoint"
+        )
+    deployment = config.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ProviderConfigurationError("judge-model requires a deployment")
+    return f"endpoints:/{deployment.strip()}"

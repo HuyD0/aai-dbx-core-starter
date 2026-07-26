@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   lint-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,9 +40,12 @@ jobs:
         # Includes the zizmor workflow-security lint via the locked dev env.
         run: ./scripts/cloud-verify.sh
 
+      - name: Validate SDK, template, and built-wheel contracts
+        run: uv run --python 3.12 python scripts/validate_release.py --wheel dist
+
   python-311:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,5 +58,54 @@ jobs:
       - name: Install and test Python 3.11 compatibility
         run: |
           python -m pip install uv==0.8.23
-          uv sync --python 3.11 --extra dev --locked
+          uv sync --python 3.11 --extra dev --extra all --locked
+          uv pip check --python .venv/bin/python
           uv run --python 3.11 pytest -q
+
+  provider-extras:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the certified provider stack
+        run: |
+          python -m pip install uv==0.8.23
+          uv sync --python 3.12 --extra dev --extra all --locked
+          uv pip install \
+            --python .venv/bin/python \
+            --requirements templates/agent-app/template/recipes/langgraph/requirements.lock
+          uv pip check --python .venv/bin/python
+
+      - name: Exercise the optional LangGraph durability contract
+        env:
+          LANGGRAPH_STRICT_MSGPACK: "true"
+        run: |
+          uv run --python 3.12 pytest -q \
+            templates/agent-app/template/recipes/langgraph/test_graph.py
+
+      - name: Verify generated transitive template locks
+        run: |
+          uv run --python 3.12 python \
+            scripts/lock_template_dependencies.py --check
+
+      - name: Exercise real provider import boundaries
+        run: |
+          uv run --python 3.12 python - <<'PY'
+          import azure.identity
+          import azure.keyvault.secrets
+          import azure.search.documents
+          import databricks.ai_search.client
+          import databricks.sdk
+          import databricks_openai
+          import mlflow
+          import openai
+
+          print("all certified provider extras import successfully")
+          PY

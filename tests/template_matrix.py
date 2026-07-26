@@ -141,8 +141,12 @@ COMBOS = {
                 "src/app/messages.py",
                 "src/app/tool_scoring.py",
                 "src/app/tools.py",
-                "serving/model.py",
-                "scripts/deploy_serving.py",
+                "src/app/endpoint.py",
+                "start_server.py",
+                "app.yaml",
+                "requirements.txt",
+                "resources/agent_app.yml",
+                "tests/test_app_endpoint.py",
                 "notebooks/02_enable_monitoring.py",
             ],
             "expect_absent": ["src/app/scoring.py"],
@@ -157,10 +161,13 @@ COMBOS = {
             },
             "expect_present": ["src/app/agent.py", "notebooks/01_explore.py"],
             "expect_absent": [
-                "serving/model.py",
-                "serving",
-                "scripts/deploy_serving.py",
                 "notebooks/02_enable_monitoring.py",
+                "src/app/endpoint.py",
+                "start_server.py",
+                "app.yaml",
+                "requirements.txt",
+                "resources/agent_app.yml",
+                "tests/test_app_endpoint.py",
             ],
         },
         {
@@ -174,7 +181,14 @@ COMBOS = {
             # Foundry cannot satisfy serving resource declarations, so the
             # serving path is omitted even though include_serving defaults yes.
             "expect_present": ["src/app/agent.py"],
-            "expect_absent": ["serving/model.py", "scripts/deploy_serving.py"],
+            "expect_absent": [
+                "src/app/endpoint.py",
+                "start_server.py",
+                "app.yaml",
+                "requirements.txt",
+                "resources/agent_app.yml",
+                "tests/test_app_endpoint.py",
+            ],
         },
     ],
 }

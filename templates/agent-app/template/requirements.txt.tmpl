@@ -1,0 +1,5 @@
+# Databricks Apps installs this file before starting app.yaml. The application
+# imports aai-core directly, so both it and the app are explicit dependencies.
+{{.aai_core_volume}}/aai_core/{{.aai_core_version}}/aai_core-{{.aai_core_version}}-py3-none-any.whl
+-r requirements.lock
+.

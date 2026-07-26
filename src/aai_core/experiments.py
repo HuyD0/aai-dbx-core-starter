@@ -8,9 +8,13 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from pydantic import Field
+
+from aai_core.contracts import ContractModel
 from aai_core.secrets import SecretRef, SecretValue
 from aai_core.tags import ResourceContext
 
@@ -25,6 +29,42 @@ _SENSITIVE_NAMES = {
 }
 
 
+class RunPurpose(StrEnum):
+    """Closed vocabulary for the evidence a run is intended to produce."""
+
+    BASELINE = "baseline"
+    CHANGE = "change"
+    RESULT = "result"
+    DECISION = "decision"
+    MONITORING = "monitoring"
+    EXPLORATION = "exploration"
+
+
+class ExperimentRunMetadata(ContractModel):
+    """Searchable intent and comparison lineage for a governed run."""
+
+    purpose: RunPurpose
+    change_id: str = Field(min_length=1)
+    change_summary: str = Field(min_length=1)
+    hypothesis: str | None = Field(default=None, min_length=1)
+    baseline_run_id: str | None = None
+    application_model_id: str | None = None
+
+    def as_tags(self) -> dict[str, str]:
+        values = {
+            "aai.run_purpose": self.purpose.value,
+            "aai.change_id": self.change_id,
+            "aai.change_summary": self.change_summary,
+        }
+        if self.hypothesis:
+            values["aai.hypothesis"] = self.hypothesis
+        if self.baseline_run_id:
+            values["aai.baseline_run_id"] = self.baseline_run_id
+        if self.application_model_id:
+            values["aai.application_model_id"] = self.application_model_id
+        return values
+
+
 class ExperimentManager:
     def __init__(
         self,
@@ -33,6 +73,8 @@ class ExperimentManager:
         context: ResourceContext,
         mlflow_module: Any | None = None,
     ) -> None:
+        if not experiment_name.strip():
+            raise ValueError("experiment_name must not be blank")
         self.experiment_name = experiment_name
         self.context = context
         self._mlflow = mlflow_module
@@ -45,59 +87,56 @@ class ExperimentManager:
         parameters: Mapping[str, Any] | None = None,
         tags: Mapping[str, str] | None = None,
         nested: bool = False,
+        metadata: ExperimentRunMetadata | None = None,
     ) -> Iterator[Any]:
+        if not run_name.strip():
+            raise ValueError("run_name must not be blank")
         mlflow = self._client()
         mlflow.set_experiment(self.experiment_name)
-        with mlflow.start_run(run_name=run_name, nested=nested) as active_run:
-            merged_tags = self.context.merged(tags)
-            mlflow.set_tags({f"aai.{key}": value for key, value in merged_tags.items()})
-            if parameters:
-                mlflow.log_params(_safe_parameters(parameters))
-            yield active_run
+        active_model = None
+        if metadata is not None and metadata.application_model_id:
+            setter = getattr(mlflow, "set_active_model", None)
+            if setter is None:
+                raise RuntimeError(
+                    "Application-version lineage requires MLflow 3 "
+                    "`set_active_model()` support."
+                )
+            active_model = setter(model_id=metadata.application_model_id)
 
-    def log_dataset(
-        self,
-        data: Any,
-        *,
-        name: str,
-        context: str = "training",
-        source: str | None = None,
-    ) -> str:
-        """Log a pandas DataFrame as an MLflow input dataset inside the active
-        run and return its digest (also logged as ``dataset_digest`` so the
-        exact data version is queryable from run params)."""
+        @contextmanager
+        def governed_run() -> Iterator[Any]:
+            with mlflow.start_run(run_name=run_name, nested=nested) as active_run:
+                merged_tags = self.context.merged(tags)
+                run_tags = {f"aai.{key}": value for key, value in merged_tags.items()}
+                run_tags["aai.experiment_name"] = self.experiment_name
+                if metadata is not None:
+                    conflicts = set(run_tags).intersection(metadata.as_tags())
+                    if conflicts:
+                        raise ValueError(
+                            "Run metadata conflicts with governed tags: "
+                            + ", ".join(sorted(conflicts))
+                        )
+                    run_tags.update(metadata.as_tags())
+                mlflow.set_tags(run_tags)
+                if parameters:
+                    mlflow.log_params(_safe_parameters(parameters))
+                yield active_run
 
-        mlflow = self._client()
-        dataset = mlflow.data.from_pandas(data, name=name, source=source)
-        mlflow.log_input(dataset, context=context)
-        digest = str(dataset.digest)
-        mlflow.log_params({"dataset_name": name, "dataset_digest": digest})
-        return digest
-
-    def log_metrics(
-        self, metrics: Mapping[str, float], *, step: int | None = None
-    ) -> None:
-        """Log numeric metrics to the active run (non-numeric values are a
-        caller bug and raise instead of being dropped silently)."""
-
-        numeric: dict[str, float] = {}
-        for key, value in metrics.items():
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"Metric {key!r} is not numeric: {value!r}")
-            numeric[str(key)] = float(value)
-        self._client().log_metrics(numeric, step=step)
-
-    def log_artifact(
-        self, path: str | Path, *, artifact_path: str | None = None
-    ) -> None:
-        """Log a file or directory as run artifacts."""
-
-        target = Path(path)
-        mlflow = self._client()
-        if target.is_dir():
-            mlflow.log_artifacts(str(target), artifact_path=artifact_path)
+        if active_model is None:
+            with governed_run() as active_run:
+                yield active_run
         else:
-            mlflow.log_artifact(str(target), artifact_path=artifact_path)
+            # MLflow's native ActiveModel context restores the previous model.
+            # Returning it unchanged avoids an SDK mirror of LoggedModel.
+            with active_model:
+                with governed_run() as active_run:
+                    yield active_run
+
+    @property
+    def native_client(self) -> Any:
+        """Return the native MLflow module for unsupported fluent APIs."""
+
+        return self._client()
 
     def _client(self):
         if self._mlflow is not None:
@@ -134,6 +173,7 @@ def record_reproducibility(
 
     record: dict[str, str] = {
         "source_commit": _source_commit(),
+        "source_state": _source_state(),
         "aai_core_version": __version__,
     }
     if seed is not None:
@@ -169,6 +209,29 @@ def _source_commit() -> str:
         return "local-dev"
 
 
+def _source_state() -> str:
+    """Return a non-sensitive clean/dirty/unknown source state."""
+
+    from_environment = os.getenv("GIT_DIRTY")
+    if from_environment is not None:
+        return (
+            "dirty"
+            if from_environment.strip().lower() in {"1", "true", "yes"}
+            else "clean"
+        )
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        return "dirty" if result.stdout.strip() else "clean"
+    except Exception:
+        return "unknown"
+
+
 def _package_freeze() -> str:
     from importlib.metadata import distributions
 
@@ -183,7 +246,7 @@ def _package_freeze() -> str:
 def _safe_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in parameters.items():
-        normalized = key.lower().replace("-", "_")
+        normalized = key.lower().replace("-", "_").replace(".", "_").replace("/", "_")
         sensitive_name = any(
             normalized == name or normalized.endswith(f"_{name}")
             for name in _SENSITIVE_NAMES

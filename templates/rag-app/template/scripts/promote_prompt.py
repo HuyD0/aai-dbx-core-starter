@@ -1,9 +1,9 @@
-"""Promote a governed prompt version to the candidate or production alias.
+"""Promote a governed prompt version to the validation or production alias.
 
 The application loads the ``production`` alias in prod environments and
 ``development`` elsewhere (src/app/rag.py). Nothing promotes automatically:
 after the release gate (evals/evaluate.py) passes for a prompt version, a
-human runs this script — first ``--to candidate``, then ``--to production``
+human runs this script — first ``--to validation``, then ``--to production``
 once the release is approved. Evaluations should pin exact versions
 (``prompts:/name/version``); aliases are deployment pointers only.
 """
@@ -31,7 +31,7 @@ def main() -> None:
     parser.add_argument(
         "--to",
         required=True,
-        choices=["candidate", "production"],
+        choices=["validation", "production"],
         dest="alias",
         help="Alias to move to the given version.",
     )

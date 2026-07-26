@@ -108,6 +108,11 @@ class FakeChatModel:
         self.requests: list[dict[str, Any]] = []
         self._script = [tuple(turn) for turn in (tool_call_script or [])]
 
+    def create_native_async_client(self) -> Any:
+        raise UnsupportedCapabilityError(
+            "FakeChatModel does not provide a native async client"
+        )
+
     def generate(
         self,
         messages: Sequence[Mapping[str, Any]],

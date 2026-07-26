@@ -33,7 +33,7 @@ def test_failure_triage_hides_details_and_raw_content_by_default(capsys):
             },
         ]
     )
-    report = SimpleNamespace(raw=SimpleNamespace(result_df=result_df))
+    report = SimpleNamespace(result_df=result_df)
 
     print_failure_triage(report)
 
@@ -56,7 +56,7 @@ def test_failure_triage_details_are_explicit_opt_in(capsys):
             }
         ]
     )
-    report = SimpleNamespace(raw=SimpleNamespace(result_df=result_df))
+    report = SimpleNamespace(result_df=result_df)
 
     print_failure_triage(report, include_details=True)
 

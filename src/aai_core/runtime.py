@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import Field, field_serializer, field_validator
 
+from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.tags import ResourceContext
 
 _RESOURCE_ENV = {
@@ -33,8 +34,7 @@ _PLATFORM_ENV = {
 }
 
 
-@dataclass(frozen=True)
-class PlatformSettings:
+class PlatformSettings(ContractModel):
     """Configuration shared by SDK services.
 
     The settings object contains references and identifiers only. Secret values
@@ -43,14 +43,30 @@ class PlatformSettings:
 
     resource: ResourceContext
     catalog: str = "unset"
-    schema: str = "unset"
+    schema_name: str = Field(default="unset", alias="schema")
     experiment_name: str = "unset"
     azure_identity: str = "auto"
-    models: dict[str, dict[str, Any]] = field(default_factory=dict)
-    embeddings: dict[str, dict[str, Any]] = field(default_factory=dict)
-    retrievers: dict[str, dict[str, Any]] = field(default_factory=dict)
-    secrets: dict[str, str] = field(default_factory=dict)
-    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    embeddings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    retrievers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    secrets: dict[str, str] = Field(default_factory=dict)
+    raw: dict[str, Any] = Field(default_factory=dict, repr=False, exclude=True)
+
+    @field_validator(
+        "models",
+        "embeddings",
+        "retrievers",
+        "secrets",
+        "raw",
+        mode="after",
+    )
+    @classmethod
+    def freeze_configuration(cls, value: Mapping[str, Any]):
+        return freeze_value(value)
+
+    @field_serializer("models", "embeddings", "retrievers", "secrets")
+    def serialize_configuration(self, value: Mapping[str, Any]):
+        return thaw_value(value)
 
     @property
     def strict(self) -> bool:
@@ -58,22 +74,32 @@ class PlatformSettings:
         return self.resource.environment.lower() in strict_environments
 
     @property
+    def schema(self) -> str:
+        """Unity Catalog schema name.
+
+        The internal field name avoids shadowing Pydantic's deprecated
+        ``BaseModel.schema`` compatibility method; the constructor and public
+        SDK continue to use ``schema=...``.
+        """
+
+        return self.schema_name
+
+    @property
     def effective_experiment_name(self) -> str:
         """The experiment every SDK surface uses.
 
         Explicit configuration wins; otherwise the platform naming convention
-        applies: ``/Shared/<team>-<application>-<environment>`` — derived from
-        the governed tags so experiments are attributable and consistent
-        across teams without per-project invention. Strict environments still
-        require an explicit name (validated in :meth:`validate`).
+        applies: ``/Shared/<team>-<project>-<application>``. The experiment is
+        the durable comparison space for one AI application; ``environment``
+        remains a required run tag instead of fragmenting the evidence across
+        experiments. Strict environments still require an explicit name
+        (validated in :meth:`validate`).
         """
 
         if self.experiment_name not in {"", "unset"}:
             return self.experiment_name
         resource = self.resource
-        return (
-            f"/Shared/{resource.team}-{resource.application}-" f"{resource.environment}"
-        )
+        return f"/Shared/{resource.team}-{resource.project}-{resource.application}"
 
     def validate(self) -> None:
         self.resource.validate(strict=self.strict)
@@ -182,9 +208,9 @@ def find_platform_config(
         return Path(override)
     base = Path(start) if start is not None else Path.cwd()
     for directory in (base, *base.parents):
-        candidate = directory / "aai-platform.yml"
-        if candidate.is_file():
-            return candidate
+        config_path = directory / "aai-platform.yml"
+        if config_path.is_file():
+            return config_path
     return base / "aai-platform.yml"
 
 

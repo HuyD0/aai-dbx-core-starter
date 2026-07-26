@@ -1,0 +1,24 @@
+resources:
+  apps:
+    agent_app:
+      name: "{{.application_name}}-${bundle.target}"
+      description: "Governed Responses API agent on Databricks Apps"
+      source_code_path: ../
+      usage_policy_id: {{.app_usage_policy_id}}
+      config:
+        command:
+          - python
+          - start_server.py
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: databricks
+          - name: MLFLOW_REGISTRY_URI
+            value: databricks-uc
+          - name: MLFLOW_EXPERIMENT_ID
+            value: {{.experiment_id}}
+          - name: AAI_PLATFORM_CONFIG
+            value: aai-platform.yml
+          # This is the same immutable version passed to release_gate. App
+          # startup refuses to resolve a mutable prompt alias.
+          - name: AAI_PROMPT_VERSION
+            value: ${var.prompt_version}

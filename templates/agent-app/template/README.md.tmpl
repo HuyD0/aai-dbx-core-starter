@@ -1,9 +1,18 @@
 # {{.project_name}}
 
 Tool-using agent application generated from the AAI platform template
-(`agent-app`, successor of `agentic-rag`'s agent half): governed prompt, SDK
-tool-execution loop, structured outputs, tracing, trajectory-aware offline
-evaluation, feedback, and a gated Model Serving deployment.
+(`agent-app`, successor of `agentic-rag`'s agent half): governed prompt,
+application-owned async tool loop, structured outputs, tracing,
+trajectory-aware offline evaluation, and feedback.
+{{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
+The single generated serving path is a gated Databricks Apps deployment
+through MLflow Agent Server, with native async invoke and streaming endpoints.
+{{ else }}
+Serving resources were intentionally omitted for this configuration. The
+packaged application, tests, and evaluation gate remain available; add a
+gateway-fronted Databricks endpoint and regenerate, or add reviewed deployment
+resources, before serving it.
+{{ end }}
 
 ## Local setup
 
@@ -27,49 +36,110 @@ provider integration.
 
 ## How the agent works
 
-- `src/app/tools.py` registers code tools (plain Python) in a
-  `ToolRegistry`; for governed structured-data lookups, create Unity
-  Catalog functions and list them in `UC_FUNCTION_TOOLS` so deployment
-  declares them as serving resources.
-- `src/app/agent.py` drives `aai_core.agents.run_tool_loop` (bounded turns,
-  every invocation recorded) and finishes with
-  `aai_core.structured.generate_structured` for a schema-validated final
-  answer (`src/app/schemas.py`).
-- Tests script the model's tool calls with
-  `aai_core.testing.FakeChatModel(tool_call_script=...)` — fully hermetic.
+- `src/app/tools.py` registers async code tools (plain Python) in the
+  application-owned `AsyncToolRegistry`; for governed structured-data lookups,
+  create Unity
+  Catalog functions.
+{{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
+  Ask the platform owner to grant the App service principal least-privilege
+  `EXECUTE` on each function.
+{{ else }}
+  Declare each function with least-privilege `EXECUTE` access in the reviewed
+  deployment resources you add later.
+{{ end }}
+- `src/app/agent.py` drives a bounded async loop over the provider-native
+  client, executes async tools, and validates the final answer with the
+  Pydantic contract in `src/app/schemas.py`.
+- `aai-core` owns only the serializable request/response boundary; the native
+  client, stream, tools, and loop remain recognizable application objects.
+- Tests script provider-native responses and streams with async fakes, so they
+  remain credential-free and exercise cancellation and cleanup.
 
 ## Release lifecycle
 
 1. Edit `prompts/system_prompt.json`; register a version:
-   `python scripts/register_prompt.py`.
+   `python scripts/register_prompt.py`. Record the returned immutable version
+   and set `variables.prompt_version.default` in `databricks.yml` to that exact
+   value. Do not put a mutable alias in deployment configuration.
 2. Grow `evals/data/release_cases.json` — every case declares
    exact `expected_tool_calls` names and arguments (or an empty list for a
    no-tool case), so missing, repeated, mis-parameterized, or gratuitous
    calls fail the gate.
 3. Configure the approved `judge-model` endpoint, then run the gate:
-   `python evals/evaluate.py` — explicitly routed Correctness/Safety judges
-   plus an exact compatibility layer over MLflow `ToolCallCorrectness` and
-   traced TOOL spans. It covers empty and repeated-call trajectories as well
-   as names/arguments, with thresholds in `evals/gate_config.json` and
-   baseline regression. After a released run:
-   `--update-baseline`.
+   `make evaluate PROMPT_VERSION=<version>` — explicitly routed
+   Correctness/Safety judges plus an exact compatibility layer over MLflow
+   `ToolCallCorrectness` and traced TOOL spans. The required version must be
+   the same value recorded in `databricks.yml`. The gate covers empty and
+   repeated-call trajectories as well as names/arguments, with thresholds in
+   `evals/gate_config.json` and baseline regression. After a released run,
+   append `EVALUATE_ARGS=--update-baseline`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset
    by name.
 4. Promote the prompt (`python scripts/promote_prompt.py --version <n>
-   --to candidate|production`).
-5. Deploy — only after the gate passes:
-   `python scripts/deploy_serving.py` logs the models-from-code wrapper
-   (use `--register-only` to register the agent as code in Unity Catalog
-   without deploying an endpoint)
-   (`serving/model.py`) with its resource declarations, registers it in
-   Unity Catalog, and deploys via Model Serving with scale-to-zero.
-6. Enable production monitoring from `notebooks/02_enable_monitoring.py`
+   --to validation|production`).
+{{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
+5. Before enabling deployment, have the approved platform process create the
+   Databricks App named `{{.application_name}}-dev`. App creation provisions
+   its dedicated service principal. The platform owner must grant that
+   identity only:
+
+   - `CAN_EDIT` on experiment `{{.experiment_id}}`;
+   - `CAN_QUERY` on serving endpoint `{{.model_deployment}}`;
+   - `USE CATALOG`, `USE SCHEMA`, and `EXECUTE` on Prompt Registry function
+     `{{.catalog}}.{{.schema}}.{{.prompt_name}}`; and
+   - `READ VOLUME` on the SDK artifact volume represented by
+     `{{.aai_core_volume}}`.
+
+   The deploy identity also needs the externally approved rights required to
+   update this App. A platform owner then performs the one-time binding:
+
+   ```bash
+   databricks bundle deployment bind \
+     agent_app {{.application_name}}-dev -t dev
+   ```
+
+   `resources/agent_app.yml` deliberately contains no permission-bearing App
+   resource bindings. The deploy workflow verifies that the App already
+   exists before `bundle deploy`, so CI cannot become the identity or
+   permissions bootstrap.
+
+6. Deploy the bundle, run the workspace gate, and only then start or restart
+   the externally provisioned Databricks App:
+
+   ```bash
+   databricks bundle deploy -t dev
+   databricks bundle run release_gate -t dev
+   databricks bundle run agent_app -t dev
+   ```
+
+   `src/app/endpoint.py`, `start_server.py`, and `app.yaml` expose the native
+   MLflow Responses API contract. The bundle passes the same
+   `${var.prompt_version}` to the `release_gate` job and to the App as
+   `AAI_PROMPT_VERSION`; App startup rejects a missing, invalid, or alias-like
+   value and `ToolAgent` loads only that exact version.
+7. Enable production monitoring from `notebooks/02_enable_monitoring.py`
    (sampled scorers are Beta and notebook-only) and attach user feedback to
    traces; curate real failures back into the release cases.
+{{ else }}
+5. Serving is out of scope for this generated configuration. The bundle still
+   deploys and runs `release_gate`; there is no `agent_app` resource. Route the
+   model through a governed Databricks endpoint and regenerate (or add
+   equivalent reviewed resources) before introducing an HTTP deployment.
+{{ end }}
 
 Pull-request CI runs only the deterministic checks
 (`evals/offline_checks.py`) — it never holds credentials. The platform team
 must onboard this repository (main-branch federated credential, service
 principal, constrained compute, serving permissions for the deploy step,
 non-secret repository variables) before the deploy workflow is enabled.
+
+## Optional durable LangGraph orchestration
+
+The default agent stays framework-neutral so the SDK does not hide native
+MLflow or provider behavior. If the application needs durable checkpoints,
+replay, or human approval, follow `recipes/langgraph/README.md`. The recipe
+uses native LangGraph state APIs, injected persistent checkpoint/store
+backends, an interrupt before side effects, and an application idempotency
+key. `aai-core` continues to own resource context, trace policy, evaluation,
+and release evidence rather than wrapping the graph.

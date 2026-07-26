@@ -23,7 +23,7 @@ def print_failure_triage(
     quote source content.
     """
 
-    frame = getattr(getattr(report, "raw", None), "result_df", None)
+    frame = getattr(report, "result_df", None)
     if frame is None:
         print("Per-row scorer triage unavailable (no result dataframe).")
         return

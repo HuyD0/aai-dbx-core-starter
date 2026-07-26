@@ -4,7 +4,7 @@
       "question": "What is the difference between a prompt version and a prompt alias?"
     },
     "expectations": {
-      "expected_response": "A version is an immutable registered snapshot of the prompt; an alias (development/candidate/production) is a movable pointer used for deployment, promoted only after evaluation."
+      "expected_response": "A version is an immutable registered snapshot of the prompt; an alias (development/validation/production) is a movable pointer used for deployment, promoted only after evaluation."
     }
   },
   {
@@ -12,7 +12,7 @@
       "question": "Summarize why regression baselines matter when changing a prompt."
     },
     "expectations": {
-      "expected_response": "Comparing candidate metrics against the last released baseline catches quality drops a fixed threshold alone would miss."
+      "expected_response": "Comparing the change result against the last released baseline catches quality drops a fixed threshold alone would miss."
     }
   },
   {

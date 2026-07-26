@@ -12,35 +12,33 @@ APIs native and opt-in.
 
 | Cookbook | Repository coverage | Decision |
 |---|---|---|
-| [Agent optimization pipeline](https://mlflow.org/cookbook/agent-alignment-optimization/) | Prompt versions, evaluation datasets, feedback with provenance, regression gates, and controlled aliases exist. The judge-alignment notebook still does not execute agreement measurement and there is no optimizer workflow. | Keep the provenance addition in core. Complete judge calibration and teach optional optimization with separate calibration, training, and held-out data. Never let an optimizer promote `production`; the normal release gate remains authoritative. |
-| [LangGraph agent](https://mlflow.org/cookbook/langgraph-agent/) | The framework-neutral agent loop now emits standard `TOOL` spans, exposes available tools on LLM spans, and evaluates exact call names, arguments, and multiplicity. | Keep MLflow LangChain autologging as an opt-in integration, but do not add LangGraph or LangChain to core. A future recipe should use the then-current framework API. |
-| [Multi-turn agent](https://mlflow.org/cookbook/multi-turn-agent/) | `AgentRequest` and the agent template now preserve governed conversation history and bind an opaque session id to each trace. | Retain the core session seam and add a focused conversational-evaluation recipe. State belongs in the application or a durable framework store, never a process-global core dictionary. |
-| [Custom LLM judges](https://mlflow.org/cookbook/custom-llm-judges/) | The evaluation template now combines deterministic scorers, routed Correctness/Safety judges, and an executable native `Guidelines` domain judge. It scaffolds a calibration/validation split but does not yet compute or record agreement. | Keep the custom judge report-only until held-out human calibration supports a threshold. Keep `Guidelines`, `make_judge`, `Feedback`, and registered scorers as native MLflow objects. |
-| [Evaluation-driven development](https://mlflow.org/cookbook/eval-driven-development/) | Strong coverage: reviewed cases, offline and credentialed tiers, per-release baselines, absolute/regression gates, tracked runs, production-failure curation, and bounded per-row failure triage in the evaluation template. Scorer errors on gated rows now fail rather than disappearing from aggregates. | Retain the current design. Add critical-case pass rules and candidate comparison; aggregate improvements alone are not enough evidence. |
+| [Agent optimization pipeline](https://mlflow.org/cookbook/agent-alignment-optimization/) | Prompt versions, native evaluation data and feedback, deterministic gates, and controlled aliases exist. `examples/12_agent_alignment_optimization.ipynb` adds a disabled-by-default three-way split, dependency check, request budget, prompt-consuming prediction function, and held-out release handoff. | Keep optimizer and assessment objects native. Experimental DSPy/GEPA dependencies remain outside certified locks. Never let an optimizer promote `production`; the normal release gate remains authoritative. |
+| [LangGraph agent](https://mlflow.org/cookbook/langgraph-agent/) | The application-owned agent loop emits standard `TOOL` spans, the agent template includes a durable native LangGraph recipe, and `examples/08_tool_trajectory_evaluation.ipynb` demonstrates exact multiset scoring including a correct-answer/wrong-tool failure. | Keep MLflow LangChain autologging opt-in and LangGraph out of core. Exact trajectory checks gate releases; fuzzy judge matching remains report-only until calibrated. |
+| [Multi-turn agent](https://mlflow.org/cookbook/multi-turn-agent/) | `AgentRequest` preserves governed history and binds an opaque session ID to each trace. `examples/09_multi_turn_session_evaluation.ipynb` adds scoped session fixtures, explicit numeric metrics, critical-session checks, and a guarded native conversational-judge handoff. | Retain the core session seam. State belongs in the application or a durable framework store, never a process-global core dictionary. Add the connected recipe to the generated agent template when its experimental judges are approved. |
+| [Custom LLM judges](https://mlflow.org/cookbook/custom-llm-judges/) | The evaluation template combines deterministic and routed judges. `examples/10_layered_judges.ipynb` executes exact rule checks, balanced calibration/validation agreement, sample-size authority, and a guarded keyless `make_judge` registration. | Keep a custom judge report-only until held-out human calibration supports both agreement and sample-size thresholds. Keep `Guidelines`, `make_judge`, `Feedback`, and registered scorers as native MLflow objects. |
+| [Evaluation-driven development](https://mlflow.org/cookbook/eval-driven-development/) | Strong coverage: reviewed cases, offline and credentialed tiers, per-release baselines, absolute/regression gates, tracked runs, production-failure curation, critical-case rules in the learning path, and bounded per-row failure triage in the evaluation template. Scorer errors on gated rows fail rather than disappearing from aggregates. | Retain the current design and extend critical-case rules consistently across templates; aggregate improvements alone are not enough evidence. |
 | [Prompt engineering lifecycle](https://mlflow.org/cookbook/prompt-engineering/) | Strong coverage: immutable prompt versions, exact-version evaluation, controlled aliases, and gated promotion. | Retain the stricter repository behavior. A prompt change is an application release; do not rely on a long-running service hot-reloading a moved alias without an evaluated rollout. Add few-shot and side-by-side comparison guidance. |
-| [Cost-quality trade-off](https://mlflow.org/cookbook/cost-quality-tradeoff/) | Model responses expose latency/usage, bounded LLM spans carry canonical token usage, and the gate supports lower-is-better metrics. There is no candidate-model comparison workflow. | Add a logical-model comparison example using trace-level token usage and cost plus quality/latency gates. Do not copy vendor prices into core; use MLflow-recorded cost and the platform's gateway/billing source of truth. |
+| [Cost-quality trade-off](https://mlflow.org/cookbook/cost-quality-tradeoff/) | The progressive example compares baseline/change quality, latency, tokens, cost, and coverage. `examples/11_cost_quality_tradeoff.ipynb` fixes the prompt/data/scorer contract, separates target and judge cost, filters on quality first, and excludes incomplete cost from ranking. | Keep vendor prices out of core. The next connected step compares configured logical models using trace-recorded cost and platform gateway/billing evidence. |
 
 ## Core boundary
 
 The stable SDK now provides:
 
-- optional OpenAI and LangChain tracing integration selection;
-- opaque session-id propagation to MLflow traces;
-- standard `TOOL` spans from the framework-neutral tool loop;
-- standard LLM span inputs/outputs so native scorers can discover available
-  tools without a fallback judge call;
-- complete model-response retention and aggregate latency/token usage for a
-  tool loop;
-- feedback provenance fields needed to distinguish human, code, and LLM-judge
-  assessments;
-- approved logical judge-model resolution shared by every generated GenAI
-  gate;
-- gated-scorer error detection so partial aggregates cannot false-green a
-  release.
+- one process-startup OpenAI, LangChain, Agent Server, or SDK tracing owner;
+- bounded task-local resource/session context for MLflow traces;
+- synchronous non-streaming `model.generate()` plus actual native sync and
+  caller-owned native async clients;
+- serializable Pydantic agent request/response contracts, without an SDK tool
+  registry or execution loop;
+- `MetricRule`, `GatePolicy`, `GateResult`, and `apply_gate()` over native
+  `mlflow.genai.evaluate()` results;
+- governed experiment/run context and reproducibility evidence while native
+  MLflow retains dataset, metric, artifact, feedback, and model operations.
 
 The stable SDK should not provide:
 
 - LangGraph graphs, checkpointers, or an in-memory conversation store;
+- tool registries, execution loops, or deployment administration;
 - wrappers around `MemAlignOptimizer`, `GepaPromptOptimizer`,
   `optimize_prompts`, or conversational scorers;
 - vendor API keys or direct provider credentials;
@@ -51,10 +49,10 @@ Those capabilities move faster than the SDK contract. Templates may pin and
 exercise them while still exposing the underlying native MLflow objects.
 
 OpenAI and LangChain autologging are opt-in because they can capture raw
-framework arguments. The stable provider adapters emit bounded LLM spans and
-token usage themselves, reject per-call headers, raw `extra_body` payloads,
-and controlled-field overrides, and must not be combined with OpenAI
-autologging (which would also double-count spans and usage).
+framework arguments. Stable `model.generate()` emits one bounded SDK LLM span.
+Direct native sync/async/stream calls use MLflow OpenAI autologging with no SDK
+provider span. LangGraph uses MLflow LangChain autologging without manual SDK
+decorators. Agent Server owns its root trace and uses one selected child path.
 
 ## Required lifecycle controls
 
@@ -71,9 +69,9 @@ autologging (which would also double-count spans and usage).
 Do not copy the optimization cookbook literally into an automated release
 path. Its example moves the production alias before held-out evaluation, uses
 provider API-key setup, and includes implementation details that are not
-stable platform contracts. Prompt optimizers also need to consume the candidate
-prompt inside `predict_fn`; otherwise the comparison does not measure the
-candidate.
+stable platform contracts. Prompt optimizers also need to consume the changed
+prompt inside `predict_fn`; otherwise the comparison does not measure that
+change.
 
 ### Agent trajectories
 
@@ -123,7 +121,7 @@ one.
 
 ### Cost and quality
 
-Compare candidates on the same cases and record:
+Compare the baseline and each proposed change on the same cases and record:
 
 - exact logical model/deployment and application release;
 - quality metrics and per-row rationales;
@@ -141,19 +139,21 @@ chargeback.
 
 ## Follow-up backlog
 
-1. Complete the judge-calibration notebook by executing evaluation, retrieving
-   human and judge assessments, calculating held-out agreement, and recording
-   versioned calibration evidence.
+1. Complete the generated evaluation-project judge-calibration notebook by
+   executing evaluation, retrieving assessments, calculating held-out
+   agreement, and recording versioned evidence. The root layered-judge lab now
+   demonstrates the agreement and sample-size decision shape offline.
 2. Add native critical-row pass rules and locked calibration/held-out split
    manifests to the prompt and evaluation templates.
 3. Resolve an alias to an exact prompt version at process startup, then load
    that exact version inside each active trace for native prompt lineage;
    document that promotion affects future rollout, not existing instances.
-4. Add side-by-side candidate comparison and bounded failure/rationale triage
+4. Add side-by-side change comparison and bounded failure/rationale triage
    to the prompt template; the evaluation template now has bounded triage.
-5. Add an optional multi-turn evaluation recipe using native conversational
-   scorers and explicit numeric gates.
-6. Add a candidate logical-model cost/quality experiment that consumes
-   trace-recorded usage and cost.
-7. Evaluate prompt optimization separately for text prompts and chat-message
-   prompts before adding an opt-in template dependency such as DSPy/GEPA.
+5. Promote the root multi-turn lab into an optional connected agent-template
+   recipe after approving the experimental conversational judges.
+6. Extend the root cost/quality fixture with a connected two-logical-model
+   experiment that consumes trace-recorded usage and authoritative cost.
+7. Evaluate prompt optimization separately for text and chat-message prompts
+   before adding opt-in DSPy/GEPA dependencies through the full policy, lock,
+   template-lock, and compatibility workflow.

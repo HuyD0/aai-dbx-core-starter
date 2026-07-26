@@ -17,9 +17,10 @@ APP_PORT ?= 8000
 APP_NAME ?= aai-platform-console-dev
 
 .PHONY: help check-uv install lint format format-check test build check verify \
-	sync-templates check-templates bundle-validate validate-templates doctor \
+	sync-templates check-templates lock-templates check-template-locks \
+	bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
-	local-ui workspace-connect workspace-example examples-connect example \
+	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart
 
 help: ## Show the available targets.
@@ -58,12 +59,18 @@ quickstart: install ## Prove a fresh clone works without credentials.
 local-start: examples-install ## Write a trace to a clean, repository-local MLflow store.
 	$(PYTHON) scripts/examples.py local first_trace
 
-local-example: examples-install ## Run a local-capable example: make local-example EXAMPLE=first_trace
+local-example: examples-install ## Run one local lifecycle example or lab.
 	@test -n "$(EXAMPLE)" || { \
-		echo "EXAMPLE is required. Choose first_trace or first_experiment."; \
+		echo "EXAMPLE is required. Run 'make examples-list' to see valid names."; \
 		exit 2; \
 	}
 	$(PYTHON) scripts/examples.py local "$(EXAMPLE)"
+
+local-lifecycle: examples-install ## Run the complete deterministic MLflow curriculum.
+	$(PYTHON) scripts/examples.py local first_trace
+	$(PYTHON) scripts/examples.py local first_experiment
+	$(PYTHON) scripts/examples.py local first_prompt
+	$(PYTHON) scripts/examples.py local first_evaluation
 
 local-ui: examples-install ## Serve the isolated local MLflow store at http://127.0.0.1:5000.
 	@mkdir -p "$(LOCAL_MLFLOW_DIR)/mlruns"
@@ -110,6 +117,12 @@ sync-templates: ## Copy the canonical shared scaffold into every template.
 
 check-templates: ## Check that generated template scaffold files are in sync.
 	$(PYTHON) scripts/sync_template_shared.py --check
+
+lock-templates: check-uv ## Regenerate exact transitive template runtime locks.
+	$(PYTHON) scripts/lock_template_dependencies.py
+
+check-template-locks: check-uv ## Resolve and verify template runtime locks are current.
+	$(PYTHON) scripts/lock_template_dependencies.py --check
 
 check: check-templates format-check test build ## Run the standard pre-commit checks.
 

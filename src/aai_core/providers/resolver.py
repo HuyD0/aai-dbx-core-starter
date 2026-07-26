@@ -57,14 +57,13 @@ class ProviderResolver:
             return self._embeddings[logical_name]
         config = self._config(logical_name, self.context.settings.embeddings)
         provider = self._provider(config)
-        client, model = self._openai_client(provider, config)
+        client, model, _ = self._openai_clients(provider, config)
         adapter = OpenAICompatibleEmbeddingProvider(
             logical_name=logical_name,
             provider=provider,
             model=model,
             client=client,
             dimensions=_optional_int(config.get("dimensions")),
-            **_resilience_options(config),
         )
         self._embeddings[logical_name] = adapter
         return adapter
@@ -99,28 +98,46 @@ class ProviderResolver:
 
     def _openai_compatible_model(self, logical_name: str, config: dict[str, Any]):
         provider = self._provider(config)
-        client, model = self._openai_client(provider, config)
+        client, model, async_client_factory = self._openai_clients(provider, config)
         return OpenAICompatibleChatModel(
             logical_name=logical_name,
             provider=provider,
             model=model,
             client=client,
+            async_client_factory=async_client_factory,
             capabilities=_capabilities(config),
-            **_resilience_options(config),
         )
 
-    def _openai_client(self, provider: str, config: dict[str, Any]) -> tuple[Any, str]:
-        # The adapter owns retries (Retry-After-aware, configurable); native
-        # client retries are disabled so a persistent 429/5xx costs at most
-        # max_retries+1 attempts instead of multiplying with the SDK's own
-        # default retry policy.
-        model = _required(config, "deployment")
-        if provider == "databricks":
-            from databricks_openai import DatabricksOpenAI
+    def _openai_clients(
+        self, provider: str, config: dict[str, Any]
+    ) -> tuple[Any, str, Callable[[], Any]]:
+        """Build native sync and async clients from one governed configuration."""
 
-            return DatabricksOpenAI(max_retries=0), model
+        model = _required(config, "deployment")
+        native_options = _native_client_options(config)
+        if provider == "databricks":
+            try:
+                from databricks_openai import AsyncDatabricksOpenAI, DatabricksOpenAI
+            except ModuleNotFoundError as error:
+                if error.name != "databricks_openai":
+                    raise
+                raise ProviderConfigurationError(
+                    "The Databricks model provider requires the optional "
+                    "'databricks-openai' package.",
+                    remediation="Install the SDK's Databricks dependencies with "
+                    "`python -m pip install 'aai-core[databricks]'`, then restart "
+                    "the Python process. In this source repository, run "
+                    "`make examples-install` and select `.venv/bin/python` as "
+                    "the notebook kernel.",
+                ) from error
+
+            return (
+                DatabricksOpenAI(**native_options),
+                model,
+                lambda: AsyncDatabricksOpenAI(**native_options),
+            )
         if provider == "foundry":
-            from openai import OpenAI
+            from openai import AsyncOpenAI, OpenAI
 
             endpoint = _required(config, "endpoint").rstrip("/")
             token_provider = self._bearer_token_provider(
@@ -128,16 +145,18 @@ class ProviderResolver:
                 or config.get("scope")
                 or "https://ai.azure.com/.default"
             )
+            client_options = {
+                **native_options,
+                "base_url": f"{endpoint}/openai/v1/",
+                "api_key": token_provider,
+            }
             return (
-                OpenAI(
-                    base_url=f"{endpoint}/openai/v1/",
-                    api_key=token_provider,
-                    max_retries=0,
-                ),
+                OpenAI(**client_options),
                 model,
+                lambda: AsyncOpenAI(**client_options),
             )
         if provider == "azure_apim":
-            from openai import OpenAI
+            from openai import AsyncOpenAI, OpenAI
 
             # The enterprise AI-gateway path: the APIM (or any OpenAI-
             # compatible gateway) base URL is taken verbatim, auth is a
@@ -149,9 +168,9 @@ class ProviderResolver:
                 _required(config, "token_scope")
             )
             client_options: dict[str, Any] = {
+                **native_options,
                 "base_url": base_url,
                 "api_key": token_provider,
-                "max_retries": 0,
             }
             headers = self._subscription_key_headers(config)
             if headers:
@@ -159,7 +178,11 @@ class ProviderResolver:
             api_version = config.get("api_version")
             if api_version:
                 client_options["default_query"] = {"api-version": str(api_version)}
-            return OpenAI(**client_options), model
+            return (
+                OpenAI(**client_options),
+                model,
+                lambda: AsyncOpenAI(**client_options),
+            )
         raise ProviderConfigurationError(f"Unsupported model provider: {provider}")
 
     def _bearer_token_provider(self, scope: str):
@@ -265,13 +288,20 @@ def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
 
 
-def _resilience_options(config: dict[str, Any]) -> dict[str, Any]:
-    options: dict[str, Any] = {}
+def _native_client_options(config: dict[str, Any]) -> dict[str, Any]:
+    from aai_core.providers.openai_compatible import (
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_TIMEOUT_SECONDS,
+    )
+
+    options: dict[str, Any] = {
+        "max_retries": int(config.get("max_retries", DEFAULT_MAX_RETRIES)),
+    }
     if "timeout_seconds" in config:
         timeout = config["timeout_seconds"]
-        options["timeout_seconds"] = None if timeout is None else float(timeout)
-    if "max_retries" in config:
-        options["max_retries"] = int(config["max_retries"])
+        options["timeout"] = None if timeout is None else float(timeout)
+    else:
+        options["timeout"] = DEFAULT_TIMEOUT_SECONDS
     return options
 
 
@@ -282,17 +312,5 @@ def _capabilities(config: dict[str, Any]) -> ModelCapabilities:
     if unknown:
         raise ProviderConfigurationError(
             "Unknown model capabilities: " + ", ".join(sorted(unknown))
-        )
-    declared_unimplemented = [
-        name for name in ("streaming", "responses_api") if supplied.get(name)
-    ]
-    if declared_unimplemented:
-        raise ProviderConfigurationError(
-            "Capabilities not implemented by the stable adapter: "
-            + ", ".join(declared_unimplemented),
-            remediation="The stable generate() surface is synchronous "
-            "chat-completions only. Remove the flag, or use "
-            "model.native_client for provider-specific streaming/Responses "
-            "API access.",
         )
     return ModelCapabilities(**supplied)

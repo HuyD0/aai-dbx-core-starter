@@ -1,5 +1,5 @@
 {
-  "$comment": "Canonical version pins for packages that appear in more than one template's requirements.lock or pyproject.toml.tmpl. Templates only pin the packages they actually use, but where they pin one of these, the version must match \u2014 tests/test_template.py enforces agreement so templates never drift apart on shared runtime dependencies.",
+  "$comment": "Template projection of certified direct inputs from dependency-policy.toml. Generated transitive locks include additional exact packages. tests/test_shared_scaffold.py and scripts/validate_release.py enforce agreement.",
   "pins": {
     "azure-identity": "1.25.3",
     "azure-search-documents": "12.0.0",

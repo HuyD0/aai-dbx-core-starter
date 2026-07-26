@@ -14,16 +14,16 @@ import json
 import sys
 from pathlib import Path
 
-from aai_core.evaluation import QualityThreshold, apply_thresholds
+from aai_core.evaluation import GatePolicy, MetricRule, apply_gate
 
 ROOT = Path(__file__).resolve().parents[1]
 MIN_GOLDEN_CASES = 10
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 
 
-def load_gate() -> tuple[list[QualityThreshold], set[str], set[str], set[str]]:
+def load_gate() -> tuple[list[MetricRule], set[str], set[str], set[str]]:
     config = json.loads((ROOT / "evals" / "gate_config.json").read_text("utf-8"))
-    thresholds = [QualityThreshold(**threshold) for threshold in config["thresholds"]]
+    thresholds = [MetricRule(**threshold) for threshold in config["thresholds"]]
     return (
         thresholds,
         set(config["code_metrics"]),
@@ -104,7 +104,15 @@ def main() -> int:
             totals[f"{name}/mean"] = totals.get(f"{name}/mean", 0.0) + value
     metrics = {name: value / len(golden) for name, value in totals.items()}
     code_thresholds = [t for t in thresholds if t.metric in code_metrics]
-    report = apply_thresholds(metrics, code_thresholds)
+    report = apply_gate(
+        metrics,
+        policy=GatePolicy(
+            rules=tuple(code_thresholds),
+            # Tier 1 enforces absolute deterministic thresholds only. The
+            # governed tier-2 run owns comparison to the approved baseline.
+            allow_missing_regression_baseline=True,
+        ),
+    )
     print({"tier": "offline", "metrics": report.metrics})
     report.require_passed()
     print(f"offline release-gate checks passed ({len(golden)} golden cases)")

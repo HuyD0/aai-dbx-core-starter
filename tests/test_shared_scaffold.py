@@ -14,6 +14,12 @@ _spec = importlib.util.spec_from_file_location(
 sync_module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sync_module)
 
+_release_spec = importlib.util.spec_from_file_location(
+    "validate_release", ROOT / "scripts" / "validate_release.py"
+)
+release_module = importlib.util.module_from_spec(_release_spec)
+_release_spec.loader.exec_module(release_module)
+
 
 def test_shared_files_are_in_sync():
     drift = [
@@ -50,6 +56,16 @@ def test_common_dependency_pins_agree():
     )
 
 
+def test_template_runtime_locks_are_exact_and_transitive():
+    for template in sync_module.discover_templates():
+        lock = template / "template" / "requirements.lock"
+        text = lock.read_text(encoding="utf-8")
+        pins = release_module.requirement_pins(lock)
+        assert "Certified universal transitive runtime lock" in text
+        assert not release_module.unpinned_requirement_lines(lock)
+        assert len(pins) >= 20, f"{template.name} regressed to a direct-only lock"
+
+
 def test_manifest_files_exist_and_nothing_orphaned():
     manifest = json.loads((SHARED / "manifest.json").read_text())
     for relative in manifest["files"]:
@@ -64,3 +80,10 @@ def test_manifest_files_exist_and_nothing_orphaned():
         f"manifest/files mismatch: only-declared={sorted(declared - on_disk)} "
         f"only-on-disk={sorted(on_disk - declared)}"
     )
+
+
+def test_sdk_template_and_dependency_manifests_are_consistent():
+    """A template must never advertise an SDK or certified stack that its
+    repository release metadata does not describe."""
+
+    release_module.validate_repository()

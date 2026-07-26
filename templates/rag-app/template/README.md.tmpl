@@ -36,7 +36,7 @@ a provider integration.
    bundle only references it by name in `aai-platform.yml`. For Azure AI
    Search, index and ingestion are likewise managed outside this bundle.
 3. Register prompts with `python scripts/register_prompt.py`; promote with
-   `python scripts/promote_prompt.py --version <n> --to candidate|production`
+   `python scripts/promote_prompt.py --version <n> --to validation|production`
    after the gate passes (production loads the `production` alias).
 4. Grow `evals/data/release_cases.json` with your domain's golden and
    failure cases (the seeded cases show the shape). Keep at least 10.

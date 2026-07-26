@@ -10,18 +10,19 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
+import mlflow
 from mlflow.genai.scorers import Correctness, RelevanceToQuery, Safety
 
 from aai_core import bootstrap
 from aai_core.evaluation import (
-    EvaluationSuite,
-    QualityThreshold,
-    judge_model_uri,
-    publish_report,
-    workspace_run_url,
+    GatePolicy,
+    MetricRule,
+    apply_gate,
 )
+from aai_core.providers.types import ProviderConfigurationError
 from app.assistant import Assistant
 from app.config import DATASET_NAME, PROMPT_NAME
 
@@ -30,9 +31,9 @@ GATE_CONFIG = ROOT / "evals" / "gate_config.json"
 BASELINE = ROOT / "evals" / "baseline.json"
 
 
-def load_thresholds() -> list[QualityThreshold]:
+def load_thresholds() -> list[MetricRule]:
     config = json.loads(GATE_CONFIG.read_text(encoding="utf-8"))
-    return [QualityThreshold(**threshold) for threshold in config["thresholds"]]
+    return [MetricRule(**threshold) for threshold in config["thresholds"]]
 
 
 def load_baseline() -> dict[str, float]:
@@ -75,34 +76,39 @@ def main() -> None:
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
-    judge_model = judge_model_uri(context.settings)
-    suite = EvaluationSuite(
-        scorers=[
-            Correctness(model=judge_model),
-            RelevanceToQuery(model=judge_model),
-            Safety(model=judge_model),
-        ],
-        thresholds=load_thresholds(),
-    )
+    judge_model = _judge_model_uri(context.settings)
     baseline = load_baseline()
+    policy = GatePolicy(
+        rules=tuple(load_thresholds()),
+        allow_missing_regression_baseline=args.update_baseline and not baseline,
+    )
     # A governed MLflow run: aai.* tags, pinned prompt URI + dataset as
     # params, gate metrics, verdict tag, and the evaluation traces attached.
-    report, run_id = suite.run_tracked(
-        experiments=context.experiments,
-        run_name=f"prompt-gate-v{version}",
-        data=cases,
-        predict_fn=assistant.ask,
-        baseline_metrics=baseline,
-        prompt_uri=prompt_uri,
-        dataset_name=dataset_name,
-        parameters={"prompt_version": version},
-    )
-    publish_report(
-        report,
-        title=f"Prompt gate — {PROMPT_NAME} v{version}",
-        baseline=baseline,
-        run_link=workspace_run_url(run_id),
-    )
+    with context.experiments.run(
+        run_name=f"prompt-v{version}-validation-gate",
+        parameters={
+            "prompt_version": version,
+            "prompt_uri": prompt_uri,
+            "evaluation_dataset": dataset_name,
+            "case_count": len(cases),
+        },
+    ):
+        native_result = mlflow.genai.evaluate(
+            data=cases,
+            predict_fn=assistant.ask,
+            scorers=[
+                Correctness(model=judge_model),
+                RelevanceToQuery(model=judge_model),
+                Safety(model=judge_model),
+            ],
+        )
+        report = apply_gate(
+            native_result,
+            policy=policy,
+            baseline_metrics=baseline,
+        )
+        mlflow.log_metrics(dict(report.metrics))
+        mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
     report.require_passed()
     if args.update_baseline:
         BASELINE.write_text(
@@ -118,6 +124,18 @@ def main() -> None:
             "baseline_updated": args.update_baseline,
         }
     )
+
+
+def _judge_model_uri(settings) -> str:
+    config = settings.models.get("judge-model")
+    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
+        raise ProviderConfigurationError(
+            "judge-model must resolve to a governed Databricks serving endpoint"
+        )
+    deployment = config.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ProviderConfigurationError("judge-model requires a deployment")
+    return f"endpoints:/{deployment.strip()}"
 
 
 if __name__ == "__main__":

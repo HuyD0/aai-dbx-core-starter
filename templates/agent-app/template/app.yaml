@@ -1,0 +1,3 @@
+command:
+  - python
+  - start_server.py

@@ -50,7 +50,7 @@ wheel stored in the platform volume.
 
 This repository's sample bundle is intentionally different: it builds the
 current SDK checkout into `dist/` and deploys that wheel to its smoke job. That
-path validates an unreleased SDK candidate. It does not replace the
+path validates a proposed unreleased SDK wheel. It does not replace the
 `publish-sdk` workflow or mutate an existing released version.
 
 ### Credential-free PR boundary

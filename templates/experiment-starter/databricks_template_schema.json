@@ -48,8 +48,8 @@
     },
     "experiment_name": {
       "type": "string",
-      "default": "/Shared/{{.project_name}}",
-      "description": "MLflow experiment path for this project's runs",
+      "default": "/Shared/{{.application_name}}-signal-threshold-quality-cost",
+      "description": "Descriptive MLflow experiment path naming the application and decision purpose",
       "order": 8
     },
     "include_notebook": {
@@ -64,7 +64,7 @@
     },
     "aai_core_version": {
       "type": "string",
-      "default": "0.2.0",
+      "default": "0.3.0",
       "description": "Pinned aai-core SDK version",
       "order": 16
     },

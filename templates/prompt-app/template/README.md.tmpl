@@ -39,7 +39,7 @@ provider integration.
    `python scripts/sync_dataset.py` — evaluation runs link the dataset
    by name.
 4. Promote only after the gate passes:
-   `python scripts/promote_prompt.py --version <n> --to candidate`, then
+   `python scripts/promote_prompt.py --version <n> --to validation`, then
    `--to production` at release approval. Production deploys load the
    `production` alias — promotion must happen before the first prod deploy.
 5. Deploy the evaluation job: `databricks bundle validate -t dev` then

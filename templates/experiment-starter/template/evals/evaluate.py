@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from aai_core import bootstrap
-from aai_core.evaluation import QualityThreshold, apply_thresholds
+from aai_core.evaluation import GatePolicy, MetricRule, apply_gate
 from app.experiment import run_experiment
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,9 +20,9 @@ GATE_CONFIG = ROOT / "evals" / "gate_config.json"
 BASELINE = ROOT / "evals" / "baseline.json"
 
 
-def load_thresholds() -> list[QualityThreshold]:
+def load_thresholds() -> list[MetricRule]:
     config = json.loads(GATE_CONFIG.read_text(encoding="utf-8"))
-    return [QualityThreshold(**threshold) for threshold in config["thresholds"]]
+    return [MetricRule(**threshold) for threshold in config["thresholds"]]
 
 
 def load_baseline() -> dict[str, float]:
@@ -43,8 +43,14 @@ def main() -> None:
 
     context = bootstrap(ROOT / "aai-platform.yml")
     metrics = run_experiment(context)
-    report = apply_thresholds(
-        metrics, load_thresholds(), baseline_metrics=load_baseline()
+    baseline = load_baseline()
+    report = apply_gate(
+        metrics,
+        baseline_metrics=baseline,
+        policy=GatePolicy(
+            rules=tuple(load_thresholds()),
+            allow_missing_regression_baseline=args.update_baseline and not baseline,
+        ),
     )
     report.require_passed()
     if args.update_baseline:

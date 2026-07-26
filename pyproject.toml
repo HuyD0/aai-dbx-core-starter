@@ -4,23 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aai-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Paved-road SDK for AI and ML applications on Azure Databricks."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 authors = [{ name = "AI/ML Platform Team" }]
 dependencies = [
+  "pydantic>=2.12,<3",
   "PyYAML>=6.0.3,<7",
 ]
 
 [project.optional-dependencies]
 databricks = [
-  "databricks-ai-search>=0.77,<1",
-  "databricks-sdk>=0.122,<1",
-  "databricks-openai>=0.17,<1",
+  "databricks-ai-search>=0.77,<0.78",
+  "databricks-sdk>=0.122,<0.123",
+  "databricks-openai>=0.17,<0.18",
 ]
 foundry = [
-  "azure-ai-projects>=2.3,<3",
   "azure-identity>=1.25.3,<2",
   "openai>=2.48,<3",
 ]
@@ -33,7 +33,7 @@ keyvault = [
   "azure-keyvault-secrets>=4.11,<5",
 ]
 genai = [
-  "mlflow[databricks]>=3.14,<4",
+  "mlflow[databricks]>=3.14,<3.15",
 ]
 examples = [
   "ipykernel>=6.29,<8",

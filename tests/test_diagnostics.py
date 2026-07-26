@@ -31,7 +31,8 @@ def test_doctor_passes_on_valid_config_without_cloud(tmp_path):
     dependency_checks = [c for c in checks if c.name.startswith("dependency:")]
     assert dependency_checks
     assert all(c.status in {"pass", "skip"} for c in dependency_checks)
-    assert any("install aai-core[" in c.detail for c in dependency_checks)
+    skipped = [check for check in dependency_checks if check.status == "skip"]
+    assert all("install aai-core[" in check.detail for check in skipped)
 
 
 def test_doctor_cli_exit_codes_and_json_output(tmp_path, capsys):
