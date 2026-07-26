@@ -1,4 +1,5 @@
 import logging
+import pickle
 
 import pytest
 
@@ -29,6 +30,8 @@ def test_secret_reference_and_value_never_render_raw():
     assert str(value) == "[REDACTED]"
     assert "super-secret" not in repr(value)
     assert value.reveal() == "super-secret"
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(value)
 
 
 def test_resolved_secret_is_registered_for_log_redaction():

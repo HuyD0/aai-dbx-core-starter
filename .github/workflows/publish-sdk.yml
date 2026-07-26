@@ -21,12 +21,13 @@ concurrency:
 jobs:
   build:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -36,13 +37,23 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          python -m pip install build==1.5.0
+          python -m pip install uv==0.8.23
+          uv sync --python 3.12 --extra dev --locked
           PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           test "$PACKAGE_VERSION" = "$REQUESTED_VERSION"
-          python -m build --wheel
+          uv run --python 3.12 python -m build --wheel --no-isolation
           WHEEL="dist/aai_core-${PACKAGE_VERSION}-py3-none-any.whl"
           test -f "$WHEEL"
-          sha256sum "$WHEEL" > "${WHEEL}.sha256"
+          (
+            cd dist
+            sha256sum "aai_core-${PACKAGE_VERSION}-py3-none-any.whl" \
+              > "aai_core-${PACKAGE_VERSION}-py3-none-any.whl.sha256"
+          )
+          uv run --python 3.12 python scripts/validate_release.py \
+            --wheel "$WHEEL" \
+            --release-version "$PACKAGE_VERSION" \
+            --require-tag \
+            --write-manifest dist/release-manifest.json
 
       - name: Stage wheel and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -51,13 +62,14 @@ jobs:
           path: |
             dist/*.whl
             dist/*.sha256
+            dist/release-manifest.json
           if-no-files-found: error
           retention-days: 1
 
   publish:
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       id-token: write
@@ -79,7 +91,7 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
-      - name: Publish immutable wheel and checksum
+      - name: Publish immutable release
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
@@ -90,11 +102,48 @@ jobs:
           WHEEL="aai_core-${PACKAGE_VERSION}-py3-none-any.whl"
           DESTINATION="dbfs:${SDK_ARTIFACT_VOLUME}/aai_core/${PACKAGE_VERSION}"
           databricks fs mkdir "$DESTINATION"
-          if databricks fs ls "${DESTINATION}/${WHEEL}" >/dev/null 2>&1; then
-            echo "Version ${PACKAGE_VERSION} already exists; releases are immutable."
+          if databricks fs ls \
+            "${DESTINATION}/release-manifest.json" >/dev/null 2>&1; then
+            echo "Version ${PACKAGE_VERSION} is complete; releases are immutable."
             exit 1
           fi
-          databricks fs cp "dist/${WHEEL}" "${DESTINATION}/${WHEEL}"
+
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "${VERIFY_DIR}"' EXIT
+
+          publish_or_resume() {
+            local filename="$1"
+            local remote="${DESTINATION}/${filename}"
+            if databricks fs ls "$remote" >/dev/null 2>&1; then
+              databricks fs cp --overwrite "$remote" "${VERIFY_DIR}/${filename}"
+              if ! cmp "dist/${filename}" "${VERIFY_DIR}/${filename}"; then
+                echo "Partial release contains different ${filename}; refusing overwrite."
+                exit 1
+              fi
+              echo "Resuming matching partial release: ${filename}"
+            else
+              databricks fs cp "dist/${filename}" "$remote"
+            fi
+          }
+
+          publish_or_resume "$WHEEL"
+          publish_or_resume "${WHEEL}.sha256"
+          databricks fs cp --overwrite \
+            "${DESTINATION}/${WHEEL}" "${VERIFY_DIR}/${WHEEL}"
+          databricks fs cp --overwrite \
+            "${DESTINATION}/${WHEEL}.sha256" "${VERIFY_DIR}/${WHEEL}.sha256"
+          (
+            cd "$VERIFY_DIR"
+            sha256sum --check "${WHEEL}.sha256"
+          )
+
+          # The manifest is the completion marker and is always published last.
           databricks fs cp \
-            "dist/${WHEEL}.sha256" \
-            "${DESTINATION}/${WHEEL}.sha256"
+            "dist/release-manifest.json" \
+            "${DESTINATION}/release-manifest.json"
+          databricks fs cp --overwrite \
+            "${DESTINATION}/release-manifest.json" \
+            "${VERIFY_DIR}/release-manifest.json"
+          cmp \
+            "dist/release-manifest.json" \
+            "${VERIFY_DIR}/release-manifest.json"

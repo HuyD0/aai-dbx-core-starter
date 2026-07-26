@@ -1,6 +1,7 @@
 """ProviderResolver wiring tests — the code that turns aai-platform.yml into
 clients, exercised hermetically with fake provider modules."""
 
+import builtins
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,11 @@ class FakeOpenAIClient:
         self.options = options
         self.chat = SimpleNamespace(completions=FakeCompletions())
         self.embeddings = SimpleNamespace()
+
+
+class FakeAsyncOpenAIClient:
+    def __init__(self, **options):
+        self.options = options
 
 
 class FakeSecretProvider:
@@ -79,7 +85,12 @@ def test_unknown_logical_name_and_provider_fail_with_clear_errors():
 def test_azure_apim_model_wires_gateway_options(monkeypatch):
     recorded = {}
     _install_identity_fakes(monkeypatch, recorded)
-    install_fake_module(monkeypatch, "openai", OpenAI=FakeOpenAIClient)
+    install_fake_module(
+        monkeypatch,
+        "openai",
+        OpenAI=FakeOpenAIClient,
+        AsyncOpenAI=FakeAsyncOpenAIClient,
+    )
 
     resolver = ProviderResolver(
         _context(
@@ -103,17 +114,24 @@ def test_azure_apim_model_wires_gateway_options(monkeypatch):
     assert model.native_client.options == {
         "base_url": "https://gw.azure-api.net/llm",
         "api_key": "token-provider",
-        "max_retries": 0,  # the adapter owns retries; native retries stay off
+        "max_retries": 2,
+        "timeout": 60.0,
         "default_headers": {"api-key": "subscription-key-value"},
         "default_query": {"api-version": "2025-04-01"},
     }
+    assert model.create_native_async_client().options == model.native_client.options
     assert model.generate([{"role": "user", "content": "q"}]).content == "answer"
 
 
 def test_azure_apim_requires_token_scope_and_secret_reference(monkeypatch):
     recorded = {}
     _install_identity_fakes(monkeypatch, recorded)
-    install_fake_module(monkeypatch, "openai", OpenAI=FakeOpenAIClient)
+    install_fake_module(
+        monkeypatch,
+        "openai",
+        OpenAI=FakeOpenAIClient,
+        AsyncOpenAI=FakeAsyncOpenAIClient,
+    )
 
     resolver = ProviderResolver(
         _context(
@@ -146,9 +164,17 @@ def test_azure_apim_requires_token_scope_and_secret_reference(monkeypatch):
 def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
     recorded = {}
     _install_identity_fakes(monkeypatch, recorded)
-    install_fake_module(monkeypatch, "openai", OpenAI=FakeOpenAIClient)
     install_fake_module(
-        monkeypatch, "databricks_openai", DatabricksOpenAI=FakeOpenAIClient
+        monkeypatch,
+        "openai",
+        OpenAI=FakeOpenAIClient,
+        AsyncOpenAI=FakeAsyncOpenAIClient,
+    )
+    install_fake_module(
+        monkeypatch,
+        "databricks_openai",
+        DatabricksOpenAI=FakeOpenAIClient,
+        AsyncDatabricksOpenAI=FakeAsyncOpenAIClient,
     )
 
     configs = {
@@ -172,17 +198,52 @@ def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
         assert model.logical_name == "general-chat"
 
 
-def test_declared_unimplemented_capabilities_are_rejected():
-    with pytest.raises(ProviderConfigurationError) as excinfo:
-        _capabilities({"capabilities": {"streaming": True}})
+def test_missing_databricks_extra_has_actionable_remediation(monkeypatch):
+    native_import = builtins.__import__
 
-    assert "native_client" in str(excinfo.value.remediation)
+    def import_without_databricks_openai(name, *args, **kwargs):
+        if name == "databricks_openai":
+            raise ModuleNotFoundError(
+                "No module named 'databricks_openai'",
+                name="databricks_openai",
+            )
+        return native_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_databricks_openai)
+    resolver = ProviderResolver(
+        _context(
+            models={
+                "general-chat": {
+                    "provider": "databricks",
+                    "deployment": "chat-endpoint",
+                }
+            }
+        )
+    )
+
+    with pytest.raises(ProviderConfigurationError) as excinfo:
+        resolver.model("general-chat")
+
+    assert "databricks-openai" in str(excinfo.value)
+    assert "make examples-install" in str(excinfo.value.remediation)
+    assert ".venv/bin/python" in str(excinfo.value.remediation)
+
+
+@pytest.mark.parametrize("name", ["streaming", "responses_api"])
+def test_native_only_features_are_not_stable_capability_flags(name):
+    with pytest.raises(ProviderConfigurationError, match="Unknown model capabilities"):
+        _capabilities({"capabilities": {name: True}})
 
 
 def test_resilience_options_come_from_configuration(monkeypatch):
     recorded = {}
     _install_identity_fakes(monkeypatch, recorded)
-    install_fake_module(monkeypatch, "openai", OpenAI=FakeOpenAIClient)
+    install_fake_module(
+        monkeypatch,
+        "openai",
+        OpenAI=FakeOpenAIClient,
+        AsyncOpenAI=FakeAsyncOpenAIClient,
+    )
 
     resolver = ProviderResolver(
         _context(
@@ -200,5 +261,6 @@ def test_resilience_options_come_from_configuration(monkeypatch):
 
     model = resolver.model("general-chat")
 
-    assert model.timeout_seconds == 15.0
-    assert model.max_retries == 0
+    assert model.native_client.options["timeout"] == 15.0
+    assert model.native_client.options["max_retries"] == 0
+    assert model.create_native_async_client().options == model.native_client.options

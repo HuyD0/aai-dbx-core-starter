@@ -35,19 +35,11 @@ class ProviderRequestError(ProviderError):
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """Capabilities the stable adapter can honor for an endpoint.
+    """Capabilities the stable synchronous adapter can honor."""
 
-    ``streaming`` and ``responses_api`` are reserved for future adapter
-    support; declaring them true is rejected at resolution time because the
-    stable ``generate()`` surface cannot honor them yet (use
-    ``native_client`` for provider-specific streaming).
-    """
-
-    streaming: bool = False
     tool_calling: bool = True
     structured_output: bool = False
     embeddings: bool = False
-    responses_api: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +84,10 @@ class ChatModel(Protocol):
     provider: str
     capabilities: ModelCapabilities
     native_client: Any
+
+    def create_native_async_client(self) -> Any:
+        """Create a provider-native async client owned by the caller."""
+        ...
 
     def generate(
         self,

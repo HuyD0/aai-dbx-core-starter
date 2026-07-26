@@ -121,7 +121,7 @@ def run_preflight(*, allow_login_prompt: bool) -> list[str]:
             artifact_names = {item["name"] for item in json.loads(listing.stdout)}
         except (json.JSONDecodeError, KeyError, TypeError):
             artifact_names = set()
-    for artifact in (wheel, f"{wheel}.sha256"):
+    for artifact in (wheel, f"{wheel}.sha256", "release-manifest.json"):
         if artifact not in artifact_names:
             problems.append(
                 f"Cannot read `{artifact}` from `{SDK_VOLUME}`. Ask the AAI "

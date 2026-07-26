@@ -19,6 +19,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from validate_release import validate_repository
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IDENTIFIERS = json.loads((REPO_ROOT / "platform-identifiers.json").read_text())
 
@@ -62,6 +64,9 @@ def validation_runs() -> list[tuple[Path, str, dict[str, str]]]:
 
 
 def main() -> int:
+    # Fail before cloud calls when template provenance, SDK compatibility, or
+    # certified dependency declarations have drifted.
+    validate_repository()
     failures: list[str] = []
     results: list[tuple[str, str]] = []
     for template, label, overrides in validation_runs():

@@ -6,12 +6,15 @@ resources:
         - task_key: evaluate
           spark_python_task:
             python_file: ../evals/evaluate.py
+            parameters:
+              - --prompt-version
+              - ${var.prompt_version}
           job_cluster_key: default
           libraries:
             - whl: ../dist/*.whl
             - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
-            # Single source of truth for runtime pins — the same lock file
-            # local installs use (bundle-synced to the workspace).
+            # Certified transitive runtime lock — the same file local installs
+            # use (bundle-synced to the workspace).
             - requirements: ../requirements.lock
 
       job_clusters:

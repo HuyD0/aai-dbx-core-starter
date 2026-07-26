@@ -5,25 +5,45 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Literal
+
+from pydantic import Field, JsonValue, field_serializer, field_validator
+
+from aai_core.contracts import ContractModel, freeze_value, thaw_value
 
 
-@dataclass(frozen=True)
-class ApplicationRelease:
-    application: str
-    release: str
-    source_commit: str
-    core_sdk_version: str
-    model: Mapping[str, Any]
-    prompt: Mapping[str, Any]
-    retrieval: Mapping[str, Any]
-    evaluation: Mapping[str, Any]
-    environment: str
+class ApplicationRelease(ContractModel):
+    """Persistable evidence for one reproducible AI application release."""
 
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    application: str = Field(min_length=1)
+    release: str = Field(min_length=1)
+    source_commit: str = Field(min_length=1)
+    core_sdk_version: str = Field(min_length=1)
+    model: dict[str, JsonValue]
+    prompt: dict[str, JsonValue]
+    retrieval: dict[str, JsonValue]
+    evaluation: dict[str, JsonValue]
+    environment: str = Field(min_length=1)
+    schema_version: Literal["1"] = "1"
+
+    @field_validator(
+        "model",
+        "prompt",
+        "retrieval",
+        "evaluation",
+        mode="after",
+    )
+    @classmethod
+    def freeze_evidence(cls, value: Mapping[str, JsonValue]):
+        return freeze_value(value)
+
+    @field_serializer("model", "prompt", "retrieval", "evaluation")
+    def serialize_evidence(self, value: Mapping[str, JsonValue]):
+        return thaw_value(value)
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        return self.model_dump(mode="json")
 
     @property
     def digest(self) -> str:

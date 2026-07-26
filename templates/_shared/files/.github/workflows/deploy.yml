@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,16 +31,16 @@ jobs:
       - name: Test before build (credential-free)
         run: |
           python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements.lock
           python -m pip install -e '.[dev]'
+          python -m pip check
           ruff check .
           black --check .
           pytest -q
           python evals/offline_checks.py
 
       - name: Build application before cloud login
-        run: |
-          python -m pip install build==1.5.0
-          python scripts/build_application.py
+        run: python scripts/build_application.py
 
       - name: Stage application wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -52,7 +52,7 @@ jobs:
 
   deploy-dev:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       id-token: write
@@ -78,6 +78,15 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
+      - name: Verify externally provisioned Databricks App
+        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: |
+          APP_NAME=$(python -c 'import json; stamp = json.load(open(".aai-template.json")); print(stamp["generated_with"]["application_name"] + "-dev")')
+          databricks apps get "$APP_NAME" >/dev/null
+
       - name: Validate and deploy
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
@@ -94,10 +103,17 @@ jobs:
         # Every template's bundle names its gate job `release_gate` (the
         # project's tier-2 evaluation). Running it here ENFORCES the gate on
         # the credentialed path: a failing gate fails this workflow, so a
-        # candidate that misses safety/quality thresholds never proceeds to
+        # validation result that misses safety/quality thresholds never proceeds to
         # promotion. Requires the onboarding grants documented in the README
         # (e.g. CAN_QUERY on the endpoints the evaluation uses).
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
         run: databricks bundle run release_gate -t dev
+
+      - name: Start or update the Databricks App
+        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: databricks bundle run agent_app -t dev

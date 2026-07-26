@@ -1,4 +1,4 @@
-"""Promote an evaluated prompt version to the candidate or production alias.
+"""Promote an evaluated prompt version to the validation or production alias.
 
 Production deploys load the `production` alias (src/app/assistant.py), so a
 version must be promoted before the first prod deploy. Run this only after
@@ -21,7 +21,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, type=int)
     parser.add_argument(
-        "--to", required=True, choices=["candidate", "production"], dest="alias"
+        "--to", required=True, choices=["validation", "production"], dest="alias"
     )
     args = parser.parse_args()
 

@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from aai_core.evaluation import QualityThreshold
+from aai_core.evaluation import MetricRule
 
 ROOT = Path(__file__).resolve().parents[1]
 MIN_CASES = 10
@@ -27,7 +27,7 @@ def main() -> int:
     failures: list[str] = []
 
     config = json.loads((ROOT / "evals" / "gate_config.json").read_text("utf-8"))
-    thresholds = [QualityThreshold(**threshold) for threshold in config["thresholds"]]
+    thresholds = [MetricRule(**threshold) for threshold in config["thresholds"]]
     gated = {threshold.metric for threshold in thresholds}
     for metric in REQUIRED_GATED_METRICS:
         if metric not in gated:

@@ -1,5 +1,5 @@
 {
-  "welcome_message": "Create an AAI agent application\n\nA tool-using agent: governed prompt, SDK tool-execution loop, structured outputs, tracing, trajectory-aware offline evaluation, feedback, and a gated Model Serving deployment.",
+  "welcome_message": "Create an AAI agent application\n\nA tool-using agent with an application-owned async loop, governed prompt, Pydantic outputs and tools, tracing, trajectory-aware evaluation, feedback, a native MLflow Agent Server deployment, and an optional LangGraph recipe.",
   "min_databricks_cli_version": "v1.6.0",
   "properties": {
     "project_name": {
@@ -13,8 +13,11 @@
     "application_name": {
       "type": "string",
       "default": "order-agent",
-      "description": "Application identifier used in tags and traces",
-      "order": 2
+      "description": "Application identifier used in tags, traces, and the Databricks App name (maximum 26 characters so the generated -dev name stays within the Apps limit)",
+      "order": 2,
+      "maxLength": 26,
+      "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?$",
+      "pattern_match_failure_message": "Use 1-26 lowercase letters, numbers, and hyphens; start with a letter and do not end with a hyphen."
     },
     "team": {
       "type": "string",
@@ -89,46 +92,102 @@
       "pattern": "^[a-z][a-z0-9_]+$",
       "pattern_match_failure_message": "Use lowercase letters, numbers, and underscores."
     },
+    "prompt_version": {
+      "type": "string",
+      "default": "1",
+      "description": "Exact immutable Prompt Registry version evaluated by release_gate and loaded by the App; after registering a new prompt, update this value before deployment",
+      "order": 13,
+      "pattern": "^[1-9][0-9]*$",
+      "pattern_match_failure_message": "Use a positive integer Prompt Registry version; mutable aliases are not accepted."
+    },
+    "include_serving": {
+      "type": "string",
+      "default": "yes",
+      "description": "Include the Databricks Apps + MLflow Agent Server deployment. Requires model_provider=databricks; direct Foundry projects omit deployment until routed through a Databricks external-model endpoint",
+      "enum": [
+        "yes",
+        "no"
+      ],
+      "order": 14
+    },
+    "experiment_id": {
+      "type": "string",
+      "default": "replace-with-mlflow-experiment-id",
+      "description": "ID of the existing MLflow experiment named in aai-platform.yml; the externally onboarded App identity requires CAN_EDIT",
+      "order": 15,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "include_serving": {
+                "const": "no"
+              }
+            }
+          },
+          {
+            "properties": {
+              "model_provider": {
+                "const": "foundry"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "app_usage_policy_id": {
+      "type": "string",
+      "default": "replace-with-app-usage-policy-id",
+      "description": "Externally provisioned Databricks Apps usage policy ID",
+      "order": 16,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "include_serving": {
+                "const": "no"
+              }
+            }
+          },
+          {
+            "properties": {
+              "model_provider": {
+                "const": "foundry"
+              }
+            }
+          }
+        ]
+      }
+    },
     "aai_core_version": {
       "type": "string",
-      "default": "0.2.0",
+      "default": "0.3.0",
       "description": "Pinned aai-core SDK version",
-      "order": 16
+      "order": 17
     },
     "aai_core_volume": {
       "type": "string",
       "default": "/Volumes/dbx_dev/dbx_platform/python_packages",
       "description": "Unity Catalog volume holding aai-core wheels",
-      "order": 17
+      "order": 18
     },
     "workspace_host": {
       "type": "string",
       "default": "https://adb-7405609799238491.11.azuredatabricks.net",
       "description": "Development Azure Databricks workspace",
-      "order": 18
+      "order": 19
     },
     "compute_policy_id": {
       "type": "string",
       "default": "0005F2031B6D2319",
       "description": "Constrained Job Compute policy",
-      "order": 19
+      "order": 20
     },
     "aai_core_pip_source": {
       "type": "string",
       "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
       "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
-      "order": 20
-    },
-    "include_serving": {
-      "type": "string",
-      "default": "yes",
-      "description": "Include the Model Serving deployment path (serving wrapper, deploy script, monitoring notebook). Requires model_provider=databricks \u2014 Foundry projects omit serving until routed through a Databricks external-model endpoint",
-      "enum": [
-        "yes",
-        "no"
-      ],
-      "order": 13
+      "order": 21
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make evaluate                       # judges + trajectories\n  6. python scripts/deploy_serving.py    # only after the gate passes\n\nRun `make help` for every available target."
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. Set variables.prompt_version.default in databricks.yml to that version\n  6. python evals/evaluate.py --prompt-version <version>\n  7. Complete the external App onboarding and one-time bundle bind in README.md\n  8. databricks bundle deploy -t dev\n  9. databricks bundle run release_gate -t dev\n{{if and (eq .include_serving \"yes\") (eq .model_provider \"databricks\")}} 10. databricks bundle run agent_app -t dev  # same prompt version; only after the gate{{else}} 10. Serving resources were intentionally omitted for this configuration. Add a gateway-fronted Databricks endpoint and regenerate or add the reviewed deployment resources before serving.{{end}} Run `make help` for every target."
 }

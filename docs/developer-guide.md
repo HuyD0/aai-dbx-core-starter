@@ -82,25 +82,41 @@ application boundary.
 Every meaningful comparison should have:
 
 - A question or hypothesis.
+- A descriptive run name that says what changed.
 - Dataset or trace-set reference.
 - Parameters and application release.
 - Quality, latency, and cost measurements.
-- A conclusion.
+- A baseline link and an explicit conclusion.
 
-Use `ExperimentManager.run()` so the standard ownership and release tags are
-attached automatically. Experiments follow the platform naming convention
-(`/Shared/<team>-<application>-<environment>`) unless `experiment_name` is
-set explicitly; strict environments require an explicit name. Evaluation
-gates run through `EvaluationSuite.run_tracked(...)`, so every gate is a
-governed MLflow run carrying the pinned prompt URI, the registered Unity
-Catalog dataset name, gate metrics, an `aai.gate_passed` verdict tag, and
-the evaluation traces.
+Use `ExperimentManager.run()` with `ExperimentRunMetadata` so standard
+ownership, purpose, change id, hypothesis, and baseline lineage are searchable
+tags. One experiment is the durable comparison space for an application:
+`/Shared/<team>-<project>-<application>` unless explicitly configured.
+Environment remains a run tag, so evidence is comparable without scattering
+it across environment-named experiments. Strict environments require an
+explicit experiment name.
+
+The normal evidence sequence is:
+
+```text
+baseline -> change -> result -> adopt | reject | inconclusive
+```
+
+The word `change` means only “the controlled difference under test.” It is not
+a new deployable object or wrapper around an MLflow run.
+
+Call `record_reproducibility()` inside the run to capture source commit/state,
+SDK version, seed, and an installed-package freeze. Use native MLflow APIs for
+datasets, metrics, artifacts, logged models, and features the helper does not
+cover; `ExperimentManager.native_client` is the deliberate escape hatch.
 
 ## 5. Develop prompts and retrieval
 
 Register prompts rather than copying prompt strings between notebooks.
 Reference immutable prompt versions during evaluation and production; use the
-controlled `development`, `candidate`, and `production` aliases for promotion.
+controlled `development`, `validation`, and `production` aliases for
+promotion. The old `candidate` alias remains temporarily compatible but is
+deprecated.
 
 For RAG, version the source snapshot, parser, chunking profile, embedding
 profile, search index, filters, and reranker behavior. A change to any of these
@@ -118,8 +134,31 @@ Add representative production traces as the application is used. Evaluate:
 - Tool selection and arguments.
 - Latency and provider cost.
 
-The candidate must pass absolute thresholds and allowed regression limits
-against the deployed baseline.
+The change must pass absolute thresholds and allowed regression limits against
+the deployed baseline. A gate result is evidence, not deployment permission by
+itself: persist an `adopt`, `reject`, or `inconclusive` decision with its
+rationale and evidence identifiers.
+
+Measure quality, latency, tokens, cost, and **cost coverage** on the same cases.
+Unknown cost is not zero. It either blocks the gate or is reported explicitly,
+according to the versioned gate policy. Begin with deterministic scorers;
+introduce an LLM judge only after comparing it with held-out human labels.
+
+Tracing has an equally explicit choice:
+
+- `TraceIntegration.SDK` for stable `model.generate()` calls and a bounded,
+  provider-neutral span shape.
+- `TraceIntegration.MLFLOW_OPENAI` for direct native sync, async, or streaming
+  OpenAI calls after full-content capture is approved.
+- `TraceIntegration.MLFLOW_LANGCHAIN` for LangChain/LangGraph.
+- `TraceIntegration.MLFLOW_AGENT_SERVER` when Agent Server owns the root trace
+  and the application uses one bounded child instrumentation path.
+- No tracing only when a declared policy selects `OFF`.
+
+Configure this selection once at process startup; identical configuration is
+idempotent and conflicts fail. Never toggle autologging in a request handler.
+Do not enable an autologger on top of SDK spans for the same call; duplicate
+spans also duplicate token and cost evidence.
 
 ## 7. Deploy and monitor
 
@@ -134,6 +173,12 @@ Validate and deploy the generated bundle:
 databricks bundle validate -t dev
 databricks bundle deploy -t dev
 ```
+
+For agent HTTP serving, the generated agent template uses MLflow Agent Server
+on Databricks Apps as its native deployment path, with async `@invoke` and
+`@stream` handlers. LangGraph is an optional application-owned recipe for
+durable graph execution; inject an async persistent checkpointer/store and put
+an interrupt before irreversible work.
 
 Production applications emit sampled asynchronous traces. Attach end-user and
 expert feedback to the originating trace, monitor quality and operations, and

@@ -1,459 +1,209 @@
-"""MLflow GenAI evaluation suites and release gates."""
+"""Small release-gate contracts over native MLflow GenAI evaluation results."""
 
 from __future__ import annotations
 
-import os
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from enum import StrEnum
+from math import isfinite
 from numbers import Real
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Self
 
+from pydantic import Field, field_serializer, field_validator, model_validator
+
+from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.exceptions import AaiCoreError
-from aai_core.providers.types import ProviderConfigurationError
-from aai_core.tags import ResourceContext
 
 
-@dataclass(frozen=True)
-class QualityThreshold:
-    metric: str
-    direction: Literal["higher", "lower"]
+class MetricDirection(StrEnum):
+    HIGHER = "higher"
+    LOWER = "lower"
+
+
+class MetricRule(ContractModel):
+    """One absolute and/or regression rule for a native MLflow metric."""
+
+    metric: str = Field(min_length=1)
+    direction: MetricDirection
     required: float | None = None
-    max_regression: float | None = None
+    max_regression: float | None = Field(default=None, ge=0.0)
+
+    @field_validator("direction", mode="before")
+    @classmethod
+    def parse_direction(cls, value: Any) -> MetricDirection:
+        if isinstance(value, MetricDirection):
+            return value
+        if not isinstance(value, str):
+            raise TypeError("direction must be a string or MetricDirection")
+        return MetricDirection(value.strip().lower())
+
+    @field_validator("required", "max_regression")
+    @classmethod
+    def require_finite_number(cls, value: float | None) -> float | None:
+        if value is not None and not isfinite(value):
+            raise ValueError("metric rule values must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def require_a_constraint(self) -> Self:
+        if self.required is None and self.max_regression is None:
+            raise ValueError("A metric rule requires required or max_regression")
+        return self
 
 
-@dataclass(frozen=True)
-class GateFailure:
-    metric: str
-    reason: str
+class GatePolicy(ContractModel):
+    """Persistable policy applied after ``mlflow.genai.evaluate()``."""
+
+    rules: tuple[MetricRule, ...] = ()
+    minimum_cost_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    cost_coverage_metric: str = Field(default="cost/coverage", min_length=1)
+    fail_on_scorer_errors: bool = True
+    scorer_error_metric_suffix: str = Field(default="/error_count", min_length=1)
+    allow_missing_regression_baseline: bool = False
 
 
-@dataclass(frozen=True)
-class EvaluationReport:
+class GateFailure(ContractModel):
+    metric: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class GateResult(ContractModel):
+    """Immutable release-gate evidence; native evaluation results stay native."""
+
     metrics: Mapping[str, float]
     failures: tuple[GateFailure, ...] = ()
-    raw: Any = field(default=None, repr=False, compare=False)
+
+    @field_validator("metrics", mode="after")
+    @classmethod
+    def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
+        return freeze_value(value)
+
+    @field_serializer("metrics")
+    def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
+        return thaw_value(value)
 
     @property
     def passed(self) -> bool:
         return not self.failures
 
     def require_passed(self) -> None:
-        if self.failures:
-            messages = "; ".join(
+        if not self.failures:
+            return
+        raise EvaluationGateError(
+            "; ".join(
                 f"{failure.metric}: {failure.reason}" for failure in self.failures
             )
-            raise EvaluationGateError(messages)
+        )
 
 
 class EvaluationGateError(AaiCoreError):
     code = "aai_core.evaluation.gate_failed"
 
 
-class EvaluationDatasetManager:
-    """Create and tag MLflow evaluation datasets from cases or traces."""
-
-    def __init__(
-        self,
-        *,
-        context: ResourceContext,
-        experiment_id: str | None = None,
-        mlflow_module: Any | None = None,
-    ) -> None:
-        self.context = context
-        self.experiment_id = experiment_id
-        self._mlflow = mlflow_module
-
-    def create(
-        self,
-        name: str,
-        *,
-        records: Any | None = None,
-        tags: Mapping[str, str] | None = None,
-    ):
-        metadata = self.context.merged(tags)
-        dataset = self._client().genai.datasets.create_dataset(
-            name=name,
-            experiment_id=self.experiment_id,
-            tags={f"aai.{key}": value for key, value in metadata.items()},
-        )
-        if records is not None:
-            dataset = dataset.merge_records(records)
-        return dataset
-
-    def get(self, *, name: str | None = None, dataset_id: str | None = None):
-        if bool(name) == bool(dataset_id):
-            raise ValueError("Specify exactly one of name or dataset_id")
-        return self._client().genai.datasets.get_dataset(
-            name=name,
-            dataset_id=dataset_id,
-        )
-
-    def _client(self):
-        if self._mlflow is not None:
-            return self._mlflow
-        try:
-            import mlflow
-        except ImportError as error:
-            raise RuntimeError(
-                "Dataset support requires the `genai` extra. From an aai-core "
-                "checkout run `make examples-install` and use `.venv/bin/python`; "
-                "in a consuming environment install `aai-core[genai]`."
-            ) from error
-        return mlflow
-
-
-class EvaluationSuite:
-    def __init__(
-        self,
-        *,
-        scorers: Sequence[Any],
-        thresholds: Sequence[QualityThreshold],
-        mlflow_module: Any | None = None,
-    ) -> None:
-        self.scorers = tuple(scorers)
-        self.thresholds = tuple(thresholds)
-        self._mlflow = mlflow_module
-
-    def run(
-        self,
-        *,
-        data: Any,
-        predict_fn: Any | None = None,
-        baseline_metrics: Mapping[str, float] | None = None,
-    ) -> EvaluationReport:
-        kwargs = {"data": data, "scorers": list(self.scorers)}
-        if predict_fn is not None:
-            kwargs["predict_fn"] = predict_fn
-        raw = self._client().genai.evaluate(**kwargs)
-        metrics = _extract_metrics(raw)
-        failures = _evaluate_thresholds(
-            metrics, self.thresholds, baseline_metrics or {}
-        )
-        failures.extend(_gated_scorer_error_failures(raw, self.thresholds))
-        return EvaluationReport(metrics=metrics, failures=tuple(failures), raw=raw)
-
-    def run_tracked(
-        self,
-        *,
-        experiments: Any,
-        run_name: str,
-        data: Any,
-        predict_fn: Any | None = None,
-        baseline_metrics: Mapping[str, float] | None = None,
-        prompt_uri: str | None = None,
-        dataset_name: str | None = None,
-        parameters: Mapping[str, Any] | None = None,
-    ) -> tuple[EvaluationReport, str | None]:
-        """Run the evaluation as a governed MLflow run and return its id.
-
-        The run carries the platform ``aai.*`` tags (via the passed
-        :class:`~aai_core.experiments.ExperimentManager`), the evaluated
-        prompt URI and dataset identity as params, the gate metrics, and an
-        ``aai.gate_passed`` tag. Traces produced by ``predict_fn`` during
-        the evaluation attach to this run, and passing a Unity Catalog
-        dataset object as ``data`` links the dataset natively — evaluation
-        runs become fully connected records instead of floating metric bags.
-        """
-
-        linked: dict[str, Any] = {"case_count": _case_count(data)}
-        if prompt_uri:
-            linked["prompt_uri"] = prompt_uri
-        if dataset_name:
-            linked["evaluation_dataset"] = dataset_name
-        linked.update(parameters or {})
-
-        run_id: str | None = None
-        with experiments.run(run_name=run_name, parameters=linked) as active_run:
-            run_id = getattr(getattr(active_run, "info", None), "run_id", None)
-            report = self.run(
-                data=data,
-                predict_fn=predict_fn,
-                baseline_metrics=baseline_metrics,
-            )
-            client = self._client()
-            numeric = {
-                name: value
-                for name, value in report.metrics.items()
-                if isinstance(value, (int, float))
-            }
-            if numeric:
-                client.log_metrics(numeric)
-            client.set_tags({"aai.gate_passed": str(report.passed).lower()})
-        return report, run_id
-
-    def log_feedback(
-        self,
-        *,
-        trace_id: str,
-        name: str,
-        value: Any,
-        rationale: str | None = None,
-        source: Any | None = None,
-        metadata: Mapping[str, Any] | None = None,
-        span_id: str | None = None,
-    ) -> None:
-        options: dict[str, Any] = {
-            "trace_id": trace_id,
-            "name": name,
-            "value": value,
-        }
-        if rationale is not None:
-            options["rationale"] = rationale
-        if source is not None:
-            options["source"] = source
-        if metadata is not None:
-            options["metadata"] = dict(metadata)
-        if span_id is not None:
-            options["span_id"] = span_id
-        self._client().log_feedback(**options)
-
-    def log_expectation(
-        self,
-        *,
-        trace_id: str,
-        name: str,
-        value: Any,
-    ) -> None:
-        self._client().log_expectation(
-            trace_id=trace_id,
-            name=name,
-            value=value,
-        )
-
-    def _client(self):
-        if self._mlflow is not None:
-            return self._mlflow
-        try:
-            import mlflow
-        except ImportError as error:
-            raise RuntimeError(
-                "Evaluation support requires the `genai` extra. From an aai-core "
-                "checkout run `make examples-install` and use `.venv/bin/python`; "
-                "in a consuming environment install `aai-core[genai]`."
-            ) from error
-        return mlflow
-
-
-def apply_thresholds(
-    metrics: Mapping[str, float],
-    thresholds: Sequence[QualityThreshold],
+def apply_gate(
+    evaluation_result: Any,
     *,
+    policy: GatePolicy,
     baseline_metrics: Mapping[str, float] | None = None,
-) -> EvaluationReport:
-    """Gate already-computed metrics without running an evaluation.
+) -> GateResult:
+    """Apply deterministic policy to a native MLflow result or metric mapping."""
 
-    Lets LLM-free projects (for example the experiment starter) reuse the
-    same threshold/regression engine and `require_passed()` contract that
-    :class:`EvaluationSuite` applies to GenAI evaluations.
-    """
+    metrics = _extract_metrics(evaluation_result)
+    baseline = dict(baseline_metrics or {})
+    failures: list[GateFailure] = []
 
-    numeric = {str(key): float(value) for key, value in metrics.items()}
-    failures = _evaluate_thresholds(numeric, tuple(thresholds), baseline_metrics or {})
-    return EvaluationReport(metrics=numeric, failures=tuple(failures))
+    if policy.fail_on_scorer_errors:
+        for metric, value in metrics.items():
+            if metric.endswith(policy.scorer_error_metric_suffix) and value > 0:
+                failures.append(
+                    GateFailure(
+                        metric=metric,
+                        reason=f"{value:g} scorer invocation(s) failed",
+                    )
+                )
 
+    if policy.minimum_cost_coverage is not None:
+        observed = metrics.get(policy.cost_coverage_metric)
+        if observed is None:
+            failures.append(
+                GateFailure(
+                    metric=policy.cost_coverage_metric,
+                    reason="cost coverage is unknown",
+                )
+            )
+        elif observed < policy.minimum_cost_coverage:
+            failures.append(
+                GateFailure(
+                    metric=policy.cost_coverage_metric,
+                    reason=(
+                        f"{observed:g} is below required "
+                        f"{policy.minimum_cost_coverage:g}"
+                    ),
+                )
+            )
 
-def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
-    """Resolve an approved logical judge into MLflow's model URI.
-
-    Judges run through a Databricks serving endpoint so authentication,
-    gateway policy, and cost controls stay platform-owned. A Foundry model
-    must first be exposed through a governed Databricks external-model
-    endpoint.
-    """
-
-    models = getattr(settings, "models", {})
-    config = models.get(logical_name) if isinstance(models, Mapping) else None
-    if not isinstance(config, Mapping):
-        raise ProviderConfigurationError(
-            f"aai-platform.yml has no {logical_name!r} model entry",
-            remediation=f"Add providers.models.{logical_name} with the "
-            "gateway-fronted Databricks serving endpoint approved for judges.",
+    for rule in policy.rules:
+        observed = metrics.get(rule.metric)
+        if observed is None:
+            failures.append(GateFailure(metric=rule.metric, reason="metric is missing"))
+            continue
+        if rule.required is not None:
+            below = (
+                rule.direction is MetricDirection.HIGHER and observed < rule.required
+            )
+            above = rule.direction is MetricDirection.LOWER and observed > rule.required
+            if below or above:
+                comparison = "below" if below else "above"
+                failures.append(
+                    GateFailure(
+                        metric=rule.metric,
+                        reason=(
+                            f"{observed:g} is {comparison} required "
+                            f"{rule.required:g}"
+                        ),
+                    )
+                )
+        if rule.max_regression is None:
+            continue
+        reference = baseline.get(rule.metric)
+        if reference is None:
+            if not policy.allow_missing_regression_baseline:
+                failures.append(
+                    GateFailure(
+                        metric=rule.metric,
+                        reason="regression baseline is missing",
+                    )
+                )
+            continue
+        regression = (
+            reference - observed
+            if rule.direction is MetricDirection.HIGHER
+            else observed - reference
         )
-    if config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            f"LLM judge {logical_name!r} must use provider 'databricks'",
-            remediation="Route the judge through a Databricks serving "
-            "endpoint; for Foundry models, use an external-model endpoint.",
-        )
-    deployment = config.get("deployment")
-    if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError(
-            f"LLM judge {logical_name!r} has no deployment",
-            remediation=f"Set providers.models.{logical_name}.deployment to "
-            "the approved serving endpoint name.",
-        )
-    return f"endpoints:/{deployment.strip()}"
+        if regression > rule.max_regression:
+            failures.append(
+                GateFailure(
+                    metric=rule.metric,
+                    reason=(
+                        f"regressed by {regression:g} from baseline {reference:g}; "
+                        f"maximum allowed is {rule.max_regression:g}"
+                    ),
+                )
+            )
 
-
-def publish_report(
-    report: EvaluationReport,
-    *,
-    title: str,
-    baseline: Mapping[str, float] | None = None,
-    run_link: str | None = None,
-    summary_path: str | Path | None = None,
-) -> str:
-    """Render an evaluation report as a markdown table and publish it.
-
-    Appended to ``summary_path`` (or ``$GITHUB_STEP_SUMMARY`` when set, so CI
-    runs surface the verdict on the workflow summary page) and returned, for
-    logging or PR comments. Metric keys are taken from the report — never
-    hardcode aggregate-key formats.
-    """
-
-    failed = {failure.metric for failure in report.failures}
-    lines = [
-        f"## {title}",
-        "",
-        "| Metric | Value | Baseline | Delta | Verdict |",
-        "|---|---|---|---|---|",
-    ]
-    for name, value in sorted(report.metrics.items()):
-        reference = (baseline or {}).get(name)
-        shown_reference = f"{reference:.3f}" if reference is not None else "—"
-        delta = f"{value - reference:+.3f}" if reference is not None else "—"
-        verdict = "FAIL" if name in failed else "ok"
-        lines.append(
-            f"| {name} | {value:.3f} | {shown_reference} | {delta} | {verdict} |"
-        )
-    if report.failures:
-        lines.append("")
-        lines.append("**Gate failures:**")
-        lines.extend(
-            f"- `{failure.metric}`: {failure.reason}" for failure in report.failures
-        )
-    lines.append("")
-    lines.append(f"**Result: {'PASSED' if report.passed else 'FAILED'}**")
-    if run_link:
-        lines.append("")
-        lines.append(f"[Evaluation run]({run_link})")
-    markdown = "\n".join(lines) + "\n"
-
-    target = summary_path or os.getenv("GITHUB_STEP_SUMMARY")
-    if target:
-        with open(target, "a", encoding="utf-8") as stream:
-            stream.write(markdown + "\n")
-    return markdown
-
-
-def workspace_run_url(
-    run_id: str | None, experiment_id: str | None = None
-) -> str | None:
-    """A clickable workspace URL for an MLflow run, when derivable.
-
-    Uses ``DATABRICKS_HOST`` from the environment — the same variable every
-    credentialed path already sets — so gate reports can deep-link the
-    evaluation run without new configuration.
-    """
-
-    host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
-    if not host or not run_id:
-        return None
-    if experiment_id:
-        return f"{host}/ml/experiments/{experiment_id}/runs/{run_id}"
-    return f"{host}/#mlflow/runs/{run_id}"
-
-
-def _case_count(data: Any) -> int | str:
-    try:
-        return len(data)
-    except TypeError:
-        return "unknown"
+    return GateResult(metrics=metrics, failures=tuple(failures))
 
 
 def _extract_metrics(result: Any) -> dict[str, float]:
-    source = getattr(result, "metrics", result if isinstance(result, Mapping) else {})
-    return {
-        str(key): float(value)
-        for key, value in source.items()
-        if isinstance(value, (int, float))
-    }
-
-
-def _gated_scorer_error_failures(
-    result: Any,
-    thresholds: Sequence[QualityThreshold],
-) -> list[GateFailure]:
-    """Fail thresholds whose aggregate silently excluded scorer errors."""
-
-    frame = getattr(result, "result_df", None)
-    columns = getattr(frame, "columns", ()) if frame is not None else ()
-    error_counts: dict[str, int] = {}
-    for column in columns:
-        name = str(column)
-        if not name.endswith("/error_message"):
+    source = result if isinstance(result, Mapping) else getattr(result, "metrics", None)
+    if not isinstance(source, Mapping):
+        raise TypeError(
+            "evaluation_result must be a metric mapping or expose a metrics mapping"
+        )
+    metrics: dict[str, float] = {}
+    for name, value in source.items():
+        if isinstance(value, bool) or not isinstance(value, Real):
             continue
-        try:
-            values = frame[column]
-        except (KeyError, TypeError):
-            continue
-        count = sum(1 for value in values if _has_error_value(value))
-        if count:
-            error_counts[name.removesuffix("/error_message")] = count
-
-    failures: list[GateFailure] = []
-    for threshold in thresholds:
-        scorer_name = threshold.metric.rsplit("/", 1)[0]
-        if count := error_counts.get(scorer_name):
-            failures.append(
-                GateFailure(
-                    threshold.metric,
-                    f"{count} evaluation row(s) failed scoring; the aggregate "
-                    "excludes failed rows",
-                )
-            )
-    return failures
-
-
-def _has_error_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, Real) and not isinstance(value, bool):
-        try:
-            number = float(value)
-            return number == number
-        except (TypeError, ValueError):
-            return True
-    return str(value).strip().lower() not in {"", "nan", "nat", "none", "<na>"}
-
-
-def _evaluate_thresholds(
-    metrics: Mapping[str, float],
-    thresholds: Sequence[QualityThreshold],
-    baseline: Mapping[str, float],
-) -> list[GateFailure]:
-    failures = []
-    for threshold in thresholds:
-        if threshold.metric not in metrics:
-            failures.append(GateFailure(threshold.metric, "metric is missing"))
-            continue
-        candidate = metrics[threshold.metric]
-        if threshold.required is not None:
-            violates = (
-                candidate < threshold.required
-                if threshold.direction == "higher"
-                else candidate > threshold.required
-            )
-            if violates:
-                failures.append(
-                    GateFailure(
-                        threshold.metric,
-                        f"{candidate} violates required {threshold.required}",
-                    )
-                )
-        if threshold.max_regression is not None and threshold.metric in baseline:
-            reference = baseline[threshold.metric]
-            regression = (
-                reference - candidate
-                if threshold.direction == "higher"
-                else candidate - reference
-            )
-            if regression > threshold.max_regression:
-                failures.append(
-                    GateFailure(
-                        threshold.metric,
-                        f"regressed by {regression} from baseline {reference}",
-                    )
-                )
-    return failures
+        numeric = float(value)
+        if isfinite(numeric):
+            metrics[str(name)] = numeric
+    return metrics

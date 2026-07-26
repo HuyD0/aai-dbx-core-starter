@@ -11,10 +11,8 @@ def test_public_api_surface_is_snapshotted():
     this snapshot in the same change and follow docs/versioning.md."""
 
     assert sorted(aai_core.__all__) == [
-        "AaiCoreError",
         "PlatformContext",
         "PlatformSettings",
-        "ResourceContext",
         "__version__",
         "bootstrap",
     ]

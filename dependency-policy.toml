@@ -1,0 +1,107 @@
+schema_version = 1
+
+[python]
+supported = ["3.11", "3.12"]
+default = "3.12"
+
+[resolution]
+certified_lock = "uv.lock"
+minimum_resolution = "lowest-direct"
+latest_resolution = "highest"
+template_lock_format = "universal-transitive-v1"
+template_transitive_locking = "enforced"
+
+[updates]
+stable_runtime = "weekly"
+runtime_minor = "monthly"
+preview = "monthly-after-canary"
+platform_toolchain = "quarterly"
+security_critical_sla_hours = 24
+security_high_sla_hours = 72
+
+[packages.PyYAML]
+supported = ">=6.0.3,<7"
+certified = "6.0.3"
+maturity = "stable"
+family = "core"
+
+[packages.azure-identity]
+supported = ">=1.25.3,<2"
+certified = "1.25.3"
+maturity = "stable"
+family = "azure-openai"
+
+[packages.azure-keyvault-secrets]
+supported = ">=4.11,<5"
+certified = "4.11.0"
+maturity = "stable"
+family = "azure-openai"
+
+[packages.azure-search-documents]
+supported = ">=12,<13"
+certified = "12.0.0"
+maturity = "stable"
+family = "azure-openai"
+
+[packages.databricks-agents]
+supported = ">=1.11,<2"
+certified = "1.11.0"
+maturity = "preview"
+family = "mlflow-agents"
+note = "Template-owned until the aai-core serving extra is published."
+
+[packages.databricks-ai-search]
+supported = ">=0.77,<0.78"
+certified = "0.77"
+maturity = "preview"
+family = "databricks-clients"
+
+[packages.databricks-openai]
+supported = ">=0.17,<0.18"
+certified = "0.17.0"
+maturity = "preview"
+family = "databricks-clients"
+
+[packages.databricks-sdk]
+supported = ">=0.122,<0.123"
+certified = "0.122.0"
+maturity = "preview"
+family = "databricks-clients"
+
+[packages.langgraph]
+supported = ">=1.2,<1.3"
+certified = "1.2.9"
+maturity = "stable"
+family = "application-framework"
+note = "Optional agent-template recipe; aai-core does not wrap graph APIs."
+
+[packages.langchain]
+supported = ">=1.3,<1.4"
+certified = "1.3.14"
+maturity = "preview"
+family = "application-framework"
+note = "Required by MLflow LangChain autologging; native framework contracts remain unwrapped."
+
+[packages.mlflow]
+supported = ">=3.14,<3.15"
+certified = "3.14.0"
+maturity = "stable-with-preview-genai-apis"
+family = "mlflow-agents"
+
+[packages.openai]
+supported = ">=2.48,<3"
+certified = "2.48.0"
+maturity = "stable"
+family = "azure-openai"
+
+[packages.pandas]
+supported = ">=2,<3"
+certified = "2.3.3"
+maturity = "stable"
+family = "experiment"
+
+[packages.pydantic]
+supported = ">=2.12,<3"
+certified = "2.13.4"
+maturity = "stable"
+family = "core"

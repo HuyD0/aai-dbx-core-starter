@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from time import monotonic
 from typing import Any
@@ -11,7 +11,6 @@ from aai_core.providers.types import (
     ModelCapabilities,
     ModelResponse,
     ProviderConfigurationError,
-    ProviderError,
     ProviderRequestError,
     UnsupportedCapabilityError,
 )
@@ -19,7 +18,6 @@ from aai_core.tracing import provider_span
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_RETRIES = 2
-_MAX_BACKOFF_SECONDS = 8.0
 _CONTROLLED_CHAT_OPTIONS = {
     "max_tokens",
     "messages",
@@ -58,55 +56,36 @@ def _status_code(error: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-def _retry_after_seconds(error: BaseException) -> float | None:
-    headers = getattr(getattr(error, "response", None), "headers", None)
-    if headers is None:
-        return None
-    value = headers.get("retry-after") or headers.get("Retry-After")
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def call_with_resilience(
+def _call_provider(
     operation: Callable[[], Any],
     *,
     description: str,
     provider: str,
     logical_name: str,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-    sleep: Callable[[float], None] = time.sleep,
 ) -> Any:
-    """Run a provider request with 429/5xx retries and a stable error type.
+    """Translate a final native-client failure without duplicating retries."""
 
-    Retries honor the gateway's ``Retry-After`` header (Azure APIM token
-    limits and Databricks AI Gateway rate limits both emit it) and otherwise
-    back off exponentially. Every native failure is re-raised as
-    :class:`ProviderRequestError` with the original exception chained.
-    """
+    try:
+        return operation()
+    except Exception as error:
+        status = _status_code(error)
+        raise ProviderRequestError(
+            f"{description} failed for {logical_name!r} via {provider}: {error}",
+            remediation=_REMEDIATIONS.get(status) if status else None,
+        ) from error
 
-    attempt = 0
-    while True:
-        try:
-            return operation()
-        except ProviderError:
-            raise
-        except Exception as error:
-            status = _status_code(error)
-            retryable = status == 429 or (status is not None and status >= 500)
-            if retryable and attempt < max_retries:
-                delay = _retry_after_seconds(error)
-                if delay is None:
-                    delay = min(_MAX_BACKOFF_SECONDS, 0.5 * (2**attempt))
-                sleep(delay)
-                attempt += 1
-                continue
-            raise ProviderRequestError(
-                f"{description} failed for {logical_name!r} via {provider}: "
-                f"{error}",
-                remediation=_REMEDIATIONS.get(status) if status else None,
-            ) from error
+
+def _reject_running_event_loop(logical_name: str) -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise UnsupportedCapabilityError(
+        f"{logical_name!r} generate() is synchronous and cannot run on an "
+        "active event loop",
+        remediation="Create a provider-native async client with "
+        "model.create_native_async_client() and await the native SDK call.",
+    )
 
 
 class OpenAICompatibleChatModel:
@@ -117,17 +96,26 @@ class OpenAICompatibleChatModel:
         provider: str,
         model: str,
         client: Any,
+        async_client_factory: Callable[[], Any] | None = None,
         capabilities: ModelCapabilities | None = None,
-        timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
-        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self.logical_name = logical_name
         self.provider = provider
         self.model = model
         self.native_client = client
+        self._async_client_factory = async_client_factory
         self.capabilities = capabilities or ModelCapabilities()
-        self.timeout_seconds = timeout_seconds
-        self.max_retries = max_retries
+
+    def create_native_async_client(self) -> Any:
+        """Return a new native async client; the caller must close it."""
+
+        if self._async_client_factory is None:
+            raise UnsupportedCapabilityError(
+                f"{self.logical_name!r} has no configured native async client",
+                remediation="Register a model that supplies async_client_factory "
+                "or use generate() outside an event loop.",
+            )
+        return self._async_client_factory()
 
     def generate(
         self,
@@ -139,6 +127,7 @@ class OpenAICompatibleChatModel:
         response_format: Mapping[str, Any] | None = None,
         provider_options: Mapping[str, Any] | None = None,
     ) -> ModelResponse:
+        _reject_running_event_loop(self.logical_name)
         if tools and not self.capabilities.tool_calling:
             raise UnsupportedCapabilityError(
                 f"{self.logical_name} does not support tool calling"
@@ -179,9 +168,6 @@ class OpenAICompatibleChatModel:
                     "credentials or extra_body through provider_options.",
                 )
             request.update(provider_options)
-        if self.timeout_seconds is not None and "timeout" not in request:
-            request["timeout"] = self.timeout_seconds
-
         started = monotonic()
         with provider_span(
             "model.generate",
@@ -190,6 +176,9 @@ class OpenAICompatibleChatModel:
                 "aai.provider": self.provider,
                 "aai.logical_name": self.logical_name,
                 "aai.model": self.model,
+                "mlflow.llm.provider": self.provider,
+                "mlflow.llm.model": self.model,
+                "mlflow.message.format": "openai",
             },
         ) as span:
             if span is not None:
@@ -202,12 +191,11 @@ class OpenAICompatibleChatModel:
                     # separate, explicit data-policy decision.
                     trace_inputs["tools"] = list(tools)
                 span.set_inputs(trace_inputs)
-            response = call_with_resilience(
+            response = _call_provider(
                 lambda: self.native_client.chat.completions.create(**request),
                 description="chat completion",
                 provider=self.provider,
                 logical_name=self.logical_name,
-                max_retries=self.max_retries,
             )
 
             choice = response.choices[0]
@@ -248,16 +236,12 @@ class OpenAICompatibleEmbeddingProvider:
         model: str,
         client: Any,
         dimensions: int | None = None,
-        timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
-        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self.logical_name = logical_name
         self.provider = provider
         self.model = model
         self.native_client = client
         self.dimensions = dimensions
-        self.timeout_seconds = timeout_seconds
-        self.max_retries = max_retries
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
@@ -266,8 +250,6 @@ class OpenAICompatibleEmbeddingProvider:
         request: dict[str, Any] = {"model": self.model, "input": list(texts)}
         if self.dimensions:
             request["dimensions"] = self.dimensions
-        if self.timeout_seconds is not None:
-            request["timeout"] = self.timeout_seconds
         with provider_span(
             "embedding.generate",
             span_type="EMBEDDING",
@@ -275,14 +257,15 @@ class OpenAICompatibleEmbeddingProvider:
                 "aai.provider": self.provider,
                 "aai.logical_name": self.logical_name,
                 "aai.model": self.model,
+                "mlflow.llm.provider": self.provider,
+                "mlflow.llm.model": self.model,
             },
         ):
-            response = call_with_resilience(
+            response = _call_provider(
                 lambda: self.native_client.embeddings.create(**request),
                 description="embedding",
                 provider=self.provider,
                 logical_name=self.logical_name,
-                max_retries=self.max_retries,
             )
         return [list(item.embedding) for item in response.data]
 

@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "sdk": {
+    "version": "0.3.0",
+    "python": [
+      "3.11",
+      "3.12"
+    ],
+    "status": "pre-1.0"
+  },
+  "certified_runtime": {
+    "databricks_runtime": "18.0.x-scala2.13",
+    "dependency_policy": "dependency-policy.toml",
+    "lock": "uv.lock"
+  },
+  "templates": {
+    "agent-app": {
+      "version": "1.1.0",
+      "aai_core": "0.3.0",
+      "dependency_lock_format": "universal-transitive-v1"
+    },
+    "evaluation-project": {
+      "version": "1.1.0",
+      "aai_core": "0.3.0",
+      "dependency_lock_format": "universal-transitive-v1"
+    },
+    "experiment-starter": {
+      "version": "1.1.0",
+      "aai_core": "0.3.0",
+      "dependency_lock_format": "universal-transitive-v1"
+    },
+    "prompt-app": {
+      "version": "1.1.0",
+      "aai_core": "0.3.0",
+      "dependency_lock_format": "universal-transitive-v1"
+    },
+    "rag-app": {
+      "version": "1.1.0",
+      "aai_core": "0.3.0",
+      "dependency_lock_format": "universal-transitive-v1"
+    }
+  },
+  "features": {
+    "experiment_tracking": {
+      "support": "stable",
+      "owner": "aai-core"
+    },
+    "mlflow_tracing": {
+      "support": "stable",
+      "owner": "aai-core"
+    },
+    "framework_autologging": {
+      "support": "preview",
+      "owner": "aai-core-opt-in"
+    },
+    "provider_native_async_streaming": {
+      "support": "native-provider",
+      "owner": "application",
+      "note": "aai-core configures and returns native async clients; callers own their event-loop-local lifecycle and native stream types."
+    },
+    "prompt_registry": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance"
+    },
+    "genai_evaluation": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-gates"
+    },
+    "automatic_evaluations": {
+      "support": "preview",
+      "owner": "platform-governed"
+    },
+    "agent_serving": {
+      "support": "preview",
+      "owner": "databricks-native-with-aai-resource-contract"
+    },
+    "langgraph": {
+      "support": "native-framework",
+      "owner": "application",
+      "note": "Supported through MLflow LangChain autologging; graph and state APIs are not wrapped by aai-core."
+    }
+  }
+}

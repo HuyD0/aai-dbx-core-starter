@@ -12,10 +12,52 @@ All notable changes to `aai-core` are documented here.
   scopes do not reach compute policies, volumes or catalog grants. Served
   locally with `make app-run`; stopped by default once deployed. See
   `docs/platform-console.md`.
+
+## 0.3.0
+
+Migration notes:
+
+- The default experiment scope changes from
+  `/Shared/<team>-<application>-<environment>` to
+  `/Shared/<team>-<project>-<application>`. Explicit `experiment_name`
+  configuration is unchanged; keep one set explicitly if existing evidence
+  must remain in its current experiment.
+- `ResourceContext.lifecycle` now accepts the closed values `experimental`,
+  `candidate`, `production`, and `retired`. Replace old `validation` or
+  `active` values deliberately.
+- Persisted SDK contracts now reject unknown fields and implicit type
+  coercion. Pass correctly typed values or validate their JSON representation
+  with the model's Pydantic API.
+- The `candidate` prompt alias is deprecated in favor of `validation`; it
+  remains compatible until `0.5.0`.
+- `aai_core.serving` is removed. Generated applications emit deployable
+  artifacts and declare native resources; approved external platform
+  processes own endpoint creation, deployment, permissions, and rollback.
+
+- Reworked the learning examples into one progressive, deterministic MLflow
+  evidence path: descriptive experiments, baseline/change lineage, immutable
+  prompt versions, tracing/tracking, quality/latency/token/cost measurement,
+  reproducibility capture, and an explicit release decision.
+- Added strict Pydantic contracts and closed enums at persisted and untrusted
+  boundaries while preserving native MLflow/provider clients and result
+  objects as supported escape hatches.
+- Added trace capture policies, execution-local request context, one
+  process-startup `TraceIntegration` owner, cost-coverage-aware
+  `MetricRule`/`GatePolicy` evaluation contracts, and native MLflow result
+  handling.
+- Added a Databricks Apps + MLflow Agent Server deployment path to the agent
+  template, with native async `@invoke`/`@stream`, application-owned async
+  tools, and an optional durable async LangGraph recipe. Removed the duplicate
+  synchronous models-from-code agent serving path.
+- Added machine-readable SDK/template/runtime compatibility, generated exact
+  transitive template locks, dependency policy, Python and provider
+  compatibility CI, scheduled lower/latest-bound canaries, grouped Renovate
+  updates, and manifest-last immutable publication.
 - Added session-aware traces, secure opt-in MLflow OpenAI/LangChain
   autologging (including compatible LangGraph agents), bounded LLM/tool span
   inputs, outputs, and token usage, complete tool-loop response/usage
-  aggregation, and assessment provenance passthrough.
+  aggregation, provider-native async/streaming clients, event-loop blocking
+  protection, and assessment provenance passthrough.
 - Added approved logical judge-model resolution and made every generated
   GenAI gate route judges explicitly. Gated row-level scorer errors now fail
   releases instead of disappearing from partial aggregates.

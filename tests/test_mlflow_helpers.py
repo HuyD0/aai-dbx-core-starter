@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from aai_core.evaluation import EvaluationDatasetManager
 from aai_core.experiments import ExperimentManager
 from aai_core.prompts import PromptManager
 from aai_core.secrets import SecretValue
@@ -61,25 +60,7 @@ class FakeGenAI:
         self.alias = kwargs
 
 
-class FakeDataset:
-    def __init__(self, name, tags):
-        self.name = name
-        self.tags = tags
-        self.records = []
-
-    def merge_records(self, records):
-        self.records.extend(records)
-        return self
-
-
 class FakeDatasets:
-    def __init__(self):
-        self.created = None
-
-    def create_dataset(self, **kwargs):
-        self.created = FakeDataset(kwargs["name"], kwargs["tags"])
-        return self.created
-
     def get_dataset(self, **kwargs):
         return kwargs
 
@@ -92,7 +73,7 @@ def test_experiment_manager_attaches_platform_tags_and_parameters():
         mlflow_module=mlflow,
     )
 
-    with manager.run(run_name="candidate", parameters={"temperature": 0.1}):
+    with manager.run(run_name="change-temperature-01", parameters={"temperature": 0.1}):
         pass
 
     assert mlflow.experiment == "/Shared/claims"
@@ -130,11 +111,28 @@ def test_prompt_manager_qualifies_registers_and_loads_versions():
         commit_message="initial",
     )
     loaded = manager.load("system", version=registered.version)
-    manager.set_alias("system", alias="candidate", version=registered.version)
+    manager.set_alias("system", alias="validation", version=registered.version)
 
     assert registered.name == "main.claims.system"
     assert loaded.uri == "prompts:/main.claims.system/1"
-    assert mlflow.genai.alias["alias"] == "candidate"
+    assert mlflow.genai.alias["alias"] == "validation"
+    assert manager.native_client is mlflow
+
+
+def test_prompt_manager_prefers_validation_alias_and_deprecates_candidate():
+    mlflow = FakeMlflow()
+    manager = PromptManager(
+        context=context(),
+        catalog="main",
+        schema="claims",
+        mlflow_module=mlflow,
+    )
+
+    manager.set_alias("system", alias="validation", version=2)
+    assert mlflow.genai.alias["alias"] == "validation"
+
+    with pytest.warns(DeprecationWarning, match="validation"):
+        manager.set_alias("system", alias="candidate", version=2)
 
 
 def test_prompt_manager_rejects_uncontrolled_aliases():
@@ -147,20 +145,3 @@ def test_prompt_manager_rejects_uncontrolled_aliases():
 
     with pytest.raises(ValueError, match="Unsupported"):
         manager.set_alias("system", alias="latest-prod", version=1)
-
-
-def test_evaluation_dataset_is_tagged_and_populated():
-    mlflow = FakeMlflow()
-    manager = EvaluationDatasetManager(
-        context=context(),
-        experiment_id="experiment-1",
-        mlflow_module=mlflow,
-    )
-
-    dataset = manager.create(
-        "release-suite",
-        records=[{"inputs": {"question": "hello"}}],
-    )
-
-    assert dataset.tags["aai.application"] == "claims-agent"
-    assert dataset.records[0]["inputs"]["question"] == "hello"

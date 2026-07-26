@@ -50,44 +50,67 @@ EXAMPLES = {
         Example(
             name="first_trace",
             path="examples/first_trace.py",
-            description="MLflow trace, first local and then in Databricks",
+            description="Governed baseline trace with bounded cost/usage evidence",
             connected=True,
             local=True,
-            modules=("mlflow", "databricks.sdk"),
+            modules=("mlflow",),
             config_fields=("platform.experiment_name",),
         ),
         Example(
             name="first_experiment",
             path="examples/first_experiment.py",
-            description="Tagged MLflow run, first local and then in Databricks",
+            description="Reproducible baseline/change MLflow comparison",
             connected=True,
             local=True,
-            modules=("mlflow", "databricks.sdk"),
+            modules=("mlflow",),
             config_fields=("platform.experiment_name",),
         ),
         Example(
             name="first_prompt",
             path="examples/first_prompt.py",
-            description="Unity Catalog prompt registration and loading",
+            description="Exact prompt versions, digests, links, and safe render trace",
             connected=True,
-            modules=("mlflow", "databricks.sdk"),
+            local=True,
+            modules=("mlflow",),
             config_fields=("platform.catalog", "platform.schema"),
         ),
         Example(
             name="first_evaluation",
             path="examples/first_evaluation.py",
-            description="MLflow GenAI evaluation with an LLM judge",
+            description="Deterministic MLflow GenAI gate and release decision",
             connected=True,
-            modules=("mlflow", "databricks.sdk"),
-            config_fields=("platform.experiment_name",),
+            local=True,
+            modules=("mlflow",),
+            config_fields=(
+                "platform.experiment_name",
+                "platform.catalog",
+                "platform.schema",
+            ),
+        ),
+        Example(
+            name="connected_first_call",
+            path="examples/connected_first_call.py",
+            description="Real governed LLM call through stable model.generate()",
+            connected=True,
+            modules=("databricks_openai", "mlflow"),
+            config_fields=(
+                "providers.models.general-chat.deployment",
+                "platform.experiment_name",
+            ),
         ),
         Example(
             name="first_llm_call",
             path="examples/first_llm_call.ipynb",
-            description="Interactive first call to a configured serving endpoint",
+            description=(
+                "Advanced native async streaming comparison with MLflow autologging"
+            ),
             connected=True,
-            modules=("databricks.sdk",),
-            config_fields=("providers.models.general-chat.deployment",),
+            modules=("databricks.sdk", "mlflow"),
+            config_fields=(
+                "providers.models.general-chat.deployment",
+                "platform.catalog",
+                "platform.schema",
+            ),
             interactive=True,
         ),
     )
@@ -121,6 +144,8 @@ def _local_environment() -> dict[str, str]:
     environment["MLFLOW_TRACKING_URI"] = f"sqlite:///{LOCAL_DB.resolve()}"
     environment["MLFLOW_REGISTRY_URI"] = environment["MLFLOW_TRACKING_URI"]
     environment["AAI_PLATFORM_CONFIG"] = str(CONFIG_EXAMPLE)
+    environment["AAI_EXAMPLE_LOCAL_DIR"] = str(LOCAL_DIR.resolve())
+    environment["AAI_EXAMPLE_ARTIFACT_ROOT"] = str(LOCAL_ARTIFACTS.resolve())
     return environment
 
 
@@ -296,18 +321,27 @@ def _print_interactive_instructions(
     environment: dict[str, str],
 ) -> None:
     print(f"{example.path} is interactive. Export the configured environment:")
-    for name in (
+    names = [
         "DATABRICKS_HOST",
         "DATABRICKS_AUTH_TYPE",
-        "MLFLOW_TRACKING_URI",
-        "MLFLOW_REGISTRY_URI",
         "AAI_PLATFORM_CONFIG",
-    ):
+    ]
+    if example.name != "first_llm_call":
+        names[2:2] = ["MLFLOW_TRACKING_URI", "MLFLOW_REGISTRY_URI"]
+    for name in names:
         print(f"export {name}={shlex.quote(environment[name])}")
+    print(f"Open {ROOT / example.path} in your preferred notebook editor.")
+    print(f"Select this Python kernel: {sys.executable}")
     print(
-        f"{shlex.quote(sys.executable)} -m jupyter lab "
-        f"{shlex.quote(str(ROOT / example.path))}"
+        "A Databricks CLI profile is not required: the notebook uses the "
+        "keyless Azure CLI authentication configured above."
     )
+    if example.name == "first_llm_call":
+        print(
+            "The notebook deliberately routes MLflow tracking and prompt "
+            "registration to .aai/local; remote prompt publishing is an "
+            "explicit guarded section."
+        )
 
 
 def quickstart() -> int:
@@ -374,9 +408,10 @@ def run_example(value: str, *, destination: str = "workspace") -> int:
     example = EXAMPLES[name]
     if destination == "local":
         if not example.local:
+            choices = ", ".join(item.name for item in EXAMPLES.values() if item.local)
             print(
                 f"{example.name} requires workspace services and cannot run locally. "
-                "Choose first_trace or first_experiment.",
+                f"Choose one of: {choices}.",
                 file=sys.stderr,
             )
             return 2

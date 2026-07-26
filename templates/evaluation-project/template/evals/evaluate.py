@@ -15,14 +15,14 @@ import argparse
 import json
 from pathlib import Path
 
+import mlflow
 from mlflow.genai.scorers import scorer
 
 from aai_core import bootstrap
 from aai_core.evaluation import (
-    EvaluationSuite,
-    QualityThreshold,
-    publish_report,
-    workspace_run_url,
+    GatePolicy,
+    MetricRule,
+    apply_gate,
 )
 from app import judges, targets
 from app.config import DATASET_NAME
@@ -33,9 +33,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "evals" / "baseline.json"
 
 
-def load_thresholds() -> list[QualityThreshold]:
+def load_thresholds() -> list[MetricRule]:
     config = json.loads((ROOT / "evals" / "gate_config.json").read_text("utf-8"))
-    return [QualityThreshold(**threshold) for threshold in config["thresholds"]]
+    return [MetricRule(**threshold) for threshold in config["thresholds"]]
 
 
 def load_baseline() -> dict[str, float]:
@@ -93,31 +93,39 @@ def main() -> None:
     cases = json.loads(
         (ROOT / "evals" / "data" / "golden_cases.json").read_text(encoding="utf-8")
     )
-    suite = EvaluationSuite(
-        scorers=[*wrapped_code_scorers(), *judges.judge_scorers(context.settings)],
-        thresholds=load_thresholds(),
-    )
     baseline = load_baseline()
+    policy = GatePolicy(
+        rules=tuple(load_thresholds()),
+        allow_missing_regression_baseline=args.update_baseline and not baseline,
+    )
     dataset_name = (
         f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
     )
     # A governed MLflow run: aai.* tags, the registered dataset identity,
     # gate metrics, verdict tag, and evaluation traces attached.
-    report, run_id = suite.run_tracked(
-        experiments=context.experiments,
-        run_name=f"eval-gate-{args.mode}",
-        data=cases,
-        predict_fn=predict_fn,
-        baseline_metrics=baseline,
-        dataset_name=dataset_name,
-        parameters={"mode": args.mode},
-    )
-    print_failure_triage(report, include_details=args.show_triage_details)
-    publish_report(
-        report,
-        title=f"Evaluation gate — {context.tags.application} ({args.mode})",
-        baseline=baseline,
-        run_link=workspace_run_url(run_id),
+    with context.experiments.run(
+        run_name=f"evaluation-{args.mode}-validation-gate",
+        parameters={
+            "mode": args.mode,
+            "evaluation_dataset": dataset_name,
+            "case_count": len(cases),
+        },
+    ):
+        native_result = mlflow.genai.evaluate(
+            data=cases,
+            predict_fn=predict_fn,
+            scorers=[*wrapped_code_scorers(), *judges.judge_scorers(context.settings)],
+        )
+        report = apply_gate(
+            native_result,
+            policy=policy,
+            baseline_metrics=baseline,
+        )
+        mlflow.log_metrics(dict(report.metrics))
+        mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
+    print_failure_triage(
+        native_result,
+        include_details=args.show_triage_details,
     )
     report.require_passed()
     if args.update_baseline:

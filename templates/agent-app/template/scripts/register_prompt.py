@@ -2,7 +2,7 @@
 
 Reads prompts/system_prompt.json, registers it in the Unity Catalog prompt
 registry, and points the `development` alias at the new version. Promotion to
-candidate/production is a separate, gated step (scripts/promote_prompt.py).
+validation/production is a separate, gated step (scripts/promote_prompt.py).
 """
 
 import json

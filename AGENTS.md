@@ -111,10 +111,19 @@ remaining file that must agree (this table included).
 
 - Keep the public entry point small: `bootstrap()`, `PlatformSettings`,
   `PlatformContext`, and domain modules.
+- Use strict Pydantic v2 models (`extra="forbid"`, frozen where evidence must
+  be immutable) at configuration, untrusted-input, persisted-evidence, tool,
+  and structured-output boundaries. Use small `StrEnum` vocabularies for
+  platform-owned policy choices. Do not add Pydantic models for transient
+  internal state or mirror native provider response objects.
 - Use logical resource names in application code; endpoint/deployment/index
   names belong in environment configuration.
 - Provider abstractions cover capabilities, not administration.
 - Expose `native_client` for provider-specific functionality.
+- Keep SDK terms close to native APIs. Experiments use
+  `baseline -> change -> result -> decision`; decisions are `adopt`, `reject`,
+  or `inconclusive`. `candidate` is deprecated platform terminology, not a
+  lifecycle stage or new SDK object.
 - Fail capability and configuration checks before making an expensive request.
 - Do not create a proprietary authentication protocol or token cache.
 - `SecretValue` must never reveal its value through `str`, `repr`, logs,
@@ -138,6 +147,10 @@ remaining file that must agree (this table included).
 - Every template imports a pinned `aai-core` version.
 - Every template contains unit tests, evaluation data, an evaluation gate,
   bundle resources, cost tags, and keyless setup instructions.
+- Agent templates use MLflow Agent Server on Databricks Apps as the primary
+  HTTP serving path. Models-from-code Model Serving is a compatibility path.
+  LangGraph stays an optional, native application recipe with durable state,
+  interrupts before side effects, and idempotency.
 - Every job cluster carries `application`, `project`, `environment`, `team`,
   `owner_group`, `cost_center`, `data_classification`, `lifecycle`, and
   `tag_schema_version`.
@@ -237,7 +250,16 @@ ruff check .
 black --check .
 pytest -q
 python -m build
+python scripts/validate_release.py --wheel dist
 ```
+
+When changing a runtime dependency, update its supported/certified entry in
+`dependency-policy.toml`, the exact `uv.lock`, regenerate every affected
+template transitive lock with
+`python scripts/lock_template_dependencies.py`, and update
+`compatibility.json` in the same change. PRs test the certified locks; the
+scheduled dependency canary must continue to pass both lower and latest
+supported resolutions on Python 3.11 and 3.12.
 
 ### Codex Cloud
 

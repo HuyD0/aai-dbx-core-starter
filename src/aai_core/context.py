@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from aai_core.experiments import ExperimentManager
     from aai_core.prompts import PromptManager
     from aai_core.providers import ProviderResolver
+    from aai_core.tracing import TraceState
 
 
 @dataclass
@@ -78,10 +79,10 @@ class PlatformContext:
             )
         return self._prompts
 
-    def configure_tracing(self, **kwargs: Any) -> None:
+    def configure_tracing(self, **kwargs: Any) -> TraceState:
         from aai_core.tracing import configure_tracing
 
-        configure_tracing(
+        return configure_tracing(
             self.tags,
             experiment_name=self.settings.effective_experiment_name,
             **kwargs,

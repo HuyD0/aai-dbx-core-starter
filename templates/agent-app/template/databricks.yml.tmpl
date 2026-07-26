@@ -12,6 +12,9 @@ variables:
     default: {{.aai_core_version}}
   aai_core_volume:
     default: {{.aai_core_volume}}
+  prompt_version:
+    description: Exact immutable Prompt Registry version evaluated and served.
+    default: "{{.prompt_version}}"
   compute_policy_id:
     default: {{.compute_policy_id}}
   # Compute shape as variables so environments/policies can override them

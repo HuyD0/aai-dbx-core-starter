@@ -1,41 +1,151 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Dependency automation for a security boundary built on pins: SHA-pinned actions, uv.lock, and tool version pins all rot without an updater. Grouped weekly PRs keep the noise low; every update still lands through protected main.",
-  "extends": ["config:best-practices", ":dependencyDashboard", "schedule:weekly"],
-  "labels": ["dependencies"],
-  "prConcurrentLimit": 5,
+  "description": "Risk-tiered dependency automation. CI certifies changes against dependency-policy.toml and compatibility.json before protected main can accept them.",
+  "extends": [
+    "config:best-practices",
+    ":dependencyDashboard",
+    "schedule:weekly"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "prConcurrentLimit": 6,
+  "minimumReleaseAge": "3 days",
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["before 6am on monday"]
+    "schedule": [
+      "before 6am on monday"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [
+      "at any time"
+    ],
+    "labels": [
+      "dependencies",
+      "security"
+    ],
+    "minimumReleaseAge": null
+  },
+  "pep621": {
+    "managerFilePatterns": [
+      "/(^|/)pyproject\\.toml(?:\\.tmpl)?$/"
+    ]
   },
   "packageRules": [
     {
-      "description": "One grouped PR for all GitHub Actions bumps, always digest-pinned with a version comment",
-      "matchManagers": ["github-actions"],
+      "description": "Actions execute inside the CI security boundary",
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "github-actions",
-      "pinDigests": true
+      "pinDigests": true,
+      "automerge": false
     },
     {
-      "description": "Group Python dependency updates (pyproject ranges resolve into uv.lock)",
-      "matchManagers": ["pep621"],
-      "groupName": "python-dependencies"
+      "description": "MLflow and agent-serving compatibility stack",
+        "matchPackageNames": [
+          "mlflow",
+          "databricks-agents",
+          "langchain",
+          "langchain-core",
+          "langgraph"
+      ],
+      "groupName": "mlflow-agents",
+      "automerge": false
+    },
+    {
+      "description": "Databricks provider clients",
+      "matchPackageNames": [
+        "databricks-ai-search",
+        "databricks-openai",
+        "databricks-sdk"
+      ],
+      "groupName": "databricks-clients",
+      "automerge": false
+    },
+    {
+      "description": "Azure and OpenAI provider clients",
+      "matchPackageNames": [
+        "azure-identity",
+        "azure-keyvault-secrets",
+        "azure-search-documents",
+        "openai"
+      ],
+      "groupName": "azure-openai-clients",
+      "automerge": false
+    },
+    {
+      "description": "Credential-free Python development tooling",
+      "matchPackageNames": [
+        "black",
+        "build",
+        "hatchling",
+        "pre-commit",
+        "pytest",
+        "ruff",
+        "zizmor"
+      ],
+      "groupName": "python-tooling",
+      "automerge": false
+    },
+    {
+      "description": "Core runtime contracts and experiment dataframes",
+      "matchPackageNames": [
+        "pandas",
+        "pydantic",
+        "PyYAML"
+      ],
+      "groupName": "python-core-runtime",
+      "automerge": false
+    },
+    {
+      "description": "Major runtime and toolchain changes require planned review",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true,
+      "automerge": false
     }
   ],
   "customManagers": [
     {
-      "description": "Version-pinned tools installed inline in workflows (uv, build)",
+      "description": "Certified package versions in dependency-policy.toml",
       "customType": "regex",
-      "fileMatch": ["^\\.github/workflows/.+\\.yml$"],
+      "fileMatch": [
+        "^dependency-policy\\.toml$"
+      ],
       "matchStrings": [
-        "(?<depName>uv|build)==(?<currentValue>[0-9][0-9.]*)"
+        "\\[packages\\.(?<depName>[A-Za-z0-9_.-]+)\\][\\s\\S]*?certified\\s*=\\s*\"(?<currentValue>[0-9][0-9A-Za-z.-]*)\""
       ],
       "datasourceTemplate": "pypi"
     },
     {
-      "description": "Databricks CLI pin in the Codex setup script; its per-arch SHA-256 checksums and the databricks/setup-cli action SHA must be updated in the same PR",
+      "description": "Pinned uv versions across workflows and local/Codex setup",
       "customType": "regex",
-      "fileMatch": ["^scripts/codex-cloud-setup\\.sh$"],
-      "matchStrings": ["DATABRICKS_CLI_VERSION=\"(?<currentValue>[0-9.]+)\""],
+      "fileMatch": [
+        "^\\.github/workflows/.+\\.yml$",
+        "^Makefile$",
+        "^scripts/codex-cloud-setup\\.sh$"
+      ],
+      "matchStrings": [
+        "uv==(?<currentValue>[0-9][0-9.]*)",
+        "UV_VERSION\\s*\\?=\\s*(?<currentValue>[0-9][0-9.]*)",
+        "UV_VERSION=\"(?<currentValue>[0-9][0-9.]*)\""
+      ],
+      "depNameTemplate": "uv",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "description": "Databricks CLI pin; official checksums, action SHA, comments, and toolchain.json must be reviewed in the same PR",
+      "customType": "regex",
+      "fileMatch": [
+        "^scripts/codex-cloud-setup\\.sh$"
+      ],
+      "matchStrings": [
+        "DATABRICKS_CLI_VERSION=\"(?<currentValue>[0-9.]+)\""
+      ],
       "depNameTemplate": "databricks/cli",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.*)$"

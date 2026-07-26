@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,7 +72,15 @@ class PromptManager:
         return self._client().genai.load_prompt(reference.uri, **kwargs)
 
     def set_alias(self, name: str, *, alias: str, version: int) -> None:
-        if alias not in {"development", "candidate", "production"}:
+        if alias == "candidate":
+            warnings.warn(
+                "The 'candidate' prompt alias is deprecated; use the more "
+                "descriptive 'validation' alias. It will be removed in "
+                "aai-core 0.5.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if alias not in {"development", "validation", "candidate", "production"}:
             raise ValueError(f"Unsupported governed prompt alias: {alias}")
         self._client().genai.set_prompt_alias(
             name=self.qualify(name),
@@ -99,3 +108,9 @@ class PromptManager:
                 "in a consuming environment install `aai-core[genai]`."
             ) from error
         return mlflow
+
+    @property
+    def native_client(self) -> Any:
+        """Expose native MLflow prompt APIs without wrapping new features."""
+
+        return self._client()

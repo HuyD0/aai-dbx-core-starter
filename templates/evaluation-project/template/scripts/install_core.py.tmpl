@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -28,10 +29,12 @@ def main() -> None:
     destination.mkdir(parents=True, exist_ok=True)
     wheel = destination / wheel_name
     checksum = destination / f"{wheel_name}.sha256"
+    manifest = destination / "release-manifest.json"
 
     for remote_name, local_path in (
         (wheel_name, wheel),
         (f"{wheel_name}.sha256", checksum),
+        ("release-manifest.json", manifest),
     ):
         subprocess.run(
             [
@@ -50,6 +53,17 @@ def main() -> None:
     if actual != expected:
         raise RuntimeError(
             f"Checksum mismatch for {wheel_name}: expected {expected}, got {actual}"
+        )
+    release = json.loads(manifest.read_text(encoding="utf-8"))
+    if (
+        release.get("package") != "aai-core"
+        or release.get("version") != arguments.version
+        or release.get("wheel", {}).get("filename") != wheel_name
+        or release.get("wheel", {}).get("sha256") != actual
+    ):
+        raise RuntimeError(
+            f"Release manifest does not describe {wheel_name}; "
+            "ask the platform team to verify the immutable SDK release."
         )
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", str(wheel)],

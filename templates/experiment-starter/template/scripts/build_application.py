@@ -26,7 +26,7 @@ def main() -> None:
             raise FileNotFoundError(f"Expected prebuilt wheel: {wheel}")
         return
     subprocess.run(
-        [sys.executable, "-m", "build", "--wheel"],
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation"],
         cwd=ROOT,
         check=True,
     )

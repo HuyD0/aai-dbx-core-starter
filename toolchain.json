@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "runner": "ubuntu-24.04",
+  "python": {
+    "default": "3.12",
+    "supported": [
+      "3.11",
+      "3.12"
+    ]
+  },
+  "uv": "0.8.23",
+  "build": "1.5.0",
+  "pipx": "1.7.1",
+  "databricks_cli": "1.9.0",
+  "azure_cli": "2.88.0"
+}

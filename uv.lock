@@ -8,15 +8,15 @@ resolution-markers = [
 
 [[package]]
 name = "aai-core"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pydantic" },
     { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
 all = [
-    { name = "azure-ai-projects" },
     { name = "azure-identity" },
     { name = "azure-keyvault-secrets" },
     { name = "azure-search-documents" },
@@ -52,7 +52,6 @@ examples = [
     { name = "jupyterlab" },
 ]
 foundry = [
-    { name = "azure-ai-projects" },
     { name = "azure-identity" },
     { name = "openai" },
 ]
@@ -67,7 +66,6 @@ keyvault = [
 [package.metadata]
 requires-dist = [
     { name = "aai-core", extras = ["databricks", "foundry", "azure-search", "keyvault", "genai"], marker = "extra == 'all'" },
-    { name = "azure-ai-projects", marker = "extra == 'foundry'", specifier = ">=2.3,<3" },
     { name = "azure-identity", marker = "extra == 'azure-search'", specifier = ">=1.25.3,<2" },
     { name = "azure-identity", marker = "extra == 'foundry'", specifier = ">=1.25.3,<2" },
     { name = "azure-identity", marker = "extra == 'keyvault'", specifier = ">=1.25.3,<2" },
@@ -75,17 +73,18 @@ requires-dist = [
     { name = "azure-search-documents", marker = "extra == 'azure-search'", specifier = ">=12,<13" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=26.5.1,<27" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.5,<2" },
-    { name = "databricks-ai-search", marker = "extra == 'databricks'", specifier = ">=0.77,<1" },
-    { name = "databricks-openai", marker = "extra == 'databricks'", specifier = ">=0.17,<1" },
-    { name = "databricks-sdk", marker = "extra == 'databricks'", specifier = ">=0.122,<1" },
+    { name = "databricks-ai-search", marker = "extra == 'databricks'", specifier = ">=0.77,<0.78" },
+    { name = "databricks-openai", marker = "extra == 'databricks'", specifier = ">=0.17,<0.18" },
+    { name = "databricks-sdk", marker = "extra == 'databricks'", specifier = ">=0.122,<0.123" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.140,<1" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.31,<2" },
     { name = "ipykernel", marker = "extra == 'examples'", specifier = ">=6.29,<8" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1.6,<4" },
     { name = "jupyterlab", marker = "extra == 'examples'", specifier = ">=4.4,<5" },
-    { name = "mlflow", extras = ["databricks"], marker = "extra == 'genai'", specifier = ">=3.14,<4" },
+    { name = "mlflow", extras = ["databricks"], marker = "extra == 'genai'", specifier = ">=3.14,<3.15" },
     { name = "openai", marker = "extra == 'foundry'", specifier = ">=2.48,<3" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.1,<5" },
+    { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1,<10" },
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16,<1" },
@@ -307,23 +306,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
-]
-
-[[package]]
-name = "azure-ai-projects"
-version = "2.3.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "azure-core" },
-    { name = "azure-identity" },
-    { name = "azure-storage-blob" },
-    { name = "isodate" },
-    { name = "openai" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7a/29/ab1a80ce483fcc36ec2ac0a3db8e043aa954700b34b77db43ed5f4f9c488/azure_ai_projects-2.3.0.tar.gz", hash = "sha256:6e3006b7b8aa51c6ff9db61ef4aac3717f8a712cd1a183d5a1d34e2eb33450bd", size = 27563233, upload-time = "2026-07-01T21:09:00.018Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/bd/7e64f2d6e43d19fc8cf464769804f947d997833eb4dce1c86c2ce76146d2/azure_ai_projects-2.3.0-py3-none-any.whl", hash = "sha256:1da20aeac9663740a97644efedbb9f59eb2a332d3e01bfde7aa03027936edf44", size = 349581, upload-time = "2026-07-01T21:09:04.32Z" },
 ]
 
 [[package]]

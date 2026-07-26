@@ -11,10 +11,20 @@ import mlflow
 from mlflow.genai.scorers import Safety, ScorerSamplingConfig
 
 from aai_core import bootstrap
-from aai_core.evaluation import judge_model_uri
+from aai_core.providers.types import ProviderConfigurationError
 
 context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
 print({"experiment": context.settings.effective_experiment_name})
+
+
+def judge_model_uri(settings) -> str:
+    config = settings.models.get("judge-model")
+    if not config or config.get("provider") != "databricks":
+        raise ProviderConfigurationError(
+            "judge-model must resolve to a governed Databricks serving endpoint"
+        )
+    return f"endpoints:/{config['deployment']}"
+
 
 # COMMAND ----------
 

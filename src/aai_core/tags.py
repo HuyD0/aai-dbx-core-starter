@@ -4,28 +4,56 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from enum import StrEnum
+from typing import Literal
+
+from pydantic import Field, field_validator
+
+from aai_core.contracts import ContractModel
 
 _AZURE_VALUE = re.compile(r"[^A-Za-z0-9 +\-=._:/@]")
 _PLACEHOLDERS = {"", "unset", "unknown", "todo", "changeme"}
 
 
-@dataclass(frozen=True)
-class ResourceContext:
-    application: str
-    project: str
-    environment: str
-    team: str
-    owner_group: str
-    cost_center: str
-    data_classification: str
-    lifecycle: str
-    repository: str
-    release: str
-    tag_schema_version: str = "1"
+class LifecycleStage(StrEnum):
+    """Supported maturity states for an AI application resource."""
+
+    EXPERIMENTAL = "experimental"
+    CANDIDATE = "candidate"
+    PRODUCTION = "production"
+    RETIRED = "retired"
+
+
+class ResourceContext(ContractModel):
+    """Validated ownership, lifecycle, and cost-attribution contract."""
+
+    application: str = Field(min_length=1)
+    project: str = Field(min_length=1)
+    environment: str = Field(min_length=1)
+    team: str = Field(min_length=1)
+    owner_group: str = Field(min_length=1)
+    cost_center: str = Field(min_length=1)
+    data_classification: str = Field(min_length=1)
+    lifecycle: LifecycleStage
+    repository: str = Field(min_length=1)
+    release: str = Field(min_length=1)
+    tag_schema_version: Literal["1"] = "1"
+
+    @field_validator("lifecycle", mode="before")
+    @classmethod
+    def parse_lifecycle(cls, value: object) -> LifecycleStage:
+        if isinstance(value, LifecycleStage):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("lifecycle must be a string")
+        try:
+            return LifecycleStage(value.strip().lower())
+        except ValueError as error:
+            choices = ", ".join(stage.value for stage in LifecycleStage)
+            raise ValueError(f"lifecycle must be one of: {choices}") from error
 
     def validate(self, *, strict: bool = False) -> None:
-        values = asdict(self)
+        values = self.model_dump(mode="python")
         empty = [name for name, value in values.items() if not str(value).strip()]
         if empty:
             fields = ", ".join(empty)
@@ -48,7 +76,9 @@ class ResourceContext:
                 )
 
     def as_dict(self) -> dict[str, str]:
-        return {key: str(value) for key, value in asdict(self).items()}
+        return {
+            key: str(value) for key, value in self.model_dump(mode="python").items()
+        }
 
     def for_mlflow(self) -> dict[str, str]:
         return {f"aai.{key}": value for key, value in self.as_dict().items()}
