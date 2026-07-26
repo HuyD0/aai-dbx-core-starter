@@ -134,3 +134,27 @@ def test_apply_thresholds_gates_precomputed_metrics():
     )
     assert not failing.passed
     assert "regressed" in failing.failures[0].reason
+
+
+def test_publish_report_renders_and_appends_summary(tmp_path):
+    from aai_core.evaluation import EvaluationReport, GateFailure, publish_report
+
+    report = EvaluationReport(
+        metrics={"accuracy": 0.95, "safety/mean": 0.5},
+        failures=(GateFailure("safety/mean", "0.5 violates required 1.0"),),
+    )
+    summary = tmp_path / "summary.md"
+
+    markdown = publish_report(
+        report,
+        title="Release gate",
+        baseline={"accuracy": 0.97},
+        run_link="https://example/run",
+        summary_path=summary,
+    )
+
+    assert "| accuracy | 0.950 | 0.970 | -0.020 | ok |" in markdown
+    assert "| safety/mean | 0.500 | — | — | FAIL |" in markdown
+    assert "**Result: FAILED**" in markdown
+    assert "https://example/run" in markdown
+    assert markdown in summary.read_text()

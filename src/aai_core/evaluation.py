@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from aai_core.exceptions import AaiCoreError
@@ -182,6 +184,57 @@ def apply_thresholds(
     numeric = {str(key): float(value) for key, value in metrics.items()}
     failures = _evaluate_thresholds(numeric, tuple(thresholds), baseline_metrics or {})
     return EvaluationReport(metrics=numeric, failures=tuple(failures))
+
+
+def publish_report(
+    report: EvaluationReport,
+    *,
+    title: str,
+    baseline: Mapping[str, float] | None = None,
+    run_link: str | None = None,
+    summary_path: str | Path | None = None,
+) -> str:
+    """Render an evaluation report as a markdown table and publish it.
+
+    Appended to ``summary_path`` (or ``$GITHUB_STEP_SUMMARY`` when set, so CI
+    runs surface the verdict on the workflow summary page) and returned, for
+    logging or PR comments. Metric keys are taken from the report — never
+    hardcode aggregate-key formats.
+    """
+
+    failed = {failure.metric for failure in report.failures}
+    lines = [
+        f"## {title}",
+        "",
+        "| Metric | Value | Baseline | Delta | Verdict |",
+        "|---|---|---|---|---|",
+    ]
+    for name, value in sorted(report.metrics.items()):
+        reference = (baseline or {}).get(name)
+        shown_reference = f"{reference:.3f}" if reference is not None else "—"
+        delta = f"{value - reference:+.3f}" if reference is not None else "—"
+        verdict = "FAIL" if name in failed else "ok"
+        lines.append(
+            f"| {name} | {value:.3f} | {shown_reference} | {delta} | {verdict} |"
+        )
+    if report.failures:
+        lines.append("")
+        lines.append("**Gate failures:**")
+        lines.extend(
+            f"- `{failure.metric}`: {failure.reason}" for failure in report.failures
+        )
+    lines.append("")
+    lines.append(f"**Result: {'PASSED' if report.passed else 'FAILED'}**")
+    if run_link:
+        lines.append("")
+        lines.append(f"[Evaluation run]({run_link})")
+    markdown = "\n".join(lines) + "\n"
+
+    target = summary_path or os.getenv("GITHUB_STEP_SUMMARY")
+    if target:
+        with open(target, "a", encoding="utf-8") as stream:
+            stream.write(markdown + "\n")
+    return markdown
 
 
 def _extract_metrics(result: Any) -> dict[str, float]:

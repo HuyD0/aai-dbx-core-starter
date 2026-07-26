@@ -59,6 +59,31 @@ COMBOS = {
             "expect_absent": [],
         },
     ],
+    "evaluation-project": [
+        {
+            "name": "databricks-judge",
+            "overrides": {"project_name": "test-evaluation"},
+            "expect_present": [
+                "src/app/scorers.py",
+                "src/app/judges.py",
+                "src/app/targets.py",
+                "scripts/sync_dataset.py",
+                "evals/data/answer_sheet.json",
+                "notebooks/01_align_judge.py",
+            ],
+            "expect_absent": [],
+        },
+        {
+            "name": "foundry-judge",
+            "overrides": {
+                "project_name": "test-evaluation",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com",
+            },
+            "expect_present": ["src/app/judges.py"],
+            "expect_absent": [],
+        },
+    ],
     "agentic-rag": [
         {
             "name": "dbx-azure-search",

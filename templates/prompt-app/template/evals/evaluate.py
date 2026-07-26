@@ -15,7 +15,7 @@ from pathlib import Path
 from mlflow.genai.scorers import Correctness, RelevanceToQuery, Safety
 
 from aai_core import bootstrap
-from aai_core.evaluation import EvaluationSuite, QualityThreshold
+from aai_core.evaluation import EvaluationSuite, QualityThreshold, publish_report
 from app.assistant import Assistant
 from app.config import PROMPT_NAME
 
@@ -69,10 +69,16 @@ def main() -> None:
         scorers=[Correctness(), RelevanceToQuery(), Safety()],
         thresholds=load_thresholds(),
     )
+    baseline = load_baseline()
     report = suite.run(
         data=cases,
         predict_fn=assistant.ask,
-        baseline_metrics=load_baseline(),
+        baseline_metrics=baseline,
+    )
+    publish_report(
+        report,
+        title=f"Prompt gate — {PROMPT_NAME} v{version}",
+        baseline=baseline,
     )
     report.require_passed()
     if args.update_baseline:

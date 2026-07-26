@@ -1,0 +1,11 @@
+{{/*
+Shared Go named-templates available to every template's .tmpl files.
+Canonical copy lives in templates/_shared/library/; scripts/sync_template_shared.py
+copies it into each template's library/ directory (drift-checked in CI).
+Do not reference these defines from schema `default` values — only from
+template files and file names.
+*/}}
+
+{{- define "project_name_underscored" -}}
+{{- (regexp "-").ReplaceAllString .project_name "_" -}}
+{{- end -}}
