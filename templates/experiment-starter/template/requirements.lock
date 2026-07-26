@@ -1,4 +1,4 @@
-# Runtime versions tested by aai-core 0.1.0. Regenerate deliberately when the
+# Runtime versions tested by aai-core 0.2.0. Regenerate deliberately when the
 # platform template updates; do not allow deployments to float independently.
 mlflow[databricks]==3.14.0
 pandas==2.2.3

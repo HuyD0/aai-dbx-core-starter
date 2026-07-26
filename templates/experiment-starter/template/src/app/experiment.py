@@ -73,7 +73,7 @@ def run_experiment(
     data = data if data is not None else load_dataset()
     rows = dataset_rows(data)
     manager = ExperimentManager(
-        experiment_name=context.settings.experiment_name,
+        experiment_name=context.settings.effective_experiment_name,
         context=context.tags,
         mlflow_module=mlflow_module,
     )

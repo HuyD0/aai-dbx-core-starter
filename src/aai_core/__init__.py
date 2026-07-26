@@ -10,7 +10,7 @@ from aai_core.tags import ResourceContext
 try:
     __version__ = version("aai-core")
 except PackageNotFoundError:  # Running directly from a source checkout.
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"
 
 __all__ = [
     "AaiCoreError",

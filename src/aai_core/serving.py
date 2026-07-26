@@ -94,7 +94,7 @@ def deploy_agent(
 
     import mlflow
 
-    mlflow.set_experiment(context.settings.experiment_name)
+    mlflow.set_experiment(context.settings.effective_experiment_name)
     return agents_module.deploy(
         uc_model_name,
         int(version) if str(version).isdigit() else version,

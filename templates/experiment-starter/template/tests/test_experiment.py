@@ -76,4 +76,4 @@ def test_run_experiment_records_everything_a_rerun_needs():
     assert "source_commit" in fake.params
     assert ("requirements-frozen.txt", "reproducibility") in fake.artifacts
     assert ("summary.json", "reports") in fake.artifacts
-    assert fake.experiment == dev_context().settings.experiment_name
+    assert fake.experiment == dev_context().settings.effective_experiment_name

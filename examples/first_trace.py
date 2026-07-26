@@ -2,7 +2,7 @@ from aai_core import bootstrap
 from aai_core.tracing import configure_tracing, traced
 
 ctx = bootstrap()
-configure_tracing(ctx.tags, experiment_name=ctx.settings.experiment_name)
+configure_tracing(ctx.tags, experiment_name=ctx.settings.effective_experiment_name)
 
 
 @traced(span_type="CHAIN")

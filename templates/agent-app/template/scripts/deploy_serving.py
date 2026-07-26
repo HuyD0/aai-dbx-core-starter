@@ -54,7 +54,7 @@ def main() -> None:
         f"{context.tags.application.replace('-', '_')}"
     )
 
-    mlflow.set_experiment(settings.experiment_name)
+    mlflow.set_experiment(settings.effective_experiment_name)
     mlflow.set_registry_uri("databricks-uc")
     with mlflow.start_run(run_name="agent-deploy"):
         logged = mlflow.pyfunc.log_model(

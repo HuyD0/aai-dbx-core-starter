@@ -2,7 +2,7 @@
 
 All notable changes to `aai-core` are documented here.
 
-## Unreleased
+## 0.2.0
 
 - Added the five-template catalog (experiment-starter, prompt-app,
   evaluation-project, rag-app, agent-app) with a shared synced scaffold,
