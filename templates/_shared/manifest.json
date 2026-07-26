@@ -6,7 +6,8 @@
     ".gitignore",
     "requirements-ci.txt.tmpl",
     "scripts/build_application.py",
-    "scripts/install_core.py.tmpl"
+    "scripts/install_core.py.tmpl",
+    "scripts/setup_dev.py.tmpl"
   ],
   "opt_out": {}
 }

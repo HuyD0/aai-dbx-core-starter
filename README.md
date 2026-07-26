@@ -87,9 +87,19 @@ building:
 | `agent-app` | Tool-using agents: SDK tool loop, structured outputs, trajectory-aware evals, feedback, gated Model Serving deploy, monitoring |
 
 ```bash
+az login
+export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
+export DATABRICKS_AUTH_TYPE=azure-cli
 databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
   --template-dir templates/<template-name> --output-dir my-project
+cd my-project
+python3.12 scripts/setup_dev.py
 ```
+
+See the [developer onboarding checklist](docs/developer-onboarding.md) for the
+group permissions and workstation tools required before generation. The
+generated setup command validates access, creates `.venv`, installs the pinned
+checksum-verified SDK and project dependencies, and runs the offline checks.
 
 Every generated project shares the same spine: pinned checksum-verified
 `aai-core`, the 9 mandatory cost tags on bundle presets and job clusters,
