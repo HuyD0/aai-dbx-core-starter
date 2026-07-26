@@ -1,4 +1,4 @@
-"""Step 2: compare a baseline and one deliberate change.
+"""Lifecycle step 2: compare a baseline and one deliberate change.
 
 Both runs use the same ordered cases and dataset digest. The SDK owns governed
 run context; native MLflow APIs log the input dataset, metrics, and decision.

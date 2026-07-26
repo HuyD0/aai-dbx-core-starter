@@ -9,14 +9,22 @@ offline contract
   → baseline/change experiment
   → exact prompt lineage
   → deterministic evaluation gate
+  → connected setup
   → connected stable first call
   → native async streaming observation
+  → exact tool-trajectory evaluation
+  → multi-turn session evaluation
+  → layered and calibrated judges
+  → logical-model cost/quality analysis
+  → optional aligned-judge prompt optimization
 ```
 
 The first four MLflow examples run locally and deterministically without a
-model, cloud access, or credentials. The two connected tracks come last: a
-small stable-adapter call, followed by an advanced native async/streaming
-notebook.
+model, cloud access, or credentials. The connected setup, small stable-adapter
+call, and native async/streaming notebook come next. Advanced labs 08–11 are
+credential-free decision fixtures; lab 12 is a disabled-by-default connected
+optimization skeleton whose experimental dependencies are not in the
+certified locks.
 
 Every latency, token, and cost value in the credential-free stages is labelled
 `simulated_offline_fixture`; those values teach evidence shape and comparison
@@ -64,7 +72,8 @@ experiment organizes comparisons but does not itself approve a release.
 
 ## The lifecycle record
 
-Every example emits a final `LIFECYCLE_RESULT` containing the same vocabulary:
+Every executable script in the core lifecycle emits a final
+`LIFECYCLE_RESULT`. The advanced notebooks preserve the same vocabulary:
 
 | Field | Meaning |
 |---|---|
@@ -90,20 +99,50 @@ make local-ui
 ```
 
 `quickstart` creates or synchronizes the locked development environment and
-runs `offline_hello_world.py`. The MLflow commands use the isolated, ignored
+runs `00_offline_hello_world.py`. The MLflow commands use the isolated, ignored
 `.aai/local/mlflow.db` tracking and prompt-registry store. `local-ui` serves
 only that store at `http://127.0.0.1:5000`.
 
 | Order | Example | What it teaches locally |
 |---:|---|---|
-| Setup | [`setup.ipynb`](setup.ipynb) | Why package/config readiness and cloud authorization are separate checkpoints. It calls the same reusable setup module as the tutorial and makes no LLM request. |
-| 0 | `offline_hello_world.py` | Provider-neutral SDK contracts, secret redaction, and explicitly unknown cost. |
-| 1 | `first_trace.py` | Why one earnings-summary request needs a bounded trace, nested model span, token usage, and an explicit no-autolog choice. |
-| 2 | `first_experiment.py` | Why baseline/change runs must use the same ordered earnings cases before quality, latency, tokens, and cost can be compared. |
-| 3 | `first_prompt.py` | Why `earnings_summary` prompt versions are registered idempotently, loaded by exact URI, digested, and linked to runs. |
-| 4 | `first_evaluation.py` | Why deterministic scorers and row-critical gates—not one good-looking answer—are required before adopting `earnings-summary-prompt-v2`. |
-| 5 | `connected_first_call.py` | How to call a real configured LLM with `bootstrap()`, `ctx.providers.model(...)`, and stable synchronous `model.generate()` while recording bounded trace and run evidence. |
-| 6 | `first_llm_call.ipynb` | How a notebook/event loop uses `create_native_async_client()`, provider-native streaming, MLflow OpenAI autologging, and exact prompt lineage without duplicate SDK provider spans. |
+| 00 | [`00_offline_hello_world.py`](00_offline_hello_world.py) | Provider-neutral SDK contracts, secret redaction, and explicitly unknown cost. |
+| 01 | [`01_first_trace.py`](01_first_trace.py) | Why one earnings-summary request needs a bounded trace, nested model span, token usage, and an explicit no-autolog choice. |
+| 02 | [`02_first_experiment.py`](02_first_experiment.py) | Why baseline/change runs must use the same ordered earnings cases before quality, latency, tokens, and cost can be compared. |
+| 03 | [`03_first_prompt.py`](03_first_prompt.py) | Why `earnings_summary` prompt versions are registered idempotently, loaded by exact URI, digested, and linked to runs. |
+| 04 | [`04_first_evaluation.py`](04_first_evaluation.py) | Why deterministic scorers and row-critical gates—not one good-looking answer—are required before adopting `earnings-summary-prompt-v2`. |
+| 05 | [`05_connected_setup.ipynb`](05_connected_setup.ipynb) | Why kernel/config readiness and cloud authorization are separate checkpoints. It makes no LLM request. |
+| 06 | [`06_connected_first_call.py`](06_connected_first_call.py) | How to call a real configured LLM through stable synchronous `model.generate()` while recording bounded trace and run evidence. |
+| 07 | [`07_first_llm_call.ipynb`](07_first_llm_call.ipynb) | How a notebook/event loop uses a native async client, streaming, MLflow OpenAI autologging, and exact prompt lineage without duplicate SDK spans. |
+| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer can still fail an exact expected tool-call trajectory. |
+| 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope traces by opaque session, release, environment, and eval batch, then gate complete conversations. |
+| 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | How deterministic checks, guideline judges, human labels, and held-out agreement grant different levels of authority. |
+| 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality and policy eligibility come before cost ranking, and why missing cost remains unknown. |
+| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | How to separate judge calibration, optimizer training, and held-out release evidence without letting optimization promote production. |
+
+Open any advanced lab through the stable runner name, for example:
+
+```bash
+make local-example EXAMPLE=tool_trajectory_evaluation
+make local-example EXAMPLE=multi_turn_session_evaluation
+make local-example EXAMPLE=layered_judges
+make local-example EXAMPLE=cost_quality_tradeoff
+make local-example EXAMPLE=agent_alignment_optimization
+```
+
+The command prints the exact numbered path and selected kernel. The default
+path for all five labs makes no model request.
+
+### Cookbook adaptations
+
+| MLflow cookbook | Curriculum coverage | Platform strengthening |
+|---|---|---|
+| [Evaluation-driven development](https://mlflow.org/cookbook/eval-driven-development/) | 02, 04, 07 | Fixed ordered data, exact digests, scorer-error failure, critical-row gates, and explicit release decisions. |
+| [Prompt engineering lifecycle](https://mlflow.org/cookbook/prompt-engineering/) | 03, 04, 07, 12 | Idempotent immutable versions, exact-version lineage, one controlled change, and alias movement only after the normal gate. |
+| [Cost-quality trade-off](https://mlflow.org/cookbook/cost-quality-tradeoff/) | 07, 11 | Logical model names, no embedded vendor prices, separate target/judge cost, and explicit cost coverage. |
+| [LangGraph agent](https://mlflow.org/cookbook/langgraph-agent/) | 08 plus the optional agent-template recipe | Exact tool-call scoring for gates, one tracing owner, durable checkpoints, interrupts, and idempotency. |
+| [Multi-turn agent](https://mlflow.org/cookbook/multi-turn-agent/) | 09 | One trace per turn, opaque session IDs, exact trace scoping, numeric gates, and durable application-owned state. |
+| [Custom LLM judges](https://mlflow.org/cookbook/custom-llm-judges/) | 10 | Deterministic rules first, keyless governed judge models, balanced human rationales, and held-out agreement. |
+| [Agent alignment and optimization](https://mlflow.org/cookbook/agent-alignment-optimization/) | 10, 12 | Three disjoint evidence splits, bounded calls, prompt loading inside `predict_fn`, and no optimizer-to-production shortcut. |
 
 The scripts take no command-line arguments. For isolated direct execution,
 they honor:
@@ -176,18 +215,18 @@ The deterministic earnings-summary application uses SDK-managed spans, so
 OpenAI and LangChain autologging are disabled. Enabling an autologger for the
 same call would duplicate spans and token counts.
 
-`first_prompt.py` does not call a model or framework, so there is nothing for a
-framework autologger to instrument. It records prompt registration, exact
-loading, and safe synthetic rendering through a governed run, a manual
+`03_first_prompt.py` does not call a model or framework, so there is nothing
+for a framework autologger to instrument. It records prompt registration,
+exact loading, and safe synthetic rendering through a governed run, a manual
 `PROMPT` span, native version links, and prompt digests. That is intentional
 tracking, not missing autologging.
 
-`connected_first_call.py` is the paved-road first call. It uses
+`06_connected_first_call.py` is the paved-road first call. It uses
 `model.generate()` once, so `TraceIntegration.SDK` owns one bounded provider
 span. It records latency and normalized usage, keeps unavailable cost
 explicitly unknown, and blocks release pending evaluation.
 
-`first_llm_call.ipynb` is the advanced positive autologging example. It opts
+`07_first_llm_call.ipynb` is the advanced positive autologging example. It opts
 into approved capture for synthetic earnings cases, invokes a
 worker/event-loop-owned client from `model.create_native_async_client()`,
 consumes native provider streams, and lets MLflow own the provider span. One
@@ -200,18 +239,21 @@ exact local prompt version and comparison run. It intentionally concludes
 `inconclusive / run full evaluation`: six exploratory calls are useful for
 learning and debugging, not sufficient release evidence.
 
-Start with [`setup.ipynb`](setup.ipynb) when you want to diagnose the kernel,
-configuration, Azure identity, workspace membership, and endpoint separately.
-Both notebooks call `notebook_setup.py`; the tutorial does not use `%run` or
-depend on state left by the setup notebook.
+Use [`05_connected_setup.ipynb`](05_connected_setup.ipynb) after the local
+gate when you want to diagnose the kernel, configuration, Azure identity,
+workspace membership, and endpoint separately. Both connected notebooks call
+`notebook_setup.py`; the tutorial does not use `%run` or depend on state left
+by the setup notebook.
 
 The default notebook path intentionally splits execution from evidence:
 Databricks serves the LLM, while local SQLite stores experiment, run, trace,
 and prompt metadata and `.aai/local/mlruns` stores artifacts. Setting the
-optional prompt-publishing guard switches only the Prompt Registry to
-`databricks-uc`. Databricks-hosted MLflow tracking and Unity Catalog trace
-tables are separate production choices, not side effects of publishing a
-prompt.
+top-level `SEND_EVIDENCE_TO_DATABRICKS` switch to `True` instead routes
+tracking to `databricks` and prompt registration to `databricks-uc`, so the
+experiment, runs, traces, exact prompts, metrics, and lineage links share the
+compatible Databricks backend. The later prompt-only publishing guard remains
+available for copying prompts after a deliberately local comparison, but those
+local traces are never linked across stores.
 
 Before enabling any provider or framework autologger, document:
 
@@ -241,7 +283,7 @@ An example or generated project meets this teaching standard only when:
 
 The connected notebook is exploratory and therefore always ends with an
 inconclusive decision and `release=blocked_until_evaluated`, regardless of how
-good its small live sample looks. The deterministic `first_evaluation.py`
+good its small live sample looks. The deterministic `04_first_evaluation.py`
 stage is the release-grade gate and adopts `earnings-summary-prompt-v2` only
 when every required threshold passes. Only after that gate succeeds does it
 move the SDK-governed `production` alias to the exact adopted version. The
@@ -275,7 +317,7 @@ export DATABRICKS_AUTH_TYPE=azure-cli
 export MLFLOW_TRACKING_URI=databricks
 export MLFLOW_REGISTRY_URI=databricks-uc
 export AAI_PLATFORM_CONFIG="$PWD/aai-platform.yml"
-.venv/bin/python examples/first_trace.py
+.venv/bin/python examples/01_first_trace.py
 ```
 
 Connected prompt examples require the externally provisioned Unity Catalog
@@ -288,16 +330,20 @@ Use `make examples-list` to see the runner's accepted names and modes.
 
 | Example | Graduates into |
 |---|---|
-| `first_experiment.py` | `templates/experiment-starter` |
-| `first_prompt.py` | `templates/prompt-app` |
-| `first_evaluation.py` | `templates/evaluation-project` |
-| `connected_first_call.py`, `first_llm_call.ipynb`, `first_trace.py` | `templates/rag-app` / `templates/agent-app` |
-| `offline_hello_world.py` | every template's hermetic test pattern |
+| `02_first_experiment.py` | `templates/experiment-starter` |
+| `03_first_prompt.py` | `templates/prompt-app` |
+| `04_first_evaluation.py` | `templates/evaluation-project` |
+| `06_connected_first_call.py`, `07_first_llm_call.ipynb`, `01_first_trace.py` | `templates/rag-app` / `templates/agent-app` |
+| `08_tool_trajectory_evaluation.ipynb`, `09_multi_turn_session_evaluation.ipynb` | `templates/agent-app` and its optional LangGraph recipe |
+| `10_layered_judges.ipynb` | `templates/evaluation-project` |
+| `11_cost_quality_tradeoff.ipynb`, `12_agent_alignment_optimization.ipynb` | a connected prompt or agent project after dependency and judge approval |
+| `00_offline_hello_world.py` | every template's hermetic test pattern |
 
 ## Notebook conventions
 
-- Jupyter (`.ipynb`) is for local exploration, like
-  `first_llm_call.ipynb`.
+- Jupyter (`.ipynb`) is for local exploration and explicitly guarded connected
+  labs, like `07_first_llm_call.ipynb` through
+  `12_agent_alignment_optimization.ipynb`.
 - Generated projects use packaged Python under `src/`; Databricks-format
   notebooks remain thin teaching or operational entry points.
 - Configuration is never hardcoded. `bootstrap()` discovers

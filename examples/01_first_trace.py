@@ -1,4 +1,4 @@
-"""Step 1: observe one fictional earnings-summary trace, entirely offline.
+"""Lifecycle step 1: observe one fictional earnings-summary trace, entirely offline.
 
 This example chooses SDK-managed tracing. OpenAI and LangChain autologging stay
 off so the same call cannot produce duplicate spans or duplicate token counts.

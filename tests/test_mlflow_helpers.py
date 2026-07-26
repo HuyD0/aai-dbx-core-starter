@@ -114,6 +114,11 @@ def test_prompt_manager_qualifies_registers_and_loads_versions():
     manager.set_alias("system", alias="validation", version=registered.version)
 
     assert registered.name == "main.claims.system"
+    assert registered.kwargs["tags"]["aai_application"] == "claims-agent"
+    assert all(
+        not set(tag_key).intersection(".,-=/ :")
+        for tag_key in registered.kwargs["tags"]
+    )
     assert loaded.uri == "prompts:/main.claims.system/1"
     assert mlflow.genai.alias["alias"] == "validation"
     assert manager.native_client is mlflow

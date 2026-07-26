@@ -299,25 +299,43 @@ application change and must go through the same baseline/result/decision loop.
 
 The repository examples implement this contract in order:
 
-1. `offline_hello_world.py` proves provider-neutral contracts and represents
+1. `00_offline_hello_world.py` proves provider-neutral contracts and represents
    unknown cost explicitly.
-2. `first_trace.py` records one bounded fictional earnings-summary execution
+2. `01_first_trace.py` records one bounded fictional earnings-summary execution
    so a developer can inspect what happened inside the request.
-3. `first_experiment.py` compares the named baseline and changed
+3. `02_first_experiment.py` compares the named baseline and changed
    earnings-summary runs on the same ordered dataset digest.
-4. `first_prompt.py` registers `earnings_summary` idempotently and binds exact
+4. `03_first_prompt.py` registers `earnings_summary` idempotently and binds exact
    immutable prompt versions without an irrelevant framework autologger.
-5. `first_evaluation.py` uses native deterministic MLflow scorers and
+5. `04_first_evaluation.py` uses native deterministic MLflow scorers and
    row-critical release checks before adopting `earnings-summary-prompt-v2`.
-6. `connected_first_call.py` makes one real call through the stable synchronous
-   `model.generate()` path with bounded SDK tracing and explicit unknown cost.
-7. `first_llm_call.ipynb` demonstrates an approved OpenAI autolog path through
+6. `05_connected_setup.ipynb` separates kernel/config readiness from keyless
+   Azure identity, workspace membership, and endpoint readiness without making
+   a model request.
+7. `06_connected_first_call.py` makes one real call through the stable
+   synchronous `model.generate()` path with bounded SDK tracing and explicit
+   unknown cost.
+8. `07_first_llm_call.ipynb` demonstrates an approved OpenAI autolog path through
    a native async client and stream, compares both exact prompts on three
    synthetic cases, reads trace-level token/cost evidence, and keeps release
    blocked until the full evaluation passes.
+9. `08_tool_trajectory_evaluation.ipynb` rejects a wrong exact tool trajectory
+   even when the final answer contains every expected fact.
+10. `09_multi_turn_session_evaluation.ipynb` scopes traces by opaque session,
+    release, environment, and evaluation batch before applying session-level
+    metrics and critical-case gates.
+11. `10_layered_judges.ipynb` keeps exact rules deterministic and measures a
+    nuanced judge against balanced human feedback on a held-out split.
+12. `11_cost_quality_tradeoff.ipynb` filters logical model candidates through
+    quality and policy gates before comparing known, covered cost.
+13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
+    training, and final held-out release evidence separate; it is disabled by
+    default and cannot move a production alias.
 
-Each stage emits hypothesis, baseline, change, result, decision, and release.
-See [the executable curriculum](../examples/README.md).
+The executable lifecycle scripts emit hypothesis, baseline, change, result,
+decision, and release. The advanced notebooks preserve that vocabulary while
+remaining exploration and teaching artifacts. See
+[the executable curriculum](../examples/README.md).
 
 ## Current references
 

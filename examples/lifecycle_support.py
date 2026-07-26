@@ -461,11 +461,23 @@ def ensure_prompt_version(
     qualified_name = prompts.qualify(PROMPT_NAME)
     digest = prompt_digest(template)
     client = MlflowClient()
-    if client.get_prompt(qualified_name) is not None:
+    try:
+        prompt_exists = client.get_prompt(qualified_name) is not None
+    except Exception as exc:
+        error_code = str(getattr(exc, "error_code", "")).upper()
+        message = str(exc).upper()
+        if error_code not in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"} and not (
+            "NOT_FOUND" in message and "PROMPT" in message
+        ):
+            raise
+        # OSS returns None for a missing prompt; Unity Catalog raises NOT_FOUND.
+        prompt_exists = False
+    if prompt_exists:
         for version in client.search_prompt_versions(qualified_name):
-            if (
-                getattr(version, "template", None) == template
-                and getattr(version, "tags", {}).get("aai.prompt_digest") == digest
+            tags = getattr(version, "tags", {})
+            if getattr(version, "template", None) == template and (
+                tags.get("aai_prompt_digest") == digest
+                or tags.get("aai.prompt_digest") == digest
             ):
                 return version
     return prompts.register(

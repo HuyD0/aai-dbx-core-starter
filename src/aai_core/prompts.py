@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from re import sub
 from typing import Any
 
 from aai_core.tags import ResourceContext
@@ -52,7 +53,9 @@ class PromptManager:
             name=qualified,
             template=template,
             commit_message=commit_message,
-            tags={f"aai.{key}": value for key, value in metadata.items()},
+            # Unity Catalog prompt tags reject punctuation accepted by the
+            # local MLflow registry. Use one portable projection for both.
+            tags={_prompt_tag_key(key): value for key, value in metadata.items()},
         )
 
     def load(
@@ -114,3 +117,8 @@ class PromptManager:
         """Expose native MLflow prompt APIs without wrapping new features."""
 
         return self._client()
+
+
+def _prompt_tag_key(key: str) -> str:
+    normalized = sub(r"[.,\-=/ :]+", "_", str(key)).strip("_")
+    return f"aai_{normalized}"

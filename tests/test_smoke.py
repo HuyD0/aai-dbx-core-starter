@@ -9,6 +9,7 @@ import sys
 from ast import PyCF_ALLOW_TOP_LEVEL_AWAIT
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,113 @@ def test_sample_notebook_runs(capsys):
     assert capsys.readouterr().out.strip().endswith("package import verified")
 
 
+def test_learning_artifacts_have_one_contiguous_numbered_order():
+    artifacts = sorted(
+        path
+        for path in (ROOT / "examples").iterdir()
+        if re.fullmatch(r"\d{2}_[a-z0-9_]+\.(?:py|ipynb)", path.name)
+    )
+
+    assert [path.name[:2] for path in artifacts] == [
+        f"{number:02d}" for number in range(13)
+    ]
+    assert all(
+        not re.match(r"\d{2}_", helper)
+        for helper in ("lifecycle_support.py", "notebook_setup.py")
+    )
+
+
+def test_all_numbered_example_notebooks_are_safe_clean_and_compilable():
+    notebooks = sorted((ROOT / "examples").glob("[0-9][0-9]_*.ipynb"))
+    assert [path.name for path in notebooks] == [
+        "05_connected_setup.ipynb",
+        "07_first_llm_call.ipynb",
+        "08_tool_trajectory_evaluation.ipynb",
+        "09_multi_turn_session_evaluation.ipynb",
+        "10_layered_judges.ipynb",
+        "11_cost_quality_tradeoff.ipynb",
+        "12_agent_alignment_optimization.ipynb",
+    ]
+
+    for path in notebooks:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        assert notebook["nbformat"] == 4
+        assert notebook["cells"]
+        cell_ids = [cell.get("id") for cell in notebook["cells"]]
+        assert all(cell_ids)
+        assert len(cell_ids) == len(set(cell_ids))
+        source = "\n".join(
+            "".join(cell.get("source", [])) for cell in notebook["cells"]
+        )
+        assert "DATABRICKS_TOKEN" not in source
+        assert "AZURE_CLIENT_SECRET" not in source
+        assert "OPENAI_API_KEY" not in source
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            assert cell["execution_count"] is None
+            assert cell["outputs"] == []
+            compile(
+                "".join(cell.get("source", [])),
+                f"{path.name}:code-cell-{index}",
+                "exec",
+                flags=PyCF_ALLOW_TOP_LEVEL_AWAIT,
+            )
+
+
+def test_advanced_notebooks_preserve_release_guardrails():
+    sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (ROOT / "examples").glob("*.ipynb")
+    }
+
+    trajectory = sources["08_tool_trajectory_evaluation.ipynb"]
+    assert "right-answer-wrong-trajectory" in trajectory
+    assert "tool_trajectory_exact" in trajectory
+    assert "TraceIntegration.MLFLOW_LANGCHAIN" in trajectory
+
+    multi_turn = sources["09_multi_turn_session_evaluation.ipynb"]
+    assert "mlflow.trace.session" not in multi_turn
+    assert "mlflow.tracing.context(session_id=opaque_session_id)" in multi_turn
+    assert "tag.aai.eval_batch" in multi_turn
+    assert "predict_fn=" not in multi_turn
+
+    judges = sources["10_layered_judges.ipynb"]
+    assert 'source_id=\\"group:domain-reviewers\\"' in judges
+    assert "MINIMUM_TOTAL_LABELS = 50" in judges
+    assert '\\"report_only\\"' in judges
+
+    cost = sources["11_cost_quality_tradeoff.ipynb"]
+    assert "target_inference_cost_usd" in cost
+    assert "evaluation_judge_cost_usd" in cost
+    assert "cost_coverage" in cost
+    assert "vendor model IDs" in cost
+
+    optimization = sources["12_agent_alignment_optimization.ipynb"]
+    assert "RUN_EXPERIMENTAL_OPTIMIZATION = False" in optimization
+    assert "active_prompt = mlflow.genai.load_prompt(SEED_PROMPT_URI)" in optimization
+    assert "max_metric_calls" in optimization
+    assert "set_prompt_alias" not in optimization
+
+
+def test_advanced_notebooks_run_all_on_the_credential_free_default_path():
+    pytest.importorskip("pandas")
+    for path in sorted((ROOT / "examples").glob("0[89]_*.ipynb")) + sorted(
+        (ROOT / "examples").glob("1[0-2]_*.ipynb")
+    ):
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        namespace = {"__name__": f"notebook_{path.stem}"}
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            code = compile(
+                "".join(cell.get("source", [])),
+                f"{path.name}:code-cell-{index}",
+                "exec",
+            )
+            exec(code, namespace)
+
+
 def test_offline_example_runs_with_zero_credentials():
     environment = dict(os.environ)
     for name in (
@@ -44,7 +152,7 @@ def test_offline_example_runs_with_zero_credentials():
     ):
         environment.pop(name, None)
     completed = subprocess.run(
-        [sys.executable, str(ROOT / "examples" / "offline_hello_world.py")],
+        [sys.executable, str(ROOT / "examples" / "00_offline_hello_world.py")],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -59,7 +167,7 @@ def test_offline_example_runs_with_zero_credentials():
 
 def test_first_llm_notebook_is_valid_safe_and_output_free():
     notebook = json.loads(
-        (ROOT / "examples" / "first_llm_call.ipynb").read_text(encoding="utf-8")
+        (ROOT / "examples" / "07_first_llm_call.ipynb").read_text(encoding="utf-8")
     )
     setup_helper_source = (ROOT / "examples" / "notebook_setup.py").read_text(
         encoding="utf-8"
@@ -80,7 +188,9 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert all(cell_ids)
     assert len(cell_ids) == len(set(cell_ids))
 
-    assert "prepare_notebook_environment(repo_root)" in code_source
+    assert "prepare_notebook_environment(" in code_source
+    assert "SEND_EVIDENCE_TO_DATABRICKS = False" in code_source
+    assert '"databricks" if SEND_EVIDENCE_TO_DATABRICKS else "local"' in code_source
     assert "preflight_databricks(environment)" in code_source
     assert "importlib.reload(lifecycle_support)" in code_source
     assert 'context.providers.model("general-chat")' in setup_helper_source
@@ -94,7 +204,11 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert "await stream.close()" in code_source
     assert "link_prompt_versions_to_trace(" in source
     assert 'trace_metadata.get("mlflow.sourceRun")' in code_source
-    assert 'trace_tags.get("mlflow.linkedPrompts"' in code_source
+    assert "client.search_traces(" in code_source
+    assert "include_spans=False" in code_source
+    assert 'trace_metadata.get("mlflow.trace.sizeStats"' in code_source
+    assert 'lineage_tags.get("mlflow.linkedPrompts"' in code_source
+    assert 'client.get_run(record["run_id"])' in code_source
 
     mermaid_blocks = re.findall(
         r"```mermaid\n(.*?)```",
@@ -177,7 +291,8 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert "PromptManager.set_alias()" in markdown_source
     assert "databricks-uc" in source
     assert "cross-store" in source.lower()
-    assert "403 AuthorizationFailure" in source
+    assert "FULL DATABRICKS EVIDENCE MODE ALREADY ACTIVE" in code_source
+    assert "experiment, runs, traces, and exact prompt versions" in markdown_source
     assert 'local_mlflow_dir = root / ".aai" / "local"' in setup_helper_source
     assert 'os.environ["MLFLOW_TRACKING_URI"] = tracking_uri' in setup_helper_source
     assert "inconclusive" in source.lower()
@@ -185,7 +300,7 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert "What this proved" in markdown_source
     assert "did not prove" in markdown_source.lower()
     assert "Troubleshooting" in markdown_source
-    assert "Run `make local-ui`" in source
+    assert "`make local-ui`" in source
 
     assert "PREFLIGHT PASSED" in source
     assert "A Databricks CLI profile" in source
@@ -210,7 +325,7 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     for index, cell in enumerate(code_cells):
         compile(
             "".join(cell.get("source", [])),
-            f"first_llm_call.ipynb:code-cell-{index}",
+            f"07_first_llm_call.ipynb:code-cell-{index}",
             "exec",
             flags=PyCF_ALLOW_TOP_LEVEL_AWAIT,
         )
@@ -218,7 +333,7 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
 
 def test_setup_notebook_is_explicit_output_free_and_uses_shared_helper():
     notebook = json.loads(
-        (ROOT / "examples" / "setup.ipynb").read_text(encoding="utf-8")
+        (ROOT / "examples" / "05_connected_setup.ipynb").read_text(encoding="utf-8")
     )
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
@@ -231,7 +346,7 @@ def test_setup_notebook_is_explicit_output_free_and_uses_shared_helper():
     assert "do not use `%run`" in source
     assert "SETUP PASSED" in source
     assert "PREFLIGHT PASSED" in source
-    assert "first_llm_call.ipynb" in source
+    assert "07_first_llm_call.ipynb" in source
     assert "DATABRICKS_TOKEN" not in source
     assert "AZURE_CLIENT_SECRET" not in source
     assert all(cell["execution_count"] is None for cell in code_cells)
@@ -239,13 +354,15 @@ def test_setup_notebook_is_explicit_output_free_and_uses_shared_helper():
     for index, cell in enumerate(code_cells):
         compile(
             "".join(cell.get("source", [])),
-            f"setup.ipynb:code-cell-{index}",
+            f"05_connected_setup.ipynb:code-cell-{index}",
             "exec",
         )
 
 
 def test_connected_first_call_uses_stable_adapter_and_bounded_sdk_trace():
-    source = (ROOT / "examples" / "connected_first_call.py").read_text(encoding="utf-8")
+    source = (ROOT / "examples" / "06_connected_first_call.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "ctx = bootstrap()" in source
     assert 'ctx.providers.model("general-chat")' in source
@@ -259,7 +376,7 @@ def test_connected_first_call_uses_stable_adapter_and_bounded_sdk_trace():
 
 def test_connected_setup_notebook_is_diagnostic_and_output_free():
     notebook = json.loads(
-        (ROOT / "examples" / "setup.ipynb").read_text(encoding="utf-8")
+        (ROOT / "examples" / "05_connected_setup.ipynb").read_text(encoding="utf-8")
     )
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
     source = "\n".join("".join(cell["source"]) for cell in code_cells)

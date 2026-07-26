@@ -212,9 +212,71 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
     ):
         assert runner.EXAMPLES[name].connected is True
         assert runner.EXAMPLES[name].local is True
+    assert runner.EXAMPLES["connected_setup"].connected is True
+    assert runner.EXAMPLES["connected_setup"].interactive is True
     assert runner.EXAMPLES["first_llm_call"].interactive is True
     assert runner.EXAMPLES["connected_first_call"].connected is True
     assert runner.EXAMPLES["connected_first_call"].interactive is False
+    for name in (
+        "tool_trajectory_evaluation",
+        "multi_turn_session_evaluation",
+        "layered_judges",
+        "cost_quality_tradeoff",
+        "agent_alignment_optimization",
+    ):
+        assert runner.EXAMPLES[name].connected is False
+        assert runner.EXAMPLES[name].local is True
+        assert runner.EXAMPLES[name].interactive is True
+
+    numbered_paths = [example.path for example in runner.EXAMPLES.values()]
+    assert [Path(path).name[:2] for path in numbered_paths] == [
+        f"{number:02d}" for number in range(13)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        ("first_trace", "first_trace"),
+        ("first_trace.py", "first_trace"),
+        ("01_first_trace.py", "first_trace"),
+        ("08-tool-trajectory-evaluation.ipynb", "tool_trajectory_evaluation"),
+    ),
+)
+def test_example_name_normalization_keeps_cli_aliases_and_accepts_numbered_files(
+    runner,
+    value,
+    expected,
+):
+    assert runner._normalize_example_name(value) == expected
+
+
+def test_prompt_registration_normalizes_unity_catalog_not_found(
+    lifecycle_support, monkeypatch
+):
+    mlflow = pytest.importorskip("mlflow")
+
+    class MissingPromptError(Exception):
+        error_code = "NOT_FOUND"
+
+    class PromptClient:
+        def get_prompt(self, name):
+            raise MissingPromptError(f"Prompt {name} does not exist")
+
+    registered = SimpleNamespace(version=1)
+    prompts = SimpleNamespace(
+        qualify=lambda name: f"dbx_dev.default.{name}",
+        register=lambda *args, **kwargs: registered,
+    )
+    monkeypatch.setattr(mlflow, "MlflowClient", lambda: PromptClient())
+
+    result = lifecycle_support.ensure_prompt_version(
+        prompts,
+        role="baseline",
+        template=lifecycle_support.BASELINE_PROMPT,
+    )
+
+    assert result is registered
 
 
 def test_connected_environment_routes_mlflow_to_databricks(runner, monkeypatch):
@@ -389,7 +451,7 @@ def test_local_run_never_checks_cloud_and_reports_workspace_path(
     assert "make workspace-connect" in output
 
 
-def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path):
+def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, runner):
     mlflow = pytest.importorskip("mlflow")
     local_dir = tmp_path / "local"
     tracking_uri = f"sqlite:///{local_dir / 'mlflow.db'}"
@@ -408,8 +470,9 @@ def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path):
     environment.pop("DATABRICKS_AUTH_TYPE", None)
 
     def execute(name: str) -> dict:
+        example_path = runner.EXAMPLES[name].path
         completed = subprocess.run(
-            [sys.executable, str(ROOT / "examples" / f"{name}.py")],
+            [sys.executable, str(ROOT / example_path)],
             cwd=ROOT,
             env=environment,
             capture_output=True,
@@ -475,7 +538,7 @@ def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path):
     assert payloads["first_evaluation"]["change"]["name"] == (
         "change-cited-earnings-summary-prompt-v2"
     )
-    evaluation_source = (ROOT / "examples" / "first_evaluation.py").read_text(
+    evaluation_source = (ROOT / runner.EXAMPLES["first_evaluation"].path).read_text(
         encoding="utf-8"
     )
     assert evaluation_source.index("gate.require_passed()") < evaluation_source.index(
@@ -583,12 +646,39 @@ providers:
     assert "export MLFLOW_REGISTRY_URI" not in output
     assert f"export AAI_PLATFORM_CONFIG={config}" in output
     assert (
-        f"Open {runner.ROOT / 'examples/first_llm_call.ipynb'} "
+        f"Open {runner.ROOT / runner.EXAMPLES['first_llm_call'].path} "
         "in your preferred notebook editor."
     ) in output
     assert f"Select this Python kernel: {sys.executable}" in output
     assert "A Databricks CLI profile is not required" in output
-    assert "routes MLflow tracking and prompt registration to .aai/local" in output
+    assert "SEND_EVIDENCE_TO_DATABRICKS = False" in output
+    assert "store prompts, runs, and traces in Databricks" in output
+
+
+def test_interactive_local_lab_prints_only_local_evidence_exports(
+    runner, tmp_path, monkeypatch, capsys
+):
+    local_dir = tmp_path / ".aai" / "local"
+    monkeypatch.setattr(runner, "LOCAL_DIR", local_dir)
+    monkeypatch.setattr(runner, "LOCAL_DB", local_dir / "mlflow.db")
+    monkeypatch.setattr(runner, "LOCAL_ARTIFACTS", local_dir / "mlruns")
+    monkeypatch.setattr(runner, "_module_issues", lambda example: [])
+
+    assert (
+        runner.run_example(
+            "08_tool_trajectory_evaluation.ipynb",
+            destination="local",
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "export MLFLOW_TRACKING_URI=" in output
+    assert "export MLFLOW_REGISTRY_URI=" in output
+    assert "export AAI_PLATFORM_CONFIG=" in output
+    assert "export DATABRICKS_HOST=" not in output
+    assert "keyless Azure CLI" not in output
+    assert "credential-free and makes no model request" in output
 
 
 def test_makefile_exposes_single_command_onboarding():

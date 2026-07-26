@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,6 +79,7 @@ def make_environment(tmp_path: Path) -> notebook_setup.NotebookEnvironment:
         tracking_uri="sqlite:///local.db",
         registry_uri="sqlite:///local.db",
         artifact_root=tmp_path / "mlruns",
+        evidence_destination=notebook_setup.EvidenceDestination.LOCAL,
         mlflow=mlflow,
     )
 
@@ -112,17 +114,27 @@ def fake_context(*, deployment="ready-chat", task="llm/v1/chat", ready="READY"):
             me=lambda: SimpleNamespace(user_name="developer@example.invalid")
         ),
         serving_endpoints=endpoints,
+        catalogs=SimpleNamespace(
+            get=lambda name: SimpleNamespace(name=name),
+            list=lambda: [SimpleNamespace(name="dbx_dev")],
+        ),
+        schemas=SimpleNamespace(
+            get=lambda full_name: SimpleNamespace(full_name=full_name),
+            list=lambda catalog_name: [SimpleNamespace(name="default")],
+        ),
     )
     model = SimpleNamespace(model=deployment)
     return SimpleNamespace(
         workspace=workspace,
         settings=SimpleNamespace(
+            catalog="dbx_dev",
+            schema="default",
             models={
                 "general-chat": {
                     "provider": "databricks",
                     "deployment": deployment,
                 }
-            }
+            },
         ),
         providers=SimpleNamespace(model=lambda logical_name: model),
         tags=SimpleNamespace(),
@@ -162,12 +174,48 @@ def test_prepare_environment_routes_all_learning_evidence_locally(
     assert environment.tracking_uri == expected_uri
     assert environment.registry_uri == expected_uri
     assert environment.artifact_root == root / ".aai" / "local" / "mlruns"
+    assert environment.evidence_destination is notebook_setup.EvidenceDestination.LOCAL
     assert environment.artifact_root.is_dir()
     assert notebook_setup.os.environ["MLFLOW_TRACKING_URI"] == expected_uri
     assert notebook_setup.os.environ["MLFLOW_REGISTRY_URI"] == expected_uri
     assert notebook_setup.os.environ["DATABRICKS_AUTH_TYPE"] == "azure-cli"
     assert str(root) in notebook_setup.sys.path
     assert "SETUP PASSED" in capsys.readouterr().out
+
+
+def test_prepare_environment_routes_prompts_runs_and_traces_to_databricks(
+    tmp_path, monkeypatch, capsys
+):
+    root, config = make_repo(tmp_path)
+    mlflow = FakeMlflow()
+    runtime = SimpleNamespace(find_platform_config=lambda start: config)
+
+    monkeypatch.setattr(notebook_setup.sys, "path", list(notebook_setup.sys.path))
+    monkeypatch.setattr(notebook_setup, "_missing_modules", lambda: [])
+
+    def import_module(name):
+        if name == "aai_core.runtime":
+            return runtime
+        if name == "mlflow":
+            return mlflow
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(notebook_setup.importlib, "import_module", import_module)
+
+    environment = notebook_setup.prepare_notebook_environment(
+        root,
+        evidence_destination="databricks",
+    )
+
+    assert environment.tracking_uri == "databricks"
+    assert environment.registry_uri == "databricks-uc"
+    assert (
+        environment.evidence_destination
+        is notebook_setup.EvidenceDestination.DATABRICKS
+    )
+    assert notebook_setup.os.environ["MLFLOW_TRACKING_URI"] == "databricks"
+    assert notebook_setup.os.environ["MLFLOW_REGISTRY_URI"] == "databricks-uc"
+    assert "Databricks-managed" in capsys.readouterr().out
 
 
 def test_prepare_environment_reports_missing_kernel_modules(tmp_path, monkeypatch):
@@ -210,6 +258,34 @@ def test_preflight_resolves_model_only_after_access_checks(
     assert connected.experiment_name == "/Shared/earnings"
     assert connected.endpoint["state"]["ready"] == "READY"
     assert "PREFLIGHT PASSED" in capsys.readouterr().out
+
+
+def test_remote_preflight_verifies_prompt_namespace(tmp_path, monkeypatch):
+    environment = replace(
+        make_environment(tmp_path),
+        tracking_uri="databricks",
+        registry_uri="databricks-uc",
+        evidence_destination=notebook_setup.EvidenceDestination.DATABRICKS,
+    )
+    context = fake_context()
+    monkeypatch.setenv("DATABRICKS_HOST", "https://workspace.example")
+    monkeypatch.setattr(
+        notebook_setup.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(
+            lifecycle_experiment_name=lambda ctx: "/Shared/earnings"
+        ),
+    )
+
+    connected = notebook_setup.preflight_databricks(
+        environment,
+        which=lambda name: "/usr/bin/az",
+        run_command=lambda *args, **kwargs: azure_result(),
+        bootstrap_fn=lambda path: context,
+    )
+
+    assert connected.context.settings.catalog == "dbx_dev"
+    assert connected.context.settings.schema == "default"
 
 
 @pytest.mark.parametrize(

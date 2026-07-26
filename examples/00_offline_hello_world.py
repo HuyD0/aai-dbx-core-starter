@@ -7,7 +7,7 @@ explicitly unknown cost, and secret redaction. It also introduces the
 baseline/change/result/decision/release vocabulary used by the remaining
 examples. Run it before any cloud onboarding:
 
-    python examples/offline_hello_world.py
+    python examples/00_offline_hello_world.py
 """
 
 from __future__ import annotations

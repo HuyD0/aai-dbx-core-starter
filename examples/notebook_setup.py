@@ -16,6 +16,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -34,6 +35,13 @@ _REQUIRED_IDENTIFIERS = (
 )
 
 
+class EvidenceDestination(StrEnum):
+    """Supported stores for notebook prompt, run, and trace evidence."""
+
+    LOCAL = "local"
+    DATABRICKS = "databricks"
+
+
 @dataclass(frozen=True)
 class NotebookEnvironment:
     """Local evidence destinations and non-secret platform configuration."""
@@ -44,6 +52,7 @@ class NotebookEnvironment:
     tracking_uri: str
     registry_uri: str
     artifact_root: Path
+    evidence_destination: EvidenceDestination
     mlflow: ModuleType
 
 
@@ -108,10 +117,20 @@ def _load_identifiers(repo_root: Path) -> dict[str, str]:
 
 def prepare_notebook_environment(
     repo_root: str | Path | None = None,
+    *,
+    evidence_destination: EvidenceDestination | str = EvidenceDestination.LOCAL,
 ) -> NotebookEnvironment:
-    """Configure safe local MLflow evidence and keyless Databricks auth."""
+    """Configure one compatible MLflow evidence backend and Databricks auth."""
 
     root = find_repo_root(repo_root)
+    try:
+        destination = EvidenceDestination(evidence_destination)
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in EvidenceDestination)
+        raise ValueError(
+            f"Unsupported evidence destination {evidence_destination!r}; "
+            f"choose one of: {choices}."
+        ) from exc
     # Make imports deterministic even when VS Code starts the kernel in examples/.
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -136,28 +155,34 @@ def prepare_notebook_environment(
     local_mlflow_dir = root / ".aai" / "local"
     artifact_root = local_mlflow_dir / "mlruns"
     artifact_root.mkdir(parents=True, exist_ok=True)
-    tracking_uri = f"sqlite:///{local_mlflow_dir / 'mlflow.db'}"
+    if destination is EvidenceDestination.DATABRICKS:
+        tracking_uri = "databricks"
+        registry_uri = "databricks-uc"
+    else:
+        tracking_uri = f"sqlite:///{local_mlflow_dir / 'mlflow.db'}"
+        registry_uri = tracking_uri
 
-    # Keep learning evidence local even though the six LLM calls are remote.
+    # Keep tracking and registry compatible so exact run/trace/prompt links are valid.
     os.environ["AAI_PLATFORM_CONFIG"] = str(config_path)
     os.environ["AAI_EXAMPLE_LOCAL_DIR"] = str(local_mlflow_dir)
     os.environ["AAI_EXAMPLE_ARTIFACT_ROOT"] = str(artifact_root)
     os.environ["DATABRICKS_HOST"] = identifiers["databricks_host"]
     os.environ["DATABRICKS_AUTH_TYPE"] = "azure-cli"
     os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
-    os.environ["MLFLOW_REGISTRY_URI"] = tracking_uri
+    os.environ["MLFLOW_REGISTRY_URI"] = registry_uri
 
     mlflow = importlib.import_module("mlflow")
     mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_registry_uri(tracking_uri)
+    mlflow.set_registry_uri(registry_uri)
 
     environment = NotebookEnvironment(
         repo_root=root,
         config_path=config_path,
         identifiers=identifiers,
         tracking_uri=tracking_uri,
-        registry_uri=tracking_uri,
+        registry_uri=registry_uri,
         artifact_root=artifact_root,
+        evidence_destination=destination,
         mlflow=mlflow,
     )
     print("SETUP PASSED")
@@ -167,7 +192,12 @@ def prepare_notebook_environment(
             "config": str(environment.config_path),
             "tracking_uri": mlflow.get_tracking_uri(),
             "registry_uri": mlflow.get_registry_uri(),
-            "artifact_root": str(environment.artifact_root),
+            "evidence_destination": destination.value,
+            "artifact_root": (
+                str(environment.artifact_root)
+                if destination is EvidenceDestination.LOCAL
+                else "Databricks-managed"
+            ),
         }
     )
     return environment
@@ -275,6 +305,41 @@ def preflight_databricks(
             f"'databricks'; found {provider!r}."
         )
 
+    if environment.evidence_destination is EvidenceDestination.DATABRICKS:
+        catalog = str(context.settings.catalog)
+        schema = str(context.settings.schema)
+        try:
+            workspace.catalogs.get(catalog)
+        except Exception as exc:
+            visible_catalogs = ", ".join(
+                sorted(
+                    str(item.name)
+                    for item in workspace.catalogs.list()
+                    if getattr(item, "name", None)
+                )
+            )
+            raise RuntimeError(
+                f"Unity Catalog catalog {catalog!r} does not exist or is not "
+                "visible. Set `platform.catalog` in aai-platform.yml to an "
+                f"approved catalog. Visible catalogs: {visible_catalogs or 'none'}."
+            ) from exc
+        prompt_namespace = f"{catalog}.{schema}"
+        try:
+            workspace.schemas.get(prompt_namespace)
+        except Exception as exc:
+            visible_schemas = ", ".join(
+                sorted(
+                    str(item.name)
+                    for item in workspace.schemas.list(catalog_name=catalog)
+                    if getattr(item, "name", None)
+                )
+            )
+            raise RuntimeError(
+                f"Unity Catalog schema {prompt_namespace!r} does not exist or is "
+                "not visible. Set `platform.schema` in aai-platform.yml to an "
+                f"approved schema. Visible schemas: {visible_schemas or 'none'}."
+            ) from exc
+
     deployment = str(model_config.get("deployment", ""))
     if not deployment or deployment.startswith("replace-"):
         choices = ", ".join(_ready_chat_endpoints(workspace)) or "none visible"
@@ -322,6 +387,12 @@ def preflight_databricks(
             "deployment": model.model,
             "endpoint_state": endpoint.get("state", {}).get("ready"),
             "experiment": experiment_name,
+            "evidence_destination": environment.evidence_destination.value,
+            "prompt_namespace": (
+                f"{context.settings.catalog}.{context.settings.schema}"
+                if environment.evidence_destination is EvidenceDestination.DATABRICKS
+                else "local SQLite"
+            ),
         }
     )
     return preflight

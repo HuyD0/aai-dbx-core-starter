@@ -1,4 +1,4 @@
-"""Step 3: register immutable prompts and bind exact versions to a run.
+"""Lifecycle step 3: register immutable prompts and bind exact versions to a run.
 
 No mutable alias is used as evaluation or release evidence. Re-running the
 example reuses an identical version by digest instead of creating duplicates.

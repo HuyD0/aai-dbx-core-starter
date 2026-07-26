@@ -43,13 +43,13 @@ EXAMPLES = {
     for example in (
         Example(
             name="offline_hello_world",
-            path="examples/offline_hello_world.py",
+            path="examples/00_offline_hello_world.py",
             description="SDK contracts with in-memory fakes",
             connected=False,
         ),
         Example(
             name="first_trace",
-            path="examples/first_trace.py",
+            path="examples/01_first_trace.py",
             description="Governed baseline trace with bounded cost/usage evidence",
             connected=True,
             local=True,
@@ -58,7 +58,7 @@ EXAMPLES = {
         ),
         Example(
             name="first_experiment",
-            path="examples/first_experiment.py",
+            path="examples/02_first_experiment.py",
             description="Reproducible baseline/change MLflow comparison",
             connected=True,
             local=True,
@@ -67,7 +67,7 @@ EXAMPLES = {
         ),
         Example(
             name="first_prompt",
-            path="examples/first_prompt.py",
+            path="examples/03_first_prompt.py",
             description="Exact prompt versions, digests, links, and safe render trace",
             connected=True,
             local=True,
@@ -76,7 +76,7 @@ EXAMPLES = {
         ),
         Example(
             name="first_evaluation",
-            path="examples/first_evaluation.py",
+            path="examples/04_first_evaluation.py",
             description="Deterministic MLflow GenAI gate and release decision",
             connected=True,
             local=True,
@@ -88,8 +88,20 @@ EXAMPLES = {
             ),
         ),
         Example(
+            name="connected_setup",
+            path="examples/05_connected_setup.ipynb",
+            description="Kernel, keyless identity, workspace, and endpoint preflight",
+            connected=True,
+            modules=("databricks.sdk", "databricks_openai", "mlflow", "pandas"),
+            config_fields=(
+                "providers.models.general-chat.deployment",
+                "platform.experiment_name",
+            ),
+            interactive=True,
+        ),
+        Example(
             name="connected_first_call",
-            path="examples/connected_first_call.py",
+            path="examples/06_connected_first_call.py",
             description="Real governed LLM call through stable model.generate()",
             connected=True,
             modules=("databricks_openai", "mlflow"),
@@ -100,7 +112,7 @@ EXAMPLES = {
         ),
         Example(
             name="first_llm_call",
-            path="examples/first_llm_call.ipynb",
+            path="examples/07_first_llm_call.ipynb",
             description=(
                 "Advanced native async streaming comparison with MLflow autologging"
             ),
@@ -111,6 +123,50 @@ EXAMPLES = {
                 "platform.catalog",
                 "platform.schema",
             ),
+            interactive=True,
+        ),
+        Example(
+            name="tool_trajectory_evaluation",
+            path="examples/08_tool_trajectory_evaluation.ipynb",
+            description="Exact tool-call trajectories and critical-case gates",
+            connected=False,
+            local=True,
+            modules=("pandas",),
+            interactive=True,
+        ),
+        Example(
+            name="multi_turn_session_evaluation",
+            path="examples/09_multi_turn_session_evaluation.ipynb",
+            description="Session-scoped conversation metrics and judge handoff",
+            connected=False,
+            local=True,
+            modules=("pandas",),
+            interactive=True,
+        ),
+        Example(
+            name="layered_judges",
+            path="examples/10_layered_judges.ipynb",
+            description="Deterministic rules, nuanced judges, and held-out agreement",
+            connected=False,
+            local=True,
+            modules=("pandas",),
+            interactive=True,
+        ),
+        Example(
+            name="cost_quality_tradeoff",
+            path="examples/11_cost_quality_tradeoff.ipynb",
+            description="Quality-first logical-model cost comparison",
+            connected=False,
+            local=True,
+            modules=("pandas",),
+            interactive=True,
+        ),
+        Example(
+            name="agent_alignment_optimization",
+            path="examples/12_agent_alignment_optimization.ipynb",
+            description="Disabled-by-default aligned-judge and optimizer workflow",
+            connected=False,
+            local=True,
             interactive=True,
         ),
     )
@@ -151,6 +207,9 @@ def _local_environment() -> dict[str, str]:
 
 def _normalize_example_name(value: str) -> str:
     name = Path(value).stem.replace("-", "_")
+    prefix, separator, unnumbered = name.partition("_")
+    if separator and len(prefix) == 2 and prefix.isdigit():
+        name = unnumbered
     if name not in EXAMPLES:
         choices = ", ".join(EXAMPLES)
         raise ValueError(f"Unknown example {value!r}. Choose one of: {choices}")
@@ -320,27 +379,40 @@ def _print_interactive_instructions(
     example: Example,
     environment: dict[str, str],
 ) -> None:
-    print(f"{example.path} is interactive. Export the configured environment:")
-    names = [
-        "DATABRICKS_HOST",
-        "DATABRICKS_AUTH_TYPE",
-        "AAI_PLATFORM_CONFIG",
-    ]
-    if example.name != "first_llm_call":
-        names[2:2] = ["MLFLOW_TRACKING_URI", "MLFLOW_REGISTRY_URI"]
+    print(f"{example.path} is interactive.")
+    names: list[str] = []
+    if example.connected:
+        print("Export the configured environment:")
+        names = [
+            "DATABRICKS_HOST",
+            "DATABRICKS_AUTH_TYPE",
+            "AAI_PLATFORM_CONFIG",
+        ]
+        if example.name not in {"connected_setup", "first_llm_call"}:
+            names[2:2] = ["MLFLOW_TRACKING_URI", "MLFLOW_REGISTRY_URI"]
+    elif "MLFLOW_TRACKING_URI" in environment:
+        print("The local runner selected this evidence environment:")
+        names = [
+            "MLFLOW_TRACKING_URI",
+            "MLFLOW_REGISTRY_URI",
+            "AAI_PLATFORM_CONFIG",
+        ]
     for name in names:
         print(f"export {name}={shlex.quote(environment[name])}")
     print(f"Open {ROOT / example.path} in your preferred notebook editor.")
     print(f"Select this Python kernel: {sys.executable}")
-    print(
-        "A Databricks CLI profile is not required: the notebook uses the "
-        "keyless Azure CLI authentication configured above."
-    )
+    if example.connected:
+        print(
+            "A Databricks CLI profile is not required: the notebook uses the "
+            "keyless Azure CLI authentication configured above."
+        )
+    else:
+        print("The default path is credential-free and makes no model request.")
     if example.name == "first_llm_call":
         print(
-            "The notebook deliberately routes MLflow tracking and prompt "
-            "registration to .aai/local; remote prompt publishing is an "
-            "explicit guarded section."
+            "Keep SEND_EVIDENCE_TO_DATABRICKS = False for local MLflow, or set "
+            "it to True and restart the kernel to store prompts, runs, and "
+            "traces in Databricks."
         )
 
 
@@ -458,12 +530,12 @@ def list_examples() -> int:
     for example in EXAMPLES.values():
         mode = "workspace"
         if not example.connected:
-            mode = "offline"
+            mode = "local" if example.local else "offline"
         elif example.local:
             mode = "local → workspace"
         if example.interactive:
             mode += ", interactive"
-        print(f"  {example.name:<22} [{mode}] {example.description}")
+        print(f"  {example.name:<30} [{mode}] {example.description}")
     return 0
 
 

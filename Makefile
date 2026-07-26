@@ -59,9 +59,9 @@ quickstart: install ## Prove a fresh clone works without credentials.
 local-start: examples-install ## Write a trace to a clean, repository-local MLflow store.
 	$(PYTHON) scripts/examples.py local first_trace
 
-local-example: examples-install ## Run one local lifecycle example: make local-example EXAMPLE=first_evaluation
+local-example: examples-install ## Run one local lifecycle example or lab.
 	@test -n "$(EXAMPLE)" || { \
-		echo "EXAMPLE is required. Choose first_trace, first_experiment, first_prompt, or first_evaluation."; \
+		echo "EXAMPLE is required. Run 'make examples-list' to see valid names."; \
 		exit 2; \
 	}
 	$(PYTHON) scripts/examples.py local "$(EXAMPLE)"

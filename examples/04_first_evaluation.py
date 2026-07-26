@@ -1,4 +1,4 @@
-"""Step 4: run a deterministic MLflow GenAI comparison and release gate.
+"""Lifecycle step 4: run a deterministic MLflow GenAI comparison and release gate.
 
 The custom scorers are native MLflow APIs and require no LLM judge. A connected
 project may add an approved judge only after calibrating it against held-out

@@ -1,4 +1,4 @@
-"""Make one governed call through aai-core's stable synchronous adapter.
+"""Lifecycle step 6: make one governed call through the stable synchronous adapter.
 
 This connected teaching track uses a real configured model. Run it outside an
 event loop with:
