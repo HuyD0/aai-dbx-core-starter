@@ -22,7 +22,8 @@ contracts without hiding useful differences between providers.
 
 ```text
 src/aai_core/               installable platform SDK
-templates/agentic-rag/      custom Databricks project template
+templates/                  five lifecycle-ladder Databricks project templates
+templates/_shared/          canonical scaffold synced into every template
 examples/                   focused learning examples
 resources/                  this repository's bundle smoke job
 infra/                      human-run keyless CI identity bootstrap
@@ -72,23 +73,30 @@ After authenticating with Azure CLI and Databricks unified authentication:
 aai-core doctor --cloud
 ```
 
-## Generate an Agentic RAG project
+## Generate a project
+
+Five templates cover the lifecycle ladder; pick by what the team is
+building:
+
+| Template | Use when you want |
+|---|---|
+| `experiment-starter` | Reproducible MLflow experiments (LLM-free): dataset lineage, tags, metrics, artifacts, deterministic gate |
+| `prompt-app` | A governed prompt lifecycle: versioned registration, pinned-version LLM-judge evaluation, gated alias promotion |
+| `evaluation-project` | A standalone eval harness for an existing app/endpoint: UC datasets, reusable scorers, baselines, CI regression gate, published results |
+| `rag-app` | Governed RAG: chunking pipeline, declared vector index (or Azure AI Search), traced grounded generation, groundedness gate |
+| `agent-app` | Tool-using agents: SDK tool loop, structured outputs, trajectory-aware evals, feedback, gated Model Serving deploy, monitoring |
 
 ```bash
-databricks bundle init ./templates/agentic-rag \
-  --output-dir ../my-agent
+databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+  --template-dir templates/<template-name> --output-dir my-project
 ```
 
-The generated project contains:
-
-- An exploration notebook.
-- A packaged, framework-neutral RAG agent.
-- Logical model, embedding, and retrieval configuration.
-- MLflow tracing and normalized retriever documents.
-- Prompt registration.
-- An offline evaluation gate.
-- A wheel-based Databricks job.
-- Keyless local and CI setup instructions.
+Every generated project shares the same spine: pinned checksum-verified
+`aai-core`, the 9 mandatory cost tags on bundle presets and job clusters,
+credential-free PR CI with a deterministic gate tier, a keyless OIDC deploy
+workflow, hermetic tests on `aai_core.testing` fakes, and an
+`.aai-template.json` provenance stamp. (`agentic-rag` retired into
+`rag-app` + `agent-app` — see `templates/agentic-rag/README.md`.)
 
 ## Publish the private SDK
 

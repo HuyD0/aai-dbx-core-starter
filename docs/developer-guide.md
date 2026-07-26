@@ -11,18 +11,27 @@ python examples/offline_hello_world.py
 
 ## 1. Generate a project
 
-Run the Agentic RAG bundle template and answer its non-secret configuration
-questions. From your own machine (the normal case), point `bundle init` at
-this repository's Git URL:
+Pick the template that matches what you are building (each wizard asks only
+non-secret configuration; the README's template table has the decision
+guide):
+
+- `experiment-starter` — reproducible MLflow experiments (LLM-free)
+- `prompt-app` — governed prompt lifecycle with judged, pinned-version evals
+- `evaluation-project` — standalone eval harness for an existing app/endpoint
+- `rag-app` — governed retrieval-augmented generation
+- `agent-app` — tool-using agents with gated serving
+
+From your own machine (the normal case), point `bundle init` at this
+repository's Git URL:
 
 ```bash
 databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
-  --template-dir templates/agentic-rag --output-dir my-agent
-cd my-agent
+  --template-dir templates/rag-app --output-dir my-project
+cd my-project
 ```
 
 (Inside a checkout of this monorepo, `databricks bundle init
-./templates/agentic-rag` works too.)
+./templates/<template-name>` works too.)
 
 ## 2. Authenticate keylessly
 

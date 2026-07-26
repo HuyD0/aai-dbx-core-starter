@@ -39,7 +39,7 @@ Also update, as pointed out by the failing cross-check tests:
 - `databricks.yml`: `targets.dev.workspace.host` (must be a literal — the CLI
   forbids variables in authentication fields) and the
   `job_compute_policy_id` variable default.
-- `templates/agentic-rag/databricks_template_schema.json`: `workspace_host`,
+- every `templates/*/databricks_template_schema.json`: `workspace_host`,
   `compute_policy_id`, and `aai_core_volume` defaults.
 - `infra/backend.tf`: enterprise state storage account/container/key — or
   delete the file to bootstrap with local state.

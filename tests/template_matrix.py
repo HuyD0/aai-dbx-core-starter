@@ -186,24 +186,4 @@ COMBOS = {
             "expect_absent": [],
         },
     ],
-    "agentic-rag": [
-        {
-            "name": "dbx-azure-search",
-            "overrides": {
-                "project_name": "test-agent",
-                "model_provider": "databricks",
-                "model_deployment": "chat",
-                "retrieval_provider": "azure_ai_search",
-                "search_endpoint": "https://search.search.windows.net",
-                "search_index": "knowledge",
-                "embedding_deployment": "embedding",
-            },
-            "expect_present": [
-                "src/app/agent.py",
-                "evals/evaluate.py",
-                "scripts/promote_prompt.py",
-            ],
-            "expect_absent": [],
-        },
-    ],
 }

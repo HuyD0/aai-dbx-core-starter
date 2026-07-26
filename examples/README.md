@@ -26,3 +26,13 @@ cp aai-platform.example.yml aai-platform.yml  # then replace the placeholders
 ```
 
 No example ever needs a PAT, client secret, or API key.
+
+## Where each example leads
+
+| Example | Graduates into |
+|---|---|
+| `first_experiment.py` | `templates/experiment-starter` |
+| `first_prompt.py` | `templates/prompt-app` |
+| `first_evaluation.py` | `templates/evaluation-project` |
+| `first_llm_call.ipynb`, `first_trace.py` | `templates/rag-app` / `templates/agent-app` |
+| `offline_hello_world.py` | every template's hermetic test pattern |
