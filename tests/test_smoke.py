@@ -1,5 +1,6 @@
 """Credential-free regression tests for the platform's security boundaries."""
 
+import json
 import re
 import runpy
 from pathlib import Path
@@ -20,6 +21,24 @@ def load_yaml(relative_path):
 def test_sample_notebook_runs(capsys):
     runpy.run_path(str(ROOT / "src" / "notebooks" / "sample_etl.py"))
     assert capsys.readouterr().out.strip().endswith("package import verified")
+
+
+def test_first_llm_notebook_is_valid_safe_and_output_free():
+    notebook = json.loads(
+        (ROOT / "examples" / "first_llm_call.ipynb").read_text(encoding="utf-8")
+    )
+    assert notebook["nbformat"] == 4
+    assert notebook["cells"]
+
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    assert 'ctx.providers.model("general-chat")' in source
+    assert "model.generate(" in source
+    assert "DATABRICKS_TOKEN" not in source
+    assert "AZURE_CLIENT_SECRET" not in source
+
+    code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    assert all(cell["execution_count"] is None for cell in code_cells)
+    assert all(cell["outputs"] == [] for cell in code_cells)
 
 
 def test_dev_target_is_pinned_to_dev_workspace():
