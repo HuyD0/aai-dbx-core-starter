@@ -32,6 +32,35 @@ variables:
     description: Constrained Job Compute policy that job clusters must use.
     default: "0005F2031B6D2319"
 
+  # Platform console (resources/optional/platform_console.yml). These are declared here so
+  # the bundle parses whether or not the console is opted in; nothing is deployed until
+  # that file is added to `include` above. See docs/platform-console.md.
+  sdk_artifact_volume:
+    description: SDK artifact volume path the console reports on.
+    default: /Volumes/dbx_dev/dbx_platform/python_packages
+  sdk_artifact_volume_full_name:
+    description: >-
+      The same volume in dotted Unity Catalog form, which is what an app resource binding
+      requires. tests/test_app_resource.py derives this from sdk_artifact_volume so the
+      two spellings cannot drift.
+    default: dbx_dev.dbx_platform.python_packages
+  app_suffix:
+    description: >-
+      Distinguishes app instances. App names are workspace-global (the CLI applies no
+      development-mode prefix to apps), so CI and any individual deployer must differ.
+    default: dev
+  app_usage_policy_id:
+    description: >-
+      Serverless usage policy carrying the standard tag set. An app resource has no tags
+      field, so this is its only cost-attribution surface. Replace the placeholder with a
+      real id from the platform identity owner BEFORE opting the console in.
+    default: replace-with-usage-policy-id
+  template_repo:
+    description: >-
+      Git URL of this template hub, used to build the console's `bundle init` command.
+      Empty renders the in-checkout relative form instead.
+    default: https://github.com/HuyD0/aai-dbx-core-starter
+
 artifacts:
   default:
     type: whl

@@ -140,3 +140,32 @@ def test_hosted_config_never_reads_the_repository_fixture():
     )
     assert loaded.hosted is True
     assert "job_compute_policy_id" not in loaded.identifiers
+
+
+def test_workspace_probes_do_not_run_on_the_event_loop(config):
+    """A blocking SDK call on an async route would stall a single-worker server.
+
+    app.yaml starts one uvicorn worker, so a checks route running its blocking
+    Databricks calls on the event loop would take health, navigation and generation
+    down for the whole SDK timeout. Asserting the route is a plain `def` — which
+    Starlette runs in its worker threadpool — is the property that prevents that.
+    """
+    import asyncio
+    import inspect
+
+    app = create_app(config, probe=WorkspaceProbe(_FakeWorkspace()))
+    route = next(r for r in app.routes if getattr(r, "path", "") == "/api/checks/run")
+    assert not asyncio.iscoroutinefunction(
+        route.endpoint
+    ), "the checks route must be a sync def so blocking SDK calls run in a threadpool"
+    assert not inspect.isasyncgenfunction(route.endpoint)
+
+
+def test_content_is_parsed_once_rather_than_per_request(config):
+    """Re-reading the content YAML per request is blocking disk I/O on the loop."""
+    app = create_app(config, probe=WorkspaceProbe(_FakeWorkspace()))
+    client = ASGIClient(app)
+    before = app.state.tracks
+    client.get("/")
+    client.get("/api/content")
+    assert app.state.tracks is before, "tracks must not be re-rendered per request"

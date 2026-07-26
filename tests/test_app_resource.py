@@ -5,6 +5,7 @@ never sees. That is a second dependency channel, and the only thing stopping it 
 from the versions this repository actually tests is a test.
 """
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -18,6 +19,13 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 REQUIREMENTS = APP_DIR / "requirements.txt"
 APP_YAML = APP_DIR / "app.yaml"
+RESOURCE = ROOT / "resources" / "optional" / "platform_console.yml"
+IDENTIFIERS = json.loads((ROOT / "platform-identifiers.json").read_text())
+
+
+def _app_resource() -> dict:
+    document = yaml.safe_load(RESOURCE.read_text(encoding="utf-8"))
+    return document["resources"]["apps"]["platform_console"]
 
 
 def _pins() -> dict[str, str]:
@@ -162,3 +170,75 @@ def test_workflow_directory_contains_no_yaml_extension_files():
     assert not list(
         WORKFLOWS.glob("*.yaml")
     ), "workflows must use .yml so the pinning and credential guards see them"
+
+
+def test_app_resource_is_outside_the_auto_included_glob():
+    """databricks.yml globs `resources/*.yml`. The console must not be swept in: the CI
+    principal has no app permission, so an auto-deployed app would fail every push to
+    main and take the sample-job deployment down with it."""
+    bundle = yaml.safe_load((ROOT / "databricks.yml").read_text(encoding="utf-8"))
+    includes = bundle["include"]
+    assert RESOURCE.parent.name == "optional"
+    assert (
+        "resources/optional/platform_console.yml" not in includes
+    ), "opting the console in is a deliberate act gated on external grants"
+    # The glob is one level deep, so a nested file is genuinely not matched.
+    assert not list((ROOT / "resources").glob("*.yml")) == [RESOURCE]
+
+
+def test_app_resource_carries_cost_attribution_and_no_tags():
+    """An app has no tags field, so a usage policy is the only attribution surface."""
+    app = _app_resource()
+    assert "tags" not in app and "custom_tags" not in app
+    assert app["usage_policy_id"] == "${var.app_usage_policy_id}"
+
+
+def test_app_name_is_legal_and_not_workspace_global():
+    """App names allow only lowercase alphanumerics and hyphens, and get no
+    development-mode prefix, so they must be disambiguated explicitly."""
+    name = _app_resource()["name"]
+    assert "${var.app_suffix}" in name
+    literal = name.replace("${var.app_suffix}", "x")
+    assert re.fullmatch(r"[a-z0-9-]+", literal), f"illegal app name: {literal}"
+
+
+def test_app_source_code_path_points_at_the_console():
+    assert (RESOURCE.parent / _app_resource()["source_code_path"]).resolve() == APP_DIR
+
+
+def test_app_resource_command_matches_app_yaml():
+    """Two sources of the start command would drift silently."""
+    from_yaml = yaml.safe_load(APP_YAML.read_text(encoding="utf-8"))["command"]
+    assert _app_resource()["config"]["command"] == from_yaml
+
+
+def test_app_resource_supplies_every_identifier_the_console_reads():
+    """The container cannot read platform-identifiers.json, so each AAI_CONSOLE_* value
+    must arrive through the bundle rather than be baked into the source."""
+    env = {e["name"]: e["value"] for e in _app_resource()["config"]["env"]}
+    assert set(env) == {
+        "AAI_CONSOLE_DATABRICKS_HOST",
+        "AAI_CONSOLE_SDK_ARTIFACT_VOLUME",
+        "AAI_CONSOLE_JOB_COMPUTE_POLICY_ID",
+        "AAI_CONSOLE_TEMPLATE_REPO",
+    }
+    for value in env.values():
+        assert value.startswith("${"), f"{value!r} must come from a bundle variable"
+
+
+def test_dotted_volume_name_is_derived_from_the_identifier_fixture():
+    """Two spellings of one volume is the drift the fixture exists to prevent."""
+    bundle = yaml.safe_load((ROOT / "databricks.yml").read_text(encoding="utf-8"))
+    variables = bundle["variables"]
+    path = IDENTIFIERS["sdk_artifact_volume"]
+    assert variables["sdk_artifact_volume"]["default"] == path
+    assert variables["sdk_artifact_volume_full_name"]["default"] == ".".join(
+        path.strip("/").split("/")[1:]
+    )
+
+
+def test_volume_binding_is_read_only():
+    """The console reads no application data; anything beyond READ_VOLUME is excess."""
+    binding = _app_resource()["resources"][0]["uc_securable"]
+    assert binding["securable_type"] == "VOLUME"
+    assert binding["permission"] == "READ_VOLUME"

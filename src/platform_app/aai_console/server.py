@@ -76,10 +76,13 @@ def create_app(
         "/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static"
     )
 
+    # Content is static for the life of the process, so parse and render it once.
+    # Re-reading the YAML per request would put blocking disk I/O on the event loop of a
+    # single-worker server for no benefit.
+    app.state.tracks = _render_tracks(app.state.registry.tracks(), app.state.config)
+
     def tracks_for(request: Request) -> tuple[Track, ...]:
-        return _render_tracks(
-            request.app.state.registry.tracks(), request.app.state.config
-        )
+        return request.app.state.tracks
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
@@ -152,8 +155,13 @@ def create_app(
             },
         )
 
+    # Deliberately `def`, not `async def`. run_checks makes blocking Databricks SDK
+    # network calls and app.yaml starts a single-worker uvicorn, so on an async route
+    # an unreachable workspace would stall the event loop for the whole SDK timeout
+    # and take health, navigation and generation down with it. A sync route runs in
+    # Starlette's worker threadpool instead.
     @app.post("/api/checks/run", response_class=HTMLResponse)
-    async def checks(request: Request) -> HTMLResponse:
+    def checks(request: Request) -> HTMLResponse:
         results: list[PlatformCheck] = run_checks(
             request.app.state.config, request.app.state.probe
         )
