@@ -37,6 +37,7 @@ class PlatformContext:
             self._secrets = default_secret_resolver(
                 redactor=self.redactor,
                 allow_environment=not self.settings.strict,
+                azure_identity=self.settings.azure_identity,
             )
         return self._secrets
 

@@ -83,3 +83,32 @@ def test_databricks_provider_accepts_injected_notebook_getter():
     assert provider.resolve(
         SecretRef.parse("databricks-secret://application/vendor-key")
     ) == ("application:vendor-key:resolved")
+
+
+def test_key_vault_provider_honors_configured_identity_mode(monkeypatch):
+    recorded = {}
+    monkeypatch.setattr(
+        "aai_core.identity.azure_credential",
+        lambda mode, **kwargs: recorded.setdefault("mode", mode) or "credential",
+    )
+    provider = AzureKeyVaultSecretProvider(
+        azure_identity="managed_identity",
+        client_factory=lambda url, credential: type(
+            "Client",
+            (),
+            {"get_secret": staticmethod(lambda name: type("S", (), {"value": "v"}))},
+        )(),
+    )
+
+    provider.resolve(SecretRef.parse("keyvault://team-vault/vendor-key"))
+
+    assert recorded["mode"] == "managed_identity"
+
+
+def test_default_resolver_threads_identity_mode_into_key_vault():
+    from aai_core.secrets import default_secret_resolver
+
+    resolver = default_secret_resolver(azure_identity="workload_identity")
+
+    provider = resolver._providers["keyvault"]
+    assert provider._azure_identity == "workload_identity"

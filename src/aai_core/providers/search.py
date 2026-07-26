@@ -1,12 +1,56 @@
-"""Azure AI Search and Databricks AI Search retriever adapters."""
+"""Azure AI Search and Databricks AI Search retriever adapters.
+
+Both adapters share one contract: ``mode`` must be ``text``, ``vector``, or
+``hybrid``; a mode that needs vectors either receives ``query_vector``, uses
+the retriever's configured embedding provider to embed the query, or fails
+with a configuration error that says how to fix it. No silent fallbacks.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from aai_core.providers.types import SearchResult, UnsupportedCapabilityError
+from aai_core.providers.types import (
+    ProviderConfigurationError,
+    SearchResult,
+    UnsupportedCapabilityError,
+)
 from aai_core.tracing import provider_span
+
+_MODES = {"text", "vector", "hybrid"}
+
+
+def _validated_mode(mode: str) -> str:
+    normalized = mode.lower()
+    if normalized not in _MODES:
+        raise ValueError(f"Unsupported retrieval mode: {mode}")
+    return normalized
+
+
+def _resolve_query_vector(
+    *,
+    retriever: Any,
+    query: str,
+    query_vector: Sequence[float] | None,
+    mode: str,
+    required: bool,
+) -> Sequence[float] | None:
+    """Return the vector for a vector-consuming mode, embedding on demand."""
+
+    if query_vector is not None or mode == "text":
+        return query_vector
+    embedding = getattr(retriever, "embedding_provider", None)
+    if embedding is not None:
+        return embedding.embed_query(query)
+    if required:
+        raise ProviderConfigurationError(
+            f"{mode} retrieval for {retriever.logical_name!r} needs a query " "vector",
+            remediation="Pass query_vector, or set `embedding: "
+            "<logical-embedding-name>` on this retriever in aai-platform.yml "
+            "so the SDK embeds the query for you.",
+        )
+    return None
 
 
 class AzureAISearchRetriever:
@@ -22,6 +66,7 @@ class AzureAISearchRetriever:
         source_uri_field: str | None = None,
         chunk_id_field: str | None = None,
         vector_fields: Sequence[str] = (),
+        embedding_provider: Any | None = None,
     ) -> None:
         self.logical_name = logical_name
         self.native_client = client
@@ -30,6 +75,7 @@ class AzureAISearchRetriever:
         self.source_uri_field = source_uri_field
         self.chunk_id_field = chunk_id_field
         self.vector_fields = tuple(vector_fields)
+        self.embedding_provider = embedding_provider
 
     def search(
         self,
@@ -41,11 +87,15 @@ class AzureAISearchRetriever:
         mode: str = "hybrid",
         provider_options: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
-        mode = mode.lower()
-        if mode not in {"text", "vector", "hybrid"}:
-            raise ValueError(f"Unsupported retrieval mode: {mode}")
-        if mode in {"vector", "hybrid"} and query_vector is None:
-            raise ValueError(f"{mode} retrieval requires query_vector")
+        mode = _validated_mode(mode)
+        # Azure AI Search always needs a client-side vector for vector/hybrid.
+        query_vector = _resolve_query_vector(
+            retriever=self,
+            query=query,
+            query_vector=query_vector,
+            mode=mode,
+            required=True,
+        )
         if query_vector is not None and not self.vector_fields:
             raise UnsupportedCapabilityError(
                 f"{self.logical_name} has no configured vector fields"
@@ -118,6 +168,7 @@ class DatabricksAISearchRetriever:
         id_field: str,
         source_uri_field: str | None = None,
         chunk_id_field: str | None = None,
+        embedding_provider: Any | None = None,
     ) -> None:
         self.logical_name = logical_name
         self.native_client = index
@@ -126,6 +177,7 @@ class DatabricksAISearchRetriever:
         self.id_field = id_field
         self.source_uri_field = source_uri_field
         self.chunk_id_field = chunk_id_field
+        self.embedding_provider = embedding_provider
 
     def search(
         self,
@@ -137,16 +189,26 @@ class DatabricksAISearchRetriever:
         mode: str = "hybrid",
         provider_options: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
+        mode = _validated_mode(mode)
+        # Databricks can embed hybrid/text queries server-side, so a vector is
+        # only mandatory for pure vector mode (never a silent fallback).
+        query_vector = _resolve_query_vector(
+            retriever=self,
+            query=query,
+            query_vector=query_vector,
+            mode=mode,
+            required=(mode == "vector"),
+        )
         options: dict[str, Any] = {
             "columns": list(self.columns),
             "num_results": top_k,
             "filters": dict(filters or {}),
-            "query_type": "HYBRID" if mode.lower() == "hybrid" else "ANN",
+            "query_type": "HYBRID" if mode == "hybrid" else "ANN",
         }
+        if mode != "vector":
+            options["query_text"] = query
         if query_vector is not None:
             options["query_vector"] = list(query_vector)
-        else:
-            options["query_text"] = query
         if provider_options:
             options.update(provider_options)
 

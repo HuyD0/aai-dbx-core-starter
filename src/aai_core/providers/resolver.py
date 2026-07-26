@@ -26,10 +26,10 @@ class ProviderResolver:
         self._embeddings: dict[str, Any] = {}
         self._retrievers: dict[str, Any] = {}
         self._model_factories: dict[str, Callable[[str, dict[str, Any]], Any]] = {
-            "databricks": self._databricks_model,
-            "foundry": self._foundry_model,
+            "databricks": self._openai_compatible_model,
+            "foundry": self._openai_compatible_model,
+            "azure_apim": self._openai_compatible_model,
         }
-        self._embedding_factories = dict(self._model_factories)
         self._retriever_factories: dict[str, Callable[[str, dict[str, Any]], Any]] = {
             "azure_ai_search": self._azure_search,
             "databricks_ai_search": self._databricks_search,
@@ -64,6 +64,7 @@ class ProviderResolver:
             model=model,
             client=client,
             dimensions=_optional_int(config.get("dimensions")),
+            **_resilience_options(config),
         )
         self._embeddings[logical_name] = adapter
         return adapter
@@ -96,24 +97,16 @@ class ProviderResolver:
         cache[logical_name] = factory(logical_name, config)
         return cache[logical_name]
 
-    def _databricks_model(self, logical_name: str, config: dict[str, Any]):
-        client, model = self._openai_client("databricks", config)
+    def _openai_compatible_model(self, logical_name: str, config: dict[str, Any]):
+        provider = self._provider(config)
+        client, model = self._openai_client(provider, config)
         return OpenAICompatibleChatModel(
             logical_name=logical_name,
-            provider="databricks",
+            provider=provider,
             model=model,
             client=client,
             capabilities=_capabilities(config),
-        )
-
-    def _foundry_model(self, logical_name: str, config: dict[str, Any]):
-        client, model = self._openai_client("foundry", config)
-        return OpenAICompatibleChatModel(
-            logical_name=logical_name,
-            provider="foundry",
-            model=model,
-            client=client,
-            capabilities=_capabilities(config),
+            **_resilience_options(config),
         )
 
     def _openai_client(self, provider: str, config: dict[str, Any]) -> tuple[Any, str]:
@@ -123,15 +116,13 @@ class ProviderResolver:
 
             return DatabricksOpenAI(), model
         if provider == "foundry":
-            from azure.identity import get_bearer_token_provider
             from openai import OpenAI
 
-            from aai_core.identity import azure_credential
-
             endpoint = _required(config, "endpoint").rstrip("/")
-            credential = azure_credential(self.context.settings.azure_identity)
-            token_provider = get_bearer_token_provider(
-                credential, config.get("scope", "https://ai.azure.com/.default")
+            token_provider = self._bearer_token_provider(
+                config.get("token_scope")
+                or config.get("scope")
+                or "https://ai.azure.com/.default"
             )
             return (
                 OpenAI(
@@ -140,7 +131,59 @@ class ProviderResolver:
                 ),
                 model,
             )
+        if provider == "azure_apim":
+            from openai import OpenAI
+
+            # The enterprise AI-gateway path: the APIM (or any OpenAI-
+            # compatible gateway) base URL is taken verbatim, auth is a
+            # keyless Entra bearer token for the gateway's own audience, and
+            # an optional per-team subscription key is resolved through the
+            # secret machinery — never inlined in configuration.
+            base_url = _required(config, "base_url").rstrip("/")
+            token_provider = self._bearer_token_provider(
+                _required(config, "token_scope")
+            )
+            client_options: dict[str, Any] = {
+                "base_url": base_url,
+                "api_key": token_provider,
+            }
+            headers = self._subscription_key_headers(config)
+            if headers:
+                client_options["default_headers"] = headers
+            api_version = config.get("api_version")
+            if api_version:
+                client_options["default_query"] = {"api-version": str(api_version)}
+            return OpenAI(**client_options), model
         raise ProviderConfigurationError(f"Unsupported model provider: {provider}")
+
+    def _bearer_token_provider(self, scope: str):
+        from azure.identity import get_bearer_token_provider
+
+        from aai_core.identity import azure_credential
+
+        credential = azure_credential(self.context.settings.azure_identity)
+        return get_bearer_token_provider(credential, scope)
+
+    def _subscription_key_headers(
+        self, config: dict[str, Any]
+    ) -> dict[str, str] | None:
+        reference = config.get("subscription_key")
+        if not reference:
+            return None
+        try:
+            secret = self.context.secrets.resolve(str(reference))
+        except ValueError as error:
+            # Deliberately do not echo the configured value: if someone pasted
+            # a raw key instead of a reference, it must not reach logs.
+            raise ProviderConfigurationError(
+                "subscription_key is not a valid secret reference",
+                remediation="Use a keyvault://<vault>/<name> or "
+                "databricks-secret://<scope>/<key> reference in "
+                "aai-platform.yml; never place the key value in "
+                "configuration.",
+            ) from error
+        header = str(config.get("subscription_key_header", "api-key"))
+        return {header: secret.reveal()}
 
     def _azure_search(self, logical_name: str, config: dict[str, Any]):
         from azure.search.documents import SearchClient
@@ -160,6 +203,7 @@ class ProviderResolver:
             source_uri_field=config.get("source_uri_field", "source_uri"),
             chunk_id_field=config.get("chunk_id_field", "chunk_id"),
             vector_fields=config.get("vector_fields", ()),
+            embedding_provider=self._retriever_embedding(config),
         )
 
     def _databricks_search(self, logical_name: str, config: dict[str, Any]):
@@ -178,7 +222,15 @@ class ProviderResolver:
             id_field=config.get("id_field", "id"),
             source_uri_field=config.get("source_uri_field", "source_uri"),
             chunk_id_field=config.get("chunk_id_field", "chunk_id"),
+            embedding_provider=self._retriever_embedding(config),
         )
+
+    def _retriever_embedding(self, config: dict[str, Any]):
+        """Resolve the optional `embedding` logical name a retriever uses to
+        embed queries when the caller supplies no vector."""
+
+        logical_name = config.get("embedding")
+        return self.embedding(str(logical_name)) if logical_name else None
 
     @staticmethod
     def _config(
@@ -207,6 +259,16 @@ def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
 
 
+def _resilience_options(config: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    if "timeout_seconds" in config:
+        timeout = config["timeout_seconds"]
+        options["timeout_seconds"] = None if timeout is None else float(timeout)
+    if "max_retries" in config:
+        options["max_retries"] = int(config["max_retries"])
+    return options
+
+
 def _capabilities(config: dict[str, Any]) -> ModelCapabilities:
     supplied = dict(config.get("capabilities", {}))
     valid = set(ModelCapabilities.__dataclass_fields__)
@@ -214,5 +276,17 @@ def _capabilities(config: dict[str, Any]) -> ModelCapabilities:
     if unknown:
         raise ProviderConfigurationError(
             "Unknown model capabilities: " + ", ".join(sorted(unknown))
+        )
+    declared_unimplemented = [
+        name for name in ("streaming", "responses_api") if supplied.get(name)
+    ]
+    if declared_unimplemented:
+        raise ProviderConfigurationError(
+            "Capabilities not implemented by the stable adapter: "
+            + ", ".join(declared_unimplemented),
+            remediation="The stable generate() surface is synchronous "
+            "chat-completions only. Remove the flag, or use "
+            "model.native_client for provider-specific streaming/Responses "
+            "API access.",
         )
     return ModelCapabilities(**supplied)

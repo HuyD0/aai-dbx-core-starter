@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from aai_core.exceptions import AaiCoreError
 from aai_core.tags import ResourceContext
 
 
@@ -41,8 +42,8 @@ class EvaluationReport:
             raise EvaluationGateError(messages)
 
 
-class EvaluationGateError(RuntimeError):
-    pass
+class EvaluationGateError(AaiCoreError):
+    code = "aai_core.evaluation.gate_failed"
 
 
 class EvaluationDatasetManager:

@@ -95,3 +95,25 @@ platform:
 
     with pytest.raises(ValueError, match="must select"):
         PlatformSettings.load(config, environ={})
+
+
+def test_staging_is_a_strict_environment():
+    from aai_core.runtime import PlatformSettings
+    from aai_core.tags import ResourceContext
+
+    settings = PlatformSettings(
+        resource=ResourceContext(
+            application="app",
+            project="proj",
+            environment="staging",
+            team="team",
+            owner_group="group:owners",
+            cost_center="CC-1",
+            data_classification="internal",
+            lifecycle="active",
+            repository="org/repo",
+            release="1.0.0",
+        )
+    )
+
+    assert settings.strict

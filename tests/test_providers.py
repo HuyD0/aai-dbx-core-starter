@@ -2,11 +2,19 @@ from types import SimpleNamespace
 
 import pytest
 
+from aai_core.exceptions import AaiCoreError
 from aai_core.providers import (
     AzureAISearchRetriever,
     ModelCapabilities,
     OpenAICompatibleChatModel,
     UnsupportedCapabilityError,
+)
+from aai_core.providers.openai_compatible import call_with_resilience
+from aai_core.providers.search import DatabricksAISearchRetriever
+from aai_core.providers.types import (
+    ProviderConfigurationError,
+    ProviderError,
+    ProviderRequestError,
 )
 
 
@@ -99,3 +107,183 @@ def test_azure_search_normalizes_mlflow_document():
     assert result.provider == "azure_ai_search"
     assert result.metadata == {"region": "ca"}
     assert result.as_mlflow_document()["metadata"]["doc_uri"] == ("https://example/doc")
+
+
+class _RateLimitError(Exception):
+    def __init__(self, status_code, retry_after=None):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+        headers = {"retry-after": str(retry_after)} if retry_after else {}
+        self.response = SimpleNamespace(headers=headers)
+
+
+def test_resilience_retries_429_honoring_retry_after():
+    delays = []
+    attempts = {"count": 0}
+
+    def operation():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise _RateLimitError(429, retry_after=1.5)
+        return "ok"
+
+    result = call_with_resilience(
+        operation,
+        description="chat completion",
+        provider="azure_apim",
+        logical_name="general-chat",
+        sleep=delays.append,
+    )
+
+    assert result == "ok"
+    assert delays == [1.5]
+
+
+def test_resilience_wraps_exhausted_retries_with_remediation():
+    def operation():
+        raise _RateLimitError(429)
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        call_with_resilience(
+            operation,
+            description="chat completion",
+            provider="databricks",
+            logical_name="general-chat",
+            max_retries=1,
+            sleep=lambda _: None,
+        )
+
+    assert isinstance(excinfo.value, ProviderError)
+    assert isinstance(excinfo.value, AaiCoreError)
+    assert isinstance(excinfo.value.__cause__, _RateLimitError)
+    assert "rate limit" in str(excinfo.value.remediation)
+
+
+def test_resilience_does_not_retry_authorization_failures():
+    attempts = {"count": 0}
+
+    def operation():
+        attempts["count"] += 1
+        raise _RateLimitError(403)
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        call_with_resilience(
+            operation,
+            description="chat completion",
+            provider="databricks",
+            logical_name="general-chat",
+            sleep=lambda _: pytest.fail("must not sleep on 403"),
+        )
+
+    assert attempts["count"] == 1
+    assert "CAN_QUERY" in str(excinfo.value.remediation)
+
+
+class FakeEmbedding:
+    def __init__(self):
+        self.queries = []
+
+    def embed_query(self, text):
+        self.queries.append(text)
+        return [0.1, 0.2]
+
+
+def test_azure_search_embeds_query_when_vector_missing(monkeypatch):
+    from conftest import install_fake_module
+
+    class FakeVectorizedQuery:
+        def __init__(self, *, vector, k_nearest_neighbors, fields):
+            self.vector = vector
+            self.k_nearest_neighbors = k_nearest_neighbors
+            self.fields = fields
+
+    install_fake_module(
+        monkeypatch,
+        "azure.search.documents.models",
+        VectorizedQuery=FakeVectorizedQuery,
+    )
+
+    class VectorAwareSearch:
+        def __init__(self):
+            self.options = None
+
+        def search(self, **options):
+            self.options = options
+            return []
+
+    client = VectorAwareSearch()
+    embedding = FakeEmbedding()
+    retriever = AzureAISearchRetriever(
+        logical_name="knowledge",
+        client=client,
+        content_field="content",
+        id_field="id",
+        vector_fields=["content_vector"],
+        embedding_provider=embedding,
+    )
+
+    retriever.search("question")  # hybrid default, no query_vector
+
+    assert embedding.queries == ["question"]
+    assert client.options["vector_queries"][0].vector == [0.1, 0.2]
+
+
+def test_azure_search_without_vector_or_embedding_says_how_to_fix():
+    retriever = AzureAISearchRetriever(
+        logical_name="knowledge",
+        client=FakeSearch(),
+        content_field="content",
+        id_field="id",
+        vector_fields=["content_vector"],
+    )
+
+    with pytest.raises(ProviderConfigurationError) as excinfo:
+        retriever.search("question")
+
+    assert "embedding" in str(excinfo.value.remediation)
+
+
+class FakeDatabricksIndex:
+    def __init__(self):
+        self.options = None
+
+    def similarity_search(self, **options):
+        self.options = options
+        return {
+            "manifest": {"columns": [{"name": "id"}, {"name": "content"}]},
+            "result": {"data_array": [["doc-1", "grounding"]]},
+        }
+
+
+def test_databricks_search_validates_mode_and_requires_vector_for_vector_mode():
+    retriever = DatabricksAISearchRetriever(
+        logical_name="knowledge",
+        index=FakeDatabricksIndex(),
+        columns=["id", "content"],
+        content_field="content",
+        id_field="id",
+    )
+
+    with pytest.raises(ValueError):
+        retriever.search("question", mode="semantic")
+    with pytest.raises(ProviderConfigurationError):
+        retriever.search("question", mode="vector")
+
+
+def test_databricks_search_hybrid_sends_text_and_optional_vector():
+    index = FakeDatabricksIndex()
+    retriever = DatabricksAISearchRetriever(
+        logical_name="knowledge",
+        index=index,
+        columns=["id", "content"],
+        content_field="content",
+        id_field="id",
+        embedding_provider=FakeEmbedding(),
+    )
+
+    results = retriever.search("question")  # hybrid default
+
+    assert index.options["query_type"] == "HYBRID"
+    assert index.options["query_text"] == "question"
+    assert index.options["query_vector"] == [0.1, 0.2]
+    assert results[0].document_id == "doc-1"

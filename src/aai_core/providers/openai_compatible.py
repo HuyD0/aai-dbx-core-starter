@@ -2,16 +2,94 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from time import monotonic
 from typing import Any
 
 from aai_core.providers.types import (
     ModelCapabilities,
     ModelResponse,
+    ProviderError,
+    ProviderRequestError,
     UnsupportedCapabilityError,
 )
 from aai_core.tracing import provider_span
+
+DEFAULT_TIMEOUT_SECONDS = 60.0
+DEFAULT_MAX_RETRIES = 2
+_MAX_BACKOFF_SECONDS = 8.0
+
+_REMEDIATIONS = {
+    401: "The request was not authenticated. Verify your keyless login "
+    "(az login / DATABRICKS_AUTH_TYPE) and, behind a gateway, the token "
+    "scope and subscription key reference in aai-platform.yml.",
+    403: "The identity is authenticated but not authorized. Ask for "
+    "CAN_QUERY on the serving endpoint (Databricks) or the required "
+    "role/product subscription (Foundry/APIM).",
+    404: "The configured deployment/endpoint does not exist. Check the "
+    "`deployment` (and `base_url`/`endpoint`) for this logical name in "
+    "aai-platform.yml.",
+    429: "The provider or gateway rate limit was exhausted after retries. "
+    "Reduce request volume or ask the platform team about the rate limit "
+    "for your team.",
+}
+
+
+def _status_code(error: BaseException) -> int | None:
+    status = getattr(error, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _retry_after_seconds(error: BaseException) -> float | None:
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    if headers is None:
+        return None
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def call_with_resilience(
+    operation: Callable[[], Any],
+    *,
+    description: str,
+    provider: str,
+    logical_name: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    """Run a provider request with 429/5xx retries and a stable error type.
+
+    Retries honor the gateway's ``Retry-After`` header (Azure APIM token
+    limits and Databricks AI Gateway rate limits both emit it) and otherwise
+    back off exponentially. Every native failure is re-raised as
+    :class:`ProviderRequestError` with the original exception chained.
+    """
+
+    attempt = 0
+    while True:
+        try:
+            return operation()
+        except ProviderError:
+            raise
+        except Exception as error:
+            status = _status_code(error)
+            retryable = status == 429 or (status is not None and status >= 500)
+            if retryable and attempt < max_retries:
+                delay = _retry_after_seconds(error)
+                if delay is None:
+                    delay = min(_MAX_BACKOFF_SECONDS, 0.5 * (2**attempt))
+                sleep(delay)
+                attempt += 1
+                continue
+            raise ProviderRequestError(
+                f"{description} failed for {logical_name!r} via {provider}: "
+                f"{error}",
+                remediation=_REMEDIATIONS.get(status) if status else None,
+            ) from error
 
 
 class OpenAICompatibleChatModel:
@@ -23,12 +101,16 @@ class OpenAICompatibleChatModel:
         model: str,
         client: Any,
         capabilities: ModelCapabilities | None = None,
+        timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self.logical_name = logical_name
         self.provider = provider
         self.model = model
         self.native_client = client
         self.capabilities = capabilities or ModelCapabilities()
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
 
     def generate(
         self,
@@ -63,6 +145,8 @@ class OpenAICompatibleChatModel:
             request["response_format"] = dict(response_format)
         if provider_options:
             request.update(provider_options)
+        if self.timeout_seconds is not None and "timeout" not in request:
+            request["timeout"] = self.timeout_seconds
 
         started = monotonic()
         with provider_span(
@@ -74,7 +158,13 @@ class OpenAICompatibleChatModel:
                 "aai.model": self.model,
             },
         ):
-            response = self.native_client.chat.completions.create(**request)
+            response = call_with_resilience(
+                lambda: self.native_client.chat.completions.create(**request),
+                description="chat completion",
+                provider=self.provider,
+                logical_name=self.logical_name,
+                max_retries=self.max_retries,
+            )
         elapsed = (monotonic() - started) * 1000
 
         choice = response.choices[0]
@@ -109,17 +199,26 @@ class OpenAICompatibleEmbeddingProvider:
         model: str,
         client: Any,
         dimensions: int | None = None,
+        timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self.logical_name = logical_name
         self.provider = provider
         self.model = model
         self.native_client = client
         self.dimensions = dimensions
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        request: dict[str, Any] = {"model": self.model, "input": list(texts)}
+        if self.dimensions:
+            request["dimensions"] = self.dimensions
+        if self.timeout_seconds is not None:
+            request["timeout"] = self.timeout_seconds
         with provider_span(
             "embedding.generate",
             span_type="EMBEDDING",
@@ -129,10 +228,12 @@ class OpenAICompatibleEmbeddingProvider:
                 "aai.model": self.model,
             },
         ):
-            response = self.native_client.embeddings.create(
-                model=self.model,
-                input=list(texts),
-                **({"dimensions": self.dimensions} if self.dimensions else {}),
+            response = call_with_resilience(
+                lambda: self.native_client.embeddings.create(**request),
+                description="embedding",
+                provider=self.provider,
+                logical_name=self.logical_name,
+                max_retries=self.max_retries,
             )
         return [list(item.embedding) for item in response.data]
 

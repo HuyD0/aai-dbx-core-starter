@@ -53,7 +53,7 @@ class PlatformSettings:
 
     @property
     def strict(self) -> bool:
-        strict_environments = {"test", "uat", "prod", "production"}
+        strict_environments = {"test", "staging", "uat", "prod", "production"}
         return self.resource.environment.lower() in strict_environments
 
     def validate(self) -> None:

@@ -3,6 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from aai_core.context import PlatformContext, bootstrap
+from aai_core.exceptions import AaiCoreError
 from aai_core.runtime import PlatformSettings
 from aai_core.tags import ResourceContext
 
@@ -12,6 +13,7 @@ except PackageNotFoundError:  # Running directly from a source checkout.
     __version__ = "0.1.0"
 
 __all__ = [
+    "AaiCoreError",
     "PlatformContext",
     "PlatformSettings",
     "ResourceContext",
