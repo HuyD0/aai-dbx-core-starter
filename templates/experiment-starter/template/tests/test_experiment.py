@@ -30,10 +30,15 @@ class FakeMlflow:
     def set_experiment(self, name):
         self.experiment = name
 
-    def start_run(self, run_name=None, nested=False):
+    def start_run(self, run_name=None, nested=False, description=None):
         class _Run:
             def __enter__(self):
-                return SimpleNamespace(info=SimpleNamespace(run_name=run_name))
+                return SimpleNamespace(
+                    info=SimpleNamespace(
+                        run_name=run_name,
+                        description=description,
+                    )
+                )
 
             def __exit__(self, *args):
                 return False

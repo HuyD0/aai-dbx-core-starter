@@ -57,17 +57,27 @@ class NotebookEnvironment:
 
 
 @dataclass(frozen=True)
-class DatabricksPreflight:
-    """Resolved resources proven usable before any billable model request."""
+class DatabricksEvidencePreflight:
+    """Identity and governed evidence resources resolved without a model request."""
 
     context: Any
     workspace: Any
-    model: Any
     experiment_name: str
-    deployment: str
-    endpoint: Mapping[str, Any]
+    experiment_id: str
+    catalog: str
+    schema: str
+    evidence_destination: EvidenceDestination
     azure_account: Mapping[str, Any]
     current_user: Any
+
+
+@dataclass(frozen=True)
+class DatabricksPreflight(DatabricksEvidencePreflight):
+    """Evidence resources and model endpoint proven before a billable request."""
+
+    model: Any
+    deployment: str
+    endpoint: Mapping[str, Any]
 
 
 def find_repo_root(start: str | Path | None = None) -> Path:
@@ -254,14 +264,14 @@ def _ready_chat_endpoints(workspace: Any) -> list[str]:
     return sorted(names)
 
 
-def preflight_databricks(
+def preflight_databricks_evidence(
     environment: NotebookEnvironment,
     *,
     which: Callable[[str], str | None] | None = None,
     run_command: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     bootstrap_fn: Callable[[Path], Any] | None = None,
-) -> DatabricksPreflight:
-    """Verify identity, workspace membership, and endpoint readiness."""
+) -> DatabricksEvidencePreflight:
+    """Verify identity, workspace membership, UC namespace, and experiment access."""
 
     which_command = which or shutil.which
     if which_command("az") is None:
@@ -297,17 +307,9 @@ def preflight_databricks(
             "your workspace registration."
         ) from exc
 
-    model_config = dict(context.settings.models.get("general-chat", {}))
-    provider = str(model_config.get("provider", ""))
-    if provider != "databricks":
-        raise RuntimeError(
-            "This connected tutorial expects `general-chat` to use provider "
-            f"'databricks'; found {provider!r}."
-        )
-
+    catalog = str(context.settings.catalog)
+    schema = str(context.settings.schema)
     if environment.evidence_destination is EvidenceDestination.DATABRICKS:
-        catalog = str(context.settings.catalog)
-        schema = str(context.settings.schema)
         try:
             workspace.catalogs.get(catalog)
         except Exception as exc:
@@ -340,6 +342,72 @@ def preflight_databricks(
                 f"approved schema. Visible schemas: {visible_schemas or 'none'}."
             ) from exc
 
+    lifecycle = importlib.import_module("examples.lifecycle_support")
+    experiment_name = lifecycle.lifecycle_experiment_name(context)
+    try:
+        experiment = environment.mlflow.set_experiment(experiment_name)
+        experiment_id = str(experiment.experiment_id)
+    except Exception as exc:
+        raise RuntimeError(
+            f"MLflow experiment {experiment_name!r} could not be resolved or "
+            "created with the current identity."
+        ) from exc
+
+    preflight = DatabricksEvidencePreflight(
+        context=context,
+        workspace=workspace,
+        experiment_name=experiment_name,
+        experiment_id=experiment_id,
+        catalog=catalog,
+        schema=schema,
+        evidence_destination=environment.evidence_destination,
+        azure_account=account,
+        current_user=current_user,
+    )
+    print("EVIDENCE PREFLIGHT PASSED")
+    print(
+        {
+            "azure_account": account.get("name"),
+            "databricks_user": getattr(current_user, "user_name", None),
+            "workspace": os.environ["DATABRICKS_HOST"],
+            "experiment": experiment_name,
+            "experiment_id": experiment_id,
+            "evidence_destination": environment.evidence_destination.value,
+            "dataset_namespace": (
+                f"{catalog}.{schema}"
+                if environment.evidence_destination is EvidenceDestination.DATABRICKS
+                else "local SQLite"
+            ),
+        }
+    )
+    return preflight
+
+
+def preflight_databricks(
+    environment: NotebookEnvironment,
+    *,
+    which: Callable[[str], str | None] | None = None,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    bootstrap_fn: Callable[[Path], Any] | None = None,
+) -> DatabricksPreflight:
+    """Verify governed evidence access and model endpoint readiness."""
+
+    evidence = preflight_databricks_evidence(
+        environment,
+        which=which,
+        run_command=run_command,
+        bootstrap_fn=bootstrap_fn,
+    )
+    context = evidence.context
+    workspace = evidence.workspace
+    model_config = dict(context.settings.models.get("general-chat", {}))
+    provider = str(model_config.get("provider", ""))
+    if provider != "databricks":
+        raise RuntimeError(
+            "This connected tutorial expects `general-chat` to use provider "
+            f"'databricks'; found {provider!r}."
+        )
+
     deployment = str(model_config.get("deployment", ""))
     if not deployment or deployment.startswith("replace-"):
         choices = ", ".join(_ready_chat_endpoints(workspace)) or "none visible"
@@ -366,27 +434,29 @@ def preflight_databricks(
 
     # Resolve the logical name only after every non-billable access check passes.
     model = context.providers.model("general-chat")
-    lifecycle = importlib.import_module("examples.lifecycle_support")
-    experiment_name = lifecycle.lifecycle_experiment_name(context)
     preflight = DatabricksPreflight(
         context=context,
         workspace=workspace,
+        experiment_name=evidence.experiment_name,
+        experiment_id=evidence.experiment_id,
+        catalog=evidence.catalog,
+        schema=evidence.schema,
+        evidence_destination=evidence.evidence_destination,
+        azure_account=evidence.azure_account,
+        current_user=evidence.current_user,
         model=model,
-        experiment_name=experiment_name,
         deployment=deployment,
         endpoint=endpoint,
-        azure_account=account,
-        current_user=current_user,
     )
     print("PREFLIGHT PASSED")
     print(
         {
-            "azure_account": account.get("name"),
-            "databricks_user": getattr(current_user, "user_name", None),
+            "azure_account": evidence.azure_account.get("name"),
+            "databricks_user": getattr(evidence.current_user, "user_name", None),
             "workspace": os.environ["DATABRICKS_HOST"],
             "deployment": model.model,
             "endpoint_state": endpoint.get("state", {}).get("ready"),
-            "experiment": experiment_name,
+            "experiment": evidence.experiment_name,
             "evidence_destination": environment.evidence_destination.value,
             "prompt_namespace": (
                 f"{context.settings.catalog}.{context.settings.schema}"
@@ -396,3 +466,61 @@ def preflight_databricks(
         }
     )
     return preflight
+
+
+def get_or_create_uc_evaluation_dataset(
+    *,
+    evidence: DatabricksEvidencePreflight,
+    dataset_name: str,
+    records: list[dict[str, Any]],
+    mlflow_module: Any | None = None,
+) -> Any:
+    """Return an idempotently populated UC EvaluationDataset for a notebook lab."""
+
+    if evidence.evidence_destination is not EvidenceDestination.DATABRICKS:
+        raise ValueError(
+            "Unity Catalog dataset registration requires Databricks evidence mode."
+        )
+    logical_name = dataset_name.strip()
+    if not logical_name or "." in logical_name:
+        raise ValueError(
+            "dataset_name must be a non-blank logical name without catalog or schema"
+        )
+    if not records:
+        raise ValueError("records must not be empty")
+
+    mlflow = mlflow_module or importlib.import_module("mlflow")
+    qualified_name = f"{evidence.catalog}.{evidence.schema}.{logical_name}"
+    try:
+        dataset = mlflow.genai.datasets.get_dataset(name=qualified_name)
+    except Exception as exc:
+        if not _is_missing_dataset(exc):
+            raise
+        # Databricks-managed EvaluationDatasets reject MLflow dataset tags.
+        # Governed context belongs on runs and UC securables instead.
+        dataset = mlflow.genai.datasets.create_dataset(
+            name=qualified_name,
+            experiment_id=evidence.experiment_id,
+        )
+
+    experiment_ids = {
+        str(experiment_id) for experiment_id in (dataset.experiment_ids or [])
+    }
+    if evidence.experiment_id not in experiment_ids:
+        raise RuntimeError(
+            f"Unity Catalog dataset {qualified_name!r} is not associated with "
+            f"MLflow experiment {evidence.experiment_id!r}. Databricks does not "
+            "support adding experiment associations through this API; use a new "
+            "approved dataset name or ask the platform owner to repair it."
+        )
+    dataset.merge_records(records)
+    return dataset
+
+
+def _is_missing_dataset(error: Exception) -> bool:
+    error_code = str(getattr(error, "error_code", "")).upper()
+    message = str(error).upper()
+    return error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"} or any(
+        marker in message
+        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    )

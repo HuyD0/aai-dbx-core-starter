@@ -20,11 +20,18 @@ class FakeMlflow:
         self.params: dict = {}
         self.tags: dict = {}
         self.artifacts: list = []
+        self.start_run_arguments: dict = {}
 
     def set_experiment(self, name):
         self.experiment = name
 
-    def start_run(self, run_name=None, nested=False):
+    def start_run(self, run_name=None, nested=False, description=None):
+        self.start_run_arguments = {
+            "run_name": run_name,
+            "nested": nested,
+            "description": description,
+        }
+
         class _Run:
             def __enter__(self):
                 return SimpleNamespace(
@@ -60,6 +67,7 @@ def test_manager_governs_run_context_and_exposes_native_mlflow():
 
     with manager.run(
         run_name="prompt-v4-token-reduction",
+        description="Compare the shorter prompt against the governed baseline.",
         parameters={"temperature": 0.1},
         tags={"evaluation_tier": "release"},
     ):
@@ -71,6 +79,18 @@ def test_manager_governs_run_context_and_exposes_native_mlflow():
     assert fake.tags["aai.application"] == "test-app"
     assert fake.tags["aai.evaluation_tier"] == "release"
     assert fake.tags["aai.experiment_name"] == "/Shared/test"
+    assert fake.start_run_arguments["description"] == (
+        "Compare the shorter prompt against the governed baseline."
+    )
+
+
+def test_manager_refuses_blank_run_description():
+    with pytest.raises(ValueError, match="description"):
+        with _manager(FakeMlflow()).run(
+            run_name="blank-description",
+            description=" ",
+        ):
+            pass
 
 
 def test_manager_refuses_sensitive_parameters():
