@@ -89,7 +89,8 @@ update one that already exists.
 >    the CLI applies no presets to apps), so the nine platform tags cannot be attached the
 >    way they are to a job cluster. Our tagging standard already routes serverless spend
 >    through usage policies. Please create (or name an existing) usage policy carrying the
->    standard tag set, and give us its id to record in `platform-identifiers.json`.
+>    standard tag set. The CI principal also needs `USE_BUDGET_POLICY` permission on this
+>    policy (so CI can reference it when deploying the app).
 >
 > 4. **Grant the app's own service principal exactly two read privileges.** The app
 >    auto-provisions its own principal, distinct from the CI one, and the console's
