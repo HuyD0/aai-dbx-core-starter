@@ -1,5 +1,7 @@
 """Credential-free regression tests for the platform's security boundaries."""
 
+import ast
+import asyncio
 import importlib.util
 import json
 import os
@@ -8,7 +10,9 @@ import runpy
 import subprocess
 import sys
 from ast import PyCF_ALLOW_TOP_LEVEL_AWAIT
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -128,9 +132,55 @@ def test_advanced_notebooks_preserve_release_guardrails():
 
     optimization = sources["12_agent_alignment_optimization.ipynb"]
     assert "RUN_EXPERIMENTAL_OPTIMIZATION = False" in optimization
-    assert "active_prompt = mlflow.genai.load_prompt(SEED_PROMPT_URI)" in optimization
+    assert "active_prompt = mlflow.genai.load_prompt(prompt_uri)" in optimization
+    assert 'train_data=datasets[\\"optimizer_training\\"]' in optimization
+    assert 'data=datasets[\\"held_out_release\\"]' in optimization
+    assert "optimization_result.optimized_prompts[0]" in optimization
+    assert "link_prompt_versions_to_trace(" in optimization
     assert "max_metric_calls" in optimization
     assert "set_prompt_alias" not in optimization
+
+
+def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
+    sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (ROOT / "examples").glob("*.ipynb")
+    }
+
+    for notebook_name in (
+        "07_first_llm_call.ipynb",
+        "08_tool_trajectory_evaluation.ipynb",
+        "09_multi_turn_session_evaluation.ipynb",
+        "10_layered_judges.ipynb",
+        "11_cost_quality_tradeoff.ipynb",
+        "12_agent_alignment_optimization.ipynb",
+    ):
+        source = sources[notebook_name]
+        assert "get_or_create_uc_evaluation_dataset(" in source
+        assert "mlflow.log_input(" in source
+        assert "description=(" in source
+
+    assert (
+        "fictional_earnings_summary_regression_v1" in sources["07_first_llm_call.ipynb"]
+    )
+    assert (
+        "fictional_agent_tool_trajectory_regression_v1"
+        in sources["08_tool_trajectory_evaluation.ipynb"]
+    )
+    assert (
+        "fictional_multi_turn_session_regression_v1"
+        in sources["09_multi_turn_session_evaluation.ipynb"]
+    )
+    assert "fictional_layered_judge_cases_v1" in sources["10_layered_judges.ipynb"]
+    assert "fictional_judge_calibration_labels_v1" in sources["10_layered_judges.ipynb"]
+    assert (
+        "fictional_cost_quality_regression_v1"
+        in sources["11_cost_quality_tradeoff.ipynb"]
+    )
+    optimization = sources["12_agent_alignment_optimization.ipynb"]
+    assert 'dataset_name=f\\"fictional_{split}_v1\\"' in optimization
+    for split in ("judge_calibration", "optimizer_training", "held_out_release"):
+        assert f'\\"{split}\\"' in optimization
 
 
 def test_advanced_notebooks_run_all_on_the_credential_free_default_path():
@@ -212,6 +262,14 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert 'stream_options={"include_usage": True}' in code_source
     assert "await stream.close()" in code_source
     assert "link_prompt_versions_to_trace(" in source
+    assert 'application_span.set_attribute("mlflow.message.format", "openai")' in (
+        source
+    )
+    assert 'application_span.set_outputs({"content": content})' in source
+    assert "mlflow.update_current_trace(request_preview=rendered_prompt)" in source
+    assert "mlflow.update_current_trace(response_preview=content)" in source
+    assert '@traced(name=\\"earnings_summary.prompt_evaluation' not in source
+    assert "mlflow.log_input(registered_dataset" in source
     assert 'trace_metadata.get("mlflow.sourceRun")' in code_source
     assert "client.search_traces(" in code_source
     assert "include_spans=False" in code_source
@@ -338,6 +396,138 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
             "exec",
             flags=PyCF_ALLOW_TOP_LEVEL_AWAIT,
         )
+
+
+def test_first_llm_trace_displays_content_without_losing_telemetry():
+    notebook = json.loads(
+        (ROOT / "examples" / "07_first_llm_call.ipynb").read_text(encoding="utf-8")
+    )
+    source = next(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell.get("id") == "ab-code"
+    )
+    tree = ast.parse(source)
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in {"response_text", "invoke_prompt"}
+    ]
+
+    class FakeSpan:
+        def __init__(self):
+            self.attributes = {}
+            self.inputs = None
+            self.outputs = None
+
+        def set_attribute(self, name, value):
+            self.attributes[name] = value
+
+        def set_inputs(self, value):
+            self.inputs = value
+
+        def set_outputs(self, value):
+            self.outputs = value
+
+    class FakeMlflow:
+        def __init__(self):
+            self.span = FakeSpan()
+            self.trace_updates = []
+
+        @contextmanager
+        def start_span(self, **kwargs):
+            assert kwargs == {
+                "name": "earnings_summary.prompt_evaluation",
+                "span_type": "CHAIN",
+            }
+            yield self.span
+
+        def update_current_trace(self, **kwargs):
+            self.trace_updates.append(kwargs)
+
+    class FakeStream:
+        def __init__(self):
+            self.closed = False
+            self.events = iter(
+                [
+                    SimpleNamespace(
+                        model="served-model",
+                        usage=SimpleNamespace(
+                            model_dump=lambda: {
+                                "prompt_tokens": 8,
+                                "completion_tokens": 3,
+                            }
+                        ),
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="assistant answer")
+                            )
+                        ],
+                    )
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.events)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+
+        async def close(self):
+            self.closed = True
+
+    stream = FakeStream()
+    native_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **kwargs: _async_value(stream))
+        )
+    )
+    fake_mlflow = FakeMlflow()
+    namespace = {
+        "mlflow": fake_mlflow,
+        "model": SimpleNamespace(model="configured-model"),
+        "ctx": SimpleNamespace(tags=SimpleNamespace()),
+        "monotonic": __import__("time").monotonic,
+        "set_trace_resource_context": lambda context: None,
+    }
+    exec(
+        compile(
+            ast.Module(body=functions, type_ignores=[]),
+            "07_first_llm_call.ipynb:trace-functions",
+            "exec",
+        ),
+        namespace,
+    )
+
+    result = asyncio.run(
+        namespace["invoke_prompt"](
+            native_async_client=native_client,
+            rendered_prompt="synthetic user request",
+        )
+    )
+
+    assert fake_mlflow.span.inputs == {
+        "messages": [{"role": "user", "content": "synthetic user request"}]
+    }
+    assert fake_mlflow.span.outputs == {"content": "assistant answer"}
+    assert fake_mlflow.span.attributes["mlflow.message.format"] == "openai"
+    assert fake_mlflow.trace_updates == [
+        {"request_preview": "synthetic user request"},
+        {"response_preview": "assistant answer"},
+    ]
+    assert result["content"] == "assistant answer"
+    assert result["usage"] == {"prompt_tokens": 8, "completion_tokens": 3}
+    assert result["model"] == "served-model"
+    assert result["latency_ms"] >= 0
+    assert stream.closed
+
+
+async def _async_value(value):
+    return value
 
 
 def test_setup_notebook_is_explicit_output_free_and_uses_shared_helper():
@@ -516,7 +706,7 @@ def test_documented_bundle_init_never_hardcodes_a_repository():
     every developer upstream, so the documented form must resolve it at run time."""
     offenders = []
     for path in sorted(ROOT.glob("**/*.md")):
-        if any(part in {".git", ".venv"} for part in path.parts):
+        if any(part in {".claude", ".git", ".venv"} for part in path.parts):
             continue
         relative = path.relative_to(ROOT).as_posix()
         if relative in _MARKDOWN_EXEMPT:
@@ -539,7 +729,9 @@ def test_documented_bundle_init_never_hardcodes_a_repository():
 def test_markdown_does_not_restate_environment_identifiers():
     offenders = []
     for path in sorted(ROOT.glob("**/*.md")):
-        if any(part in {".git", ".venv", "node_modules"} for part in path.parts):
+        if any(
+            part in {".claude", ".git", ".venv", "node_modules"} for part in path.parts
+        ):
             continue
         relative = path.relative_to(ROOT).as_posix()
         if relative in _MARKDOWN_EXEMPT:

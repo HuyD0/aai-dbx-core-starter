@@ -38,6 +38,10 @@ class FakeMlflow:
     def get_registry_uri(self):
         return self.registry_uri
 
+    def set_experiment(self, name):
+        self.experiment = name
+        return SimpleNamespace(experiment_id="experiment-1")
+
 
 class ApiRecord:
     def __init__(self, value):
@@ -129,6 +133,7 @@ def fake_context(*, deployment="ready-chat", task="llm/v1/chat", ready="READY"):
         settings=SimpleNamespace(
             catalog="dbx_dev",
             schema="default",
+            effective_experiment_name="/Shared",
             models={
                 "general-chat": {
                     "provider": "databricks",
@@ -286,6 +291,149 @@ def test_remote_preflight_verifies_prompt_namespace(tmp_path, monkeypatch):
 
     assert connected.context.settings.catalog == "dbx_dev"
     assert connected.context.settings.schema == "default"
+    assert connected.experiment_id == "experiment-1"
+
+
+def test_evidence_preflight_does_not_resolve_model_endpoint(
+    tmp_path, monkeypatch, capsys
+):
+    environment = replace(
+        make_environment(tmp_path),
+        tracking_uri="databricks",
+        registry_uri="databricks-uc",
+        evidence_destination=notebook_setup.EvidenceDestination.DATABRICKS,
+    )
+    context = fake_context()
+    context.providers.model = lambda logical_name: pytest.fail(
+        "evidence preflight must not resolve a model"
+    )
+    context.workspace.serving_endpoints.get = lambda name: pytest.fail(
+        "evidence preflight must not inspect a serving endpoint"
+    )
+    monkeypatch.setenv("DATABRICKS_HOST", "https://workspace.example")
+    monkeypatch.setattr(
+        notebook_setup.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(
+            lifecycle_experiment_name=lambda ctx: "/Shared/earnings"
+        ),
+    )
+
+    evidence = notebook_setup.preflight_databricks_evidence(
+        environment,
+        which=lambda name: "/usr/bin/az",
+        run_command=lambda *args, **kwargs: azure_result(),
+        bootstrap_fn=lambda path: context,
+    )
+
+    assert evidence.experiment_id == "experiment-1"
+    assert evidence.catalog == "dbx_dev"
+    assert "EVIDENCE PREFLIGHT PASSED" in capsys.readouterr().out
+
+
+class FakeEvaluationDataset:
+    def __init__(self, *, name, experiment_ids):
+        self.name = name
+        self.dataset_id = "dataset-1"
+        self.experiment_ids = experiment_ids
+        self.merged_records = None
+
+    def merge_records(self, records):
+        self.merged_records = records
+        return self
+
+
+class FakeDatasetApi:
+    def __init__(self, *, existing=None, get_error=None):
+        self.existing = existing
+        self.get_error = get_error
+        self.create_arguments = None
+
+    def get_dataset(self, **kwargs):
+        if self.get_error is not None:
+            raise self.get_error
+        return self.existing
+
+    def create_dataset(self, **kwargs):
+        self.create_arguments = kwargs
+        self.existing = FakeEvaluationDataset(
+            name=kwargs["name"],
+            experiment_ids=[kwargs["experiment_id"]],
+        )
+        return self.existing
+
+
+def databricks_evidence(tmp_path):
+    return notebook_setup.DatabricksEvidencePreflight(
+        context=fake_context(),
+        workspace=fake_context().workspace,
+        experiment_name="/Shared/earnings",
+        experiment_id="experiment-1",
+        catalog="dbx_dev",
+        schema="default",
+        evidence_destination=notebook_setup.EvidenceDestination.DATABRICKS,
+        azure_account={},
+        current_user=SimpleNamespace(user_name="developer@example.invalid"),
+    )
+
+
+def test_uc_dataset_helper_reuses_and_merges_existing_dataset(tmp_path):
+    dataset = FakeEvaluationDataset(
+        name="dbx_dev.default.earnings_regression_v1",
+        experiment_ids=["experiment-1"],
+    )
+    datasets = FakeDatasetApi(existing=dataset)
+    mlflow = SimpleNamespace(genai=SimpleNamespace(datasets=datasets))
+    records = [{"inputs": {"question": "Synthetic question"}}]
+
+    result = notebook_setup.get_or_create_uc_evaluation_dataset(
+        evidence=databricks_evidence(tmp_path),
+        dataset_name="earnings_regression_v1",
+        records=records,
+        mlflow_module=mlflow,
+    )
+
+    assert result is dataset
+    assert result.merged_records == records
+    assert datasets.create_arguments is None
+
+
+def test_uc_dataset_helper_creates_without_unsupported_tags(tmp_path):
+    error = RuntimeError("RESOURCE_DOES_NOT_EXIST: dataset not found")
+    datasets = FakeDatasetApi(get_error=error)
+    mlflow = SimpleNamespace(genai=SimpleNamespace(datasets=datasets))
+
+    result = notebook_setup.get_or_create_uc_evaluation_dataset(
+        evidence=databricks_evidence(tmp_path),
+        dataset_name="earnings_regression_v1",
+        records=[{"inputs": {"question": "Synthetic question"}}],
+        mlflow_module=mlflow,
+    )
+
+    assert result.dataset_id == "dataset-1"
+    assert datasets.create_arguments == {
+        "name": "dbx_dev.default.earnings_regression_v1",
+        "experiment_id": "experiment-1",
+    }
+    assert "tags" not in datasets.create_arguments
+
+
+def test_uc_dataset_helper_rejects_wrong_experiment_association(tmp_path):
+    dataset = FakeEvaluationDataset(
+        name="dbx_dev.default.earnings_regression_v1",
+        experiment_ids=["some-other-experiment"],
+    )
+    mlflow = SimpleNamespace(
+        genai=SimpleNamespace(datasets=FakeDatasetApi(existing=dataset))
+    )
+
+    with pytest.raises(RuntimeError, match="not associated"):
+        notebook_setup.get_or_create_uc_evaluation_dataset(
+            evidence=databricks_evidence(tmp_path),
+            dataset_name="earnings_regression_v1",
+            records=[{"inputs": {"question": "Synthetic question"}}],
+            mlflow_module=mlflow,
+        )
 
 
 @pytest.mark.parametrize(
@@ -310,12 +458,20 @@ def test_preflight_reports_wrong_azure_context(tmp_path, tenant, subscription, m
         )
 
 
-def test_preflight_placeholder_lists_ready_chat_endpoints(tmp_path):
+def test_preflight_placeholder_lists_ready_chat_endpoints(tmp_path, monkeypatch):
     environment = make_environment(tmp_path)
     context = fake_context(deployment="ready-chat")
     context.settings.models["general-chat"][
         "deployment"
     ] = "replace-with-serving-endpoint"
+    monkeypatch.setenv("DATABRICKS_HOST", "https://workspace.example")
+    monkeypatch.setattr(
+        notebook_setup.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(
+            lifecycle_experiment_name=lambda ctx: "/Shared/earnings"
+        ),
+    )
 
     with pytest.raises(RuntimeError, match="READY chat endpoints visible") as error:
         notebook_setup.preflight_databricks(

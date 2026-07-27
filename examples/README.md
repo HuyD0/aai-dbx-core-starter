@@ -112,12 +112,12 @@ only that store at `http://127.0.0.1:5000`.
 | 04 | [`04_first_evaluation.py`](04_first_evaluation.py) | Why deterministic scorers and row-critical gates—not one good-looking answer—are required before adopting `earnings-summary-prompt-v2`. |
 | 05 | [`05_connected_setup.ipynb`](05_connected_setup.ipynb) | Why kernel/config readiness and cloud authorization are separate checkpoints. It makes no LLM request. |
 | 06 | [`06_connected_first_call.py`](06_connected_first_call.py) | How to call a real configured LLM through stable synchronous `model.generate()` while recording bounded trace and run evidence. |
-| 07 | [`07_first_llm_call.ipynb`](07_first_llm_call.ipynb) | How a notebook/event loop uses a native async client, streaming, MLflow OpenAI autologging, and exact prompt lineage without duplicate SDK spans. |
-| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer can still fail an exact expected tool-call trajectory. |
-| 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope traces by opaque session, release, environment, and eval batch, then gate complete conversations. |
-| 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | How deterministic checks, guideline judges, human labels, and held-out agreement grant different levels of authority. |
-| 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality and policy eligibility come before cost ranking, and why missing cost remains unknown. |
-| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | How to separate judge calibration, optimizer training, and held-out release evidence without letting optimization promote production. |
+| 07 | [`07_first_llm_call.ipynb`](07_first_llm_call.ipynb) | Native async streaming, readable chat traces, exact prompt lineage, and an optional UC EvaluationDataset linked to described A/B runs. |
+| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer can fail an exact tool trajectory, with optional governed dataset/run evidence but no fabricated trace. |
+| 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope real traces, retain their IDs, register the session contract, and gate complete conversations. |
+| 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | How deterministic checks and human calibration become separate UC datasets linked to a report-only judge run. |
+| 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality comes before cost, with actual synthetic cases registered separately from simulated measurement artifacts. |
+| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | How disjoint UC datasets, immutable prompt versions, readable real-call traces, and held-out runs prevent optimizer-to-production shortcuts. |
 
 Open any advanced lab through the stable runner name, for example:
 
@@ -130,7 +130,8 @@ make local-example EXAMPLE=agent_alignment_optimization
 ```
 
 The command prints the exact numbered path and selected kernel. The default
-path for all five labs makes no model request.
+path for all five labs makes no model request and writes no remote evidence.
+Each lab exposes an explicit Databricks switch for its governed evidence path.
 
 ### Cookbook adaptations
 
@@ -232,7 +233,10 @@ worker/event-loop-owned client from `model.create_native_async_client()`,
 consumes native provider streams, and lets MLflow own the provider span. One
 manual application parent attaches governed context; the same invocation never
 passes through `model.generate()`, whose SDK provider span would duplicate
-usage evidence. The notebook compares both exact prompt versions across the
+usage evidence. The parent uses MLflow's OpenAI message format, stores only the
+assistant content as its output, and sets plain-text request/response previews;
+latency, model, usage, and cost remain telemetry instead of rendering as the
+answer. The notebook compares both exact prompt versions across the
 same three cases, reads tokens and cost back from each completed trace, records
 cost coverage when pricing is unavailable, and links each local trace to the
 exact local prompt version and comparison run. It intentionally concludes
@@ -251,9 +255,20 @@ and prompt metadata and `.aai/local/mlruns` stores artifacts. Setting the
 top-level `SEND_EVIDENCE_TO_DATABRICKS` switch to `True` instead routes
 tracking to `databricks` and prompt registration to `databricks-uc`, so the
 experiment, runs, traces, exact prompts, metrics, and lineage links share the
-compatible Databricks backend. The later prompt-only publishing guard remains
+compatible Databricks backend. In that mode the three cases are also merged
+idempotently into a fully qualified Unity Catalog EvaluationDataset and linked
+as a native input to both described runs. The later prompt-only publishing guard remains
 available for copying prompts after a deliberately local comparison, but those
 local traces are never linked across stores.
+
+Labs 08–12 follow the same evidence rule: a disabled-by-default connected path
+gets or creates fully qualified Unity Catalog EvaluationDatasets, merges only
+synthetic records, and links each dataset to a natively described run with
+`mlflow.log_input`. Databricks-managed datasets do not accept MLflow dataset
+tags, so governed context stays on runs and platform-managed UC securables.
+Offline fixtures never manufacture traces or prompt lineage. Prompt links are
+added only by labs 07 and 12 when a registered prompt actually produced a real
+model trace.
 
 Before enabling any provider or framework autologger, document:
 
@@ -270,7 +285,11 @@ An example or generated project meets this teaching standard only when:
 - run names and metadata distinguish baseline, change, result, and decision;
 - one falsifiable hypothesis and one change are recorded;
 - baseline and change use the exact same ordered dataset digest;
+- connected evaluation data is a native UC EvaluationDataset linked to its run;
+- connected runs carry a native description that distinguishes observed and
+  simulated evidence;
 - traces declare capture policy and autolog mode without duplicate spans;
+- model traces render assistant content as text while retaining telemetry;
 - prompt evidence uses an exact URI/version and content digest, never only an
   alias;
 - quality, latency, input/output tokens, cost, and cost coverage are recorded;

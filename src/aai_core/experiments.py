@@ -84,6 +84,7 @@ class ExperimentManager:
         self,
         *,
         run_name: str,
+        description: str | None = None,
         parameters: Mapping[str, Any] | None = None,
         tags: Mapping[str, str] | None = None,
         nested: bool = False,
@@ -91,6 +92,8 @@ class ExperimentManager:
     ) -> Iterator[Any]:
         if not run_name.strip():
             raise ValueError("run_name must not be blank")
+        if description is not None and not description.strip():
+            raise ValueError("description must not be blank")
         mlflow = self._client()
         mlflow.set_experiment(self.experiment_name)
         active_model = None
@@ -105,7 +108,11 @@ class ExperimentManager:
 
         @contextmanager
         def governed_run() -> Iterator[Any]:
-            with mlflow.start_run(run_name=run_name, nested=nested) as active_run:
+            with mlflow.start_run(
+                run_name=run_name,
+                nested=nested,
+                description=description,
+            ) as active_run:
                 merged_tags = self.context.merged(tags)
                 run_tags = {f"aai.{key}": value for key, value in merged_tags.items()}
                 run_tags["aai.experiment_name"] = self.experiment_name
