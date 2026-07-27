@@ -105,6 +105,29 @@ git config merge.keepours.name "always keep this clone's value"
 Merge rather than rebase: rebasing this clone's commits re-applies the same
 identifier resolution on every sync, while a merge settles it once per release.
 
+### When a sync does conflict
+
+Ordinary upstream changes — new template properties, SDK work, documentation —
+merge cleanly, because the values this clone changed live in one file that the
+merge driver keeps.
+
+The exception is upstream changing *its own* identifiers. Upstream then edits
+the same stamped lines this clone did, so `databricks.yml` and the five
+`databricks_template_schema.json` files conflict. That resolution is mechanical
+— take upstream's content so its template changes survive, then re-stamp this
+clone's identifiers over it:
+
+```bash
+make resolve-upstream
+make verify
+git commit
+```
+
+The target only touches generated files and leaves anything else conflicted for
+you to resolve deliberately. It takes upstream's version of those files
+wholesale, so if this clone customises a template schema beyond its identifier
+defaults, resolve that file by hand instead.
+
 Rehearse it before it matters — change every value in the fixture on a scratch
 branch, merge an upstream tag, and confirm no conflict prompt and a green
 `make verify` with your values intact.

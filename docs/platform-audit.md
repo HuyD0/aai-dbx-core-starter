@@ -708,7 +708,15 @@ The clone's divergence is now two files — `platform-identifiers.json` and
 | 0f | Rewrite `docs/enterprise-clone-runbook.md` §3 to "edit the fixture, run `make sync-templates`" | makes the runbook true |
 | 0g | Add the `.gitattributes` + `merge=keepours` recipe and the one-way-remote setup to the runbook, plus a CI check that the fixture's *key set* matches upstream | makes syncs non-interactive |
 
-| 0h | Make hosted+unset `template_repo` a `fail` check, and warn when it equals the upstream URL (`generate.py:52`, `checks.py`) | **C3** — F3 at the point of use |
+| 0h | Make hosted+unset `template_repo` a `fail` check (`generate.py`, `checks.py`) | **C3** — F3 at the point of use |
+| 0i | `make resolve-upstream` for the one conflict class that survives: upstream changing its *own* identifiers | residual F1 |
+
+> Deviation from the plan: 0h originally also proposed warning when
+> `template_repo` equals the known-upstream URL. That would require an
+> identifier literal under `src/platform_app`, which
+> `tests/test_app_content.py` forbids precisely because such a literal is what
+> makes a clone silently wrong. Fail-on-unset is the real failure mode and is
+> what shipped.
 
 **Exit criterion:** `grep -rE '<host>|<tenant>|<sub>|<policy>|<org>' . --exclude-dir=.git --exclude=uv.lock` returns hits in exactly two files: `platform-identifiers.json` and `.github/CODEOWNERS`.
 
