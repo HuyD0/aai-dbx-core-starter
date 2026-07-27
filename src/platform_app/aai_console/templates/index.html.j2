@@ -5,7 +5,7 @@
 <header class="topbar">
   <div class="topbar__title">
     <h1>{{ active.title }}</h1>
-    <span class="topbar__sub">{{ active.subtitle }}</span>
+    <span class="topbar__sub">{{ active.subtitle }} · <span data-track-progress>0 of {{ active.steps | length }} complete</span></span>
   </div>
   <div class="topbar__actions">
     <button class="iconbtn" type="button" id="checks-run" title="Check platform state">
@@ -21,9 +21,10 @@
     {% endif %}
 
     {% for step in active.steps %}
-      <section class="step" id="step-{{ step.id }}">
+      <section class="step" id="step-{{ step.id }}" data-step="{{ active.id }}/{{ step.id }}">
         <h2 class="step__title">
           <span class="step__index">{{ loop.index }}</span>{{ step.title }}
+          <button class="step__complete" type="button" data-step-complete aria-pressed="false">Mark complete</button>
         </h2>
 
         {% if step.body %}<p>{{ step.body | icode }}</p>{% endif %}
@@ -52,7 +53,12 @@
         {% endif %}
 
         {% if step.generate %}
-          <div class="generate" id="generate-target">
+          <div class="generate-form">
+            <label for="project-name">Project name</label>
+            <input id="project-name" name="project_name" value="my-project" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" aria-describedby="project-name-help" />
+            <small id="project-name-help">Start with a letter or number; then use letters, numbers, dots, underscores, or hyphens.</small>
+          </div>
+          <div class="generate" id="generate-target" aria-live="polite">
             <p class="muted">Pick a template above to build your exact command.</p>
           </div>
         {% endif %}
@@ -73,25 +79,12 @@
   </article>
 </div>
 
-<div class="composer">
-  <div class="composer__box">
-    <button class="iconbtn composer__add" type="button" aria-label="Add">+</button>
-    <textarea
-      class="composer__input"
-      id="composer-input"
-      rows="1"
-      placeholder="Search the guide…  (press / )"
-      aria-label="Search the guide"
-    ></textarea>
-    <div class="composer__meta">
-      <span class="mode">
-        {% include "fragments/icon_shield.svg.j2" %}
-        Guide &amp; generate
-      </span>
-      <button class="sendbtn" type="button" id="composer-send" aria-label="Search">
-        {% include "fragments/icon_arrow.svg.j2" %}
-      </button>
-    </div>
+<div class="guide-search">
+  <label class="guide-search__label" for="guide-search-input">Search setup, access, templates, evaluation, and cost</label>
+  <div class="guide-search__box">
+    {% include "fragments/icon_search.svg.j2" %}
+    <input id="guide-search-input" type="search" placeholder="Search the guide…  (press / )" autocomplete="off" />
+    <button type="button" id="guide-search-submit">Search</button>
   </div>
   <p class="composer__note">{{ platform_state_heading }}</p>
 </div>

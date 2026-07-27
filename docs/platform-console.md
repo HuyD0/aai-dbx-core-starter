@@ -6,6 +6,11 @@ own machine, and reports platform state.
 
 It lives at `src/platform_app` and is **not** part of the published `aai-core` wheel.
 
+The home page uses progressive disclosure: it offers one short orientation, a direct
+project path, and three deliberately separate readiness paths. Detailed lifecycle tracks
+remain available behind those choices. Step completion is optional browser-local UI state;
+it contains only content step ids and is never treated as access or deployment evidence.
+
 ## What it does, and what it deliberately does not
 
 | | |

@@ -91,6 +91,22 @@ def test_progressive_onboarding_home_renders(client):
     assert client.get("/concept").status_code == 404
 
 
+def test_guided_track_supports_progress_search_and_named_generation(client):
+    response = client.get("/track/generate")
+    assert response.status_code == 200
+    assert "data-step-complete" in response.text
+    assert "data-track-progress" in response.text
+    assert 'id="guide-search-input"' in response.text
+    assert 'id="project-name"' in response.text
+
+    generated = client.post(
+        "/api/generate",
+        json={"template": "rag-app", "project_name": "claims-assistant"},
+    )
+    assert generated.status_code == 200
+    assert "claims-assistant" in generated.text
+
+
 def test_unknown_track_is_a_404_not_a_crash(client):
     assert client.get("/track/does-not-exist").status_code == 404
 

@@ -101,17 +101,13 @@ document.addEventListener("click", (event) => {
 /* ------------------------------------------------------------- generate */
 
 let generateAbort = null;
+let selectedTemplate = null;
 
-document.addEventListener("click", async (event) => {
-  const choice = event.target.closest("[data-template]");
-  if (!choice) return;
-
-  for (const other of choice.closest("[data-choices]").querySelectorAll("[data-template]")) {
-    other.setAttribute("aria-pressed", String(other === choice));
-  }
-
+async function generateCommand(template, scroll = true) {
   const target = document.getElementById("generate-target");
   if (!target) return;
+  const projectName = document.getElementById("project-name");
+  if (projectName && !projectName.reportValidity()) return;
 
   generateAbort?.abort();
   generateAbort = new AbortController();
@@ -119,16 +115,33 @@ document.addEventListener("click", async (event) => {
     const response = await fetch("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ template: choice.dataset.template }),
+      body: JSON.stringify({
+        template,
+        project_name: projectName?.value || "my-project",
+      }),
       signal: generateAbort.signal,
     });
     if (!response.ok) throw new Error(String(response.status));
     swap(target, await response.text());
-    target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (scroll) target.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
     if (error.name === "AbortError") return;
     target.textContent = "Could not build the command. Retry in a moment.";
   }
+}
+
+document.addEventListener("click", (event) => {
+  const choice = event.target.closest("[data-template]");
+  if (!choice) return;
+  selectedTemplate = choice.dataset.template;
+  for (const other of choice.closest("[data-choices]").querySelectorAll("[data-template]")) {
+    other.setAttribute("aria-pressed", String(other === choice));
+  }
+  generateCommand(selectedTemplate);
+});
+
+document.getElementById("project-name")?.addEventListener("change", () => {
+  if (selectedTemplate) generateCommand(selectedTemplate, false);
 });
 
 /* -------------------------------------------------------------- palette */
@@ -187,32 +200,64 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* ------------------------------------------------------------- composer */
+/* --------------------------------------------------------- guide search */
 
-const composer = document.getElementById("composer-input");
+const guideSearch = document.getElementById("guide-search-input");
 
-function autosize() {
-  composer.style.height = "auto";
-  composer.style.height = `${composer.scrollHeight}px`;
+function submitGuideSearch() {
+  openPalette(guideSearch?.value.trim() || "");
 }
 
-if (composer) {
-  composer.addEventListener("input", autosize);
-  composer.addEventListener("keydown", (event) => {
-    // Enter submits; Shift+Enter inserts a newline. isComposing guards IME input, where
-    // Enter commits a candidate and must not be treated as submit.
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-      event.preventDefault();
-      const query = composer.value.trim();
-      composer.value = "";
-      autosize();
-      openPalette(query);
-    }
-  });
-  document.getElementById("composer-send")?.addEventListener("click", () => {
-    const query = composer.value.trim();
-    composer.value = "";
-    autosize();
-    openPalette(query);
-  });
+guideSearch?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    submitGuideSearch();
+  }
+});
+document.getElementById("guide-search-submit")?.addEventListener("click", submitGuideSearch);
+
+/* ------------------------------------------------------ local progress */
+
+const progressKey = "aai-console-completed-steps-v1";
+
+function readProgress() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(progressKey) || "[]"));
+  } catch {
+    return new Set();
+  }
 }
+
+function writeProgress(completed) {
+  try {
+    localStorage.setItem(progressKey, JSON.stringify([...completed]));
+  } catch {
+    // Progress is optional; private browsing and storage policy must not block guidance.
+  }
+}
+
+function renderProgress(completed) {
+  const steps = [...document.querySelectorAll("[data-step]")];
+  for (const step of steps) {
+    const done = completed.has(step.dataset.step);
+    step.classList.toggle("step--complete", done);
+    const button = step.querySelector("[data-step-complete]");
+    button?.setAttribute("aria-pressed", String(done));
+    if (button) button.textContent = done ? "Completed" : "Mark complete";
+  }
+  const label = document.querySelector("[data-track-progress]");
+  if (label) label.textContent = `${steps.filter((step) => completed.has(step.dataset.step)).length} of ${steps.length} complete`;
+}
+
+const completedSteps = readProgress();
+renderProgress(completedSteps);
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-step-complete]");
+  if (!button) return;
+  const id = button.closest("[data-step]")?.dataset.step;
+  if (!id) return;
+  if (completedSteps.has(id)) completedSteps.delete(id);
+  else completedSteps.add(id);
+  writeProgress(completedSteps);
+  renderProgress(completedSteps);
+});
