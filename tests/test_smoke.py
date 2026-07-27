@@ -1,5 +1,6 @@
 """Credential-free regression tests for the platform's security boundaries."""
 
+import importlib.util
 import json
 import os
 import re
@@ -13,6 +14,14 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The identifier-stamping map lives in the sync script; loading it here keeps the
+# check and the writer from drifting apart.
+_sync_spec = importlib.util.spec_from_file_location(
+    "sync_template_shared", ROOT / "scripts" / "sync_template_shared.py"
+)
+sync_module = importlib.util.module_from_spec(_sync_spec)
+_sync_spec.loader.exec_module(sync_module)
 WORKFLOWS = ROOT / ".github" / "workflows"
 SHA_PIN = re.compile(
     r"^\s*(?:-\s+)?uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s+#.*)?$",
@@ -431,18 +440,18 @@ def test_identifier_fixture_is_the_single_source_of_truth():
     each remaining literal that must follow."""
     templates = _discovered_templates()
     assert templates, "no bundle templates discovered"
-    for template in templates:
-        schema = json.loads((template / "databricks_template_schema.json").read_text())
-        defaults = {
-            name: prop["default"] for name, prop in schema["properties"].items()
-        }
-        assert defaults["workspace_host"] == IDENTIFIERS["databricks_host"], template
-        assert (
-            defaults["compute_policy_id"] == IDENTIFIERS["job_compute_policy_id"]
-        ), template
-        assert (
-            defaults["aai_core_volume"] == IDENTIFIERS["sdk_artifact_volume"]
-        ), template
+
+    # The stamping map lives in the sync script so the check cannot drift from
+    # the thing that writes the values. `aai_core_pip_source` is in it too: it
+    # is the one default that points at a *repository*, so a clone that misses
+    # it makes every generated project's CI install the SDK from upstream.
+    drift = sync_module.schema_default_drift()
+    assert not drift, "run `make sync-templates`: " + "; ".join(drift)
+    stamped = {prop for _, prop, _ in sync_module.planned_schema_defaults()}
+    assert stamped == set(sync_module.IDENTIFIER_DEFAULTS), (
+        "every identifier-owned schema property must exist in every template; "
+        f"stamped={sorted(stamped)}"
+    )
 
     verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
     assert "platform-identifiers.json" in verify
@@ -454,6 +463,69 @@ def test_identifier_fixture_is_the_single_source_of_truth():
         assert (
             value not in verify
         ), "cloud-verify.sh must read the fixture, not inline ids"
+
+
+#: Every key the fixture must carry. A downstream clone keeps its own copy of
+#: platform-identifiers.json (docs/enterprise-clone-runbook.md recommends a
+#: `merge=keepours` driver so upstream merges never prompt on it) — and the cost
+#: of that is that a *new* key added upstream would be silently dropped there.
+#: This list is the guard: it travels with the merge, so the clone fails loudly
+#: on the next test run instead of rendering an empty default into a command.
+REQUIRED_IDENTIFIER_KEYS = {
+    "azure_tenant_id",
+    "azure_subscription_id",
+    "databricks_host",
+    "job_compute_policy_id",
+    "sdk_artifact_volume",
+    "sdk_pip_source",
+    "template_repo",
+}
+
+
+def test_identifier_fixture_carries_every_required_key():
+    present = {key for key in IDENTIFIERS if not key.startswith("$")}
+    missing = REQUIRED_IDENTIFIER_KEYS - present
+    assert not missing, (
+        "platform-identifiers.json is missing key(s) that this version of the "
+        "repository requires: " + ", ".join(sorted(missing)) + ". A clone that "
+        "keeps its own fixture must add them with its own values."
+    )
+    for key in sorted(REQUIRED_IDENTIFIER_KEYS):
+        assert str(IDENTIFIERS[key]).strip(), f"{key} is empty"
+
+
+#: Prose is the fourth copy of the identifier values and the one nothing used to
+#: check, which is how the SDK artifact volume in AGENTS.md drifted away from the
+#: fixture while every test stayed green. Markdown may *describe* these values but
+#: must not restate them, so a clone never has to hunt through docs.
+_MARKDOWN_FORBIDDEN = (
+    "azure_tenant_id",
+    "azure_subscription_id",
+    "databricks_host",
+    "job_compute_policy_id",
+    "sdk_artifact_volume",
+)
+# The audit report deliberately quotes the drift it found, and the clone runbook
+# needs to name the fixture keys it walks you through.
+_MARKDOWN_EXEMPT = {"docs/platform-audit.md"}
+
+
+def test_markdown_does_not_restate_environment_identifiers():
+    offenders = []
+    for path in sorted(ROOT.glob("**/*.md")):
+        if any(part in {".git", ".venv", "node_modules"} for part in path.parts):
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if relative in _MARKDOWN_EXEMPT:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for key in _MARKDOWN_FORBIDDEN:
+            if IDENTIFIERS[key] in text:
+                offenders.append(f"{relative} restates {key}")
+    assert not offenders, (
+        "documentation must point at platform-identifiers.json rather than copy it "
+        "(a clone would otherwise have to edit prose too): " + "; ".join(offenders)
+    )
 
 
 def test_bundle_and_compute_use_required_platform_tags():

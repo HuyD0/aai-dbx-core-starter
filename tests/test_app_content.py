@@ -23,6 +23,15 @@ SYNTHESIZED_COMMANDS = {
     "make examples-list": (
         "Makefile target; the docs describe it in prose, not a fenced block."
     ),
+    f"export DATABRICKS_HOST={IDENTIFIERS['databricks_host']}": (
+        "The docs `source scripts/platform-env.sh` so a clone never has a workspace "
+        "host pasted into prose (tests/test_smoke.py enforces that). The console is "
+        "hosted and a viewer may have no checkout to source, so it substitutes the "
+        "value it was configured with instead."
+    ),
+    "export DATABRICKS_AUTH_TYPE=azure-cli": (
+        "Second half of the same substitution; platform-env.sh exports it too."
+    ),
 }
 
 

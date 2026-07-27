@@ -34,7 +34,7 @@ feature-engineering templates are future work.
 ```text
 GitHub Actions (permissions: id-token: write)
   -> OIDC token (immutable subject:
-     repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main)
+     repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main)
   -> azure/login exchanges it against an Entra federated credential
   -> Azure CLI authenticated as the CI service principal
   -> Databricks CLI uses DATABRICKS_AUTH_TYPE=azure-cli
@@ -45,30 +45,41 @@ There are no stored credentials in this chain.
 
 ## 3. Provisioned identifiers
 
+**`platform-identifiers.json` at the repo root is the single source.** Read it
+for the current tenant, subscription, workspace host, compute policy, SDK
+artifact volume, template repository, and CI pip source. It is deliberately not
+restated here: a copy in prose is a copy a clone has to find and edit, and it is
+how the SDK artifact volume in this file once drifted away from the fixture
+while every test stayed green.
+
+Editing that file and running `make sync-templates` is the entire identifier
+change for a clone. `scripts/sync_template_shared.py` stamps the template schema
+defaults; `tests/test_smoke.py` cross-checks `databricks.yml`, the Codex
+environment, and every `*.md` — including this one, which is why the values are
+gone from it. See `docs/enterprise-clone-runbook.md`.
+
+Identity objects are provisioned externally and are not environment fixtures, so
+they stay here:
+
 | Thing | Value |
 |---|---|
-| GitHub repo | `HuyD0/aai-dbx-core-starter` |
-| Azure tenant | `7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6` |
-| Azure subscription | `ea936670-dda1-4884-8467-49c225bf3e83` (`practisesubscription`) |
-| Legacy CI app | `github-actions-dbx-platform` |
-| Legacy client id | `b74a6820-d0ac-454f-8c32-02141cba3c8a` |
-| Legacy SP object id | `f1ae1583-6b35-4d6c-a7c1-305034983307` |
 | Dedicated CI app | `github-actions-aai-dbx-core-starter` |
 | Dedicated client id | `a7e40167-d3f6-48a9-acd9-7998230cce34` |
 | Dedicated SP object id | `4539bb3b-b4ff-4f63-9da5-5873ececace6` |
 | Federated credential | `gh-aai-dbx-core-starter-main` |
-| FIC subject | `repo:HuyD0@151226205/aai-dbx-core-starter@1311037530:ref:refs/heads/main` |
-| Dev workspace | `dbx-dev` / `https://adb-7405609799238491.11.azuredatabricks.net` / `7405609799238491` |
-| SDK artifact path | `/Volumes/platform/artifacts/python_packages/aai_core/<version>/` |
+| FIC subject | `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main` |
+| Dev workspace | `dbx-dev` (host in `platform-identifiers.json`) |
+
+The FIC subject embeds immutable numeric owner and repository ids, so it cannot
+be reused by a clone — see rule 9 and the clone runbook.
+
+**Legacy shared application** (rule 7 — do not delete, rotate, or mutate it):
+`github-actions-dbx-platform`, client id
+`b74a6820-d0ac-454f-8c32-02141cba3c8a`, SP object id
+`f1ae1583-6b35-4d6c-a7c1-305034983307`. It is shared with other workloads and
+is not used by this repository's deploy path.
 
 These are non-secret identifiers. Do not classify them as secrets.
-
-`platform-identifiers.json` at the repo root is the machine-readable copy of
-the environment-specific values above; tests and `scripts/cloud-verify.sh`
-cross-check every other occurrence against it. When cloning this repo into a
-different tenant/workspace, edit that file first and follow
-`docs/enterprise-clone-runbook.md` — the smoke tests then point at each
-remaining file that must agree (this table included).
 
 ## 4. Hard security rules
 
@@ -285,7 +296,8 @@ For a Databricks bundle change:
 
 ```bash
 az login
-export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
+export DATABRICKS_HOST=$(python3 -c \
+  'import json;print(json.load(open("platform-identifiers.json"))["databricks_host"])')
 export DATABRICKS_AUTH_TYPE=azure-cli
 databricks bundle validate -t dev
 ```
@@ -316,8 +328,8 @@ attribution.
 - The `publish-sdk` workflow runs from `main`, verifies the requested version,
   builds the wheel, creates a checksum, and refuses to overwrite an existing
   artifact.
-- The non-secret repo variable `SDK_ARTIFACT_VOLUME` points to
-  `/Volumes/platform/artifacts/python_packages`.
+- The non-secret repo variable `SDK_ARTIFACT_VOLUME` must equal
+  `sdk_artifact_volume` in `platform-identifiers.json`.
 - Generated projects download and checksum the exact pinned wheel locally and
   install the same volume path in Databricks jobs.
 

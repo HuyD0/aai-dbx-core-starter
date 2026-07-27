@@ -5,21 +5,24 @@
 Create the following Unity Catalog objects through the platform's approved
 administrative workflow:
 
+The catalog, schema, and volume names are the three dotted components of
+`sdk_artifact_volume` in `platform-identifiers.json`:
+
 ```sql
-CREATE CATALOG IF NOT EXISTS dbx_dev;
-CREATE SCHEMA IF NOT EXISTS dbx_dev.dbx_platform;
-CREATE VOLUME IF NOT EXISTS dbx_dev.dbx_platform.python_packages;
+CREATE CATALOG IF NOT EXISTS <catalog>;
+CREATE SCHEMA IF NOT EXISTS <catalog>.<schema>;
+CREATE VOLUME IF NOT EXISTS <catalog>.<schema>.<volume>;
 ```
 
 Grant development groups `READ VOLUME`. Grant the dedicated release service
-principal `READ VOLUME` and `WRITE VOLUME` only on
-`dbx_dev.dbx_platform.python_packages`. Do not grant Azure ARM RBAC or workspace
-admin to publish a wheel.
+principal `READ VOLUME` and `WRITE VOLUME` only on that volume. Do not grant
+Azure ARM RBAC or workspace admin to publish a wheel.
 
 Set the non-secret GitHub repository variable:
 
-```text
-SDK_ARTIFACT_VOLUME=/Volumes/dbx_dev/dbx_platform/python_packages
+```bash
+gh variable set SDK_ARTIFACT_VOLUME -b "$(python3 -c \
+  'import json;print(json.load(open("platform-identifiers.json"))["sdk_artifact_volume"])')"
 ```
 
 Run `publish-sdk` from `main` with the exact `pyproject.toml` version. Existing
@@ -36,7 +39,7 @@ There are three related but distinct wheel paths:
 2. **SDK release.** The `publish-sdk` workflow builds
    `aai_core-<version>-py3-none-any.whl` before cloud login, creates a SHA-256
    checksum, and publishes both files immutably under
-   `/Volumes/dbx_dev/dbx_platform/python_packages/aai_core/<version>/`.
+   `<sdk_artifact_volume>/aai_core/<version>/`.
 3. **Application consumption.** A generated application's
    `scripts/install_core.py` downloads that exact SDK wheel and checksum through
    Databricks unified authentication, verifies the checksum, and installs it

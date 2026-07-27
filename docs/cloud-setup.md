@@ -44,8 +44,7 @@ az ad app federated-credential list \
   --id a7e40167-d3f6-48a9-acd9-7998230cce34 \
   --query "[].{name:name, subject:subject}" -o table
 
-export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
-export DATABRICKS_AUTH_TYPE=azure-cli
+source scripts/platform-env.sh
 
 databricks service-principals list \
   --filter "applicationId eq a7e40167-d3f6-48a9-acd9-7998230cce34"
@@ -60,18 +59,34 @@ workspace admin and must not have unrestricted cluster creation.
 All values are identifiers or non-sensitive attribution values, so use
 repository variables rather than secrets:
 
-```bash
-gh variable set AZURE_CLIENT_ID       -R HuyD0/aai-dbx-core-starter -b a7e40167-d3f6-48a9-acd9-7998230cce34
-gh variable set AZURE_TENANT_ID       -R HuyD0/aai-dbx-core-starter -b 7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6
-gh variable set AZURE_SUBSCRIPTION_ID -R HuyD0/aai-dbx-core-starter -b ea936670-dda1-4884-8467-49c225bf3e83
-gh variable set DATABRICKS_HOST       -R HuyD0/aai-dbx-core-starter -b https://adb-7405609799238491.11.azuredatabricks.net
-gh variable set COST_CENTER           -R HuyD0/aai-dbx-core-starter -b CC-1234
-gh variable set TEAM                  -R HuyD0/aai-dbx-core-starter -b data-platform
-gh variable set OWNER_GROUP           -R HuyD0/aai-dbx-core-starter -b group:data-platform-owners
-gh variable set SDK_ARTIFACT_VOLUME   -R HuyD0/aai-dbx-core-starter -b /Volumes/platform/artifacts/python_packages
+The environment-specific values come from `platform-identifiers.json`, so this
+block is correct in a clone the moment that file is, with no editing here:
 
-gh variable list -R HuyD0/aai-dbx-core-starter
+```bash
+source scripts/platform-env.sh
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+VOLUME=$(python3 -c \
+  'import json;print(json.load(open("platform-identifiers.json"))["sdk_artifact_volume"])')
+
+# Identity of the CI service principal (from your platform identity owner).
+gh variable set AZURE_CLIENT_ID       -R "$REPO" -b a7e40167-d3f6-48a9-acd9-7998230cce34
+
+gh variable set AZURE_TENANT_ID       -R "$REPO" -b "$AZURE_TENANT_ID"
+gh variable set AZURE_SUBSCRIPTION_ID -R "$REPO" -b "$AZURE_SUBSCRIPTION_ID"
+gh variable set DATABRICKS_HOST       -R "$REPO" -b "$DATABRICKS_HOST"
+gh variable set SDK_ARTIFACT_VOLUME   -R "$REPO" -b "$VOLUME"
+
+# Cost attribution — set these to the owning team's real values.
+gh variable set COST_CENTER           -R "$REPO" -b CC-1234
+gh variable set TEAM                  -R "$REPO" -b data-platform
+gh variable set OWNER_GROUP           -R "$REPO" -b group:data-platform-owners
+
+gh variable list -R "$REPO"
 ```
+
+`AZURE_CLIENT_ID` is the one value not in the fixture: it identifies an
+externally provisioned Entra application, and a clone is issued a different one
+(see `docs/enterprise-clone-runbook.md`).
 
 Do not add a `gh secret set` step.
 

@@ -9,8 +9,10 @@ never grants permissions or creates cloud resources.
 Confirm the developer's approved group has:
 
 - Access to the `dbx-dev` Databricks workspace.
-- `READ VOLUME` on `dbx_dev.dbx_platform.python_packages`.
-- `CAN_USE` on compute policy `0005F2031B6D2319`.
+- `READ VOLUME` on the SDK artifact volume (`sdk_artifact_volume` in
+  `platform-identifiers.json`).
+- `CAN_USE` on the constrained job compute policy (`job_compute_policy_id`
+  in the same file).
 - The application-specific catalog, schema, model endpoint, and search
   permissions required by the chosen template.
 - Access to create or push the consuming GitHub repository.
@@ -32,8 +34,7 @@ Authenticate before invoking the template wizard:
 
 ```bash
 az login
-export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
-export DATABRICKS_AUTH_TYPE=azure-cli
+source scripts/platform-env.sh
 ```
 
 Generate the selected project:

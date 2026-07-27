@@ -186,9 +186,10 @@ def build_config(template: Path, overrides: dict) -> dict:
             "workspace_host": IDENTIFIERS["databricks_host"],
             "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
             "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],
-            "aai_core_pip_source": (
-                "git+https://github.com/HuyD0/aai-dbx-core-starter"
-            ),
+            # `aai_core_pip_source` is deliberately NOT supplied: its default
+            # embeds `{{.aai_core_version}}`, which the CLI expands only for a
+            # schema default, never for an answer passed in. Leaving it out both
+            # honours the docstring above and exercises the stamped default.
         }.items()
         if key in schema_properties
     }

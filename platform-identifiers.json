@@ -1,9 +1,11 @@
 {
-  "$comment": "Single machine-readable source for environment-specific, non-secret identifiers. Tests and scripts cross-check every other occurrence (databricks.yml variable defaults, template schema defaults, Codex env expectations) against this file, so editing it surfaces every place that must agree. When cloning this repo into another tenant/workspace, update this file first, then follow docs/enterprise-clone-runbook.md. Human-readable context for these values lives in AGENTS.md section 3.",
+  "$comment": "Single machine-readable source for environment-specific, non-secret identifiers. `scripts/sync_template_shared.py` STAMPS the template schema defaults from this file (run it, or `make sync-templates`, after editing); tests cross-check the remaining occurrences (databricks.yml variable defaults, Codex env expectations, and every *.md) so nothing can drift silently. When cloning this repo into another tenant/workspace, edit this file, run `make sync-templates`, and follow docs/enterprise-clone-runbook.md — that should be the whole identifier change.",
   "azure_tenant_id": "7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6",
   "azure_subscription_id": "ea936670-dda1-4884-8467-49c225bf3e83",
   "databricks_host": "https://adb-7405609799238491.11.azuredatabricks.net",
   "job_compute_policy_id": "0005F2031B6D2319",
   "sdk_artifact_volume": "/Volumes/dbx_dev/dbx_platform/python_packages",
-  "template_repo": "https://github.com/HuyD0/aai-dbx-core-starter"
+  "template_repo": "https://github.com/HuyD0/aai-dbx-core-starter",
+  "$sdk_pip_source_comment": "Where a generated project's CREDENTIAL-FREE CI installs aai-core from. Runtime jobs always install the checksum-pinned volume wheel instead, so this reaches only PR CI. It MUST resolve to exactly aai_core_version. A clone that leaves this pointing at another org's repository makes every generated project's CI depend on that repository — prefer an internal index ('aai-core=={{.aai_core_version}}') in an enterprise tenant.",
+  "sdk_pip_source": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}"
 }

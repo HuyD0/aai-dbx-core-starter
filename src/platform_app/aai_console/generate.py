@@ -50,6 +50,20 @@ def bundle_init(request: GenerateRequest, config: ConsoleConfig) -> list[Block]:
     """Render the keyless-auth + `bundle init` sequence for the chosen template."""
     _validate(request)
 
+    if config.hosted and not config.template_repo:
+        # The in-checkout relative form is a sensible default for `make app-run`,
+        # but a hosted viewer has no checkout, so emitting it would hand every
+        # developer a command that cannot work. Refuse instead of guessing — and
+        # deliberately do not fall back to a baked-in URL: an identifier literal
+        # here is exactly what makes a clone silently point at another tenant's
+        # repository (tests/test_app_content.py forbids one).
+        raise GenerateError(
+            "this console has no template repository configured, so it cannot "
+            "generate a working `bundle init`. The bundle must set "
+            "AAI_CONSOLE_TEMPLATE_REPO from the `template_repo` variable, whose "
+            "value comes from platform-identifiers.json."
+        )
+
     source = config.template_repo or f"./templates/{request.template}"
     if config.template_repo:
         init = (
