@@ -52,9 +52,8 @@ variables:
   app_usage_policy_id:
     description: >-
       Serverless usage policy carrying the standard tag set. An app resource has no tags
-      field, so this is its only cost-attribution surface. Replace the placeholder with a
-      real id from the platform identity owner BEFORE opting the console in.
-    default: replace-with-usage-policy-id
+      field, so this is its only cost-attribution surface.
+    default: 4c3c39a5-ffb8-4c18-a5e0-7ddb3bb809b8
   template_repo:
     description: >-
       Git URL of this template hub, used to build the console's `bundle init` command. A
@@ -72,6 +71,7 @@ artifacts:
 
 include:
   - resources/*.yml
+  - resources/optional/platform_console.yml
 
 # Only a `dev` target for now (per project decision). To add prod later, map it
 # to dbx-uat and add a matching federated credential — see docs/cloud-setup.md
