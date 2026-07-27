@@ -80,12 +80,15 @@ def test_index_and_every_track_page_render(client):
         assert track["title"] in response.text
 
 
-def test_progressive_onboarding_concept_renders(client):
-    response = client.get("/concept")
+def test_progressive_onboarding_home_renders(client):
+    response = client.get("/")
     assert response.status_code == 200
     assert "Take the 10-minute orientation" in response.text
     assert "Find your first trace" in response.text
     assert "Platform health never claims" in response.text
+    assert 'href="/track/local-first"' in response.text
+    assert "data-run-checks" in response.text
+    assert client.get("/concept").status_code == 404
 
 
 def test_unknown_track_is_a_404_not_a_crash(client):
