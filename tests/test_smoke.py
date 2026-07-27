@@ -510,6 +510,32 @@ _MARKDOWN_FORBIDDEN = (
 _MARKDOWN_EXEMPT = {"docs/platform-audit.md"}
 
 
+def test_documented_bundle_init_never_hardcodes_a_repository():
+    """`databricks bundle init <url>` decides which repository a developer's next
+    project comes from. A clone whose docs still named the upstream URL would send
+    every developer upstream, so the documented form must resolve it at run time."""
+    offenders = []
+    for path in sorted(ROOT.glob("**/*.md")):
+        if any(part in {".git", ".venv"} for part in path.parts):
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if relative in _MARKDOWN_EXEMPT:
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            # Only actual commands, not prose that mentions `bundle init`.
+            stripped = line.strip()
+            if not stripped.startswith("databricks bundle init"):
+                continue
+            arguments = stripped[len("databricks bundle init") :].split()
+            if arguments and arguments[0].startswith(("http://", "https://", "git@")):
+                offenders.append(f"{relative}: {stripped}")
+    assert not offenders, (
+        "documented `bundle init` must take the repository from "
+        "`platform-identifiers.json` (source scripts/platform-env.sh, then use "
+        '"$AAI_TEMPLATE_REPO"): ' + "; ".join(offenders)
+    )
+
+
 def test_markdown_does_not_restate_environment_identifiers():
     offenders = []
     for path in sorted(ROOT.glob("**/*.md")):

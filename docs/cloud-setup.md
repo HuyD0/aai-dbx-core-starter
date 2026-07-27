@@ -1,8 +1,7 @@
 # Cloud setup — connect externally provisioned resources
 
-This repository configures and verifies the keyless connection used by
-`HuyD0/aai-dbx-core-starter`. It does not provision Azure, Entra, Databricks,
-or GitHub infrastructure.
+This repository configures and verifies its own keyless connection. It does
+not provision Azure, Entra, Databricks, or GitHub infrastructure.
 
 The required authentication chain is:
 
@@ -57,10 +56,9 @@ workspace admin and must not have unrestricted cluster creation.
 ## 3. Configure GitHub repository variables
 
 All values are identifiers or non-sensitive attribution values, so use
-repository variables rather than secrets:
-
-The environment-specific values come from `platform-identifiers.json`, so this
-block is correct in a clone the moment that file is, with no editing here:
+repository variables rather than secrets. They come from
+`platform-identifiers.json`, so this block is correct in a clone the moment
+that file is, with no editing here:
 
 ```bash
 source scripts/platform-env.sh
@@ -96,9 +94,9 @@ The authentication smoke test proves the OIDC exchange. The deploy workflow
 proves the principal also has the required Databricks authorization:
 
 ```bash
-gh workflow run auth-smoke.yml -R HuyD0/aai-dbx-core-starter --ref main
-gh workflow run deploy.yml -R HuyD0/aai-dbx-core-starter --ref main
-gh run watch -R HuyD0/aai-dbx-core-starter
+gh workflow run auth-smoke.yml --ref main
+gh workflow run deploy.yml --ref main
+gh run watch
 ```
 
 If `azure/login` reports `AADSTS700213`, compare the job's `subject claim`
@@ -121,7 +119,7 @@ Remove the repository variables separately:
 ```bash
 for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DATABRICKS_HOST \
   COST_CENTER TEAM OWNER_GROUP SDK_ARTIFACT_VOLUME; do
-  gh variable delete "$v" -R HuyD0/aai-dbx-core-starter
+  gh variable delete "$v"
 done
 ```
 

@@ -30,7 +30,10 @@ Install:
 - Azure CLI.
 - Databricks CLI.
 
-Authenticate before invoking the template wizard:
+Authenticate before invoking the template wizard. Run these from a checkout of
+this repository: `platform-env.sh` reads `platform-identifiers.json`, so the
+commands below carry your platform's workspace and template repository without
+either being written down here.
 
 ```bash
 az login
@@ -40,7 +43,7 @@ source scripts/platform-env.sh
 Generate the selected project:
 
 ```bash
-databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+databricks bundle init "$AAI_TEMPLATE_REPO" \
   --template-dir templates/<template-name> --output-dir my-project
 cd my-project
 ```

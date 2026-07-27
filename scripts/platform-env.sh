@@ -36,7 +36,12 @@ _aai_platform_env() {
     AZURE_TENANT_ID="$(_aai_identifier "$root/$fixture" azure_tenant_id)"
     AZURE_SUBSCRIPTION_ID="$(_aai_identifier "$root/$fixture" azure_subscription_id)"
     DATABRICKS_AUTH_TYPE="azure-cli"
+    # Which repository `databricks bundle init` generates projects from. Exported
+    # so documented commands never hard-code it: a clone whose docs still named
+    # the upstream URL would send its developers upstream for every new project.
+    AAI_TEMPLATE_REPO="$(_aai_identifier "$root/$fixture" template_repo)"
     export DATABRICKS_HOST AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DATABRICKS_AUTH_TYPE
+    export AAI_TEMPLATE_REPO
 
     echo "platform-env: DATABRICKS_HOST=$DATABRICKS_HOST (auth: azure-cli)"
 }

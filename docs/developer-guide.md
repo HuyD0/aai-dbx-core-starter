@@ -47,7 +47,7 @@ repository's Git URL:
 ```bash
 az login
 source scripts/platform-env.sh
-databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+databricks bundle init "$AAI_TEMPLATE_REPO" \
   --template-dir templates/rag-app --output-dir my-project
 cd my-project
 python3.12 scripts/setup_dev.py
