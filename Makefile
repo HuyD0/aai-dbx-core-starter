@@ -124,6 +124,32 @@ lock-templates: check-uv ## Regenerate exact transitive template runtime locks.
 check-template-locks: check-uv ## Resolve and verify template runtime locks are current.
 	$(PYTHON) scripts/lock_template_dependencies.py --check
 
+resolve-upstream: ## Resolve a downstream clone's stamped-file conflicts after merging upstream.
+	@# Only the files sync-templates generates are handled here: their conflicts
+	@# are always "upstream changed its identifiers, we keep ours", which is
+	@# mechanical. Take upstream's content so genuine template changes survive,
+	@# then re-stamp this clone's identifiers over it.
+	@#
+	@# CAVEAT: this discards local edits to the *rest* of those files. If this
+	@# clone customises a template schema beyond its identifier defaults, resolve
+	@# that file by hand instead. Anything not generated is left conflicted for
+	@# you to resolve deliberately.
+	@conflicted=$$(git diff --name-only --diff-filter=U); \
+	if [ -z "$$conflicted" ]; then echo "no conflicts to resolve"; exit 0; fi; \
+	generated=$$(echo "$$conflicted" | grep -E '^(databricks\.yml|templates/[^/]+/databricks_template_schema\.json)$$' || true); \
+	if [ -n "$$generated" ]; then \
+		echo "$$generated" | xargs git checkout --theirs --; \
+		echo "$$generated" | xargs git add --; \
+		$(PYTHON) scripts/sync_template_shared.py; \
+		echo "$$generated" | xargs git add --; \
+		echo "re-stamped: $$generated"; \
+	fi; \
+	remaining=$$(git diff --name-only --diff-filter=U); \
+	if [ -n "$$remaining" ]; then \
+		echo "resolve these by hand, then 'git commit':"; echo "$$remaining"; exit 1; \
+	fi; \
+	echo "stamped-file conflicts resolved; review 'git diff --cached', then 'git commit'"
+
 check: check-templates format-check test build ## Run the standard pre-commit checks.
 
 verify: ## Run the complete credential-free verification used by CI.

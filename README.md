@@ -201,9 +201,8 @@ building:
 
 ```bash
 az login
-export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
-export DATABRICKS_AUTH_TYPE=azure-cli
-databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+source scripts/platform-env.sh
+databricks bundle init "$AAI_TEMPLATE_REPO" \
   --template-dir templates/<template-name> --output-dir my-project
 cd my-project
 python3.12 scripts/setup_dev.py
@@ -220,7 +219,8 @@ presets and job clusters,
 credential-free PR CI with a deterministic gate tier, a keyless OIDC deploy
 workflow, hermetic tests on `aai_core.testing` fakes, and an
 `.aai-template.json` provenance stamp. (`agentic-rag` retired into
-`rag-app` + `agent-app` — see `templates/agentic-rag/README.md`.)
+`rag-app` + `agent-app`; it is last renderable at tag
+`v0.2.0-agentic-rag-final` and each successor records it in `supersedes`.)
 
 The SDK stays close to MLflow, Databricks, and provider APIs. It supplies
 governed defaults and typed evidence contracts, returns native result objects,
@@ -241,8 +241,10 @@ dependency resolutions on every supported Python version.
 Wheels are released immutably to:
 
 ```text
-/Volumes/dbx_dev/dbx_platform/python_packages/aai_core/<version>/
+<sdk_artifact_volume>/aai_core/<version>/
 ```
+
+where `sdk_artifact_volume` comes from `platform-identifiers.json`.
 
 From the `main` branch, run the `publish-sdk` workflow with the exact version
 from `pyproject.toml`. The release identity uses GitHub OIDC and receives only
@@ -293,7 +295,10 @@ cloud and identity resources are provisioned outside this repository.
 - [Platform architecture](docs/platform-architecture.md)
 - [Secrets and identity](docs/secrets-and-identity.md)
 - [SDK versioning policy](docs/versioning.md)
-- [Enterprise clone runbook](docs/enterprise-clone-runbook.md)
+- [Enterprise clone runbook](docs/enterprise-clone-runbook.md) — including
+  how a downstream clone tracks this repository without re-resolving the
+  same identifier conflicts on every sync
+- [Platform audit](docs/platform-audit.md) — findings and prioritised backlog
 - [Tagging standard](docs/tagging-standard.md)
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)

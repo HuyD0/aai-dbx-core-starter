@@ -44,7 +44,7 @@ def _resource_context(
         cost_center=cost_center,
         data_classification="internal",
         lifecycle="experimental",
-        repository="HuyD0/aai-dbx-core-starter",
+        repository="example-org/example-repo",
         release="dev",
     )
 
@@ -117,7 +117,7 @@ def test_configured_metadata_is_applied_inside_traced_call(monkeypatch):
         cost_center="CC-1234",
         data_classification="internal",
         lifecycle="experimental",
-        repository="HuyD0/aai-dbx-core-starter",
+        repository="example-org/example-repo",
         release="dev",
     )
 
@@ -176,7 +176,7 @@ def test_langchain_autolog_is_opt_in(monkeypatch):
         cost_center="CC-1234",
         data_classification="internal",
         lifecycle="experimental",
-        repository="HuyD0/aai-dbx-core-starter",
+        repository="example-org/example-repo",
         release="dev",
     )
 
@@ -205,7 +205,7 @@ def test_openai_autolog_is_opt_in(monkeypatch):
         cost_center="CC-1234",
         data_classification="internal",
         lifecycle="experimental",
-        repository="HuyD0/aai-dbx-core-starter",
+        repository="example-org/example-repo",
         release="dev",
     )
 
@@ -234,7 +234,7 @@ def test_native_autologging_requires_full_capture_policy(monkeypatch):
         cost_center="CC-1234",
         data_classification="internal",
         lifecycle="experimental",
-        repository="HuyD0/aai-dbx-core-starter",
+        repository="example-org/example-repo",
         release="dev",
     )
 

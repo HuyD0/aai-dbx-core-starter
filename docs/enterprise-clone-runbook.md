@@ -30,34 +30,107 @@ infrastructure provisioning to this repository or its CI.
 
 ## 3. Update repository identifiers
 
-Edit `platform-identifiers.json` first:
+Edit `platform-identifiers.json`, then run the sync. That is the whole
+identifier change — no other file holds these values:
 
-- `azure_tenant_id`
-- `azure_subscription_id`
-- `databricks_host`
-- `job_compute_policy_id`
-- `sdk_artifact_volume`
-- `template_repo` — the clone's own Git URL. If this is left pointing at the
-  upstream repository, the platform console generates `bundle init` commands
-  that initialise projects from upstream instead of the clone.
+```bash
+$EDITOR platform-identifiers.json
+make sync-templates
+```
 
-Then update the human-readable table in `AGENTS.md` and the values identified
-by the smoke tests:
+The keys:
 
-- the literal dev workspace host and compute-policy default in
-  `databricks.yml`;
-- `workspace_host`, `compute_policy_id`, and `aai_core_volume` defaults in
-  every `templates/*/databricks_template_schema.json`;
-- the `template_repo` and volume defaults in `databricks.yml` (only relevant if
-  you enable the platform console — see section 6).
+| Key | Notes |
+|---|---|
+| `azure_tenant_id` | |
+| `azure_subscription_id` | |
+| `databricks_host` | |
+| `job_compute_policy_id` | |
+| `sdk_artifact_volume` | `/Volumes/<catalog>/<schema>/<volume>`; the dotted form used by app resource bindings is derived from it |
+| `template_repo` | The clone's own Git URL. Left pointing upstream, the platform console generates `bundle init` commands that initialise projects from the upstream repository |
+| `sdk_pip_source` | Where a generated project's **credential-free CI** installs `aai-core` from. Left pointing upstream, every generated project's CI depends on that repository over the public internet. Prefer an internal index: `aai-core=={{.aai_core_version}}` |
 
-Run:
+`make sync-templates` stamps the derived copies — `databricks.yml`'s variable
+defaults and dev workspace host, and the four platform-controlled defaults in
+each `templates/*/databricks_template_schema.json`.
+
+Verify:
 
 ```bash
 pytest -q tests/test_smoke.py
 ```
 
-The identifier cross-checks report each remaining value that must agree.
+These checks fail on any value that still disagrees, on any `*.md` that
+restates an identifier, and on a fixture missing a key this version requires.
+
+`AZURE_CLIENT_ID` is deliberately *not* in the fixture: it identifies the
+externally provisioned Entra application from section 2, and is set as a GitHub
+repository variable in section 4.
+
+## 3a. Track upstream without re-resolving the same conflicts
+
+Updates flow one way: upstream → clone. Merging the other direction would push
+this tenant's subscription, workspace host, compute policy, and volume paths
+into the upstream repository, so make the wrong direction fail rather than
+relying on discipline:
+
+```bash
+git remote add upstream <upstream-repo-url>
+git remote set-url --push upstream DISABLED
+```
+
+Prefer a GitHub *clone* over a *fork*: cross-organisation forks are unreliable
+under enterprise SSO/EMU, and a fork relationship advertises a pull-request path
+back upstream that must not exist.
+
+Sync on release tags rather than `main`, so what you merge is a reviewed, tested
+point rather than whatever is mid-flight:
+
+```bash
+git fetch upstream --tags
+git merge v0.4.0
+make sync-templates   # no-op unless upstream changed what is stamped
+make verify
+```
+
+Enable the automatic resolution for the two files that are meant to differ
+forever. Git will not run a merge driver a repository defines for itself, so
+each clone sets this once, locally — `.gitattributes` is already committed:
+
+```bash
+git config merge.keepours.driver true
+git config merge.keepours.name "always keep this clone's value"
+```
+
+Merge rather than rebase: rebasing this clone's commits re-applies the same
+identifier resolution on every sync, while a merge settles it once per release.
+
+### When a sync does conflict
+
+Ordinary upstream changes — new template properties, SDK work, documentation —
+merge cleanly, because the values this clone changed live in one file that the
+merge driver keeps.
+
+The exception is upstream changing *its own* identifiers. Upstream then edits
+the same stamped lines this clone did, so `databricks.yml` and the five
+`databricks_template_schema.json` files conflict. That resolution is mechanical
+— take upstream's content so its template changes survive, then re-stamp this
+clone's identifiers over it:
+
+```bash
+make resolve-upstream
+make verify
+git commit
+```
+
+The target only touches generated files and leaves anything else conflicted for
+you to resolve deliberately. It takes upstream's version of those files
+wholesale, so if this clone customises a template schema beyond its identifier
+defaults, resolve that file by hand instead.
+
+Rehearse it before it matters — change every value in the fixture on a scratch
+branch, merge an upstream tag, and confirm no conflict prompt and a green
+`make verify` with your values intact.
 
 ## 4. Configure repository variables
 

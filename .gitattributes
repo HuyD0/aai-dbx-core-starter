@@ -1,0 +1,23 @@
+# Downstream clones (see docs/enterprise-clone-runbook.md) track this repository
+# as a read-only `upstream` remote and merge its release tags. Two files are
+# *meant* to differ forever in such a clone: the environment fixture and the
+# reviewer list. Marking them here means `git merge upstream/<tag>` resolves
+# them automatically instead of raising the same conflict on every sync.
+#
+# The driver is intentionally NOT defined in this file — Git will not run a
+# merge driver that a repository can define by itself, because that would let a
+# fetched branch execute configuration. Each clone enables it once, locally:
+#
+#     git config merge.keepours.driver true
+#     git config merge.keepours.name "always keep this clone's value"
+#
+# Until that config exists these lines are inert and Git falls back to a normal
+# conflict, which is the safe direction. The upstream repository itself has no
+# reason to set it.
+#
+# Trade-off to know about: `keepours` discards upstream changes to these files,
+# including a NEW key added to platform-identifiers.json. That is covered by
+# tests/test_smoke.py::test_identifier_fixture_carries_every_required_key, which
+# does travel with the merge and fails loudly if a required key is absent.
+platform-identifiers.json  merge=keepours
+.github/CODEOWNERS         merge=keepours

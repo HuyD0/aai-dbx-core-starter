@@ -4,6 +4,27 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Made `platform-identifiers.json` the only file a clone edits for environment
+  identifiers. `scripts/sync_template_shared.py` now stamps the four
+  platform-controlled defaults in every template schema and the identifier
+  literals in `databricks.yml`; documentation sources `scripts/platform-env.sh`
+  instead of restating a workspace host, and a smoke test fails on any `*.md`
+  that restates one. A downstream clone's divergence from upstream is now two
+  files, both marked `merge=keepours` in `.gitattributes`, so tracking upstream
+  no longer re-resolves the same conflicts on every sync. See
+  `docs/enterprise-clone-runbook.md` sections 3 and 3a.
+- Added `sdk_pip_source` to the identifier fixture and to the values that are
+  stamped and cross-checked. It is where a generated project's credential-free
+  CI installs `aai-core` from; nothing previously checked it against the
+  fixture, so a clone could pass every test while shipping five templates whose
+  CI installed the SDK from the upstream repository.
+- The platform console now refuses to generate a `bundle init` when it is
+  hosted with no `template_repo` configured, and reports that as a failed
+  platform-state check, instead of emitting an in-checkout relative path that a
+  hosted viewer cannot use.
+- Added `docs/platform-audit.md` and removed the retired `templates/agentic-rag`
+  tombstone (still last renderable at tag `v0.2.0-agentic-rag-final`).
+
 - Added the platform console (`src/platform_app`), a Databricks App that renders
   the onboarding lifecycle, generates the exact `bundle init` command for a
   chosen template with this workspace's identifiers substituted, and reports

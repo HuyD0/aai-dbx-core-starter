@@ -90,7 +90,8 @@ def test_checks_render_as_platform_state(client):
     assert PLATFORM_STATE_HEADING in response.text
     # Table rows must survive fragment parsing; this is why the client uses
     # <template>.content rather than DOMParser.
-    assert response.text.count("<tr") == 3
+    # Three workspace rows plus the workspace-independent template_source row.
+    assert response.text.count("<tr") == 4
 
 
 def test_generate_emits_the_chosen_template_and_the_configured_host(client):
@@ -191,7 +192,9 @@ def test_local_runs_never_probe_the_workspace_as_the_developer(config, monkeypat
 
     assert not called, "a local run must not construct a workspace client"
     assert {c.status for c in checks} == {"skip"}
-    assert all("hosted app" in c.detail for c in checks)
+    workspace_rows = [c for c in checks if c.id != "template_source"]
+    assert workspace_rows, "the workspace rows must still be reported"
+    assert all("hosted app" in c.detail for c in workspace_rows)
 
 
 def test_hosted_runs_do_probe(monkeypatch):
@@ -200,9 +203,57 @@ def test_hosted_runs_do_probe(monkeypatch):
         identifiers={key: IDENTIFIERS[key] for key in IDENTIFIER_KEYS},
         hosted=True,
         app_name="aai-platform-console-dev",
+        template_repo=IDENTIFIERS["template_repo"],
     )
     monkeypatch.setattr(
         "aai_console.checks.WorkspaceProbe", lambda: WorkspaceProbe(_FakeWorkspace())
     )
     checks = run_checks(hosted)
-    assert [c.status for c in checks] == ["pass", "pass", "pass"]
+    assert [c.status for c in checks] == ["pass", "pass", "pass", "pass"]
+
+
+def _hosted(template_repo=None):
+    return ConsoleConfig(
+        identifiers={key: IDENTIFIERS[key] for key in IDENTIFIER_KEYS},
+        hosted=True,
+        app_name="aai-platform-console-dev",
+        template_repo=template_repo,
+    )
+
+
+def test_hosted_console_without_a_template_repo_refuses_to_generate():
+    """A hosted viewer has no checkout, so the `./templates/...` fallback would be a
+    command that cannot work. A clone whose bundle never wired `template_repo` must
+    fail loudly here rather than hand every developer a broken `bundle init`."""
+    from aai_console.generate import GenerateError, GenerateRequest, bundle_init
+
+    with pytest.raises(GenerateError) as error:
+        bundle_init(GenerateRequest(template="rag-app"), _hosted())
+    assert "AAI_CONSOLE_TEMPLATE_REPO" in str(error.value)
+
+
+def test_hosted_console_reports_a_missing_template_repo_as_a_failed_check(monkeypatch):
+    """The generate-time refusal is a last line of defence; the panel must surface it
+    before a developer picks a template."""
+    monkeypatch.setattr(
+        "aai_console.checks.WorkspaceProbe", lambda: WorkspaceProbe(_FakeWorkspace())
+    )
+    row = next(c for c in run_checks(_hosted()) if c.id == "template_source")
+    assert row.status == "fail"
+    assert "AAI_CONSOLE_TEMPLATE_REPO" in row.detail
+
+    configured = next(
+        c
+        for c in run_checks(_hosted(IDENTIFIERS["template_repo"]))
+        if c.id == "template_source"
+    )
+    assert configured.status == "pass"
+
+
+def test_local_console_still_generates_from_the_checkout(config):
+    """`make app-run` has no bundle to supply the variable and does have a checkout,
+    so the relative form stays correct there."""
+    from aai_console.generate import GenerateRequest, bundle_init
+
+    codes = [block.code for block in bundle_init(GenerateRequest("rag-app"), config)]
+    assert any("./templates/rag-app" in code for code in codes)

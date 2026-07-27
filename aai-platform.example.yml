@@ -7,7 +7,7 @@ platform:
   cost_center: CC-1234
   data_classification: internal
   lifecycle: experimental
-  repository: HuyD0/aai-dbx-core-starter
+  repository: example-org/example-repo
   release: dev
   tag_schema_version: "1"
   catalog: main

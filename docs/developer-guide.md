@@ -46,9 +46,8 @@ repository's Git URL:
 
 ```bash
 az login
-export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
-export DATABRICKS_AUTH_TYPE=azure-cli
-databricks bundle init https://github.com/HuyD0/aai-dbx-core-starter \
+source scripts/platform-env.sh
+databricks bundle init "$AAI_TEMPLATE_REPO" \
   --template-dir templates/rag-app --output-dir my-project
 cd my-project
 python3.12 scripts/setup_dev.py
@@ -61,8 +60,7 @@ python3.12 scripts/setup_dev.py
 
 ```bash
 az login
-export DATABRICKS_HOST=https://adb-7405609799238491.11.azuredatabricks.net
-export DATABRICKS_AUTH_TYPE=azure-cli
+source scripts/platform-env.sh
 ```
 
 Do not create a PAT or client secret. The generated `scripts/setup_dev.py`

@@ -94,9 +94,11 @@ update one that already exists.
 > 4. **Grant the app's own service principal exactly two read privileges.** The app
 >    auto-provisions its own principal, distinct from the CI one, and the console's
 >    platform-state panel reports what *it* can reach. It needs:
->    - `READ VOLUME` on `dbx_dev.dbx_platform.python_packages`, so it can report whether
->      the platform can read the published SDK wheel; and
->    - `CAN_USE` on compute policy `0005F2031B6D2319`, because the panel calls
+>    - `READ VOLUME` on the SDK artifact volume (`sdk_artifact_volume` in
+>      `platform-identifiers.json`), so it can report whether the platform can
+>      read the published SDK wheel; and
+>    - `CAN_USE` on the constrained job compute policy
+>      (`job_compute_policy_id`), because the panel calls
 >      `cluster_policies.get()` and without it that row reports failure even when
 >      everything else is correctly provisioned.
 >

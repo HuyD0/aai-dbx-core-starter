@@ -113,25 +113,70 @@ def _skip_all(reason: str) -> list[PlatformCheck]:
     ]
 
 
+def template_source_check(config: ConsoleConfig) -> PlatformCheck:
+    """Report whether this console can generate a usable `bundle init`.
+
+    Needs no workspace call, so it runs even when the workspace is unreachable —
+    a clone whose bundle never wired `template_repo` would otherwise discover the
+    problem only when a developer pasted a broken command.
+    """
+
+    label = "Template repository"
+    if config.template_repo:
+        return PlatformCheck(
+            id="template_source",
+            label=label,
+            status="pass",
+            detail=f"projects generate from {config.template_repo}",
+        )
+    if config.hosted:
+        return PlatformCheck(
+            id="template_source",
+            label=label,
+            status="fail",
+            detail=(
+                "no template repository configured; set AAI_CONSOLE_TEMPLATE_REPO "
+                "from the bundle's `template_repo` variable "
+                "(value: platform-identifiers.json)"
+            ),
+        )
+    return PlatformCheck(
+        id="template_source",
+        label=label,
+        status="skip",
+        detail="running from a checkout; projects generate from ./templates",
+    )
+
+
 def run_checks(
     config: ConsoleConfig, probe: WorkspaceProbe | None = None
 ) -> list[PlatformCheck]:
+    # Independent of the workspace, so it is reported on every path below.
+    template_source = template_source_check(config)
+
     if probe is None:
         if not config.hosted:
             # Outside the hosted app there is no app service principal. Ambient auth
             # here is the *developer's* own identity, so probing would report personal
             # permissions under a heading claiming they are platform state — the exact
             # conflation this module exists to prevent. Refuse rather than mislabel.
-            return _skip_all(
-                "platform state is only reported by the hosted app; locally, run "
-                "`python3.12 scripts/setup_dev.py --check-only` to check your access"
-            )
+            return [
+                template_source,
+                *_skip_all(
+                    "platform state is only reported by the hosted app; locally, "
+                    "run `python3.12 scripts/setup_dev.py --check-only` to check "
+                    "your access"
+                ),
+            ]
         probe = WorkspaceProbe()
 
     if not probe.available:
-        return _skip_all(probe.unavailable_reason or "the workspace is not reachable")
+        return [
+            template_source,
+            *_skip_all(probe.unavailable_reason or "the workspace is not reachable"),
+        ]
 
-    checks: list[PlatformCheck] = []
+    checks: list[PlatformCheck] = [template_source]
 
     try:
         principal = probe.current_principal()
