@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AAI console — onboarding concept</title>
+    <link rel="stylesheet" href="/static/console.css" />
+  </head>
+  <body class="concept-body">
+    <div class="concept-shell">
+      <aside class="concept-rail">
+        <div class="concept-brand"><span class="concept-brand__mark">A</span><strong>AAI Platform</strong></div>
+        <nav aria-label="Platform console">
+          <a class="concept-nav concept-nav--active" href="#welcome">Home</a>
+          <a class="concept-nav" href="#first-success">Learn</a>
+          <a class="concept-nav" href="#project">Start a project</a>
+          <a class="concept-nav" href="#readiness">Readiness</a>
+          <a class="concept-nav" href="#">Projects</a>
+          <a class="concept-nav" href="#">Usage &amp; cost</a>
+        </nav>
+        <div class="concept-rail__foot"><span class="concept-status"></span> Platform available</div>
+      </aside>
+
+      <main class="concept-main">
+        <header class="concept-topbar">
+          <span>Developer launchpad</span>
+          <div><button class="concept-linkbtn">Help</button><span class="concept-avatar">DS</span></div>
+        </header>
+
+        <div class="concept-content">
+          <section class="concept-screen" id="welcome">
+            <div class="concept-eyebrow">WELCOME TO THE AAI PLATFORM</div>
+            <h1>What would you like to do?</h1>
+            <p class="concept-lede">Start small. We will show you only what you need for the next successful step.</p>
+            <div class="concept-actions">
+              <article class="concept-action concept-action--primary">
+                <span class="concept-action__icon">→</span>
+                <div><h2>Take the 10-minute orientation</h2><p>Run one example, connect safely, and find your first trace.</p></div>
+                <button>Start orientation</button>
+              </article>
+              <article class="concept-action"><span class="concept-action__icon">＋</span><div><h2>Start a new project</h2><p>Choose the right supported template and generate the setup command.</p></div><button>Choose a template</button></article>
+              <article class="concept-action"><span class="concept-action__icon">✓</span><div><h2>Check my readiness</h2><p>Separate workstation, personal access, and platform service checks.</p></div><button>View readiness</button></article>
+            </div>
+            <div class="concept-return"><div><strong>Returning?</strong><span>Resume: Connect keylessly · about 4 minutes left</span></div><button>Continue</button></div>
+          </section>
+
+          <section class="concept-screen" id="first-success">
+            <div class="concept-stephead"><div><div class="concept-eyebrow">MILESTONE 1 OF 4</div><h1>Find your first trace</h1><p>One guided success before we introduce projects, governance, or deployment.</p></div><span class="concept-time">~ 10 min</span></div>
+            <div class="concept-progress"><span class="is-done"></span><span class="is-done"></span><span class="is-current"></span><span></span></div>
+            <div class="concept-tour">
+              <article class="concept-guide">
+                <span class="concept-kicker">STEP 3 OF 4</span><h2>Open the trace in MLflow</h2>
+                <p>Your workspace example wrote a trace. In Databricks, open <strong>Experiments</strong>, select your application experiment, then open the latest trace.</p>
+                <div class="concept-note"><strong>Why this matters</strong><br />A trace shows what the application did, how long it took, and the evidence you will evaluate later.</div>
+                <div class="concept-buttons"><button class="concept-primarybtn">Open in Databricks</button><button class="concept-secondarybtn">I found it</button></div>
+              </article>
+              <figure class="concept-shot">
+                <figcaption>Illustrative Databricks orientation</figcaption>
+                <div class="mock-db">
+                  <div class="mock-db__rail"><b>◆</b><i></i><i class="active"></i><i></i><i></i></div>
+                  <div class="mock-db__body"><div class="mock-db__top">Experiments <span>Search</span></div><div class="mock-db__crumb">Workspace / AAI / first-trace</div><h3>first-trace</h3><div class="mock-tabs">Runs <b>Traces</b> Models</div><div class="mock-row"><span class="mock-check"></span><strong>latest workspace trace</strong><em>success</em><small>1.24s</small></div><div class="mock-callout">1 <span>Open the latest trace</span></div></div>
+                </div>
+                <p>Screenshot uses synthetic data. Navigation labels may change.</p>
+              </figure>
+            </div>
+          </section>
+
+          <section class="concept-screen" id="project">
+            <div class="concept-eyebrow">MILESTONE 2 OF 4</div><h1>Start with the right project</h1><p class="concept-lede">Answer two questions. We will recommend a starting point without making you learn every architecture.</p>
+            <div class="concept-question"><span>1</span><div><h2>What are you trying to do?</h2><div class="concept-pills"><button class="selected">Build an application</button><button>Evaluate something existing</button><button>Explore an idea</button></div></div></div>
+            <div class="concept-question"><span>2</span><div><h2>Will it use enterprise data to answer questions?</h2><div class="concept-pills"><button class="selected">Yes, retrieve governed data</button><button>No</button><button>Not sure</button></div></div></div>
+            <article class="concept-recommend"><div><span>RECOMMENDED START</span><h2>RAG application</h2><p>Grounded generation with governed retrieval, evaluation data, and a deployment gate.</p><div class="concept-tags"><b>Retrieval</b><b>Evaluation included</b><b>Serving included</b></div></div><div class="concept-recommend__actions"><button class="concept-primarybtn">Use this template</button><button class="concept-linkbtn">Compare all 5 templates</button></div></article>
+          </section>
+
+          <section class="concept-screen" id="readiness">
+            <div class="concept-eyebrow">BEFORE YOUR FIRST CLOUD RUN</div><h1>Know what is ready—and who can fix what is not</h1><p class="concept-lede">These are separate checks. Platform health never claims to represent your personal permissions.</p>
+            <div class="concept-readygrid">
+              <article><header><span class="ready-icon ready-icon--ok">✓</span><div><h2>Workstation</h2><p>Your local tools</p></div></header><strong class="ready-state ready-state--ok">Ready</strong><ul><li>Python 3.12</li><li>Azure CLI</li><li>Databricks CLI</li></ul><button>View details</button></article>
+              <article><header><span class="ready-icon ready-icon--warn">!</span><div><h2>Personal access</h2><p>Your group grants</p></div></header><strong class="ready-state ready-state--warn">Action needed</strong><ul><li>Workspace access</li><li class="warn">SDK volume access</li><li>Compute policy</li></ul><button>Copy access request</button></article>
+              <article><header><span class="ready-icon ready-icon--ok">✓</span><div><h2>Platform services</h2><p>App runtime checks</p></div></header><strong class="ready-state ready-state--ok">Available</strong><ul><li>Template repository</li><li>Approved compute</li><li>SDK artifacts</li></ul><button>Run again</button></article>
+            </div>
+            <div class="concept-cost"><div><span class="concept-cost__icon">$</span><div><h2>Cost basics for your first run</h2><p>Cost grows with resource size, run time, and frequency. Your project context makes that usage attributable.</p></div></div><div class="concept-context"><span><small>PROJECT</small>customer-assist</span><span><small>OWNER GROUP</small>ai-product-team</span><span><small>ENVIRONMENT</small>development</span><span><small>CLASSIFICATION</small>internal</span></div><a href="#">Why these fields matter →</a></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

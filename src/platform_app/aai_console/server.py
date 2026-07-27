@@ -191,6 +191,11 @@ def create_app(
             },
         )
 
+    @app.get("/concept", response_class=HTMLResponse)
+    async def concept(request: Request) -> HTMLResponse:
+        """Render the progressive-onboarding concept for design review."""
+        return templates.TemplateResponse(request, "concept.html.j2", {})
+
     @app.get("/track/{track_id}", response_class=HTMLResponse)
     async def track_page(request: Request, track_id: str) -> HTMLResponse:
         tracks = tracks_for(request)

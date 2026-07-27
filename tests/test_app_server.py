@@ -80,6 +80,14 @@ def test_index_and_every_track_page_render(client):
         assert track["title"] in response.text
 
 
+def test_progressive_onboarding_concept_renders(client):
+    response = client.get("/concept")
+    assert response.status_code == 200
+    assert "Take the 10-minute orientation" in response.text
+    assert "Find your first trace" in response.text
+    assert "Platform health never claims" in response.text
+
+
 def test_unknown_track_is_a_404_not_a_crash(client):
     assert client.get("/track/does-not-exist").status_code == 404
 
