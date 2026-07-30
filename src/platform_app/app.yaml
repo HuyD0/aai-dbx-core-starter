@@ -1,4 +1,4 @@
-# Databricks Apps entry point.
+# Databricks Apps entry point for AI Platform Hub.
 #
 # Only two keys exist here: `command` and `env`. The command is NOT run through a shell,
 # so no environment variable is expanded in it except DATABRICKS_APP_PORT. The Apps

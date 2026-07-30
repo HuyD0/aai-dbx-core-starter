@@ -1,0 +1,74 @@
+{% extends "base.html.j2" %}
+{% block title %}Cost optimization — AI Platform Hub{% endblock %}
+
+{% block main %}
+<header class="topbar">
+  <div class="topbar__title">
+    <h1>Cost optimization</h1>
+    <span class="topbar__sub">Evidence before recommendations</span>
+  </div>
+</header>
+
+<div class="scroll">
+  <div class="hub-page">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">My opportunities</p>
+        <h2>Metered cost with reproducible evidence</h2>
+        <p>
+          Recommendations are visible only when their direct identity, application,
+          assignment, team, or platform relationship is proven server-side.
+        </p>
+      </div>
+    </section>
+
+    {% if hub_capabilities.optimization != "ready" %}
+      <section class="notice notice--neutral" role="status">
+        <div class="notice__icon" aria-hidden="true">i</div>
+        <div>
+          <h3>Recommendation feed is not configured</h3>
+          <p>{{ hub_capabilities.optimization_detail }}</p>
+          <p class="notice__meta">
+            No zero-dollar totals are shown: unavailable telemetry is not the same as no
+            waste. The existing shared platform tables are not queried without a reviewed
+            serving-view contract and least-privilege grant.
+          </p>
+        </div>
+      </section>
+    {% endif %}
+
+    <section class="metric-grid" aria-label="Optimization summary">
+      {% for label, help_text in [
+        ("Applicable cost", "Direct, application, team, or assigned"),
+        ("Estimated avoidable cost", "Qualified by savings quality"),
+        ("Open recommendations", "Visibility-filtered"),
+        ("High-confidence findings", "Versioned detector evidence")
+      ] %}
+        <article class="metric">
+          <span class="metric__label">{{ label }}</span>
+          <strong aria-label="Unavailable">—</strong>
+          <small>{{ help_text }}</small>
+        </article>
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <div>
+          <h3>Required data contract</h3>
+          <p>Capabilities that must be real before this view becomes operational.</p>
+        </div>
+      </div>
+      <div class="requirement-grid">
+        {% for item in optimization_requirements %}
+          <article class="requirement">
+            <span class="status status--{{ item.tone }}">{{ item.status }}</span>
+            <h4>{{ item.title }}</h4>
+            <p>{{ item.detail }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

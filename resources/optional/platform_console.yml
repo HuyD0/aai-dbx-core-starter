@@ -61,7 +61,7 @@ resources:
       # workspace-global: every deployer would otherwise collide on one app. app_suffix
       # keeps CI and any individual developer apart.
       name: aai-platform-console-${var.app_suffix}
-      description: Guided onboarding console for the AAI platform.
+      description: AI Platform Hub for governed application portfolio, readiness, and golden-path onboarding.
 
       # Uploads only this directory. The container treats it as the top-level directory
       # and cannot read anything outside it — which is why no identifier is baked into the
@@ -92,6 +92,16 @@ resources:
             value: ${var.job_compute_policy_id}
           - name: AAI_CONSOLE_TEMPLATE_REPO
             value: ${var.template_repo}
+          - name: AAI_HUB_JOB_MODE
+            value: ${var.hub_job_mode}
+          - name: AAI_HUB_REGISTRATION_PRINCIPALS
+            value: ${var.hub_registration_principals}
+          - name: AAI_HUB_PLATFORM_VIEWER_GROUP
+            value: ${var.hub_platform_viewer_group}
+          - name: AAI_HUB_PLATFORM_ADMIN_GROUP
+            value: ${var.hub_platform_admin_group}
+          - name: AAI_HUB_PLATFORM_AUDITOR_GROUP
+            value: ${var.hub_platform_auditor_group}
 
       resources:
         # Lets the console report whether the platform can read the published SDK wheel.

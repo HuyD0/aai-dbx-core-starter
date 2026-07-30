@@ -6,8 +6,8 @@ version it wants changes across the starlette 0.x/1.x boundary — so a test bui
 passes or fails depending on which starlette the resolver picked. Driving the ASGI
 callable directly removes the dependency and the ambiguity, and it is about forty lines.
 
-Only what the console's tests need: GET and POST, JSON in and out, and access to the
-response body, status and headers.
+Only what the console's tests need: the common HTTP methods, JSON in and out,
+caller-supplied headers, and access to the response body, status and headers.
 
 It is strict about exceptions on purpose — see the note in `request`.
 """
@@ -39,11 +39,37 @@ class ASGIClient:
     def __init__(self, app):
         self.app = app
 
-    def get(self, path: str, params: dict | None = None) -> Response:
-        return self.request("GET", path, params=params)
+    def get(
+        self,
+        path: str,
+        params: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Response:
+        return self.request("GET", path, params=params, headers=headers)
 
-    def post(self, path: str, json: dict | None = None) -> Response:
-        return self.request("POST", path, json=json)
+    def post(
+        self,
+        path: str,
+        json: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Response:
+        return self.request("POST", path, json=json, headers=headers)
+
+    def patch(
+        self,
+        path: str,
+        json: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Response:
+        return self.request("PATCH", path, json=json, headers=headers)
+
+    def delete(
+        self,
+        path: str,
+        json: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Response:
+        return self.request("DELETE", path, json=json, headers=headers)
 
     def request(
         self,
@@ -52,14 +78,20 @@ class ASGIClient:
         *,
         params: dict | None = None,
         json: dict | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Response:
         path, _, inline_query = path.partition("?")
         query = urlencode(params) if params else inline_query
         body = jsonlib.dumps(json).encode() if json is not None else b""
 
-        headers = [(b"host", b"testserver")]
+        encoded_headers = [(b"host", b"testserver")]
+        encoded_headers.extend(
+            (name.lower().encode(), value.encode())
+            for name, value in (headers or {}).items()
+        )
         if json is not None:
-            headers.append((b"content-type", b"application/json"))
+            if not any(name == b"content-type" for name, _ in encoded_headers):
+                encoded_headers.append((b"content-type", b"application/json"))
 
         scope = {
             "type": "http",
@@ -71,7 +103,7 @@ class ASGIClient:
             "raw_path": path.encode(),
             "root_path": "",
             "query_string": query.encode(),
-            "headers": headers,
+            "headers": encoded_headers,
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
         }

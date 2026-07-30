@@ -311,6 +311,11 @@ def test_app_resource_supplies_every_identifier_the_console_reads():
         "AAI_CONSOLE_SDK_ARTIFACT_VOLUME",
         "AAI_CONSOLE_JOB_COMPUTE_POLICY_ID",
         "AAI_CONSOLE_TEMPLATE_REPO",
+        "AAI_HUB_JOB_MODE",
+        "AAI_HUB_REGISTRATION_PRINCIPALS",
+        "AAI_HUB_PLATFORM_VIEWER_GROUP",
+        "AAI_HUB_PLATFORM_ADMIN_GROUP",
+        "AAI_HUB_PLATFORM_AUDITOR_GROUP",
     }
     for value in env.values():
         assert value.startswith("${"), f"{value!r} must come from a bundle variable"

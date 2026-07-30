@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 # Identifier keys the content may reference as ${identifier:<key>}. Keeping this list
@@ -38,6 +39,28 @@ class ConfigError(RuntimeError):
     """Raised when the console cannot assemble a usable configuration."""
 
 
+class HubStateMode(StrEnum):
+    """Operational-store modes the current application can select safely.
+
+    ``memory`` exists only for credential-free local development and tests. A hosted
+    app must never accept it: Databricks App filesystems are ephemeral, and presenting
+    process memory as a durable registry would make workflow state disappear on every
+    restart. A Lakebase or SQL implementation can be added behind the repository
+    interface once the corresponding resource and least-privilege grants are approved.
+    """
+
+    UNAVAILABLE = "unavailable"
+    MEMORY = "memory"
+
+
+class HubJobMode(StrEnum):
+    """Explicit execution adapters; preview can never be selected when hosted."""
+
+    UNAVAILABLE = "unavailable"
+    DATABRICKS = "databricks"
+    PREVIEW = "preview"
+
+
 @dataclass(frozen=True)
 class ConsoleConfig:
     identifiers: dict[str, str]
@@ -46,6 +69,13 @@ class ConsoleConfig:
     #: Git URL of the template hub. Unset means "generate the in-checkout relative
     #: form", which keeps a clone working before its own repository URL is configured.
     template_repo: str | None = None
+    hub_state_mode: HubStateMode = HubStateMode.UNAVAILABLE
+    hub_job_mode: HubJobMode = HubJobMode.UNAVAILABLE
+    hub_registration_principals: frozenset[str] = frozenset()
+    hub_platform_viewer_group: str | None = None
+    hub_platform_admin_group: str | None = None
+    hub_platform_auditor_group: str | None = None
+    hub_local_actor: str = "local-developer"
 
     def identifier(self, key: str) -> str:
         if key not in IDENTIFIER_KEYS:
@@ -88,6 +118,14 @@ def _from_repository(start: Path) -> dict[str, str]:
     return {}
 
 
+def _csv_set(value: str) -> frozenset[str]:
+    return frozenset(part.strip() for part in value.split(",") if part.strip())
+
+
+def _optional(environ: dict[str, str], name: str) -> str | None:
+    return environ.get(name, "").strip() or None
+
+
 def load_config(
     environ: dict[str, str] | None = None,
     *,
@@ -104,9 +142,52 @@ def load_config(
         for key, value in _from_repository(start or Path(__file__).resolve()).items():
             identifiers.setdefault(key, value)
 
+    requested_mode = environ.get("AAI_HUB_STATE_MODE", "").strip().lower()
+    if requested_mode:
+        try:
+            state_mode = HubStateMode(requested_mode)
+        except ValueError as error:
+            choices = ", ".join(mode.value for mode in HubStateMode)
+            raise ConfigError(
+                f"AAI_HUB_STATE_MODE must be one of: {choices}"
+            ) from error
+    else:
+        state_mode = HubStateMode.UNAVAILABLE if hosted else HubStateMode.MEMORY
+    if hosted and state_mode is HubStateMode.MEMORY:
+        raise ConfigError(
+            "AAI_HUB_STATE_MODE=memory is local-preview only; bind an approved "
+            "durable store before enabling hosted Hub writes"
+        )
+
+    requested_job_mode = environ.get("AAI_HUB_JOB_MODE", "").strip().lower()
+    if requested_job_mode:
+        try:
+            job_mode = HubJobMode(requested_job_mode)
+        except ValueError as error:
+            choices = ", ".join(mode.value for mode in HubJobMode)
+            raise ConfigError(f"AAI_HUB_JOB_MODE must be one of: {choices}") from error
+    else:
+        job_mode = HubJobMode.UNAVAILABLE
+    if hosted and job_mode is HubJobMode.PREVIEW:
+        raise ConfigError(
+            "AAI_HUB_JOB_MODE=preview is local-preview only; hosted workflow "
+            "actions must use approved Databricks Jobs"
+        )
+
     return ConsoleConfig(
         identifiers=identifiers,
         hosted=hosted,
         app_name=app_name,
         template_repo=environ.get(f"{_ENV_PREFIX}TEMPLATE_REPO", "").strip() or None,
+        hub_state_mode=state_mode,
+        hub_job_mode=job_mode,
+        hub_registration_principals=_csv_set(
+            environ.get("AAI_HUB_REGISTRATION_PRINCIPALS", "")
+        ),
+        hub_platform_viewer_group=_optional(environ, "AAI_HUB_PLATFORM_VIEWER_GROUP"),
+        hub_platform_admin_group=_optional(environ, "AAI_HUB_PLATFORM_ADMIN_GROUP"),
+        hub_platform_auditor_group=_optional(environ, "AAI_HUB_PLATFORM_AUDITOR_GROUP"),
+        hub_local_actor=(
+            environ.get("AAI_HUB_LOCAL_ACTOR", "").strip() or "local-developer"
+        ),
     )

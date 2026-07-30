@@ -16,6 +16,13 @@
       "description": "Application identifier used in tags and traces",
       "order": 2
     },
+    "repository_url": {
+      "type": "string",
+      "description": "Required absolute HTTPS URL of this project's real Git repository; Hub registration rejects example and placeholder URLs",
+      "order": 22,
+      "pattern": "^https://[^\\s@/?#]+(?:/[^\\s?#]*)?$",
+      "pattern_match_failure_message": "Use an absolute HTTPS repository URL without credentials, spaces, a query string, or a fragment."
+    },
     "team": {
       "type": "string",
       "default": "data-platform",
