@@ -14,6 +14,7 @@ from aai_core.providers.search import (
     DatabricksAISearchRetriever,
 )
 from aai_core.providers.types import ModelCapabilities, ProviderConfigurationError
+from aai_core.tags import databricks_ai_gateway_request_headers
 
 if TYPE_CHECKING:
     from aai_core.context import PlatformContext
@@ -131,6 +132,12 @@ class ProviderResolver:
                     "the notebook kernel.",
                 ) from error
 
+            # These headers are fixed when the governed native clients are
+            # constructed. The adapters reject per-call headers, so application
+            # code cannot remove or replace attribution on individual requests.
+            native_options["default_headers"] = databricks_ai_gateway_request_headers(
+                self.context.tags
+            )
             return (
                 DatabricksOpenAI(**native_options),
                 model,

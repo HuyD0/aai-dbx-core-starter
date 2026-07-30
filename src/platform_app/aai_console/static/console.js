@@ -216,3 +216,181 @@ if (composer) {
     openPalette(query);
   });
 }
+
+/* ----------------------------------------------------------- detail tabs */
+
+const tabButtons = [...document.querySelectorAll("[role='tab'][data-tab]")];
+
+function activateTab(selected, { updateUrl = true } = {}) {
+  if (!selected) return;
+  for (const button of tabButtons) {
+    const active = button === selected;
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+    const panel = document.getElementById(button.getAttribute("aria-controls"));
+    if (panel) panel.hidden = !active;
+  }
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", selected.dataset.tab);
+    window.history.replaceState({}, "", url);
+  }
+}
+
+for (const button of tabButtons) {
+  button.addEventListener("click", () => activateTab(button));
+  button.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    let index = tabButtons.indexOf(button);
+    if (event.key === "Home") index = 0;
+    if (event.key === "End") index = tabButtons.length - 1;
+    if (event.key === "ArrowLeft") index = (index - 1 + tabButtons.length) % tabButtons.length;
+    if (event.key === "ArrowRight") index = (index + 1) % tabButtons.length;
+    tabButtons[index].focus();
+    activateTab(tabButtons[index]);
+  });
+}
+
+if (tabButtons.length) {
+  const requestedTab = new URL(window.location.href).searchParams.get("tab");
+  const initial = tabButtons.find((button) => button.dataset.tab === requestedTab);
+  activateTab(initial || tabButtons[0], { updateUrl: false });
+}
+
+/* ------------------------------------------------------ governed actions */
+
+function actionTarget() {
+  return document.getElementById("action-result");
+}
+
+async function problemDetail(response) {
+  const fallback = `The Hub returned HTTP ${response.status}.`;
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("json")) return fallback;
+  try {
+    const problem = await response.json();
+    return problem.detail || problem.title || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function submitAction(button, url, payload) {
+  const target = actionTarget();
+  if (!target) return;
+  button.disabled = true;
+  target.textContent = "Submitting…";
+  target.dataset.tone = "pending";
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-requested-with": "AI-Platform-Hub",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      target.textContent = await problemDetail(response);
+      target.dataset.tone = "error";
+      return;
+    }
+    const result = await response.json();
+    target.textContent = result.message || `Accepted in state ${result.status}.`;
+    target.dataset.tone = "success";
+    // Keep the control disabled while a workflow is active. A page refresh obtains the
+    // authoritative state; no optimistic success is shown before the transaction.
+    if (!["REQUESTED", "QUEUED", "RUNNING", "PENDING_REVIEW"].includes(result.status)) {
+      button.disabled = false;
+    }
+  } catch {
+    target.textContent = "The Hub could not be reached. Nothing was submitted.";
+    target.dataset.tone = "error";
+    button.disabled = false;
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const adminDecision = event.target.closest("[data-admin-decision]");
+  if (adminDecision && !adminDecision.disabled) {
+    const decision = adminDecision.dataset.adminDecision;
+    const promotionId = adminDecision.dataset.promotionId;
+    const applicationId = adminDecision.dataset.applicationId;
+    const version = adminDecision.dataset.version;
+    const source = adminDecision.dataset.source;
+    const targetEnvironment = adminDecision.dataset.target;
+    const rowVersion = Number(adminDecision.dataset.rowVersion);
+    const comment = document
+      .getElementById(adminDecision.dataset.commentInput)
+      ?.value.trim();
+    if (decision !== "approve" && !comment) {
+      const target = actionTarget();
+      if (target) {
+        target.textContent =
+          "A review comment is required to reject or request changes.";
+        target.dataset.tone = "error";
+      }
+      return;
+    }
+    const confirmed = window.confirm(
+      `${decision.replace("-", " ")} promotion request?\n\nApplication: ${applicationId}\nVersion: ${version}\nEnvironment: ${source} → ${targetEnvironment}\n\nThe decision is recorded as an append-only workflow event.`,
+    );
+    if (!confirmed) return;
+    submitAction(
+      adminDecision,
+      `/api/v1/admin/promotion-requests/${encodeURIComponent(promotionId)}/${decision}`,
+      {
+        rowVersion,
+        comment: comment || null,
+      },
+    );
+    return;
+  }
+
+  const evaluation = event.target.closest("[data-run-evaluation]");
+  if (evaluation && !evaluation.disabled) {
+    const applicationId = evaluation.dataset.runEvaluation;
+    const environment = evaluation.dataset.environment;
+    const datasetVersion = document
+      .getElementById("evaluation-dataset-version")
+      ?.value.trim();
+    if (!datasetVersion) {
+      const target = actionTarget();
+      if (target) {
+        target.textContent =
+          "Enter an immutable governed dataset version before running evaluation.";
+        target.dataset.tone = "error";
+      }
+      return;
+    }
+    submitAction(
+      evaluation,
+      `/api/v1/applications/${encodeURIComponent(applicationId)}/evaluations`,
+      {
+        environment,
+        datasetVersion,
+      },
+    );
+    return;
+  }
+
+  const promotion = event.target.closest("[data-request-promotion]");
+  if (!promotion || promotion.disabled) return;
+  const applicationId = promotion.dataset.requestPromotion;
+  const source = promotion.dataset.source;
+  const target = promotion.dataset.target;
+  const version = promotion.dataset.version;
+  const confirmed = window.confirm(
+    `Request production promotion?\n\nApplication: ${applicationId}\nVersion: ${version}\nEnvironment: ${source} → ${target}\n\nSubmission does not deploy. An administrator must review current readiness evidence.`,
+  );
+  if (!confirmed) return;
+  submitAction(
+    promotion,
+    `/api/v1/applications/${encodeURIComponent(applicationId)}/promotion-requests`,
+    {
+      sourceEnvironment: source,
+      targetEnvironment: target,
+    },
+  );
+});

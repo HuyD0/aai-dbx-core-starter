@@ -1,0 +1,64 @@
+# Versioned AI Platform Hub registration manifest.
+#
+# This complements aai-platform.yml: that file configures the application runtime,
+# while this one describes ownership, deployment bindings, evaluation policy, and
+# readiness policy to the platform control plane. It contains no permissions or
+# credentials.
+apiVersion: ai-platform/v1
+kind: AIApplication
+
+metadata:
+  id: {{.application_name}}
+  name: {{.application_name}}
+  description: Golden-path AI application generated from {{.project_name}}.
+  owner: {{.owner_group}}
+  supportGroup: {{.owner_group}}
+  businessDomain: {{.project_name}}
+  costCenter: {{.cost_center}}
+  riskTier: medium
+  tags:
+    application_id: {{.application_name}}
+    team: {{.team}}
+    domain: {{.project_name}}
+    cost_center: {{.cost_center}}
+    data_classification: internal
+    lifecycle: experimental
+
+spec:
+  repository:
+    url: "{{.repository_url}}"
+
+  authorization:
+    mode: user
+
+  environments:
+    dev:
+      tags:
+        environment: dev
+
+  resources:
+    # Every golden-path bundle already exposes this logical job key. The Hub keeps the
+    # browser action gated until approved discovery resolves it to a deployed job ID;
+    # the manifest never guesses an environment ID.
+    evaluationJobKey: release_gate
+    aiSearchIndexes: []
+    unityCatalogFunctions: []
+    mcpServices: []
+    # Promotion is deliberately disabled by absence. The current golden path has no
+    # dedicated promotion job; a browser action must never call the human-run prompt
+    # alias script directly.
+
+  evaluation:
+    profile: golden_path_release_gate_v1
+    dataset: {{.catalog}}.{{.schema}}.evaluation_cases
+    minimumCases: 1
+    maximumAgeHours: 168
+    thresholds:
+      gate_pass_rate: 1.0
+
+  readiness:
+    profile: development_v1
+
+  serviceLevels:
+    maximumErrorRate: 0.02
+    p95LatencyMs: 8000

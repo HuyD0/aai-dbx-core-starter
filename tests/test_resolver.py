@@ -2,6 +2,7 @@
 clients, exercised hermetically with fake provider modules."""
 
 import builtins
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from conftest import install_fake_module
 from aai_core.providers.resolver import ProviderResolver, _capabilities
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.secrets import SecretResolver
+from aai_core.tags import DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER, ResourceContext
 
 
 class FakeCompletions:
@@ -43,17 +45,37 @@ class FakeSecretProvider:
         return "subscription-key-value"
 
 
-def _context(models=None, embeddings=None, retrievers=None):
+def _resource_context(**overrides):
+    values = {
+        "application": "claims-agent",
+        "project": "claims",
+        "environment": "dev",
+        "team": "claims-ai",
+        "owner_group": "group:claims-ai-owners",
+        "cost_center": "CC-1042",
+        "data_classification": "internal",
+        "lifecycle": "experimental",
+        "repository": "org/claims",
+        "release": "1.0.0",
+    }
+    values.update(overrides)
+    return ResourceContext(**values)
+
+
+def _context(models=None, embeddings=None, retrievers=None, resource=None):
     secrets = SecretResolver()
     secrets.register("keyvault", FakeSecretProvider())
+    tags = resource or _resource_context()
     return SimpleNamespace(
         settings=SimpleNamespace(
             azure_identity="azure_cli",
             models=models or {},
             embeddings=embeddings or {},
             retrievers=retrievers or {},
+            resource=tags,
         ),
         secrets=secrets,
+        tags=tags,
     )
 
 
@@ -196,6 +218,57 @@ def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
         model = resolver.model("general-chat")
         assert model.provider == provider
         assert model.logical_name == "general-chat"
+        headers = model.native_client.options.get("default_headers", {})
+        if provider == "databricks":
+            assert json.loads(headers[DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER]) == {
+                "application_id": "claims_agent",
+                "application_version": "1.0.0",
+                "cost_center": "CC-1042",
+                "environment": "dev",
+                "team": "claims-ai",
+            }
+            assert (
+                model.create_native_async_client().options["default_headers"] == headers
+            )
+        else:
+            assert DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER not in headers
+
+
+def test_databricks_embedding_client_carries_governed_request_tags(monkeypatch):
+    install_fake_module(
+        monkeypatch,
+        "databricks_openai",
+        DatabricksOpenAI=FakeOpenAIClient,
+        AsyncDatabricksOpenAI=FakeAsyncOpenAIClient,
+    )
+    resolver = ProviderResolver(
+        _context(
+            embeddings={
+                "knowledge-embedding": {
+                    "provider": "databricks",
+                    "deployment": "embedding-endpoint",
+                    "dimensions": 1536,
+                }
+            },
+            resource=_resource_context(
+                application="claims agent",
+                release="git-abc123",
+            ),
+        )
+    )
+
+    embedding = resolver.embedding("knowledge-embedding")
+    header = embedding.native_client.options["default_headers"][
+        DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER
+    ]
+
+    assert json.loads(header) == {
+        "application_id": "claims_agent",
+        "application_version": "git-abc123",
+        "cost_center": "CC-1042",
+        "environment": "dev",
+        "team": "claims-ai",
+    }
 
 
 def test_missing_databricks_extra_has_actionable_remediation(monkeypatch):

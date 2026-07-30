@@ -3,27 +3,64 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{% block title %}AAI platform console{% endblock %}</title>
+    <meta name="color-scheme" content="dark light" />
+    <title>{% block title %}AI Platform Hub{% endblock %}</title>
     <link rel="stylesheet" href="/static/console.css" />
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <div class="shell">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar__head">
-          <button class="switcher" type="button" aria-label="Track set">
-            <span class="switcher__name">AAI Console</span>
-            {% include "fragments/icon_chevron.svg.j2" %}
-          </button>
-          <button class="iconbtn" type="button" id="palette-open" aria-label="Search steps" title="Search steps  /">
+          <a class="brand" href="/" aria-label="AI Platform Hub portfolio">
+            <span class="brand__mark" aria-hidden="true">AI</span>
+            <span class="brand__text">
+              <strong>Platform Hub</strong>
+              <small>AAI control plane</small>
+            </span>
+          </a>
+          <button class="iconbtn" type="button" id="palette-open" aria-label="Search the golden-path guide" title="Search guide  /">
             {% include "fragments/icon_search.svg.j2" %}
           </button>
         </div>
 
-        <nav class="sidebar__nav" aria-label="Guided tracks">
-          <p class="sidebar__group">Getting started</p>
+        <nav class="sidebar__nav" aria-label="AI Platform Hub">
+          <p class="sidebar__group">Operate</p>
+          <a
+            class="navrow {% if active_section | default('') == 'portfolio' %}navrow--active{% endif %}"
+            href="/"
+          >
+            <span class="navrow__glyph navrow__glyph--portfolio" aria-hidden="true"></span>
+            <span class="navrow__text">
+              <span class="navrow__title">Portfolio</span>
+              <span class="navrow__sub">Applications and readiness</span>
+            </span>
+          </a>
+          <a
+            class="navrow {% if active_section | default('') == 'optimization' %}navrow--active{% endif %}"
+            href="/optimization"
+          >
+            <span class="navrow__glyph navrow__glyph--cost" aria-hidden="true"></span>
+            <span class="navrow__text">
+              <span class="navrow__title">Cost optimization</span>
+              <span class="navrow__sub">Evidence-backed opportunities</span>
+            </span>
+          </a>
+          <a
+            class="navrow {% if active_section | default('') == 'admin' %}navrow--active{% endif %}"
+            href="/admin/actions"
+          >
+            <span class="navrow__glyph navrow__glyph--queue" aria-hidden="true"></span>
+            <span class="navrow__text">
+              <span class="navrow__title">Action queue</span>
+              <span class="navrow__sub">Reviews and execution state</span>
+            </span>
+          </a>
+
+          <p class="sidebar__group">Build</p>
           {% for track in tracks %}
             <a
-              class="navrow {% if track.id == active.id %}navrow--active{% endif %}"
+              class="navrow {% if active is defined and track.id == active.id %}navrow--active{% endif %}"
               href="/track/{{ track.id }}"
             >
               <span class="navrow__glyph navrow__glyph--{{ track.glyph }}" aria-hidden="true"></span>
@@ -39,11 +76,17 @@
           <span class="chip {% if session.hosted %}chip--live{% endif %}">
             {% if session.hosted %}Hosted{% else %}Local{% endif %}
           </span>
-          <span class="chip chip--muted">Guide &amp; generate</span>
+          {% if hub_capabilities is defined and hub_capabilities.state_store == "local_preview" %}
+            <span class="chip chip--warning">Preview state</span>
+          {% elif hub_capabilities is defined and hub_capabilities.state_store == "ready" %}
+            <span class="chip chip--ok">Registry ready</span>
+          {% else %}
+            <span class="chip chip--muted">Registry gated</span>
+          {% endif %}
         </div>
       </aside>
 
-      <main class="main">
+      <main class="main" id="main-content" tabindex="-1">
         {% block main %}{% endblock %}
       </main>
     </div>
@@ -53,9 +96,9 @@
         class="palette__input"
         id="palette-input"
         type="search"
-        placeholder="Search steps…"
+        placeholder="Search the golden-path guide…"
         autocomplete="off"
-        aria-label="Search steps"
+        aria-label="Search the golden-path guide"
       />
       <ul class="palette__list" id="palette-list"></ul>
     </dialog>

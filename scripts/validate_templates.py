@@ -46,6 +46,9 @@ def config_for(template: Path) -> dict:
         "properties"
     ]
     overrides = {
+        "repository_url": (
+            f"https://github.com/aai-template-validation/{template.name}"
+        ),
         "workspace_host": IDENTIFIERS["databricks_host"],
         "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
         "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],

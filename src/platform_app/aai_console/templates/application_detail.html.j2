@@ -1,0 +1,251 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ application.name }} — AI Platform Hub{% endblock %}
+
+{% block main %}
+<header class="topbar">
+  <div class="topbar__title">
+    <a class="back-link" href="/" aria-label="Back to portfolio">←</a>
+    <h1>{{ application.name }}</h1>
+    <span class="topbar__sub"><code>{{ application.application_id }}</code></span>
+  </div>
+  <div class="topbar__actions">
+    <span class="status status--{{ application.health | lower }}">
+      <span class="status__mark" aria-hidden="true"></span>{{ application.health }}
+    </span>
+  </div>
+</header>
+
+<div class="scroll">
+  <div class="hub-page">
+    <section class="detail-heading">
+      <div>
+        <p class="eyebrow">{{ application.business_domain }} · {{ application.risk_tier }} risk</p>
+        <h2>{{ application.description }}</h2>
+        <div class="tag-list">
+          {% for key, value in application.tags %}<span class="tag">{{ key }}:{{ value }}</span>{% endfor %}
+        </div>
+      </div>
+      <div class="detail-actions">
+        <label class="field" for="evaluation-dataset-version">
+          <span>Dataset version</span>
+          <input
+            id="evaluation-dataset-version"
+            type="text"
+            maxlength="2048"
+            placeholder="Immutable version or snapshot ID"
+            autocomplete="off"
+            {% if not application.can_run_evaluation %}disabled{% endif %}
+          />
+        </label>
+        <button
+          class="button"
+          type="button"
+          data-run-evaluation="{{ application.application_id }}"
+          data-environment="{{ application.environment }}"
+          {% if not application.can_run_evaluation %}disabled aria-describedby="evaluation-disabled-reason"{% endif %}
+        >
+          Run evaluation
+        </button>
+        <button
+          class="button button--critical"
+          type="button"
+          data-request-promotion="{{ application.application_id }}"
+          data-version="{{ application.git_sha }}"
+          data-source="{{ application.environment }}"
+          data-target="{{ application.promotion_target or '' }}"
+          {% if not application.can_request_promotion %}disabled aria-describedby="promotion-disabled-reason"{% endif %}
+        >
+          Request production promotion
+        </button>
+      </div>
+    </section>
+
+    {% if not application.can_run_evaluation %}
+      <p class="action-reason" id="evaluation-disabled-reason">{{ application.evaluation_disabled_reason }}</p>
+    {% endif %}
+    {% if not application.can_request_promotion %}
+      <p class="action-reason" id="promotion-disabled-reason">{{ application.promotion_disabled_reason }}</p>
+    {% endif %}
+    <div class="action-result" id="action-result" role="status" aria-live="polite"></div>
+
+    <nav class="tabs" role="tablist" aria-label="Application detail">
+      {% for id, label in [
+        ("overview", "Overview"),
+        ("readiness", "Readiness"),
+        ("evaluations", "Evaluations"),
+        ("traces", "Traces"),
+        ("costs", "Costs"),
+        ("activity", "Activity")
+      ] %}
+        <button
+          id="tab-{{ id }}"
+          type="button"
+          role="tab"
+          aria-controls="panel-{{ id }}"
+          aria-selected="{{ 'true' if loop.first else 'false' }}"
+          tabindex="{{ '0' if loop.first else '-1' }}"
+          data-tab="{{ id }}"
+        >{{ label }}</button>
+      {% endfor %}
+    </nav>
+
+    <section class="tab-panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+      <div class="detail-grid">
+        <article class="panel">
+          <div class="panel__head"><div><h3>Ownership</h3><p>Support and accountability</p></div></div>
+          <dl class="key-values">
+            <div><dt>Owner</dt><dd>{{ application.owner }}</dd></div>
+            <div><dt>Support group</dt><dd>{{ application.support_group }}</dd></div>
+            <div><dt>Lifecycle</dt><dd>{{ application.lifecycle }}</dd></div>
+            <div><dt>Cost center</dt><dd>{{ application.cost_center }}</dd></div>
+          </dl>
+        </article>
+        <article class="panel">
+          <div class="panel__head"><div><h3>Current deployment</h3><p>{{ application.environment }}</p></div></div>
+          <dl class="key-values">
+            <div><dt>Git SHA</dt><dd><code>{{ application.git_sha }}</code></dd></div>
+            <div><dt>Registered</dt><dd>{{ application.registered_at }}</dd></div>
+            <div><dt>Health</dt><dd>{{ application.health }} — {{ application.health_reason }}</dd></div>
+            <div><dt>Readiness</dt><dd>{{ application.readiness }}</dd></div>
+          </dl>
+        </article>
+      </div>
+      <article class="panel">
+        <div class="panel__head">
+          <div>
+            <h3>Current deployments</h3>
+            <p>One immutable current version per registered environment</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Environment</th><th>Git SHA</th><th>Deployment target</th><th>Registered</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for deployment in application.deployments %}
+                <tr>
+                  <td><span class="status status--neutral">{{ deployment.environment }}</span></td>
+                  <td><code>{{ deployment.git_sha }}</code></td>
+                  <td>{{ deployment.deployment_target }}</td>
+                  <td>{{ deployment.registered_at }}</td>
+                  <td>
+                    {% if deployment.selected %}
+                      <span aria-current="true">Selected</span>
+                    {% else %}
+                      <a href="/applications/{{ application.application_id }}?environment={{ deployment.environment }}">Open</a>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="panel__head"><div><h3>Resource dependencies</h3><p>Registered references; discovery is asynchronous</p></div></div>
+        {% if application.resources %}
+          <div class="resource-list">
+            {% for resource in application.resources %}
+              <div><span class="status status--neutral">{{ resource.type }}</span><strong>{{ resource.name }}</strong><code>{{ resource.id }}</code></div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="panel__empty">No resource bindings have been discovered.</p>
+        {% endif %}
+      </article>
+    </section>
+
+    <section class="tab-panel" id="panel-readiness" role="tabpanel" aria-labelledby="tab-readiness" hidden>
+      <article class="panel">
+        <div class="panel__head">
+          <div><h3>Production readiness</h3><p>{{ application.readiness_profile }} · evaluated {{ application.readiness_evaluated_at }}</p></div>
+        </div>
+        <div class="readiness-list">
+          {% for rule in readiness %}
+            <article class="readiness-row readiness-row--{{ rule.tone }}">
+              <span class="status status--{{ rule.tone }}">{{ rule.status }}</span>
+              <div>
+                <h4>{{ rule.rule_id }} · {{ rule.description }}</h4>
+                <p>{{ rule.evidence }}</p>
+                <small>{{ rule.severity }} · v{{ rule.version }} · {{ rule.evaluated_at }}</small>
+                {% if rule.remediation %}<p class="remediation">{{ rule.remediation }}</p>{% endif %}
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+
+    <section class="tab-panel" id="panel-evaluations" role="tabpanel" aria-labelledby="tab-evaluations" hidden>
+      <article class="panel">
+        <div class="panel__head"><div><h3>Evaluation history</h3><p>All registered application versions; sanitized summary metrics only</p></div></div>
+        {% if evaluations %}
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>Status</th><th>Version</th><th>Dataset</th><th>Metrics</th><th>Requested by</th><th>Run</th></tr></thead>
+              <tbody>
+                {% for evaluation in evaluations %}
+                  <tr>
+                    <td><span class="status status--{{ evaluation.tone }}">{{ evaluation.status }}</span></td>
+                    <td><code>{{ evaluation.git_sha }}</code></td>
+                    <td>{{ evaluation.dataset }}<small>{{ evaluation.dataset_version }}</small></td>
+                    <td>{{ evaluation.summary }}</td>
+                    <td>{{ evaluation.requested_by }}<small>{{ evaluation.requested_at }}</small></td>
+                    <td>
+                      {% if evaluation.run_url %}<a href="{{ evaluation.run_url }}">Job run</a>{% endif %}
+                      {% if evaluation.mlflow_url %}<a href="{{ evaluation.mlflow_url }}">MLflow run</a>{% endif %}
+                      {% if not evaluation.run_url and not evaluation.mlflow_url %}—{% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="panel__empty">No evaluations are registered for this application version.</p>
+        {% endif %}
+      </article>
+    </section>
+
+    <section class="tab-panel" id="panel-traces" role="tabpanel" aria-labelledby="tab-traces" hidden>
+      <article class="notice notice--neutral">
+        <div class="notice__icon" aria-hidden="true">i</div>
+        <div>
+          <h3>Sanitized trace summaries are not configured</h3>
+          <p>{{ hub_capabilities.traces_detail }}</p>
+          <p class="notice__meta">The Hub does not proxy prompts, responses, documents, tool inputs, or hidden reasoning.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="tab-panel" id="panel-costs" role="tabpanel" aria-labelledby="tab-costs" hidden>
+      <section class="metric-grid">
+        {% for label, detail in [
+          ("Application cost", "Mapped shared and dedicated resources"),
+          ("My direct usage", "Recorded user/run/request identity only"),
+          ("Shared or allocated", "Only with an approved allocation rule"),
+          ("Unattributed", "Preserved for mapping correction")
+        ] %}
+          <article class="metric"><span class="metric__label">{{ label }}</span><strong>—</strong><small>{{ detail }} · unavailable</small></article>
+        {% endfor %}
+      </section>
+    </section>
+
+    <section class="tab-panel" id="panel-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+      <article class="panel">
+        <div class="panel__head"><div><h3>Activity</h3><p>Append-only workflow events</p></div></div>
+        {% if activity %}
+          <ol class="timeline">
+            {% for event in activity %}
+              <li><span>{{ event.event_time }}</span><strong>{{ event.event_type }}</strong><p>{{ event.summary }}</p><small>{{ event.actor }}</small></li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          <p class="panel__empty">No workflow events are visible.</p>
+        {% endif %}
+      </article>
+    </section>
+  </div>
+</div>
+{% endblock %}

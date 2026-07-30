@@ -61,6 +61,32 @@ variables:
       from the upstream repository. Cross-checked against platform-identifiers.json by
       tests/test_app_resource.py, so editing the fixture surfaces this line.
     default: https://github.com/HuyD0/aai-dbx-core-starter
+  hub_job_mode:
+    description: >-
+      Reserved Hub workflow adapter selector. Keep unavailable in this delivery:
+      remote execution remains gated until a durable reconciler and sanitized result
+      ingestion are implemented and approved.
+    default: unavailable
+  hub_registration_principals:
+    description: >-
+      Comma-separated non-secret CI service-principal identities allowed to register
+      manifests. Empty keeps registration disabled.
+    default: ""
+  hub_platform_viewer_group:
+    description: >-
+      Approved account-level fleet viewer group name. A name alone grants no role until
+      a trusted server-side membership resolver is configured.
+    default: ""
+  hub_platform_admin_group:
+    description: >-
+      Approved account-level Hub administrator group name. Empty keeps administration
+      fail-closed.
+    default: ""
+  hub_platform_auditor_group:
+    description: >-
+      Approved account-level Hub auditor group name. Empty keeps audit fleet access
+      fail-closed.
+    default: ""
 
 artifacts:
   default:

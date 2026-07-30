@@ -1,0 +1,305 @@
+{% extends "base.html.j2" %}
+{% block title %}Application portfolio — AI Platform Hub{% endblock %}
+
+{% block main %}
+<header class="topbar">
+  <div class="topbar__title">
+    <h1>Application portfolio</h1>
+    <span class="topbar__sub">Ownership, health, readiness, and attributable cost</span>
+  </div>
+  <div class="topbar__actions">
+    <a class="button button--quiet" href="/api/openapi.json">API contract</a>
+  </div>
+</header>
+
+<div class="scroll">
+  <div class="hub-page">
+    <section class="page-heading" aria-labelledby="portfolio-heading">
+      <div>
+        <p class="eyebrow">AI Platform Hub</p>
+        <h2 id="portfolio-heading">What is running, who owns it, and what needs attention</h2>
+        <p>
+          Registered applications are visibility-filtered on the server. Cost concepts
+          stay separate so shared App compute is never presented as a person’s direct use.
+        </p>
+      </div>
+      <div class="identity-card">
+        <span class="identity-card__label">Viewing as</span>
+        <strong>{{ actor.display_name if actor else "Identity unavailable" }}</strong>
+        <small>{{ actor.role_label if actor else "Databricks forwarded identity required" }}</small>
+      </div>
+    </section>
+
+    {% if hub_capabilities.state_store != "ready" %}
+      <section class="notice notice--attention" role="status" aria-labelledby="registry-gate">
+        <div class="notice__icon" aria-hidden="true">!</div>
+        <div>
+          <h3 id="registry-gate">
+            {% if hub_capabilities.state_store == "local_preview" %}
+              Local preview registry
+            {% else %}
+              Durable registry is not bound
+            {% endif %}
+          </h3>
+          <p>{{ hub_capabilities.state_store_detail }}</p>
+          {% if session.hosted %}
+            <p class="notice__meta">
+              Hosted writes remain disabled. No application or workflow state is being
+              stored in the App filesystem.
+            </p>
+          {% else %}
+            <p class="notice__meta">
+              Preview data is process-local and is intentionally cleared on restart.
+            </p>
+          {% endif %}
+        </div>
+      </section>
+    {% endif %}
+
+    <section class="metric-grid" aria-label="Portfolio summary">
+      <article class="metric">
+        <span class="metric__label">Visible applications</span>
+        <strong>{{ summary.application_count }}</strong>
+        <small>Server-filtered</small>
+      </article>
+      <article class="metric">
+        <span class="metric__label">Blocking issues on this page</span>
+        <strong>{{ summary.blocking_count }}</strong>
+        <small>Versioned evidence · current page only</small>
+      </article>
+      <article class="metric">
+        <span class="metric__label">Application cost</span>
+        {% if hub_capabilities.costs == "ready" %}
+          <strong>{{ summary.application_cost }}</strong>
+          <small>{{ summary.cost_freshness }}</small>
+        {% else %}
+          <strong aria-label="Unavailable">—</strong>
+          <small>Telemetry view not configured</small>
+        {% endif %}
+      </article>
+      <article class="metric">
+        <span class="metric__label">My direct usage</span>
+        {% if hub_capabilities.costs == "ready" %}
+          <strong>{{ summary.direct_cost }}</strong>
+          <small>Exact identity attribution only</small>
+        {% else %}
+          <strong aria-label="Unavailable">—</strong>
+          <small>Never inferred from resource ownership</small>
+        {% endif %}
+      </article>
+    </section>
+
+    <form class="filterbar" method="get" action="/" aria-label="Portfolio filters">
+      <label class="field field--search">
+        <span>Application</span>
+        <input
+          name="search"
+          type="search"
+          value="{{ filters.search }}"
+          placeholder="Name or application ID"
+          autocomplete="off"
+        />
+      </label>
+      <label class="field">
+        <span>Lifecycle</span>
+        <select name="lifecycle">
+          <option value="">All visible</option>
+          {% for value in ["experimental", "production", "retired"] %}
+            <option value="{{ value }}" {% if filters.lifecycle == value %}selected{% endif %}>
+              {{ value | title }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>Health</span>
+        <select name="health">
+          <option value="">Any status</option>
+          {% for value in ["HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"] %}
+            <option value="{{ value }}" {% if filters.health == value %}selected{% endif %}>
+              {{ value | title }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>Ownership</span>
+        <select name="ownership">
+          <option value="visible" {% if filters.ownership == "visible" %}selected{% endif %}>
+            All visible
+          </option>
+          <option value="owned" {% if filters.ownership == "owned" %}selected{% endif %}>
+            Owned by me
+          </option>
+          <option value="teams" {% if filters.ownership == "teams" %}selected{% endif %}>
+            My teams
+          </option>
+        </select>
+      </label>
+      <label class="field field--tags">
+        <span>Tags</span>
+        <input
+          name="tags"
+          value="{{ filters.tags }}"
+          placeholder="team=platform|risk,domain=investments"
+          autocomplete="off"
+        />
+        <small>OR within <code>|</code>; AND across comma-separated keys</small>
+      </label>
+      <label class="field">
+        <span>From</span>
+        <input name="start_date" type="date" value="{{ filters.start_date }}" />
+      </label>
+      <label class="field">
+        <span>Through</span>
+        <input name="end_date" type="date" value="{{ filters.end_date }}" />
+        <small>Last 30 complete days by default</small>
+      </label>
+      <div class="filterbar__actions">
+        <button class="button" type="submit">Apply</button>
+        <a class="button button--quiet" href="/">Clear all</a>
+      </div>
+    </form>
+
+    <section class="panel" aria-labelledby="applications-table-heading">
+      <div class="panel__head">
+        <div>
+          <h3 id="applications-table-heading">Applications</h3>
+          <p>{{ page.total }} result{% if page.total != 1 %}s{% endif %}; page {{ page.number }} of {{ page.pages }}</p>
+        </div>
+        <span class="freshness">
+          <span aria-hidden="true">◷</span>
+          Registry {{ summary.registry_freshness }}
+        </span>
+      </div>
+
+      {% if applications %}
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col"><a href="{{ sort_links.application }}">Application</a></th>
+                <th scope="col">Owner / support</th>
+                <th scope="col">Lifecycle</th>
+                <th scope="col">Health</th>
+                <th scope="col">Readiness</th>
+                <th scope="col">Current version</th>
+                <th scope="col">Last evaluation</th>
+                <th scope="col">Traffic / SLO</th>
+                <th scope="col">Application cost</th>
+                <th scope="col">My direct usage</th>
+                <th scope="col">Open actions</th>
+                <th scope="col"><span class="sr-only">Open</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for application in applications %}
+                <tr>
+                  <td>
+                    <a class="app-link" href="/applications/{{ application.application_id }}">
+                      <strong>{{ application.name }}</strong>
+                      <code>{{ application.application_id }}</code>
+                    </a>
+                    <div class="tag-list">
+                      {% for key, value in application.tags %}
+                        <span class="tag">{{ key }}:{{ value }}</span>
+                      {% endfor %}
+                    </div>
+                  </td>
+                  <td>
+                    <span>{{ application.owner }}</span>
+                    <small>{{ application.support_group }}</small>
+                  </td>
+                  <td>
+                    <span class="status status--neutral">{{ application.lifecycle }}</span>
+                    <small>{{ application.environment }}</small>
+                  </td>
+                  <td>
+                    <span class="status status--{{ application.health | lower }}">
+                      <span class="status__mark" aria-hidden="true"></span>
+                      {{ application.health }}
+                    </span>
+                    <small>{{ application.health_reason }}</small>
+                  </td>
+                  <td>
+                    <span class="status status--{{ application.readiness_tone }}">
+                      {{ application.readiness }}
+                    </span>
+                    <small>{{ application.blocking_issues }} blocking</small>
+                  </td>
+                  <td>
+                    {% for deployment in application.deployments %}
+                      <a href="/applications/{{ application.application_id }}?environment={{ deployment.environment }}">
+                        <strong>{{ deployment.environment }}</strong>
+                        <code title="{{ deployment.git_sha }}">{{ deployment.git_sha[:12] }}</code>
+                      </a>
+                    {% endfor %}
+                    <small>{{ application.deployments | length }} current environment{% if application.deployments | length != 1 %}s{% endif %}</small>
+                  </td>
+                  <td>
+                    {% if application.last_evaluation %}
+                      <strong>{{ application.last_evaluation.status }}</strong>
+                      <small>{{ application.last_evaluation.completed_at }}</small>
+                    {% else %}
+                      <span>—</span><small>Unavailable</small>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if application.request_volume is not none %}
+                      <strong>{{ application.request_volume }} requests</strong>
+                      <small>P95 {{ application.p95_latency }} · {{ application.error_rate }} errors</small>
+                    {% else %}
+                      <span>—</span><small>Telemetry unavailable</small>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if application.application_cost %}
+                      <strong>{{ application.application_cost.amount }} {{ application.application_cost.currency }}</strong>
+                      <small>{{ application.application_cost.quality }} · {{ application.application_cost.freshness }}</small>
+                    {% else %}
+                      <span>—</span><small>Unavailable</small>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if application.direct_cost %}
+                      <strong>{{ application.direct_cost.amount }} {{ application.direct_cost.currency }}</strong>
+                      <small>DIRECT · EXACT</small>
+                    {% else %}
+                      <span>—</span><small>No exact identity fact</small>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if application.outstanding_actions is not none %}
+                      <strong>{{ application.outstanding_actions }}</strong>
+                    {% else %}
+                      <span>—</span><small>Workflow store unavailable</small>
+                    {% endif %}
+                  </td>
+                  <td><a class="row-arrow" href="/applications/{{ application.application_id }}" aria-label="Open {{ application.name }}">→</a></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="empty-state">
+          <span class="empty-state__mark" aria-hidden="true">◇</span>
+          <h4>No registered applications match this view</h4>
+          {% if hub_capabilities.registration == "ready" %}
+            <p>Register an <code>ai-platform/v1</code> manifest from approved golden-path CI.</p>
+          {% else %}
+            <p>Registration will appear here after a durable store and approved CI caller are configured.</p>
+          {% endif %}
+          <a href="/track/local">Open the golden-path guide</a>
+        </div>
+      {% endif %}
+
+      <nav class="pagination" aria-label="Portfolio pages">
+        {% if page.previous %}<a class="button button--quiet" href="{{ page.previous }}">Previous</a>{% endif %}
+        <span>Page {{ page.number }} of {{ page.pages }}</span>
+        {% if page.next %}<a class="button button--quiet" href="{{ page.next }}">Next</a>{% endif %}
+      </nav>
+    </section>
+  </div>
+</div>
+{% endblock %}

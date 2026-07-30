@@ -1,10 +1,13 @@
-# Platform console
+# AI Platform Hub
 
-The platform console is a Databricks App that gives a developer one guided surface for
-getting started: it renders the lifecycle, generates the exact commands they run on their
-own machine, and reports platform state.
+AI Platform Hub is the platform console's Databricks App. It gives developers one guided
+surface for getting started: it renders the lifecycle, generates the exact commands they
+run on their own machine, and reports platform state.
 
 It lives at `src/platform_app` and is **not** part of the published `aai-core` wheel.
+The Hub architecture, capability gates, external prerequisites, cost controls, and
+failure runbooks are documented in
+[`docs/ai-platform-hub.md`](ai-platform-hub.md).
 
 ## What it does, and what it deliberately does not
 
@@ -13,6 +16,7 @@ It lives at `src/platform_app` and is **not** part of the published `aai-core` w
 | **Guide** | Renders the ladder in `docs/developer-onboarding.md` and `docs/developer-guide.md`. A test asserts every command block is verbatim from the document it cites, so the console cannot drift from the docs. |
 | **Generate** | Builds the `az login` → export → `databricks bundle init` sequence for the chosen template, with this workspace's identifiers already substituted. This is the one thing `scripts/setup_dev.py` cannot do. |
 | **Platform state** | Reports what the *app's own service principal* can reach: its identity, the constrained compute policy, the SDK artifact volume. |
+| **Hub** | Publishes the `ai-platform/v1` schema and registration/workflow API, and renders portfolio, readiness, application detail, cost-optimization, and action-queue surfaces. Hosted stateful and observability capabilities remain gated until the resources in `docs/ai-platform-hub.md` are approved. |
 
 **The console never verifies your personal access.** On-behalf-of-user authorization is
 not used, for two reasons that are not going to change soon:
@@ -102,7 +106,9 @@ update one that already exists.
 >      `cluster_policies.get()` and without it that row reports failure even when
 >      everything else is correctly provisioned.
 >
->    Nothing further — the console reads no application data, no tables and no secrets.
+>    Nothing further is required for the original guide and platform-state checks. Hub
+>    registry, serving-view, and Jobs grants are separate opt-ins; request them only
+>    through the ordered enablement checklist in `docs/ai-platform-hub.md`.
 
 ### Binding — required, and easy to get wrong
 
@@ -156,9 +162,9 @@ Also confirm two workspace settings, either of which silently breaks deployment:
 - **"Only allow app deployments from Git"** — if on, workspace-folder
   `source_code_path` deploys fail and the resource needs `git_source` instead.
 
-## Adding a second track set
+## Adding another onboarding track
 
-The shell is generic; content arrives through `aai_console.registry`. A `TrackSource` is
-anything with an `id` and a `tracks()` method. A lifecycle-and-cost dashboard — MLflow runs
-grouped by the `application` tag, gate outcomes, and `system.billing.usage` sliced by the
-nine tags — is intended to be a second registration rather than a rewrite.
+The shell remains generic; onboarding content arrives through `aai_console.registry`.
+A `TrackSource` is anything with an `id` and a `tracks()` method. Operational Hub data
+does not use this content registry: it goes through the versioned Hub API, repository,
+and governed serving adapters described in `docs/ai-platform-hub.md`.

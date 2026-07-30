@@ -5,6 +5,7 @@
     ".github/workflows/deploy.yml",
     ".gitignore",
     "Makefile",
+    "ai-app.yaml.tmpl",
     "requirements-ci.txt.tmpl",
     "scripts/build_application.py",
     "scripts/install_core.py.tmpl",

@@ -12,7 +12,14 @@ import pytest
 from asgi_client import ASGIClient
 
 from aai_console.checks import PLATFORM_STATE_HEADING, WorkspaceProbe, run_checks
-from aai_console.config import IDENTIFIER_KEYS, ConsoleConfig, load_config
+from aai_console.config import (
+    IDENTIFIER_KEYS,
+    ConfigError,
+    ConsoleConfig,
+    HubJobMode,
+    HubStateMode,
+    load_config,
+)
 from aai_console.server import create_app
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +76,7 @@ def test_healthz_and_session_respond_without_any_cloud_identity(client):
     assert client.get("/healthz").json()["status"] == "ok"
     session = client.get("/api/session").json()
     assert session["hosted"] is False
-    assert session["capability"] == "guide-and-generate"
+    assert session["capability"] == "ai-platform-hub"
 
 
 def test_index_and_every_track_page_render(client):
@@ -130,6 +137,7 @@ def test_checks_skip_cleanly_when_the_workspace_is_unreachable(config):
 def test_config_falls_back_to_the_repository_fixture_for_local_runs():
     loaded = load_config({}, start=ROOT / "src" / "platform_app")
     assert loaded.hosted is False
+    assert loaded.hub_state_mode is HubStateMode.MEMORY
     assert loaded.identifiers["databricks_host"] == IDENTIFIERS["databricks_host"]
 
 
@@ -140,7 +148,38 @@ def test_hosted_config_never_reads_the_repository_fixture():
         start=ROOT / "src" / "platform_app",
     )
     assert loaded.hosted is True
+    assert loaded.hub_state_mode is HubStateMode.UNAVAILABLE
     assert "job_compute_policy_id" not in loaded.identifiers
+
+
+def test_hosted_console_cannot_select_ephemeral_hub_state():
+    with pytest.raises(ConfigError, match="local-preview only"):
+        load_config(
+            {
+                "DATABRICKS_APP_NAME": "aai-platform-console-dev",
+                "AAI_HUB_STATE_MODE": "memory",
+            },
+            start=ROOT / "src" / "platform_app",
+        )
+
+
+def test_job_execution_requires_an_explicit_mode_and_preview_is_local_only():
+    assert load_config({}, start=ROOT).hub_job_mode is HubJobMode.UNAVAILABLE
+    assert (
+        load_config(
+            {"AAI_HUB_JOB_MODE": "preview"},
+            start=ROOT,
+        ).hub_job_mode
+        is HubJobMode.PREVIEW
+    )
+    with pytest.raises(ConfigError, match="local-preview only"):
+        load_config(
+            {
+                "DATABRICKS_APP_NAME": "aai-platform-console-dev",
+                "AAI_HUB_JOB_MODE": "preview",
+            },
+            start=ROOT,
+        )
 
 
 def test_workspace_probes_do_not_run_on_the_event_loop(config):

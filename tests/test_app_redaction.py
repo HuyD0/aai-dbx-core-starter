@@ -89,10 +89,16 @@ def test_unhandled_errors_return_a_generic_body_and_log_no_detail(client, caplog
         raise RuntimeError(f"leaky message containing {SENTINEL}")
 
     with caplog.at_level(logging.DEBUG):
-        response = client.get("/api/boom")
+        response = client.get(
+            "/api/boom",
+            headers={"X-Request-Id": "audit-500"},
+        )
 
     assert response.status_code == 500
-    assert response.json() == {"error": "internal error"}
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.headers["x-request-id"] == "audit-500"
+    assert response.json()["request_id"] == "audit-500"
+    assert response.json()["title"] == "Internal server error"
     assert SENTINEL not in response.text
     assert SENTINEL not in caplog.text
 
@@ -114,7 +120,7 @@ def test_safe_detail_scrubs_credential_values_out_of_provider_errors(monkeypatch
         )
     )
     assert SENTINEL not in detail
-    assert "***" in detail
+    assert "redacted" in detail
 
 
 def test_short_environment_values_are_not_used_for_scrubbing(monkeypatch):
@@ -123,6 +129,23 @@ def test_short_environment_values_are_not_used_for_scrubbing(monkeypatch):
 
     monkeypatch.setenv("DATABRICKS_CLIENT_ID", "ab")
     assert _safe_detail(RuntimeError("a cabbage problem")) == "a cabbage problem"
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "github_pat_this_value_must_be_redacted",
+        "eyJabcdefghijk.abcdefghijkl.abcdefghijkl",
+        "https://storage.example.invalid/blob?sig=secret-signature",
+    ],
+)
+def test_safe_detail_rejects_credential_shaped_provider_payloads(credential):
+    from aai_console.checks import _safe_detail
+
+    detail = _safe_detail(RuntimeError(f"provider rejected {credential}"))
+
+    assert credential not in detail
+    assert "details redacted" in detail
 
 
 def test_check_details_are_length_capped(client):
@@ -159,7 +182,8 @@ def test_nothing_propagates_out_of_the_asgi_app(client):
 
     response = client.get("/api/leaky")
     assert response.status_code == 500
-    assert response.json() == {"error": "internal error"}
+    assert response.headers["x-request-id"] == response.json()["request_id"]
+    assert response.json()["title"] == "Internal server error"
     assert SENTINEL not in response.text
 
 

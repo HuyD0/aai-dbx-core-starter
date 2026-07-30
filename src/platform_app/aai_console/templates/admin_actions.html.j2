@@ -1,0 +1,122 @@
+{% extends "base.html.j2" %}
+{% block title %}Administrator action queue — AI Platform Hub{% endblock %}
+
+{% block main %}
+<header class="topbar">
+  <div class="topbar__title">
+    <h1>Administrator action queue</h1>
+    <span class="topbar__sub">Four-eyes review and execution state</span>
+  </div>
+</header>
+
+<div class="scroll">
+  <div class="hub-page">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">Privileged workflow</p>
+        <h2>Review evidence; execution stays in an approved job</h2>
+        <p>
+          The browser never mutates a production environment directly. Every transition
+          requires server authorization, optimistic concurrency, and an append-only event.
+        </p>
+      </div>
+    </section>
+    <div class="action-result" id="action-result" role="status" aria-live="polite"></div>
+
+    {% if not actor or not actor.is_platform_admin %}
+      <section class="notice notice--attention" role="alert">
+        <div class="notice__icon" aria-hidden="true">!</div>
+        <div>
+          <h3>Platform administrator authorization is unavailable</h3>
+          <p>{{ hub_capabilities.admin_detail }}</p>
+          <p class="notice__meta">
+            Hiding a button is not authorization. This route returns no queue records
+            until an approved server-side group resolver is configured.
+          </p>
+        </div>
+      </section>
+    {% elif hub_capabilities.state_store == "unavailable" %}
+      <section class="notice notice--attention" role="status">
+        <div class="notice__icon" aria-hidden="true">!</div>
+        <div>
+          <h3>Action queue is unavailable</h3>
+          <p>{{ hub_capabilities.state_store_detail }}</p>
+          <p class="notice__meta">An unavailable workflow store is not an empty queue.</p>
+        </div>
+      </section>
+    {% elif actions %}
+      <section class="panel">
+        <div class="panel__head">
+          <div><h3>Pending attention</h3><p>{{ actions | length }} visible request(s)</p></div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Application</th>
+                <th scope="col">Request</th>
+                <th scope="col">Version</th>
+                <th scope="col">Requester</th>
+                <th scope="col">Status</th>
+                <th scope="col">Age</th>
+                <th scope="col">Row version</th>
+                <th scope="col">Decision</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for action in actions %}
+                <tr>
+                  <td><a href="/applications/{{ action.application_id }}">{{ action.application_name }}</a></td>
+                  <td>{{ action.request_type }} → {{ action.target_environment }}</td>
+                  <td><code>{{ action.git_sha }}</code></td>
+                  <td>{{ action.requested_by }}</td>
+                  <td><span class="status status--{{ action.tone }}">{{ action.status }}</span></td>
+                  <td>{{ action.age }}</td>
+                  <td>{{ action.row_version }}</td>
+                  <td>
+                    <label class="field" for="review-comment-{{ action.promotion_request_id }}">
+                      <span>Review comment</span>
+                      <textarea
+                        id="review-comment-{{ action.promotion_request_id }}"
+                        maxlength="2000"
+                        rows="2"
+                        placeholder="Evidence-based decision"
+                      ></textarea>
+                    </label>
+                    <div class="button-row">
+                      {% for decision, label in [
+                        ("approve", "Approve"),
+                        ("request-changes", "Request changes"),
+                        ("reject", "Reject")
+                      ] %}
+                        <button
+                          type="button"
+                          class="button{% if decision == 'reject' %} button--critical{% elif decision != 'approve' %} button--quiet{% endif %}"
+                          data-admin-decision="{{ decision }}"
+                          data-promotion-id="{{ action.promotion_request_id }}"
+                          data-application-id="{{ action.application_id }}"
+                          data-version="{{ action.git_sha }}"
+                          data-source="{{ action.source_environment }}"
+                          data-target="{{ action.target_environment }}"
+                          data-row-version="{{ action.row_version }}"
+                          data-comment-input="review-comment-{{ action.promotion_request_id }}"
+                        >{{ label }}</button>
+                      {% endfor %}
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% else %}
+      <section class="empty-state empty-state--panel">
+        <span class="empty-state__mark" aria-hidden="true">✓</span>
+        <h3>No requests need attention</h3>
+        <p>Completed and rejected transitions remain available in application activity.</p>
+      </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

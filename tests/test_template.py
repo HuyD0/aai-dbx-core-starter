@@ -175,14 +175,18 @@ def all_combo_params() -> list:
 
 
 def build_config(template: Path, overrides: dict) -> dict:
-    """Identifier + combo overrides only; omitted properties resolve from
-    schema defaults inside the CLI (verified: no prompting, and Go-templated
-    defaults render correctly only when left to the CLI)."""
+    """Required answers plus identifier + combo overrides; other properties
+    resolve from schema defaults inside the CLI (verified: no prompting, and
+    Go-templated defaults render correctly only when left to the CLI)."""
 
     schema_properties = schema_for(template)["properties"]
     config = {
         key: value
         for key, value in {
+            "repository_url": (
+                "https://github.com/aai-template-tests/"
+                f"{overrides.get('project_name', template.name)}"
+            ),
             "workspace_host": IDENTIFIERS["databricks_host"],
             "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
             "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],
@@ -290,6 +294,7 @@ def test_template_schema_shared_contract(template: Path):
     for name in (
         "project_name",
         "application_name",
+        "repository_url",
         "team",
         "owner_group",
         "cost_center",
@@ -302,8 +307,11 @@ def test_template_schema_shared_contract(template: Path):
         "aai_core_pip_source",
     ):
         assert name in properties, f"{template.name} schema missing {name}"
+    assert properties["repository_url"]["type"] == "string"
+    assert "default" not in properties["repository_url"]
     for name, prop in properties.items():
-        assert "default" in prop, f"{template.name}.{name} needs a default"
+        if name != "repository_url":
+            assert "default" in prop, f"{template.name}.{name} needs a default"
         assert "description" in prop, f"{template.name}.{name} needs a description"
     assert properties["project_name"]["pattern"] == "^[a-z][a-z0-9-]+$"
     if "model_provider" in properties:

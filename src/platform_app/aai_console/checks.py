@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .config import ConsoleConfig
+from .hub.jobs import contains_credential_material
 
 Status = Literal["pass", "fail", "skip"]
 Identity = Literal["app_sp"]
@@ -249,4 +250,6 @@ def _safe_detail(error: Exception) -> str:
         # Short values would match far too much unrelated text to redact safely.
         if len(value) >= 8:
             text = text.replace(value, "***")
+    if contains_credential_material(text):
+        return f"{error.__class__.__name__}: provider details redacted"
     return text[:200] if text else error.__class__.__name__
