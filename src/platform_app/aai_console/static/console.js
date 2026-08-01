@@ -6,20 +6,20 @@
  */
 
 /** Parse an HTML fragment without losing table rows. */
-function parseFragment(html) {
+export function parseFragment(html) {
   const holder = document.createElement("template");
   holder.innerHTML = html;
   return holder.content;
 }
 
 /** Replace a container's children with a parsed fragment. */
-function swap(target, html) {
+export function swap(target, html) {
   target.replaceChildren(parseFragment(html));
 }
 
 /* ------------------------------------------------------------ clipboard */
 
-async function writeClipboard(text) {
+export async function writeClipboard(text) {
   if (navigator.clipboard && window.isSecureContext) {
     await navigator.clipboard.writeText(text);
     return;

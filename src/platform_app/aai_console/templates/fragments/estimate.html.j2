@@ -1,0 +1,107 @@
+{% if not estimate.lines %}
+<div class="empty-state">
+  <h3>No workloads in the estimate yet</h3>
+  <p>Configure a workload above and add it to see list-price totals.</p>
+</div>
+{% else %}
+<div class="est-result">
+  <table class="data-table est-table">
+    <thead>
+      <tr>
+        <th scope="col">Label</th>
+        <th scope="col">Workload</th>
+        <th scope="col">SKU</th>
+        <th scope="col" class="est-num">DBU / month</th>
+        <th scope="col" class="est-num">DBU cost</th>
+        <th scope="col" class="est-num">Infrastructure</th>
+        <th scope="col" class="est-num">Discount</th>
+        <th scope="col" class="est-num">Monthly</th>
+        <th scope="col" aria-label="Remove"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in estimate.lines %}
+      <tr>
+        <td>{{ line.label }}</td>
+        <td>{{ line.kind_label }}</td>
+        <td>{{ line.sku_name }}</td>
+        <td class="est-num">{{ line.dbu_per_month | usd(0) }}</td>
+        <td class="est-num">${{ line.dbu_cost | usd }}</td>
+        <td class="est-num">${{ line.infra_cost | usd }}</td>
+        <td class="est-num">&minus;${{ line.discount | usd }}</td>
+        <td class="est-num"><strong>${{ line.total | usd }}</strong></td>
+        <td>
+          <button
+            class="button button--quiet"
+            type="button"
+            data-remove-line="{{ loop.index0 }}"
+            aria-label="Remove {{ line.label }}"
+          >Remove</button>
+        </td>
+      </tr>
+      <tr class="est-detail">
+        <td colspan="9">
+          <details>
+            <summary>SKU breakdown</summary>
+            <table class="est-sub">
+              <thead>
+                <tr>
+                  <th scope="col">Component</th>
+                  <th scope="col">SKU</th>
+                  <th scope="col" class="est-num">Quantity</th>
+                  <th scope="col">Unit</th>
+                  <th scope="col" class="est-num">Unit price</th>
+                  <th scope="col" class="est-num">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in line.breakdown %}
+                <tr>
+                  <td>{{ row.component | upper }}</td>
+                  <td>{{ row.sku }}</td>
+                  <td class="est-num">{{ row.quantity | usd(2) }}</td>
+                  <td>{{ row.unit }}</td>
+                  <td class="est-num">${{ row.unit_price | usd(4) }}</td>
+                  <td class="est-num">${{ row.cost | usd }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% if line.note %}<p class="est-note">{{ line.note }}</p>{% endif %}
+          </details>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <section class="metric-grid est-totals" aria-label="Estimate totals">
+    <article class="metric">
+      <span class="metric__label">DBU subtotal</span>
+      <strong>${{ estimate.dbu_subtotal | usd }}</strong>
+      <small>Before discounts</small>
+    </article>
+    <article class="metric">
+      <span class="metric__label">Infrastructure subtotal</span>
+      <strong>${{ estimate.infra_subtotal | usd }}</strong>
+      <small>Azure VM list rates</small>
+    </article>
+    <article class="metric">
+      <span class="metric__label">Discounts applied</span>
+      <strong>&minus;${{ estimate.discount_total | usd }}</strong>
+      <small>DBU {{ estimate.discount_dbu_pct | usd(0) }}% · VM {{ estimate.discount_vm_pct | usd(0) }}%</small>
+    </article>
+    <article class="metric">
+      <span class="metric__label">Estimated monthly total</span>
+      <strong>${{ estimate.monthly_total | usd }}</strong>
+      <small>{{ estimate.currency }} list-price estimate</small>
+    </article>
+  </section>
+
+  <p class="est-stamp">
+    List-price estimate for {{ estimate.region_display }}, prices as of
+    {{ estimate.as_of.isoformat() }}. Estimates are not observed billing and not
+    a quote.
+  </p>
+</div>
+{% endif %}

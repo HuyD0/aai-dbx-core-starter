@@ -300,5 +300,7 @@ cloud and identity resources are provisioned outside this repository.
   same identifier conflicts on every sync
 - [Platform audit](docs/platform-audit.md) — findings and prioritised backlog
 - [Tagging standard](docs/tagging-standard.md)
+- [Cost estimation](docs/cost-estimation.md) — the console's list-price estimator
+  and its pricing snapshot
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)
