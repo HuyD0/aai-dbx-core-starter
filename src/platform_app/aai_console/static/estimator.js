@@ -163,6 +163,11 @@ function restoreCommitted() {
   state.discount_dbu_pct = parsed.discount_dbu_pct;
   state.discount_vm_pct = parsed.discount_vm_pct;
   state.lines = parsed.lines;
+  // The committed fragment on screen is authoritative again: its remove
+  // buttons (disabled while a removal was in flight) become safe to use.
+  for (const button of document.querySelectorAll("[data-remove-line]")) {
+    button.disabled = false;
+  }
   const region = document.getElementById("est-region");
   if ([...region.options].some((option) => option.value === state.region)) {
     region.value = state.region;
@@ -282,8 +287,16 @@ if (target && kindSelect) {
     }
     const remove = event.target.closest("[data-remove-line]");
     if (remove) {
+      if (remove.disabled) return;
       const index = Number(remove.dataset.removeLine);
       if (Number.isInteger(index) && index >= 0 && index < state.lines.length) {
+        // Serialize removals: a second click before the render lands would
+        // read this fragment's indexes against the already-shifted lines and
+        // delete the wrong workload. A successful render swaps in fresh
+        // buttons; a rejected one re-enables these via restoreCommitted().
+        for (const button of document.querySelectorAll("[data-remove-line]")) {
+          button.disabled = true;
+        }
         state.lines.splice(index, 1);
         readSettings();
         render();

@@ -48,22 +48,39 @@ KIND_LABELS = {
 
 
 class EstimatorModel(BaseModel):
+    """Untrusted-input boundary: share-link payloads POST straight here.
+
+    Every scalar is strict (see the aliases below), so a crafted payload
+    cannot change pricing semantics through coercion — ``discount_eligible: 1``
+    or ``"hours_per_month": "100"`` is a 422, never a silent conversion.
+    Containers stay structural on purpose: FastAPI validates the parsed JSON
+    as Python objects, where a JSON array must still populate ``tuple`` fields
+    and objects must populate nested models.
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 Label = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)
+    str,
+    StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=80),
 ]
-Key = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Key = Annotated[
+    str, StringConstraints(strict=True, strip_whitespace=True, min_length=1)
+]
+# Strict bool: rejects 0/1/"true". Strict float still accepts JSON integers by
+# pydantic's numeric rules, which is exactly right for amounts; strict int
+# rejects floats, strings, and bools.
+Toggle = Annotated[bool, Field(strict=True)]
 
 
 class Usage(EstimatorModel):
     """Exactly one usage scheme: direct hours, or runs × duration × days."""
 
-    hours_per_month: float | None = Field(default=None, gt=0, le=10_000)
-    runs_per_day: int | None = Field(default=None, ge=1, le=10_000)
-    avg_run_minutes: float | None = Field(default=None, gt=0, le=1_440)
-    days_per_month: int | None = Field(default=None, ge=1, le=31)
+    hours_per_month: float | None = Field(default=None, gt=0, le=10_000, strict=True)
+    runs_per_day: int | None = Field(default=None, ge=1, le=10_000, strict=True)
+    avg_run_minutes: float | None = Field(default=None, gt=0, le=1_440, strict=True)
+    days_per_month: int | None = Field(default=None, ge=1, le=31, strict=True)
 
     @model_validator(mode="after")
     def _exactly_one_scheme(self) -> Usage:
@@ -98,9 +115,9 @@ class JobsClassicLine(EstimatorModel):
     label: Label
     driver_instance: Key
     worker_instance: Key
-    num_workers: int = Field(ge=0, le=1_000)
-    photon: bool = False
-    spot_workers: bool = False
+    num_workers: int = Field(ge=0, le=1_000, strict=True)
+    photon: Toggle = False
+    spot_workers: Toggle = False
     usage: Usage
 
 
@@ -109,9 +126,9 @@ class AllPurposeClassicLine(EstimatorModel):
     label: Label
     driver_instance: Key
     worker_instance: Key
-    num_workers: int = Field(ge=0, le=1_000)
-    photon: bool = False
-    spot_workers: bool = False
+    num_workers: int = Field(ge=0, le=1_000, strict=True)
+    photon: Toggle = False
+    spot_workers: Toggle = False
     usage: Usage
 
 
@@ -121,31 +138,31 @@ class DltClassicLine(EstimatorModel):
     edition: Literal["core", "pro", "advanced"]
     driver_instance: Key
     worker_instance: Key
-    num_workers: int = Field(ge=0, le=1_000)
-    photon: bool = False
-    spot_workers: bool = False
+    num_workers: int = Field(ge=0, le=1_000, strict=True)
+    photon: Toggle = False
+    spot_workers: Toggle = False
     usage: Usage
 
 
 class JobsServerlessLine(EstimatorModel):
     kind: Literal["jobs_serverless"]
     label: Label
-    estimated_dbu_per_hour: float = Field(gt=0, le=10_000)
-    performance_mode: bool = False
+    estimated_dbu_per_hour: float = Field(gt=0, le=10_000, strict=True)
+    performance_mode: Toggle = False
     usage: Usage
 
 
 class AllPurposeServerlessLine(EstimatorModel):
     kind: Literal["all_purpose_serverless"]
     label: Label
-    estimated_dbu_per_hour: float = Field(gt=0, le=10_000)
+    estimated_dbu_per_hour: float = Field(gt=0, le=10_000, strict=True)
     usage: Usage
 
 
 class DltServerlessLine(EstimatorModel):
     kind: Literal["dlt_serverless"]
     label: Label
-    estimated_dbu_per_hour: float = Field(gt=0, le=10_000)
+    estimated_dbu_per_hour: float = Field(gt=0, le=10_000, strict=True)
     usage: Usage
 
 
@@ -154,7 +171,7 @@ class SqlWarehouseLine(EstimatorModel):
     label: Label
     warehouse_type: Literal["classic", "pro", "serverless"]
     size: Key
-    clusters: int = Field(default=1, ge=1, le=40)
+    clusters: int = Field(default=1, ge=1, le=40, strict=True)
     usage: Usage
 
 
@@ -162,7 +179,7 @@ class ModelServingLine(EstimatorModel):
     kind: Literal["model_serving"]
     label: Label
     size: Key
-    scale_out_units: int = Field(default=1, ge=1, le=64)
+    scale_out_units: int = Field(default=1, ge=1, le=64, strict=True)
     usage: Usage = _ALWAYS_ON
 
 
@@ -170,9 +187,9 @@ class FmapiTokensLine(EstimatorModel):
     kind: Literal["fmapi_tokens"]
     label: Label
     model: Key
-    input_tokens_millions: float = Field(default=0, ge=0, le=10_000_000)
-    output_tokens_millions: float = Field(default=0, ge=0, le=10_000_000)
-    batch_tokens_millions: float = Field(default=0, ge=0, le=10_000_000)
+    input_tokens_millions: float = Field(default=0, ge=0, le=10_000_000, strict=True)
+    output_tokens_millions: float = Field(default=0, ge=0, le=10_000_000, strict=True)
+    batch_tokens_millions: float = Field(default=0, ge=0, le=10_000_000, strict=True)
 
     @model_validator(mode="after")
     def _some_tokens(self) -> FmapiTokensLine:
@@ -191,7 +208,7 @@ class FmapiProvisionedLine(EstimatorModel):
     kind: Literal["fmapi_provisioned"]
     label: Label
     model: Key
-    provisioned_units: int = Field(default=1, ge=1, le=16)
+    provisioned_units: int = Field(default=1, ge=1, le=16, strict=True)
     usage: Usage = _ALWAYS_ON
 
 
@@ -199,7 +216,7 @@ class VectorSearchLine(EstimatorModel):
     kind: Literal["vector_search"]
     label: Label
     mode: Key
-    vectors_millions: float = Field(gt=0, le=100_000)
+    vectors_millions: float = Field(gt=0, le=100_000, strict=True)
     usage: Usage = _ALWAYS_ON
 
 
@@ -209,15 +226,15 @@ class CustomDbuLine(EstimatorModel):
     kind: Literal["custom_dbu"]
     label: Label
     sku_label: Label = "Custom DBU workload"
-    dbu_per_month: float | None = Field(default=None, gt=0, le=100_000_000)
-    dbu_per_hour: float | None = Field(default=None, gt=0, le=100_000)
+    dbu_per_month: float | None = Field(default=None, gt=0, le=100_000_000, strict=True)
+    dbu_per_hour: float | None = Field(default=None, gt=0, le=100_000, strict=True)
     usage: Usage | None = None
-    price_per_dbu: float = Field(gt=0, le=1_000)
-    infra_dollars_per_month: float = Field(default=0, ge=0, le=10_000_000)
+    price_per_dbu: float = Field(gt=0, le=1_000, strict=True)
+    infra_dollars_per_month: float = Field(default=0, ge=0, le=10_000_000, strict=True)
     # A snapshot-absent SKU has no known cross-service-discount eligibility, so
     # the requester declares it; defaulting to eligible would understate totals
     # for excluded families (serving, foundation models).
-    discount_eligible: bool = False
+    discount_eligible: Toggle = False
 
     @model_validator(mode="after")
     def _one_quantity(self) -> CustomDbuLine:
@@ -251,8 +268,8 @@ Line = Annotated[
 
 class EstimateRequest(EstimatorModel):
     region: Key
-    discount_dbu_pct: float = Field(default=0, ge=0, le=100)
-    discount_vm_pct: float = Field(default=0, ge=0, le=100)
+    discount_dbu_pct: float = Field(default=0, ge=0, le=100, strict=True)
+    discount_vm_pct: float = Field(default=0, ge=0, le=100, strict=True)
     lines: tuple[Line, ...] = Field(default=(), max_length=MAX_LINES)
 
 

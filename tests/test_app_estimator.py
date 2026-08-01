@@ -703,6 +703,29 @@ def test_invalid_payloads_are_rfc7807_and_do_not_echo_labels(client):
     assert "atlantis" not in response.text
 
 
+def test_scalar_coercion_is_rejected_not_silently_applied(client):
+    """Strict scalars: crafted payloads cannot shift pricing via coercion."""
+    coerced_bool = {
+        "region": load_snapshot().regions[0].id,
+        "discount_dbu_pct": 10,
+        "lines": [
+            {
+                "kind": "custom_dbu",
+                "label": "probe",
+                "dbu_per_month": 100,
+                "price_per_dbu": 1,
+                "discount_eligible": 1,
+            }
+        ],
+    }
+    assert client.post("/api/estimator/render", json=coerced_bool).status_code == 422
+    stringly_number = _render_payload()
+    stringly_number["lines"][0]["usage"] = {"hours_per_month": "100"}
+    response = client.post("/api/estimator/render", json=stringly_number)
+    assert response.status_code == 422
+    assert response.json()["errors"]
+
+
 def test_labels_render_escaped_in_the_fragment(client):
     payload = _render_payload()
     payload["lines"][0]["label"] = "<script>alert(1)</script>"
