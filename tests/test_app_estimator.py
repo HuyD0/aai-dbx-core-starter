@@ -58,125 +58,128 @@ REQUIRED_SKU_KEYS = {
 }
 
 
-def _fixture_snapshot() -> PricingSnapshot:
+def _fixture_payload() -> dict:
     source = {"url": "https://example.invalid/pricing", "as_of": "2026-01-01"}
     sku_price = {key: 0.5 for key in REQUIRED_SKU_KEYS}
     for key in ("MODEL_SERVING", "FMAPI", "VECTOR_SEARCH"):
         sku_price[key] = 0.1
     sku_price["SQL_PRO"] = 0.6
-    return PricingSnapshot.model_validate(
-        {
-            "metadata": {
-                "schema_version": 1,
-                "cloud": "azure",
-                "currency": "USD",
-                "as_of": "2026-01-01",
-                "disclaimer": "fixture",
-                "sources": {
-                    name: source
-                    for name in (
-                        "dbu_prices",
-                        "instances",
-                        "vm_rates",
-                        "sql_warehouses",
-                        "model_serving",
-                        "fmapi",
-                        "vector_search",
-                    )
-                },
+    return {
+        "metadata": {
+            "schema_version": 1,
+            "cloud": "azure",
+            "currency": "USD",
+            "as_of": "2026-01-01",
+            "disclaimer": "fixture",
+            "sources": {
+                name: source
+                for name in (
+                    "dbu_prices",
+                    "instances",
+                    "vm_rates",
+                    "sql_warehouses",
+                    "model_serving",
+                    "fmapi",
+                    "vector_search",
+                )
             },
-            "regions": [{"id": "r1", "display": "Region One"}],
-            "skus": {
-                key: {
-                    "label": key.replace("_", " ").title(),
-                    "cross_service_discount": key
-                    not in {"MODEL_SERVING", "FMAPI", "VECTOR_SEARCH"},
-                }
-                for key in REQUIRED_SKU_KEYS
+        },
+        "regions": [{"id": "r1", "display": "Region One"}],
+        "skus": {
+            key: {
+                "label": key.replace("_", " ").title(),
+                "cross_service_discount": key
+                not in {"MODEL_SERVING", "FMAPI", "VECTOR_SEARCH"},
+            }
+            for key in REQUIRED_SKU_KEYS
+        },
+        "dbu_prices": {"r1": sku_price},
+        "instances": {
+            "Standard_Test1": {
+                "vcpus": 4,
+                "memory_gb": 16,
+                "dbu_per_hour": 1.0,
+                "family": "General Purpose",
             },
-            "dbu_prices": {"r1": sku_price},
-            "instances": {
-                "Standard_Test1": {
-                    "vcpus": 4,
-                    "memory_gb": 16,
-                    "dbu_per_hour": 1.0,
-                    "family": "General Purpose",
-                },
-                "Standard_Test2": {
-                    "vcpus": 8,
-                    "memory_gb": 32,
-                    "dbu_per_hour": 2.0,
-                    "family": "Memory Optimized",
-                },
+            "Standard_Test2": {
+                "vcpus": 8,
+                "memory_gb": 32,
+                "dbu_per_hour": 2.0,
+                "family": "Memory Optimized",
             },
-            "vm_rates": {
-                "r1": {
-                    "Standard_Test1": {"on_demand": 1.0, "spot": 0.5},
-                    "Standard_Test2": {"on_demand": 2.0},
-                }
+        },
+        "vm_rates": {
+            "r1": {
+                "Standard_Test1": {"on_demand": 1.0, "spot": 0.5},
+                "Standard_Test2": {"on_demand": 2.0},
+            }
+        },
+        "multipliers": {
+            "photon": {"ALL_PURPOSE": 2.0, "DLT": 2.0, "JOBS": 2.0},
+            "jobs_serverless_performance": 2.0,
+        },
+        "sql_warehouses": {
+            "sizes": ["Small", "Medium"],
+            "dbu_per_hour": {
+                "classic": {"Small": 10, "Medium": 20},
+                "pro": {"Small": 10, "Medium": 20},
+                "serverless": {"Small": 10, "Medium": 20},
             },
-            "multipliers": {
-                "photon": {"ALL_PURPOSE": 2.0, "DLT": 2.0, "JOBS": 2.0},
-                "jobs_serverless_performance": 2.0,
-            },
-            "sql_warehouses": {
-                "sizes": ["Small", "Medium"],
-                "dbu_per_hour": {
-                    "classic": {"Small": 10, "Medium": 20},
-                    "pro": {"Small": 10, "Medium": 20},
-                    "serverless": {"Small": 10, "Medium": 20},
-                },
-                "compute_equivalents": {
-                    warehouse_type: {
-                        "Small": {
-                            "driver_instance": "Standard_Test2",
-                            "driver_count": 1,
-                            "worker_instance": "Standard_Test1",
-                            "worker_count": 4,
-                        },
-                        "Medium": {
-                            "driver_instance": "Standard_Test2",
-                            "driver_count": 1,
-                            "worker_instance": "Standard_Test1",
-                            "worker_count": 8,
-                        },
-                    }
-                    for warehouse_type in ("classic", "pro")
-                },
-            },
-            "model_serving": {
-                "sizes": {
-                    "cpu": {"label": "CPU", "dbu_per_hour": 1.0},
-                    "gpu": {"label": "GPU", "dbu_per_hour": 10.0},
-                }
-            },
-            "fmapi": {
-                "models": {
-                    "chat-model": {
-                        "label": "Chat Model",
-                        "per_million_tokens_dbu": {
-                            "input_token": 2.0,
-                            "output_token": 6.0,
-                        },
-                        "provisioned_dbu_per_hour": 50.0,
+            "compute_equivalents": {
+                warehouse_type: {
+                    "Small": {
+                        "driver_instance": "Standard_Test2",
+                        "driver_count": 1,
+                        "worker_instance": "Standard_Test1",
+                        "worker_count": 4,
                     },
-                    "embed-model": {
-                        "label": "Embed Model",
-                        "per_million_tokens_dbu": {"input_token": 1.0},
+                    "Medium": {
+                        "driver_instance": "Standard_Test2",
+                        "driver_count": 1,
+                        "worker_instance": "Standard_Test1",
+                        "worker_count": 8,
                     },
                 }
+                for warehouse_type in ("classic", "pro")
             },
-            "vector_search": {
-                "modes": {
-                    "standard": {
-                        "label": "Standard",
-                        "dbu_per_hour_per_unit": 4.0,
-                        "vectors_millions_per_unit": 2,
-                    }
+        },
+        "model_serving": {
+            "sizes": {
+                "cpu": {"label": "CPU", "dbu_per_hour": 1.0},
+                "gpu": {"label": "GPU", "dbu_per_hour": 10.0},
+            }
+        },
+        "fmapi": {
+            "models": {
+                "chat-model": {
+                    "label": "Chat Model",
+                    "per_million_tokens_dbu": {
+                        "input_token": 2.0,
+                        "output_token": 6.0,
+                    },
+                    "provisioned_dbu_per_hour": 50.0,
+                },
+                "embed-model": {
+                    "label": "Embed Model",
+                    "per_million_tokens_dbu": {"input_token": 1.0},
+                },
+            }
+        },
+        "vector_search": {
+            "modes": {
+                "standard": {
+                    "label": "Standard",
+                    "dbu_per_hour_per_unit": 4.0,
+                    "vectors_millions_per_unit": 2,
                 }
-            },
-        }
-    )
+            }
+        },
+    }
+
+
+def _fixture_snapshot() -> PricingSnapshot:
+    # JSON-mode, exactly like load_snapshot: the snapshot models are strict.
+    return PricingSnapshot.model_validate_json(json.dumps(_fixture_payload()))
 
 
 FIXTURE = _fixture_snapshot()
@@ -506,6 +509,30 @@ def test_estimate_csv_guards_formulas_and_reconciles():
     assert "monthly_total" in last
     assert str(round(result.monthly_total, 2)) in last
     assert "not observed billing" in text
+
+
+def test_snapshot_scalars_are_strict():
+    """A maintainer typo must fail the load, never coerce into a price."""
+    corruptions = [
+        ("bool for a rate", lambda p: p["dbu_prices"]["r1"].update(JOBS_COMPUTE=True)),
+        ("str for a rate", lambda p: p["dbu_prices"]["r1"].update(JOBS_COMPUTE="0.3")),
+        (
+            "int for a flag",
+            lambda p: p["skus"]["JOBS_COMPUTE"].update(cross_service_discount=1),
+        ),
+        (
+            "str for a count",
+            lambda p: p["instances"]["Standard_Test1"].update(vcpus="4"),
+        ),
+    ]
+    for reason, corrupt in corruptions:
+        payload = _fixture_payload()
+        corrupt(payload)
+        try:
+            PricingSnapshot.model_validate_json(json.dumps(payload))
+        except ValidationError:
+            continue
+        pytest.fail(f"snapshot accepted {reason}")
 
 
 # --- shipped snapshot integrity --------------------------------------------

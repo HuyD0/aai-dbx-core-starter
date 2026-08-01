@@ -82,7 +82,9 @@ All formulas produce a per-line SKU breakdown (the CSV mirrors it):
 sort_keys=True)`), strictly validated document. Loading rejects any rate ≤ 0,
 any region without a full SKU price table, any instance without a VM rate, and
 any warehouse ladder that misses a size — so a half-edited snapshot fails tests
-and fails the container at import, loudly.
+and fails the container at import, loudly. Scalar types are strict too: a
+hand-edited `"0.3"` string rate, `true` in a numeric field, or `1` in a boolean
+fails the load instead of silently coercing into a price.
 
 `metadata.sources` records, per table, the public URL it was curated from and
 the capture date. Azure Databricks sells the Premium tier only for new

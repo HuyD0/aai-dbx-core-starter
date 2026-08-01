@@ -13,7 +13,6 @@ at load — in the container that means at import, loud and early.
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
@@ -39,9 +38,17 @@ TOKEN_RATE_TYPES = ("batch_inference", "input_token", "output_token")
 
 
 class PricingModel(BaseModel):
-    """Trusted-but-verified data boundary: frozen, no unknown keys."""
+    """Persisted-data boundary: frozen, no unknown keys, strict scalars.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    Strictness is what makes "a bad snapshot fails at load" true for typos as
+    well as structure: a hand-edited ``true`` in a rate field or ``1`` in
+    ``cross_service_discount`` must stop the app, not price estimates.
+    Validation happens in JSON mode (see ``load_snapshot``), where strict
+    still accepts JSON ints for floats, ISO strings for dates, and arrays for
+    tuples.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class SourceRef(PricingModel):
@@ -229,7 +236,7 @@ class PricingSnapshot(PricingModel):
 
 
 def load_snapshot(path: Path = SNAPSHOT_PATH) -> PricingSnapshot:
-    return PricingSnapshot.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    return PricingSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def snapshot_age_days(snapshot: PricingSnapshot, today: date) -> int:
