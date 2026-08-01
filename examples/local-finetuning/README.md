@@ -1,0 +1,175 @@
+# Offline local fine-tuning sample project
+
+This is a self-contained study project for an Apple M3 MacBook Air with 24 GB
+of unified memory. It teaches one evidence-driven change—LoRA fine-tuning a
+small instruct model for structured customer-support classification—and then
+applies the same discipline to a deterministic application-readiness capstone.
+
+The project has two deliberately separate phases:
+
+1. `make prepare-flight` is online. It installs the exact locked environment,
+   downloads pinned public assets, verifies them, creates leakage-safe splits,
+   writes local MLflow evidence, and runs a small real MLX check.
+2. `make flight-check` is offline. It performs no installation or download,
+   enables library offline controls, denies Python sockets, rechecks every
+   digest, writes to local MLflow, and runs the local model.
+
+Run both before leaving:
+
+```bash
+cd examples/local-finetuning
+make prepare-flight
+make flight-check
+```
+
+The final line must be:
+
+```text
+READY FOR OFFLINE STUDY
+```
+
+For the strongest practical check, turn Wi-Fi off once and rerun
+`make flight-check` before the trip. See [OFFLINE_STUDY.md](OFFLINE_STUDY.md)
+for what is and is not included in that promise.
+
+## What you will build
+
+The primary task maps one support utterance to strict JSON:
+
+```json
+{
+  "intent": "recover_password",
+  "category": "account",
+  "requires_escalation": false,
+  "response": "I can help you reset your password."
+}
+```
+
+The ordered workflow is:
+
+```text
+inspect data
+  -> record a dataset card
+  -> analyze duplicates and inferred templates
+  -> make leakage-safe balanced splits
+  -> run majority and deterministic baselines
+  -> compare basic, strong, and few-shot untouched-model prompts
+  -> run an MLX-LM smoke test
+  -> train a LoRA change
+  -> evaluate the frozen test set and slices
+  -> inspect errors
+  -> adopt, reject, or mark the change inconclusive
+```
+
+Classification and structured-output validity remain the principal measures.
+The long source responses are inspected only in aggregate and are not copied
+into training targets. A versioned curriculum policy renders brief target
+responses, whose safety compliance is scored separately from classification;
+a high intent score never hides weak structured or response output.
+
+## Notebook course
+
+The main learning experience is a 12-notebook narrative course. It begins with
+the experiment question and data rights, shows every intermediate data and
+evaluation object, and ends with the production-readiness capstone and a safe
+extension-design exercise.
+
+```bash
+make notebook
+```
+
+Start with [`00_start_here.ipynb`](notebooks/00_start_here.ipynb). The complete
+ordered index, learning questions, and expected study time are in the
+[`notebooks/README.md`](notebooks/README.md). Each notebook contains:
+
+- learning objectives, prerequisites, and expected evidence;
+- small executable Python cells over local artifacts;
+- interpretation guidance, exercises, hints, and checkpoints;
+- a clear handoff to the next notebook.
+
+The CLI is not required for the lessons. It remains available for repeatable
+preflight checks and longer unattended runs.
+
+## Optional automation commands
+
+All commands below are local after `prepare-flight`:
+
+```bash
+make study-smoke       # deterministic data/evaluation/policy path
+make prepare-data      # reproduce the curated portable JSONL splits
+make baselines         # majority and deterministic baseline evidence
+make train-smoke       # ten local MLX-LM LoRA iterations
+make train             # configured 200-iteration LoRA change
+make evaluate          # frozen test metrics and error slices
+make capstone          # deterministic readiness dataset and policy ceiling
+make capstone-train-smoke # one real compact capstone LoRA iteration
+make capstone-train    # configured compact capstone LoRA change
+make capstone-evaluate # all six capstone methods on the frozen test set
+make notebook          # open the numbered notebook course
+make test              # fast curriculum contract tests
+```
+
+To inspect runs after returning to a connected development workflow:
+
+```bash
+uv run --offline --frozen --no-sync mlflow ui \
+  --backend-store-uri sqlite:///.aai/mlflow.db \
+  --default-artifact-root .aai/mlruns
+```
+
+No command needs Databricks, Azure, Kaggle, Hugging Face, or another remote
+service during the offline phase.
+
+## Baseline and decision contract
+
+The project compares:
+
+1. Majority-class output.
+2. A train-only deterministic keyword/rule baseline.
+3. The untouched model with a basic prompt.
+4. The untouched model with a constrained prompt.
+5. The untouched model with training-only few-shot examples.
+6. The LoRA fine-tuned change.
+
+The change is not adopted merely because it trained successfully. It must beat
+the strongest meaningful baseline on macro F1 while meeting absolute JSON,
+schema, unsupported-label, and response-policy gates. Evaluation uses the
+repository vocabulary `baseline -> change -> result -> decision`; decisions
+are `adopt`, `reject`, or `inconclusive`.
+
+## Project map
+
+```text
+configs/                  pinned source, model, split, and LoRA settings
+data/                     ignored raw/generated data with tracked contracts
+dataset_cards/            reviewed source and redistribution findings
+docs/                     curriculum, optional dataset review, capstone policy
+notebooks/                numbered narrative course with exercises/checkpoints
+scripts/                  deterministic notebook renderer
+src/aai_local_finetuning/ data, evaluation, MLX, tracking, and policy code
+tests/                    fast cross-platform and offline guard tests
+```
+
+The generated chat JSONL is framework-neutral. MLX-LM consumes it today; a
+future TRL/PEFT implementation can consume the same logical records without
+changing IDs, labels, or frozen split membership.
+
+## Dataset and model boundaries
+
+The Bitext dataset is a public Kaggle learning input, not proof that its content
+is suitable for commercial, enterprise, or production use. Its Kaggle metadata
+currently identifies `CDLA-Sharing-1.0`; locally generated Data or Enhanced Data
+retains that agreement. Review [the dataset card](dataset_cards/bitext-customer-support.md)
+and [data notice](DATA_LICENSE.md) before redistributing anything.
+
+Model weights, Kaggle files, adapters, MLflow stores, predictions, and learner
+inputs are ignored by Git. Credentials are neither required for the public
+downloads nor accepted as project files.
+
+## Apple memory profile
+
+The pinned 4-bit Qwen2.5 0.5B instruct model is intentionally small. The LoRA
+configuration uses batch size 1, eight adapted layers, 512-token sequences,
+gradient accumulation, and checkpointing. These are conservative settings for
+24 GB unified memory; measured peak memory and latency are recorded locally,
+not claimed in advance.

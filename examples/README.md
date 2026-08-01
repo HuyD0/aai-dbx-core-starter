@@ -345,6 +345,24 @@ LLM-free; adding an approved judge is a later, calibrated change.
 
 Use `make examples-list` to see the runner's accepted names and modes.
 
+## Standalone sample projects
+
+The numbered 00–12 files above remain one contiguous lifecycle curriculum.
+Larger projects with their own dependency and data boundaries live in nested
+directories and are intentionally not added to that runner.
+
+[`local-finetuning/`](local-finetuning/README.md) is an Apple-silicon,
+offline-first Bitext and MLX-LM study project. It prepares all third-party
+assets before travel, proves local execution with sockets blocked, compares
+deterministic and prompting baselines with a LoRA change, logs local MLflow
+evidence, and includes a deterministic application-readiness capstone. Start
+from the repository root:
+
+```bash
+make study-prepare-flight
+make study-offline-check
+```
+
 ## Where each example leads
 
 | Example | Graduates into |

@@ -1,0 +1,77 @@
+"""Offline-first baselines, evaluation, and promotion evidence."""
+
+from .baselines import KeywordRuleBaseline, MajorityBaseline
+from .io import (
+    EvaluationDataError,
+    load_predictions_jsonl,
+    load_records_jsonl,
+    parse_portable_record,
+    parse_prediction,
+    write_predictions_jsonl,
+    write_records_jsonl,
+    write_report_json,
+)
+from .metrics import Evaluator, evaluate_predictions, format_error_analysis
+from .models import (
+    ClassificationMetrics,
+    DistributionSummary,
+    ErrorAnalysis,
+    ErrorExample,
+    ErrorKind,
+    EvaluationRecord,
+    EvaluationReport,
+    OutputQualityMetrics,
+    PerformanceMetrics,
+    Prediction,
+    SliceMetrics,
+    SupportOutput,
+)
+from .policy import ResponsePolicy, ResponsePolicyResult
+from .promotion import (
+    BaselineEvaluation,
+    ChangeEvidence,
+    EvaluationSnapshot,
+    PromotionAssessment,
+    PromotionDecision,
+    PromotionResult,
+    PromotionThresholds,
+    decide_lora_promotion,
+)
+
+__all__ = [
+    "BaselineEvaluation",
+    "ChangeEvidence",
+    "ClassificationMetrics",
+    "DistributionSummary",
+    "ErrorAnalysis",
+    "ErrorExample",
+    "ErrorKind",
+    "EvaluationDataError",
+    "EvaluationRecord",
+    "EvaluationReport",
+    "EvaluationSnapshot",
+    "Evaluator",
+    "KeywordRuleBaseline",
+    "MajorityBaseline",
+    "OutputQualityMetrics",
+    "PerformanceMetrics",
+    "Prediction",
+    "PromotionAssessment",
+    "PromotionDecision",
+    "PromotionResult",
+    "PromotionThresholds",
+    "ResponsePolicy",
+    "ResponsePolicyResult",
+    "SliceMetrics",
+    "SupportOutput",
+    "decide_lora_promotion",
+    "evaluate_predictions",
+    "format_error_analysis",
+    "load_predictions_jsonl",
+    "load_records_jsonl",
+    "parse_portable_record",
+    "parse_prediction",
+    "write_predictions_jsonl",
+    "write_records_jsonl",
+    "write_report_json",
+]

@@ -21,7 +21,8 @@ APP_NAME ?= aai-platform-console-dev
 	bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
-	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart
+	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
+	study-prepare-flight study-offline-check study-lab
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -77,6 +78,15 @@ local-ui: examples-install ## Serve the isolated local MLflow store at http://12
 	$(PYTHON) -m mlflow ui \
 		--backend-store-uri "$(LOCAL_MLFLOW_URI)" \
 		--default-artifact-root "$(LOCAL_MLFLOW_DIR)/mlruns"
+
+study-prepare-flight: ## Prepare the Apple-silicon fine-tuning project while online.
+	$(MAKE) -C examples/local-finetuning prepare-flight
+
+study-offline-check: ## Prove the prepared fine-tuning project is plane-ready.
+	$(MAKE) -C examples/local-finetuning flight-check
+
+study-lab: ## Run the fine-tuning project's deterministic offline study path.
+	$(MAKE) -C examples/local-finetuning study-smoke
 
 workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect

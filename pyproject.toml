@@ -67,12 +67,21 @@ aai-core = "aai_core.diagnostics:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/aai_core"]
 
+[tool.hatch.build.targets.sdist]
+# The plane-study sample is a standalone locked project, not SDK package data.
+# Keeping it out of the SDK sdist also prevents accidental third-party data or
+# model artifacts from entering a future source release.
+exclude = [
+  "/examples/local-finetuning",
+  "/tests/test_local_finetuning_project.py",
+]
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 # src/platform_app is on the path so tests import `aai_console.server` by exactly the
 # name the Apps container uses (its source root is src/platform_app). One import path,
 # no namespace-package trickery, nothing that can diverge between test and container.
-pythonpath = ["src", "src/platform_app"]
+pythonpath = ["src", "src/platform_app", "examples/local-finetuning/src"]
 testpaths = ["tests"]
 
 [tool.ruff]
