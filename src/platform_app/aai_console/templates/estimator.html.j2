@@ -347,6 +347,11 @@
           <span>Infrastructure $ / month</span>
           <input type="number" min="0" step="any" data-field="infra_dollars_per_month" />
         </label>
+        <label class="field field--toggle">
+          <span>Cross-service discount</span>
+          <input type="checkbox" data-field="discount_eligible" />
+          <small>Tick only if the SKU is eligible — serving-family meters are not</small>
+        </label>
         {{ usage_block("custom_dbu") }}
       </fieldset>
     </section>

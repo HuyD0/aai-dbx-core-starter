@@ -214,6 +214,10 @@ class CustomDbuLine(EstimatorModel):
     usage: Usage | None = None
     price_per_dbu: float = Field(gt=0, le=1_000)
     infra_dollars_per_month: float = Field(default=0, ge=0, le=10_000_000)
+    # A snapshot-absent SKU has no known cross-service-discount eligibility, so
+    # the requester declares it; defaulting to eligible would understate totals
+    # for excluded families (serving, foundation models).
+    discount_eligible: bool = False
 
     @model_validator(mode="after")
     def _one_quantity(self) -> CustomDbuLine:
@@ -646,7 +650,7 @@ def estimate_line(
     sku_key, rows, note = _line_rows(line, path, region_id, snapshot)
     if sku_key == "CUSTOM":
         sku_name = line.sku_label  # rendered escaped; never enters error messages
-        discountable = True
+        discountable = line.discount_eligible
     else:
         info = _sku(snapshot, sku_key)
         sku_name = info.label

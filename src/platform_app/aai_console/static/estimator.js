@@ -151,37 +151,47 @@ function syncToolbar() {
   }
 }
 
+/**
+ * POST the whole state and swap the fragment.
+ *
+ * "aborted" means a newer render superseded this one; the newer render posts
+ * the full current state, so the caller must NOT mutate state in response —
+ * only "rejected" reports on the payload itself.
+ */
 async function render() {
-  if (!target) return false;
+  if (!target) return "rejected";
   renderAbort?.abort();
   renderAbort = new AbortController();
+  const signal = renderAbort.signal;
   target.setAttribute("aria-busy", "true");
   try {
     const response = await fetch("/api/estimator/render", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(state),
-      signal: renderAbort.signal,
+      signal,
     });
     if (!response.ok) {
       showProblem(await problemMessage(response));
-      return false;
+      return "rejected";
     }
+    const html = await response.text();
+    if (signal.aborted) return "aborted";
     clearProblem();
-    swap(target, await response.text());
+    swap(target, html);
     syncHash();
     syncToolbar();
-    return true;
+    return "ok";
   } catch (error) {
-    if (error.name === "AbortError") return false;
+    if (error.name === "AbortError") return "aborted";
     showProblem("The console could not be reached. The estimate was not updated.");
-    return false;
+    return "rejected";
   } finally {
     target.removeAttribute("aria-busy");
   }
 }
 
-async function addLine() {
+async function addLine(button) {
   const labelInput = document.getElementById("est-label");
   const label = labelInput.value.trim();
   if (!label) {
@@ -194,22 +204,25 @@ async function addLine() {
   );
   if (!fieldset) return;
   readSettings();
-  state.lines.push(collectLine(fieldset, label));
-  const accepted = await render();
-  if (!accepted) {
-    // Keep the estimate consistent: an unpriceable line never sticks.
-    state.lines.pop();
-    if (state.lines.length) await renderKeepingProblem();
-  } else {
-    labelInput.value = "";
+  const line = collectLine(fieldset, label);
+  state.lines.push(line);
+  button.disabled = true;
+  try {
+    const outcome = await render();
+    if (outcome === "ok") {
+      labelInput.value = "";
+    } else if (outcome === "rejected") {
+      // Roll back this specific line, never whatever happens to be last: a
+      // concurrent action may have appended since. The screen still shows the
+      // last successful fragment, which equals the rolled-back state, so no
+      // recovery render is needed (and none can cascade-abort other work).
+      const index = state.lines.indexOf(line);
+      if (index !== -1) state.lines.splice(index, 1);
+    }
+    // "aborted": the superseding render owns the final paint; nothing to do.
+  } finally {
+    button.disabled = false;
   }
-}
-
-async function renderKeepingProblem() {
-  const host = problemHost();
-  const detail = host?.querySelector("#estimator-problem-detail").textContent;
-  await render();
-  if (detail) showProblem(detail);
 }
 
 async function downloadCsv() {
@@ -241,8 +254,9 @@ async function downloadCsv() {
 
 if (target && kindSelect) {
   document.addEventListener("click", (event) => {
-    if (event.target.closest("[data-add-line]")) {
-      addLine();
+    const add = event.target.closest("[data-add-line]");
+    if (add) {
+      if (!add.disabled) addLine(add);
       return;
     }
     const remove = event.target.closest("[data-remove-line]");

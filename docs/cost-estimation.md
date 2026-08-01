@@ -67,7 +67,10 @@ All formulas produce a per-line SKU breakdown (the CSV mirrors it):
 - **Vector search:** `ceil(vectors_millions / vectors_per_unit)` units
   × DBU/h × hours.
 - **Custom DBU line:** escape hatch for anything the snapshot does not carry
-  (e.g. Lakebase) — you supply the DBU quantity and $/DBU.
+  (e.g. Lakebase) — you supply the DBU quantity and $/DBU. A snapshot-absent
+  SKU has no known discount eligibility, so custom lines are excluded from the
+  cross-service DBU discount unless the requester explicitly ticks them as
+  eligible.
 - **Discounts:** the DBU % applies only to SKUs marked eligible for
   cross-service discounting — serving, foundation-model, and vector-search
   meters are excluded, mirroring Databricks' published SKU-group exclusions.

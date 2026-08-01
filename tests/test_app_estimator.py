@@ -418,6 +418,28 @@ def test_custom_line_passes_rates_through():
     assert got.sku_name == "Database Serverless"
 
 
+def test_custom_line_discount_eligibility_is_declared_not_assumed():
+    line = {
+        "kind": "custom_dbu",
+        "label": "mystery sku",
+        "dbu_per_month": 100,
+        "price_per_dbu": 1.0,
+        "infra_dollars_per_month": 10,
+    }
+    # Default: a snapshot-absent SKU is NOT cross-service-discount eligible,
+    # so only the VM discount touches its infrastructure amount.
+    result = estimate(
+        _request([line], discount_dbu_pct=10, discount_vm_pct=50), FIXTURE
+    )
+    assert result.lines[0].discount == pytest.approx(5.0)
+    # Explicit opt-in applies the DBU discount too.
+    opted_in = dict(line, discount_eligible=True)
+    result = estimate(
+        _request([opted_in], discount_dbu_pct=10, discount_vm_pct=50), FIXTURE
+    )
+    assert result.lines[0].discount == pytest.approx(10.0 + 5.0)
+
+
 def test_discounts_split_by_sku_eligibility_and_component():
     serving = {"kind": "model_serving", "label": "endpoint", "size": "gpu"}
     request = _request(
