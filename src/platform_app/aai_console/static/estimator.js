@@ -205,7 +205,12 @@ async function render() {
       signal,
     });
     if (!response.ok) {
-      showProblem(await problemMessage(response));
+      const message = await problemMessage(response);
+      // Superseded while reading the error body: the abort surfaces inside
+      // problemMessage (whose catch returns the fallback), so re-check here —
+      // only the newest render may show a problem or touch state.
+      if (signal.aborted) return "aborted";
+      showProblem(message);
       restoreCommitted();
       return "rejected";
     }
@@ -218,7 +223,7 @@ async function render() {
     syncToolbar();
     return "ok";
   } catch (error) {
-    if (error.name === "AbortError") return "aborted";
+    if (error.name === "AbortError" || signal.aborted) return "aborted";
     showProblem("The console could not be reached. The estimate was not updated.");
     restoreCommitted();
     return "rejected";
