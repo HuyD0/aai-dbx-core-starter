@@ -55,28 +55,72 @@ def intro(
     objectives: tuple[str, ...],
     evidence: str,
 ) -> Cell:
-    objective_lines = "\n".join(f"- {item}" for item in objectives)
-    return md(f"""
-        # {number:02d} — {title}
-
-        **Estimated time:** {minutes} minutes<br>
-        **Prerequisites:** {prerequisites}<br>
-        **Learner-produced evidence:** {evidence}
-
-        ## Learning objectives
-
-        {objective_lines}
-
-        This notebook is a teaching interface over the reusable code in `src/`.
-        It uses only prepared local files. Run `make prepare-flight` before the
-        trip; no cell installs packages or downloads data.
-        """)
+    return md(
+        "\n".join(
+            [
+                f"# {number:02d} — {title}",
+                "",
+                f"**Estimated time:** {minutes} minutes<br>",
+                f"**Prerequisites:** {prerequisites}<br>",
+                f"**Learner-produced evidence:** {evidence}",
+                "",
+                "## Learning objectives",
+                "",
+                *(f"- {item}" for item in objectives),
+                "",
+                (
+                    "This notebook is a teaching interface over the reusable code "
+                    "in `src/`."
+                ),
+                (
+                    "It uses only prepared local files. Run `make prepare-flight` "
+                    "before the trip;"
+                ),
+                "no cell installs packages or downloads data.",
+            ]
+        )
+    )
 
 
 OFFLINE_SETUP = code(
     """
-    from aai_local_finetuning.offline import enable_offline_environment
+    import sys
+    from importlib import import_module
+    from pathlib import Path
 
+    current = Path.cwd().resolve()
+    project_root = None
+    for candidate in (current, *current.parents):
+        direct = candidate
+        nested = candidate / "examples" / "local-finetuning"
+        if (direct / "src" / "aai_local_finetuning").is_dir():
+            project_root = direct
+            break
+        if (nested / "src" / "aai_local_finetuning").is_dir():
+            project_root = nested
+            break
+    if project_root is None:
+        raise RuntimeError(
+            "Cannot locate examples/local-finetuning. Open this notebook from the "
+            "repository, or run `make notebook` from the repository root."
+        )
+
+    expected_python = (project_root / ".venv" / "bin" / "python").resolve()
+    active_python = Path(sys.executable).resolve()
+    if not expected_python.is_file() or active_python != expected_python:
+        raise RuntimeError(
+            "Wrong notebook kernel. Run `make notebook` from the repository root, "
+            "then select 'AAI Local Fine-Tuning (offline)'. "
+            f"Active Python: {active_python}; expected: {expected_python}"
+        )
+
+    source_root = str(project_root / "src")
+    if source_root not in sys.path:
+        sys.path.insert(0, source_root)
+
+    enable_offline_environment = import_module(
+        "aai_local_finetuning.offline"
+    ).enable_offline_environment
     enable_offline_environment()
     """,
     "offline-setup",
@@ -2403,9 +2447,9 @@ def render(notebook: Notebook) -> None:
                 "learner_evidence": notebook.evidence,
             },
             "kernelspec": {
-                "display_name": "Python 3 (ipykernel)",
+                "display_name": "AAI Local Fine-Tuning (offline)",
                 "language": "python",
-                "name": "python3",
+                "name": "aai-local-finetuning",
             },
             "language_info": {"name": "python", "version": "3.12"},
         },

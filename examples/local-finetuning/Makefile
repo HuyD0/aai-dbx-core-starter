@@ -4,10 +4,12 @@ SHELL := /bin/bash
 
 UV ?= uv
 PYTHON := .venv/bin/python
+KERNEL_NAME := aai-local-finetuning
 
 .PHONY: help install prepare-flight flight-check study-smoke prepare-data \
 	baselines train-smoke train evaluate capstone capstone-train-smoke \
-	capstone-train capstone-evaluate notebook test format format-check clean-study
+	capstone-train capstone-evaluate notebook notebook-check notebook-kernel test \
+	format format-check clean-study
 
 help: ## Show the local fine-tuning commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -51,10 +53,31 @@ capstone-train: ## Train the configured compact capstone LoRA change.
 capstone-evaluate: ## Compare all capstone methods on the frozen test set.
 	$(PYTHON) -m aai_local_finetuning.cli --offline capstone-evaluate
 
-notebook: ## Open the prepared numbered notebook course without downloads.
+notebook-kernel: ## Register the exact nested Python as the course kernel.
+	@test -x "$(PYTHON)" || { \
+		echo "Missing locked environment. Run 'make prepare-flight' while online."; \
+		exit 2; \
+	}
+	$(PYTHON) -m ipykernel install \
+		--prefix "$(CURDIR)/.venv" \
+		--name "$(KERNEL_NAME)" \
+		--display-name "AAI Local Fine-Tuning (offline)"
+
+notebook: notebook-kernel ## Open the prepared numbered notebook course without downloads.
 	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 DATASETS_OFFLINE=1 \
+		PATH="$(CURDIR)/.venv/bin:$$PATH" \
+		JUPYTER_PATH="$(CURDIR)/.venv/share/jupyter" \
 		$(PYTHON) -m jupyterlab --no-browser \
-		--LabApp.extension_manager=readonly notebooks
+		--ServerApp.root_dir="$(CURDIR)" \
+		--LabApp.default_url="/lab/tree/notebooks/00_start_here.ipynb" \
+		--LabApp.extension_manager=readonly
+
+notebook-check: notebook-kernel ## Execute notebook 00 through the registered kernel.
+	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 DATASETS_OFFLINE=1 \
+		PATH="$(CURDIR)/.venv/bin:$$PATH" \
+		JUPYTER_PATH="$(CURDIR)/.venv/share/jupyter" \
+		$(PYTHON) -m jupyter nbconvert --execute --to notebook --stdout \
+		notebooks/00_start_here.ipynb >/dev/null
 
 test: ## Run the fast cross-platform curriculum tests.
 	$(UV) run --offline --frozen --no-sync pytest -q

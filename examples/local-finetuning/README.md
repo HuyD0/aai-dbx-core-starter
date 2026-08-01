@@ -74,6 +74,8 @@ the experiment question and data rights, shows every intermediate data and
 evaluation object, and ends with the production-readiness capstone and a safe
 extension-design exercise.
 
+From the repository root:
+
 ```bash
 make notebook
 ```

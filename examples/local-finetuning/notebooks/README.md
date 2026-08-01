@@ -1,6 +1,6 @@
 # Offline fine-tuning notebook course
 
-Open this directory with `make notebook`, then work from `00` through `11`.
+From the repository root, run `make notebook`, then work from `00` through `11`.
 Every notebook starts by enabling local-only library controls. The course uses
 the prepared dataset, model, Python environment, and MLflow store; it does not
 install or download anything.
@@ -20,7 +20,12 @@ install or download anything.
 | `10_capstone_model_vs_hybrid.ipynb` | Does a model belong in the authoritative decision path? | 55 min |
 | `11_design_the_next_project.ipynb` | How should evaluation change for another task? | 35 min |
 
-The first executable cell in every notebook enables the offline environment.
+The first executable cell in every notebook verifies the exact nested Python
+kernel and enables the offline environment. The launch target registers that
+kernel as `AAI Local Fine-Tuning (offline)`. If you open a notebook directly in
+another editor, select that kernel before running cells; a wrong selection now
+reports both the active and expected Python paths.
+
 The notebooks display bounded, masked previews and aggregate findings instead
 of unnecessary raw content. Optional training cells are disabled by default so
 `Run All` remains practical; their instructions write to notebook-specific

@@ -125,3 +125,15 @@ def test_nested_lock_exists_and_is_nonempty():
     assert 'name = "mlx-lm"' in text
     assert 'version = "0.31.3"' in text
     assert 'name = "mlflow"' in text
+
+
+def test_notebook_launcher_pins_the_nested_kernel_and_start_page():
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "notebook-kernel:" in makefile
+    assert "$(PYTHON) -m ipykernel install" in makefile
+    assert '--name "$(KERNEL_NAME)"' in makefile
+    assert 'PATH="$(CURDIR)/.venv/bin:$$PATH"' in makefile
+    assert "notebooks/00_start_here.ipynb" in makefile
+    assert "notebook-check:" in makefile
+    assert "jupyter nbconvert --execute" in makefile

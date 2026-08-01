@@ -156,10 +156,11 @@ MLflow evidence, deterministic baselines, LoRA evaluation, and a policy-derived
 application-readiness capstone. Kaggle files, model weights, adapters, and local
 experiment stores stay ignored by Git.
 
-Study is notebook-led: `make -C examples/local-finetuning notebook` opens a
-numbered 12-notebook course covering provenance, data quality, leakage-safe
-splits, baselines, prompting, LoRA, frozen evaluation, MLflow decisions, and the
-capstone. CLI targets remain optional automation for preflight and long runs.
+Study is notebook-led: `make notebook` registers the exact nested Python kernel
+and opens a numbered 12-notebook course covering provenance, data quality,
+leakage-safe splits, baselines, prompting, LoRA, frozen evaluation, MLflow
+decisions, and the capstone. CLI targets remain optional automation for
+preflight and long runs.
 
 ## Install for SDK development
 

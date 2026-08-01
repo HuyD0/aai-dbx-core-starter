@@ -131,5 +131,8 @@ def test_root_exposes_prepare_and_strict_offline_commands():
     assert "study-prepare-flight:" in makefile
     assert "study-offline-check:" in makefile
     assert "study-lab:" in makefile
+    assert "notebook:" in makefile
+    notebook_rule = makefile.split("notebook:", 1)[1].split("\n\n", 1)[0]
+    assert "examples/local-finetuning notebook" in notebook_rule
     offline_rule = makefile.split("study-offline-check:", 1)[1].split("\n\n", 1)[0]
     assert "prepare-flight" not in offline_rule

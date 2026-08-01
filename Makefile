@@ -22,7 +22,7 @@ APP_NAME ?= aai-platform-console-dev
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
-	study-prepare-flight study-offline-check study-lab
+	study-prepare-flight study-offline-check study-lab notebook
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -87,6 +87,9 @@ study-offline-check: ## Prove the prepared fine-tuning project is plane-ready.
 
 study-lab: ## Run the fine-tuning project's deterministic offline study path.
 	$(MAKE) -C examples/local-finetuning study-smoke
+
+notebook: ## Open the offline fine-tuning notebook course.
+	$(MAKE) -C examples/local-finetuning notebook
 
 workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect

@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+from nbconvert import HTMLExporter
+
 from aai_local_finetuning.settings import PROJECT_ROOT
 
 EXPECTED_NOTEBOOKS = (
@@ -45,11 +47,17 @@ def test_notebook_sequence_and_prerequisites_are_contiguous():
     stages = []
     for expected_order, (path, notebook) in enumerate(notebooks):
         metadata = notebook["metadata"]["aai_curriculum"]
+        kernelspec = notebook["metadata"]["kernelspec"]
         assert metadata["order"] == expected_order
         assert int(path.name[:2]) == expected_order
         assert metadata["duration_minutes"] > 0
         assert metadata["learner_evidence"]
         assert set(metadata["prerequisites"]).issubset(seen)
+        assert kernelspec == {
+            "display_name": "AAI Local Fine-Tuning (offline)",
+            "language": "python",
+            "name": "aai-local-finetuning",
+        }
         seen.add(path.name)
         stages.append(metadata["stage"])
 
@@ -107,6 +115,35 @@ def test_every_notebook_has_narrative_exercises_and_checkpoints():
         assert "Next:" in markdown or "Final checkpoint" in markdown, path.name
 
 
+def test_opening_markdown_renders_as_headings_not_indented_code():
+    for path, notebook in _notebooks():
+        opening = _source(notebook["cells"][0])
+        lines = opening.splitlines()
+
+        assert lines[0].startswith(f"# {path.name[:2]} —"), path.name
+        assert "## Learning objectives" in lines, path.name
+        assert not any(
+            line.startswith(("    #", "    **Estimated", "    **Prerequisites"))
+            for line in lines
+        ), path.name
+
+
+def test_opening_markdown_renders_as_real_html_headings():
+    exporter = HTMLExporter()
+    for path, _ in _notebooks():
+        html, _ = exporter.from_filename(str(path))
+        preformatted = "\n".join(re.findall(r"<pre.*?</pre>", html, re.DOTALL))
+
+        assert re.search(r"<h1[^>]*>.*?\d{2} —.*?</h1>", html, re.DOTALL), path.name
+        assert re.search(
+            r"<h2[^>]*>.*?Learning objectives.*?</h2>", html, re.DOTALL
+        ), path.name
+        assert "Estimated time:" in html, path.name
+        assert "Prerequisites:" in html, path.name
+        assert "Estimated time:" not in preformatted, path.name
+        assert "Learning objectives" not in preformatted, path.name
+
+
 def test_notebook_code_is_local_only_and_enables_offline_controls_first():
     forbidden = (
         "%pip",
@@ -129,6 +166,8 @@ def test_notebook_code_is_local_only_and_enables_offline_controls_first():
         code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
         first_code = _source(code_cells[0])
         assert "enable_offline_environment" in first_code, path.name
+        assert "AAI Local Fine-Tuning (offline)" in first_code, path.name
+        assert 'project_root / ".venv" / "bin" / "python"' in first_code, path.name
         source = "\n".join(_source(cell) for cell in code_cells).lower()
         assert not any(fragment in source for fragment in forbidden), path.name
 
