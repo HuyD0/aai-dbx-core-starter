@@ -19,6 +19,11 @@ const state = {
   lines: [],
 };
 
+// Serialization of the last state the server confirmed. `state` is the draft;
+// a rejected render reverts the draft to this, so state, fragment, hash, and
+// controls can never drift apart no matter which request lost the race.
+let committed = "";
+
 let renderAbort = null;
 
 function problemHost() {
@@ -151,32 +156,57 @@ function syncToolbar() {
   }
 }
 
+/** Revert the draft to the last server-confirmed state, controls included. */
+function restoreCommitted() {
+  const parsed = JSON.parse(committed);
+  state.region = parsed.region;
+  state.discount_dbu_pct = parsed.discount_dbu_pct;
+  state.discount_vm_pct = parsed.discount_vm_pct;
+  state.lines = parsed.lines;
+  const region = document.getElementById("est-region");
+  if ([...region.options].some((option) => option.value === state.region)) {
+    region.value = state.region;
+  }
+  document.getElementById("est-discount-dbu").value = String(state.discount_dbu_pct);
+  document.getElementById("est-discount-vm").value = String(state.discount_vm_pct);
+  // The screen still shows the committed fragment (a rejected render never
+  // swaps), so re-syncing the hash and toolbar realigns everything without a
+  // recovery render.
+  syncHash();
+  syncToolbar();
+}
+
 /**
- * POST the whole state and swap the fragment.
+ * POST the whole draft state and swap the fragment.
  *
- * "aborted" means a newer render superseded this one; the newer render posts
- * the full current state, so the caller must NOT mutate state in response —
- * only "rejected" reports on the payload itself.
+ * Outcomes: "ok" commits the exact payload that rendered; "rejected" (the
+ * server refused the payload, or it never arrived) reverts the draft to the
+ * last committed state; "aborted" means a newer render superseded this one and
+ * will itself either commit or revert — so callers never mutate state in
+ * response to an outcome.
  */
 async function render() {
   if (!target) return "rejected";
   renderAbort?.abort();
   renderAbort = new AbortController();
   const signal = renderAbort.signal;
+  const payload = JSON.stringify(state);
   target.setAttribute("aria-busy", "true");
   try {
     const response = await fetch("/api/estimator/render", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(state),
+      body: payload,
       signal,
     });
     if (!response.ok) {
       showProblem(await problemMessage(response));
+      restoreCommitted();
       return "rejected";
     }
     const html = await response.text();
     if (signal.aborted) return "aborted";
+    committed = payload;
     clearProblem();
     swap(target, html);
     syncHash();
@@ -185,6 +215,7 @@ async function render() {
   } catch (error) {
     if (error.name === "AbortError") return "aborted";
     showProblem("The console could not be reached. The estimate was not updated.");
+    restoreCommitted();
     return "rejected";
   } finally {
     target.removeAttribute("aria-busy");
@@ -204,34 +235,24 @@ async function addLine(button) {
   );
   if (!fieldset) return;
   readSettings();
-  const line = collectLine(fieldset, label);
-  state.lines.push(line);
+  state.lines.push(collectLine(fieldset, label));
   button.disabled = true;
   try {
-    const outcome = await render();
-    if (outcome === "ok") {
-      labelInput.value = "";
-    } else if (outcome === "rejected") {
-      // Roll back this specific line, never whatever happens to be last: a
-      // concurrent action may have appended since. The screen still shows the
-      // last successful fragment, which equals the rolled-back state, so no
-      // recovery render is needed (and none can cascade-abort other work).
-      const index = state.lines.indexOf(line);
-      if (index !== -1) state.lines.splice(index, 1);
-    }
-    // "aborted": the superseding render owns the final paint; nothing to do.
+    if ((await render()) === "ok") labelInput.value = "";
+    // "rejected" already reverted the draft; "aborted" hands off to the
+    // superseding render, which commits or reverts the whole draft itself.
   } finally {
     button.disabled = false;
   }
 }
 
 async function downloadCsv() {
-  readSettings();
   try {
+    // Export the committed state: it is exactly what the fragment shows.
     const response = await fetch("/api/estimator/export.csv", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(state),
+      body: committed,
     });
     if (!response.ok) {
       showProblem(await problemMessage(response));
@@ -312,6 +333,9 @@ if (target && kindSelect) {
   });
 
   readSettings();
+  // Baseline before adopting any hash: a shared link that decodes but cannot
+  // be priced reverts to a clean page, not to the unpriceable state itself.
+  committed = JSON.stringify(state);
   if (restoreFromHash() && state.lines.length) {
     render();
   } else {
