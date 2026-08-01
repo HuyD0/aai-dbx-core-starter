@@ -71,8 +71,8 @@
     },
     "foundry_endpoint": {
       "type": "string",
-      "default": "https://replace-with-foundry-resource.services.ai.azure.com",
-      "description": "Foundry resource endpoint (only asked for Foundry models)",
+      "default": "https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project",
+      "description": "Foundry project endpoint ending in /api/projects/<project> (only asked for Foundry models)",
       "order": 10,
       "skip_prompt_if": {
         "properties": {

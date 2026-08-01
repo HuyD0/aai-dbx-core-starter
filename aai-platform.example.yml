@@ -37,7 +37,7 @@ providers:
     #    a gateway instead):
     # general-chat:
     #   provider: foundry
-    #   endpoint: https://replace-with-foundry-resource.services.ai.azure.com
+    #   endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
     #   deployment: replace-with-model-deployment
     #   # token_scope defaults to https://ai.azure.com/.default
     #
@@ -55,7 +55,7 @@ providers:
   embeddings:
     knowledge-embedding:
       provider: foundry
-      endpoint: https://replace-with-foundry-resource.services.ai.azure.com
+      endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
       deployment: replace-with-embedding-deployment
       dimensions: 1536
   retrievers:
