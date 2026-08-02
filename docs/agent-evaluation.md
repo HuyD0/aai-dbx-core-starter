@@ -214,7 +214,7 @@ ships an optional deployment-job gate: registering a new model version
 triggers a job that evaluates it, waits for a human approval, then hands off
 to deployment.
 
-Two things about it are worth knowing before you enable it:
+Three things about it are worth knowing before you enable it:
 
 - **The first run always fails at the approval task.** That is by design.
   Approval is recorded as a Unity Catalog tag on the model version, and no tag
@@ -222,6 +222,15 @@ Two things about it are worth knowing before you enable it:
 - **The bundle schema cannot express the link** between a registered model and
   its deployment job, so `scripts/link_deployment_job.py` makes it once through
   the MLflow client after deployment.
+- **The gate scores the version that triggered it**, not whatever `agent:`
+  happens to be committed. Databricks supplies `model_name` and
+  `model_version` as job parameters; the evaluation task passes them through,
+  and they become `--agent models:/<name>/<version>`. The same `--agent`
+  override is available on `compare`, `smoke`, and `eval` whenever you want to
+  score a specific target without editing the config.
+
+Set `registered_model` in `agentkit.yaml` to have `agentkit evidence` read the
+approval tag off that model's latest version and report who approved.
 
 The approver needs `APPLY TAG` on the model and `CAN MANAGE RUN` on the job.
 Use governed tag policies when several groups must sign off, so nobody can

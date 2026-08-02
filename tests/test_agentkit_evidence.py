@@ -180,3 +180,33 @@ def test_evidence_carries_no_secret_shaped_content(tmp_path):
     serialized = json.dumps(document) + markdown
     for marker in ("dapi", "Bearer ", "client_secret", "AZURE_CLIENT_SECRET"):
         assert marker not in serialized
+
+
+def test_non_comparison_evidence_never_reports_passed(tmp_path):
+    """A record that named no baseline must not read as an approval."""
+
+    project = _project(tmp_path)
+    results = _results(baseline_run_id=None, baseline_metrics={}, gate_passed=True)
+    report, code = evaluate_gate(project, results=results, baseline=None)
+
+    document, markdown = build_evidence(
+        project, results=results, baseline=None, gate_report=report
+    )
+
+    assert code == 2
+    assert document["gate"]["passed"] is False
+    assert "Gate verdict: FAILED" in markdown
+    assert any(
+        failure["metric"] == "comparison" for failure in document["gate"]["failures"]
+    )
+
+
+def test_approver_lookup_without_a_registered_model_says_why(tmp_path):
+    from aai_core.agentkit.evidence import databricks_approver_lookup
+
+    project = _project(tmp_path)
+
+    approver = databricks_approver_lookup(project, _results())
+
+    assert approver["status"] == "unknown"
+    assert "registered_model" in approver["reason"]

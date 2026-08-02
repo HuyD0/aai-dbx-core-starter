@@ -93,7 +93,7 @@ def test_auto_selection_with_expected_response_and_judges():
     } <= names
     assert "relevance" not in names  # expectations exist
     assert "equivalence" not in names  # add-only scorer
-    assert "pii_detection" not in names  # add-only scorer
+    assert "fluency" not in names  # add-only scorer
 
 
 def test_code_only_smoke_excludes_judges_with_reason():
@@ -328,7 +328,7 @@ def test_build_code_scorer_wraps_the_pure_function():
 def test_every_judge_routes_through_the_governed_endpoint():
     fake = _fake_mlflow()
 
-    for name in ("correctness", "safety", "relevance", "pii_detection"):
+    for name in ("correctness", "safety", "relevance", "equivalence"):
         built = build_scorer(
             get_spec(name), judge_model_uri="endpoints:/judge", mlflow_module=fake
         )

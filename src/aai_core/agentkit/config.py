@@ -114,6 +114,9 @@ class AgentkitConfig(ContractModel):
     strata: tuple[str, ...] = ()
     request_mapping: RequestMapping = Field(default_factory=RequestMapping)
     concurrency: int = Field(default=8, ge=1, le=64)
+    # The Unity Catalog model this project promotes into, if any. Evidence
+    # reads its deployment-job approval tag to report who approved.
+    registered_model: str | None = Field(default=None, min_length=1)
 
     @field_validator("strata", mode="before")
     @classmethod

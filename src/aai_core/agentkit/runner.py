@@ -122,6 +122,7 @@ def run_scoring(
     *,
     command: str = "compare",
     mode: str | None = None,
+    agent: str | None = None,
     rows_limit: int | None = None,
     judges_enabled: bool = True,
     require_baseline: bool = True,
@@ -149,7 +150,12 @@ def run_scoring(
             remediation="Fix the dataset rows, then run the command again.",
         )
 
-    target = resolve_target(config.agent, root=project.root, settings=project.settings)
+    # An explicit target overrides the configured one. The deployment-job
+    # gate needs this: it must score the model version that triggered it,
+    # not whatever `agent:` happened to be committed.
+    target = resolve_target(
+        agent or config.agent, root=project.root, settings=project.settings
+    )
     resolved_mode = mode or _default_mode(project, target)
     full_row_count = dataset.shape.row_count
     if rows_limit:

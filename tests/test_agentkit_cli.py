@@ -331,3 +331,32 @@ def test_cli_imports_no_heavy_dependencies():
         env={"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin"},
     )
     assert result.stdout.strip() == "[]"
+
+
+def test_agent_override_flag_is_accepted(project_dir, capsys):
+    code = main(
+        [
+            "smoke",
+            "--agent",
+            "evals/data/answer_sheet.json",
+            "--plan",
+            *_config_flag(project_dir),
+        ]
+    )
+
+    assert code == 0
+    assert "Inferred evaluation plan" in capsys.readouterr().out
+
+
+def test_evidence_reports_why_approval_is_unknown(project_dir, capsys):
+    main(["smoke", "--establish-baseline", *_config_flag(project_dir)])
+    capsys.readouterr()
+
+    code = main(["evidence", "--json", *_config_flag(project_dir)])
+
+    assert code == 0
+    document = json.loads(capsys.readouterr().out)
+    # The shipped lookup runs; with no registered model it explains itself
+    # instead of silently reporting a bare "unknown".
+    assert document["approver"]["status"] == "unknown"
+    assert "registered_model" in document["approver"]["reason"]

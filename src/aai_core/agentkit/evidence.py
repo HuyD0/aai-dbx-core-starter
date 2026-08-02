@@ -238,15 +238,15 @@ def databricks_approver_lookup(
     than restates.
     """
 
-    model_name = (
-        getattr(project.settings, "raw", {})
-        .get("deployment", {})
-        .get("registered_model")
-    )
-    if not model_name or not results.versions.agent:
+    model_name = project.config.registered_model
+    if not model_name:
         return {
             "status": "unknown",
-            "reason": "no registered model is configured for this project",
+            "reason": (
+                "no registered model is configured; set `registered_model` "
+                "in agentkit.yaml to report the approval recorded on its "
+                "model version"
+            ),
         }
     try:
         from mlflow import MlflowClient

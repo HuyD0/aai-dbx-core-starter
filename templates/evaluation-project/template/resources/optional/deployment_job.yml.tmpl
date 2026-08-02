@@ -41,9 +41,17 @@ resources:
           default: ""
 
       tasks:
+        # The version that triggered this job is what must be scored — not
+        # whatever `agent:` happens to be committed in agentkit.yaml. The
+        # wrapper turns these into `--agent models:/<name>/<version>`.
         - task_key: evaluation
           spark_python_task:
             python_file: ../evals/evaluate.py
+            parameters:
+              - "--model-name"
+              - "{{"{{"}}job.parameters.model_name{{"}}"}}"
+              - "--model-version"
+              - "{{"{{"}}job.parameters.model_version{{"}}"}}"
           job_cluster_key: default
           libraries:
             - whl: ../dist/*.whl

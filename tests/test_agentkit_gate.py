@@ -157,6 +157,10 @@ def test_results_without_a_comparison_are_rejected(tmp_path):
     assert code == EXIT_THRESHOLD_FAILED
     assert "not a comparison" in report.message
     assert "compare" in report.message
+    # The verdict must agree with the refusal: everything downstream (the
+    # --json output, the evidence pack) reads `passed` off this report.
+    assert not report.passed
+    assert [failure.metric for failure in report.result.failures] == ["comparison"]
 
 
 def test_established_baseline_counts_as_named_evidence(tmp_path):
@@ -273,3 +277,46 @@ def test_strict_and_inclusive_thresholds(tmp_path, expression, value, expected_c
     _, code = evaluate_gate(project, results=results, baseline=_baseline())
 
     assert code == expected_code
+
+
+def test_standalone_regression_budget_respects_registry_direction(tmp_path):
+    """Latency is lower-is-better: slower must fail, faster must pass."""
+
+    project = _project(tmp_path, regression_budget={"latency_seconds/mean": 0.5})
+    versions = BaselineVersions(
+        agent="agent", scorers={"latency_seconds": 1}, aai_core="0.4.0"
+    )
+
+    slower = _results(
+        metrics={"latency_seconds/mean": 2.0},
+        baseline_metrics={"latency_seconds/mean": 1.0},
+        versions=versions,
+    )
+    faster = _results(
+        metrics={"latency_seconds/mean": 0.2},
+        baseline_metrics={"latency_seconds/mean": 1.0},
+        versions=versions,
+    )
+
+    _, slower_code = evaluate_gate(project, results=slower, baseline=_baseline())
+    _, faster_code = evaluate_gate(project, results=faster, baseline=_baseline())
+
+    assert slower_code == EXIT_THRESHOLD_FAILED
+    assert faster_code == EXIT_PASS
+
+
+def test_standalone_regression_budget_defaults_to_higher_is_better(tmp_path):
+    project = _project(tmp_path, regression_budget={"keyword_coverage/mean": 0.05})
+    versions = BaselineVersions(
+        agent="agent", scorers={"keyword_coverage": 1}, aai_core="0.4.0"
+    )
+
+    worse = _results(
+        metrics={"keyword_coverage/mean": 0.7},
+        baseline_metrics={"keyword_coverage/mean": 0.9},
+        versions=versions,
+    )
+
+    _, code = evaluate_gate(project, results=worse, baseline=_baseline())
+
+    assert code == EXIT_THRESHOLD_FAILED

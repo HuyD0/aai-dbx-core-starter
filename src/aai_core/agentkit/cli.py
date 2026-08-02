@@ -161,6 +161,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _add_scoring_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--agent",
+        default=None,
+        help="score this target instead of the one in agentkit.yaml "
+        "(same shapes: models:/..., endpoints:/..., a URL, module:function)",
+    )
     parser.add_argument("--plan", action="store_true", help="print the plan and stop")
     parser.add_argument(
         "--yes",
@@ -263,7 +269,11 @@ def _cmd_gate(arguments: argparse.Namespace) -> int:
 
 def _cmd_evidence(arguments: argparse.Namespace) -> int:
     from aai_core.agentkit.baseline import load_baseline
-    from aai_core.agentkit.evidence import build_evidence, write_evidence
+    from aai_core.agentkit.evidence import (
+        build_evidence,
+        databricks_approver_lookup,
+        write_evidence,
+    )
     from aai_core.agentkit.gate import evaluate_gate
     from aai_core.agentkit.results import load_latest_results
 
@@ -280,7 +290,11 @@ def _cmd_evidence(arguments: argparse.Namespace) -> int:
     baseline, _ = load_baseline(project.baseline_path)
     report, _ = evaluate_gate(project, results=results, baseline=baseline)
     document, markdown = build_evidence(
-        project, results=results, baseline=baseline, gate_report=report
+        project,
+        results=results,
+        baseline=baseline,
+        gate_report=report,
+        approver_lookup=databricks_approver_lookup,
     )
     directory = Path(arguments.output) if arguments.output else project.evidence_dir
     path = write_evidence(directory, document, markdown)
@@ -393,6 +407,7 @@ def _score(
             project,
             command=command,
             mode=mode,
+            agent=getattr(arguments, "agent", None),
             rows_limit=rows_limit,
             judges_enabled=judges_enabled,
             require_baseline=require_baseline,

@@ -42,13 +42,35 @@ def build_arguments(argv: list[str] | None = None) -> list[str]:
         default=None,
         help="the conclusion this comparison supports.",
     )
+    parser.add_argument(
+        "--model-name",
+        default=None,
+        help="Unity Catalog model to score (supplied by the deployment job).",
+    )
+    parser.add_argument(
+        "--model-version",
+        default=None,
+        help="model version to score (supplied by the deployment job).",
+    )
     parsed = parser.parse_args(argv)
 
+    if bool(parsed.model_name) != bool(parsed.model_version):
+        parser.error("--model-name and --model-version must be given together")
+
     arguments = ["eval", "--yes"]
-    if parsed.mode is not None:
+    mode = parsed.mode
+    if parsed.model_name:
+        # Score the version that triggered promotion, whatever agentkit.yaml
+        # names. Without this the gate could approve an unrelated target.
+        arguments += [
+            "--agent",
+            f"models:/{parsed.model_name}/{parsed.model_version}",
+        ]
+        mode = mode or "live"
+    if mode is not None:
         arguments += [
             "--mode",
-            "live" if parsed.mode in {"endpoint", "live"} else "answer-sheet",
+            "live" if mode in {"endpoint", "live"} else "answer-sheet",
         ]
     if parsed.update_baseline:
         arguments.append("--establish-baseline")

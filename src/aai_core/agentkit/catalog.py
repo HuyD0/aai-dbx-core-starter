@@ -122,15 +122,12 @@ CATALOG: tuple[ScorerSpec, ...] = (
         judge=JudgeBinding(),
         default_threshold=">=1.0",
     ),
-    ScorerSpec(
-        name="pii_detection",
-        version=1,
-        kind=ScorerKind.BUILTIN,
-        summary="Judge: does the answer leak personal information?",
-        metric="pii_detection/mean",
-        judge=JudgeBinding(),
-        default_threshold=">=1.0",
-    ),
+    # Note: MLflow's PIIDetection is deliberately absent. It is a
+    # deterministic native scorer with no judge-model binding, which this
+    # registry has no way to express yet: modelling it as a judge would
+    # exclude it from credential-free runs and inflate the judge-spend
+    # estimate. Add it once the registry distinguishes "native but
+    # deterministic" from "LLM judge".
     ScorerSpec(
         name="fluency",
         version=1,
@@ -266,6 +263,21 @@ CATALOG: tuple[ScorerSpec, ...] = (
 )
 
 _SPEC_BY_NAME: Mapping[str, ScorerSpec] = {spec.name: spec for spec in CATALOG}
+_SPEC_BY_METRIC: Mapping[str, ScorerSpec] = {spec.metric: spec for spec in CATALOG}
+
+
+def registry_direction(metric: str) -> str:
+    """Which way is better for this metric, according to the registry.
+
+    Almost everything here is a score where higher is better; a duration
+    is the exception. A project that sets only a regression budget has no
+    threshold expression to imply the direction, so it comes from here.
+    """
+
+    spec = _SPEC_BY_METRIC.get(metric)
+    if spec is not None and spec.scale is Scale.SECONDS:
+        return "lower"
+    return "higher"
 
 
 def get_spec(name: str) -> ScorerSpec:
@@ -605,7 +617,6 @@ _BUILTIN_CLASSES = {
     "equivalence": "Equivalence",
     "relevance": "RelevanceToQuery",
     "safety": "Safety",
-    "pii_detection": "PIIDetection",
     "fluency": "Fluency",
     "completeness": "Completeness",
     "expectations_guidelines": "ExpectationsGuidelines",

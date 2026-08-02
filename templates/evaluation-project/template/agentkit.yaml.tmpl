@@ -50,7 +50,7 @@ regression_budget:
 # Select scorers from the shared registry. A project chooses and sets
 # thresholds; it never redefines what a scorer means.
 # scorers:
-#   add: [pii_detection]
+#   add: [fluency, completeness]
 #   remove: [equivalence]
 #   guidelines:
 #     - "Answers must name the official support channel for anything the
@@ -61,6 +61,11 @@ regression_budget:
 # budget:
 #   max_judge_calls: 500
 #   judge_price_per_1m_tokens: 5.0
+
+# The Unity Catalog model this project promotes into. Set it to have
+# `agentkit evidence` report the approval recorded on the model version by
+# the deployment-job gate (see resources/optional/deployment_job.yml).
+# registered_model: {{.catalog}}.{{.schema}}.{{.application_name}}
 
 # smoke:
 #   rows: 20

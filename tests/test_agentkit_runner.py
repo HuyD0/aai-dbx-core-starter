@@ -650,3 +650,23 @@ def test_local_scoring_still_gates_and_can_fail(tmp_path):
 
     assert code == EXIT_THRESHOLD_FAILED
     assert not outcome.results.gate_passed
+
+
+def test_agent_override_scores_the_named_target(tmp_path):
+    """The deployment gate must score the version that triggered it."""
+
+    project = _project(tmp_path)
+    fake = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        agent="models:/main.evaluation.agent/7",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert outcome.results.agent == "models:/main.evaluation.agent/7"
+    assert fake.tags["aai.agent_target"] == "models:/main.evaluation.agent/7"

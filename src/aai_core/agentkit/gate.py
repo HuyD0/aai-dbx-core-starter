@@ -19,11 +19,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aai_core.agentkit.baseline import BaselineRecord, load_baseline
-from aai_core.agentkit.catalog import ScorerPlan, effective_threshold, get_spec
+from aai_core.agentkit.catalog import (
+    ScorerPlan,
+    effective_threshold,
+    get_spec,
+    registry_direction,
+)
 from aai_core.agentkit.config import ProjectContext, parse_threshold
 from aai_core.agentkit.errors import UnknownScorerError
 from aai_core.agentkit.results import ResultsRecord, load_latest_results
-from aai_core.evaluation import GatePolicy, GateResult, MetricRule, apply_gate
+from aai_core.evaluation import (
+    GateFailure,
+    GatePolicy,
+    GateResult,
+    MetricRule,
+    apply_gate,
+)
 
 EXIT_PASS = 0
 EXIT_ERROR = 1
@@ -103,9 +114,12 @@ def build_policy(
                 update={"max_regression": float(allowance)}
             )
         else:
+            # With no absolute threshold to imply a direction, take it from
+            # the registry: latency is lower-is-better, so "regression"
+            # must mean slower, not faster.
             rules[metric] = MetricRule(
                 metric=metric,
-                direction="higher",
+                direction=registry_direction(metric),
                 max_regression=float(allowance),
             )
     return GatePolicy(
@@ -124,9 +138,24 @@ def evaluate_gate(
     """Apply the policy to an existing results record."""
 
     if not results.is_comparison:
-        empty = GateResult(metrics=dict(results.metrics), failures=())
+        # The refusal has to be a failure, not just an exit code: the JSON
+        # output and the evidence pack both read the verdict off this
+        # result, and a promotion record must never say PASSED for a run
+        # that never named what it was compared against.
+        refused = GateResult(
+            metrics=dict(results.metrics),
+            failures=(
+                GateFailure(
+                    metric="comparison",
+                    reason=(
+                        "no baseline was named, so these results are not a "
+                        "comparison"
+                    ),
+                ),
+            ),
+        )
         report = GateReport(
-            result=empty,
+            result=refused,
             results=results,
             baseline=baseline,
             rules=(),
