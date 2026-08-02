@@ -1,96 +1,193 @@
-# Curated learning resources
+# Official learning resources
 
-This list favors primary documentation and foundational papers over short-form
-tutorials. Read the “core path” in order while doing the matching notebooks;
-use the rest when a lesson raises a question.
+You do not need to read everything before starting. Use the **Read now** item
+beside each lesson, then return to the **Go deeper** links when you want more
+detail. The course [glossary](glossary.md) gives shorter definitions.
 
-The project intentionally pins exact versions, including MLflow 3.14.0 and
-scikit-learn 1.9.0. MLflow aligns with the repository's certified range, while
-the scikit-learn documentation matches this standalone course's lock. Versioned
-MLflow links keep the executable course stable even when rolling documentation
-changes.
+This path favors official documentation and foundational papers. The executable
+project pins MLflow 3.14.0 and scikit-learn 1.9.0; versioned MLflow links match
+the code you run.
 
-## Core path
+## Before lesson 00: Mac, Python, and notebooks
 
-1. [scikit-learn: common pitfalls and recommended practices](https://scikit-learn.org/stable/common_pitfalls.html)
-   Read before modeling. It explains inconsistent preprocessing, leakage, and
-   why pipelines must learn transformations only from training data.
+**Read now**
 
-2. [scikit-learn: cross-validation](https://scikit-learn.org/stable/modules/cross_validation.html)
-   Learn what train, validation/CV, and held-out test evidence can legitimately
-   tell you. This course uses a time holdout rather than assuming exchangeable
-   rows.
+- [uv installation](https://docs.astral.sh/uv/getting-started/installation/) —
+  official Mac installation and shell-path help.
+- [uv Python versions](https://docs.astral.sh/uv/concepts/python-versions/) —
+  explains managed Python and `uv python install`.
+- [JupyterLab: notebooks](https://jupyterlab.readthedocs.io/en/stable/user/notebook.html) —
+  cells, kernels, execution, restart, and run-all.
 
-3. [scikit-learn: model evaluation](https://scikit-learn.org/stable/modules/model_evaluation.html)
-   Use this as the metric reference. Pair it with [classification decision
-   thresholds](https://scikit-learn.org/stable/modules/classification_threshold.html)
-   and [probability calibration](https://scikit-learn.org/stable/modules/calibration.html).
+**Go deeper**
 
-4. [MLflow tracking quickstart (3.14.0)](https://mlflow.org/docs/3.14.0/ml/getting-started/quickstart/)
-   Experiments, runs, parameters, metrics, models, and the UI in one short flow.
+- [Python virtual environments](https://docs.python.org/3/tutorial/venv.html) —
+  why `.venv` isolates project packages.
 
-5. [MLflow local database tutorial (3.14.0)](https://mlflow.org/docs/3.14.0/ml/tracking/tutorials/local-database/)
-   Explains the SQLite topology used here. The file backend is legacy; SQLite is
-   a sensible single-user local backend but not a production team store.
+## Lessons 01–02: classification and data
 
-6. [MLflow sklearn guide (3.14.0)](https://mlflow.org/docs/3.14.0/ml/traditional-ml/sklearn/)
-   Covers autologging and explicit sklearn model logging. This course logs the
-   intended datasets, metrics, and model explicitly so the evidence is visible
-   and duplicate exploratory model versions are avoided.
+**Read now**
 
-7. [MLflow dataset tracking (3.14.0)](https://mlflow.org/docs/3.14.0/dataset/)
-   `mlflow.log_input` records source, schema, profile, and digest metadata. It
-   does not turn a mutable source into durable, immutable raw-data storage; the
-   course therefore records its own SHA-256 split manifest too.
+- [scikit-learn getting started](https://scikit-learn.org/stable/getting_started.html) —
+  estimator basics, `fit`, `predict`, preprocessing, and evaluation.
+- [scikit-learn glossary](https://scikit-learn.org/stable/glossary.html) — precise
+  definitions of feature, target, sample, estimator, and related terms.
+- [pandas missing-data guide](https://pandas.pydata.org/docs/user_guide/missing_data.html) —
+  how pandas represents and inspects missing values.
 
-8. [MLflow classic model evaluation (3.14.0)](https://mlflow.org/docs/3.14.0/ml/evaluation/)
-   This is the correct evaluator for classifiers and regressors. Do not mix it
-   with `mlflow.genai.evaluate`, whose scorer system solves a different problem.
+The course data is synthetic. Before using a real dataset, add its owner,
+license, purpose, collection process, privacy constraints, known gaps, and an
+immutable version; a digest alone does not answer those questions.
 
-9. [MLflow model signatures (3.14.0)](https://mlflow.org/docs/3.14.0/ml/model/signatures/)
-   A signature defines input/output names and types; a representative input
-   example supports validation and later serving. Models newly registered in
-   Unity Catalog require signatures.
+## Lesson 03: splitting and leakage
 
-10. [MLflow Model Registry workflow (3.14.0)](https://mlflow.org/docs/3.14.0/ml/model-registry/workflow/)
-    Learn registered versions, tags, and aliases. Stages are deprecated; this
-    course moves `champion` only after the gate passes.
+**Read now**
 
-## Modeling depth
+- [scikit-learn common pitfalls](https://scikit-learn.org/stable/common_pitfalls.html) —
+  inconsistent preprocessing, leakage, and safe pipelines.
+- [scikit-learn cross-validation and held-out data](https://scikit-learn.org/stable/modules/cross_validation.html) —
+  why evaluation data must be separate from fitting.
+- [scikit-learn time-series splitting](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html) —
+  the general rule that training should precede evaluation in time-ordered
+  problems. The course uses explicit date boundaries rather than this class.
 
-- [DummyClassifier reference](https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html): establish a no-skill comparison.
-- [Average precision reference](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.average_precision_score.html): understand the course's primary selection metric.
-- [Precision-recall plots for imbalanced data](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0118432): Saito and Rehmsmeier's explanation of why ROC plots can look optimistic on heavily imbalanced tasks.
-- [Nested versus non-nested cross-validation](https://scikit-learn.org/stable/auto_examples/model_selection/plot_nested_cross_validation_iris.html) and [Cawley & Talbot (2010)](https://jmlr.org/papers/v11/cawley10a.html): understand selection bias when tuning is extensive.
-- [Model persistence](https://scikit-learn.org/stable/model_persistence.html): serialization security, `skops`, environment compatibility, and why artifacts must come from trusted sources.
+## Lesson 04: baseline and classification metrics
 
-## MLflow depth
+**Read now**
 
-- [MLflow Tracking concepts (3.14.0)](https://mlflow.org/docs/3.14.0/ml/tracking/): backend versus artifact stores, dataset inputs, runs, and Logged Models.
-- [MLflow model dependencies (3.14.0)](https://mlflow.org/docs/3.14.0/ml/model/dependencies/): inspect and validate the model environment. Keep the exact `uv.lock` as the tested project contract.
-- [MLflow pickle-free models (3.14.0)](https://mlflow.org/docs/3.14.0/ml/tracking/pickle-free-models/): the course explicitly uses `skops` and trusts only the required NumPy dtype type.
-- [MLflow Model Registry aliases (3.14.0)](https://mlflow.org/docs/3.14.0/ml/model-registry/workflow/#deploy-and-organize-models-with-aliases-and-tags): load by a human-readable role while recording the concrete version used.
+- [DummyClassifier](https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html) —
+  the official no-skill estimator reference.
+- [classification metrics](https://scikit-learn.org/stable/modules/model_evaluation.html#classification-metrics) —
+  confusion matrices, precision, recall, F1, average precision, and ROC-AUC.
+- [precision-recall curve](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.PrecisionRecallDisplay.html) —
+  the plotting API used to see threshold trade-offs on imbalanced data.
 
-## Databricks path
+**Go deeper**
 
-- [Train sklearn models on Databricks](https://docs.databricks.com/aws/en/machine-learning/train-model/scikit-learn): the closest hosted equivalent to these local pipelines.
-- [MLflow experiment tracking on Databricks](https://docs.databricks.com/aws/en/mlflow/tracking): move metadata/artifacts from local SQLite to hosted tracking while retaining run structure.
-- [MLOps workflow](https://docs.databricks.com/aws/en/machine-learning/mlops/mlops-workflow): development, staging, deployment, and monitoring responsibilities.
-- [Manage model lifecycle in Unity Catalog](https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/): three-part model names, required signatures, lineage, privileges, aliases, and version loading.
-- [Declarative Automation Bundles](https://docs.databricks.com/aws/en/dev-tools/bundles/): package jobs, resources, variables, and deployment configuration as reviewed code.
-- [Model Serving](https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints): deploy a concrete approved model version for online inference.
-- [Unity AI Gateway inference tables](https://docs.databricks.com/aws/en/ai-gateway/inference-tables-serving-endpoints): capture serving requests and responses for governed observability.
-- [Data profiling](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-quality-monitoring/data-profiling): current table/profile monitoring path. Older `quality_monitors` APIs and legacy inference tables should not anchor a new design.
+- [Saito and Rehmsmeier (2015)](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0118432) —
+  foundational explanation of precision-recall versus ROC plots for imbalanced
+  data.
 
-## Production thinking
+## Lesson 05: preprocessing, pipelines, and recorded model evidence
 
-- [Google's Rules of ML](https://developers.google.com/machine-learning/guides/rules-of-ml): practical system and iteration rules; especially useful before adding model complexity.
-- [Hidden Technical Debt in Machine Learning Systems](https://research.google/pubs/hidden-technical-debt-in-machine-learning-systems/): why data and system dependencies dominate the model file.
-- [The ML Test Score](https://research.google/pubs/the-ml-test-score-a-rubric-for-ml-production-readiness-and-technical-debt-reduction/): a rubric for testing data, models, infrastructure, and monitoring rather than judging only offline accuracy.
+**Read now**
 
-## A useful warning about tutorials
+- [ColumnTransformer with mixed types](https://scikit-learn.org/stable/auto_examples/compose/plot_column_transformer_mixed_types.html) —
+  numeric and categorical preprocessing in one pipeline.
+- [Pipeline](https://scikit-learn.org/stable/modules/generated/sklearn.pipeline.Pipeline.html) —
+  the precise sklearn API contract.
+- [MLflow tracking quickstart 3.14.0](https://mlflow.org/docs/3.14.0/ml/getting-started/quickstart/) —
+  experiments, runs, parameters, metrics, and models.
+- [MLflow local database tutorial 3.14.0](https://mlflow.org/docs/3.14.0/ml/tracking/tutorials/local-database/) —
+  the SQLite layout used by this course.
 
-Tutorials often optimize hyperparameters on a variable named `X_test` and then
-report that same score as final evidence. Treat that partition as validation,
-create a separate untouched test set, and name the objects for their real role.
-The variable name does not create the statistical boundary; team behavior does.
+**Go deeper**
+
+- [MLflow sklearn guide 3.14.0](https://mlflow.org/docs/3.14.0/ml/traditional-ml/sklearn/) —
+  explicit logging, autologging, model loading, and evaluation.
+- [MLflow dataset tracking 3.14.0](https://mlflow.org/docs/3.14.0/ml/dataset/) —
+  what a logged dataset input records. It does not make a mutable source durable
+  or copy all raw data into MLflow.
+
+## Lesson 06: model choice, thresholds, and calibration
+
+**Read now**
+
+- [classification decision thresholds](https://scikit-learn.org/stable/modules/classification_threshold.html) —
+  why probability estimation and the action decision are separate.
+- [probability calibration](https://scikit-learn.org/stable/modules/calibration.html) —
+  calibration curves, Brier score, and calibrated probabilities.
+- [average precision](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.average_precision_score.html) —
+  the course's candidate-selection metric.
+
+**Go deeper**
+
+- [nested versus non-nested cross-validation](https://scikit-learn.org/stable/auto_examples/model_selection/plot_nested_cross_validation_iris.html) —
+  selection bias when model tuning becomes extensive.
+- [Cawley and Talbot (2010)](https://jmlr.org/papers/v11/cawley10a.html) —
+  foundational treatment of over-fitting during model selection.
+
+## Lesson 07: final evaluation and release evidence
+
+**Read now**
+
+- [MLflow model evaluation 3.14.0](https://mlflow.org/docs/3.14.0/ml/evaluation/) —
+  classic classifier evaluation. It is different from MLflow GenAI evaluation.
+- [scikit-learn model evaluation](https://scikit-learn.org/stable/modules/model_evaluation.html) —
+  metric definitions and scoring behavior.
+
+**Go deeper**
+
+- [scikit-learn permutation-test example](https://scikit-learn.org/stable/auto_examples/model_selection/plot_permutation_tests_for_classification.html) —
+  one introduction to distinguishing apparent score from evidence above chance.
+  Confidence intervals and statistical release policies are extensions, not
+  beginner prerequisites.
+
+## Lesson 08: model contract and registry
+
+**Read now**
+
+- [MLflow model signatures 3.14.0](https://mlflow.org/docs/3.14.0/ml/model/signatures/) —
+  input/output names and types plus input examples.
+- [MLflow Model Registry workflow 3.14.0](https://mlflow.org/docs/3.14.0/ml/model-registry/workflow/) —
+  registered models, numbered versions, tags, and aliases.
+- [MLflow model aliases 3.14.0](https://mlflow.org/docs/3.14.0/ml/model-registry/workflow/#deploy-and-organize-models-with-aliases-and-tags) —
+  movable aliases versus concrete versions.
+
+**Go deeper**
+
+- [scikit-learn model persistence](https://scikit-learn.org/stable/model_persistence.html) —
+  environment compatibility and serialization security. Load model artifacts
+  only from trusted sources.
+- [MLflow model dependencies 3.14.0](https://mlflow.org/docs/3.14.0/ml/model/dependencies/) —
+  recorded model environments and reproducible loading.
+
+## Lesson 09: monitoring, then Databricks
+
+Complete the local monitoring part before reading the cloud resources.
+
+**Read now**
+
+- [Google Rules of ML: monitoring](https://developers.google.com/machine-learning/guides/rules-of-ml#monitoring) —
+  practical production signals and response thinking.
+- [MLflow on Azure Databricks](https://learn.microsoft.com/en-us/azure/databricks/mlflow/) —
+  hosted counterpart to the local SQLite experiment and Registry.
+- [Use scikit-learn on Azure Databricks](https://learn.microsoft.com/en-us/azure/databricks/machine-learning/train-model/scikit-learn) —
+  the closest managed execution equivalent.
+- [Manage model lifecycle in Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/machine-learning/manage-model-lifecycle/) —
+  governed names, versions, signatures, permissions, and aliases.
+
+**Continue with the platform pieces only after those concepts are familiar**
+
+- [Declarative Automation Bundles](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/bundles/) —
+  reviewed job/resource configuration and deployment.
+- [Azure Databricks Model Serving](https://learn.microsoft.com/en-us/azure/databricks/machine-learning/model-serving/) —
+  managed online inference at an approved concrete version.
+- [AI Gateway-enabled inference tables](https://learn.microsoft.com/en-us/azure/databricks/ai-gateway/inference-tables-serving-endpoints) —
+  governed request/response observability.
+- [Azure Databricks data quality monitoring](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-quality-monitoring/) —
+  data profiling, drift, model-performance metrics, and alerts.
+- [Azure Databricks MLOps workflow](https://learn.microsoft.com/en-us/azure/databricks/machine-learning/mlops/mlops-workflow) —
+  development, deployment, monitoring, and ownership responsibilities.
+
+The [Databricks handoff](databricks-handoff.md) maps these resources to the exact
+local objects created by the course.
+
+## Broader production perspective
+
+These are valuable after the ten lessons:
+
+- [Google's Rules of ML](https://developers.google.com/machine-learning/guides/rules-of-ml) —
+  practical principles for starting simple and operating real systems.
+- [Hidden Technical Debt in Machine Learning Systems](https://research.google/pubs/hidden-technical-debt-in-machine-learning-systems/) —
+  why data and system dependencies often dominate model code.
+- [The ML Test Score](https://research.google/pubs/the-ml-test-score-a-rubric-for-ml-production-readiness-and-technical-debt-reduction/) —
+  a readiness rubric spanning data, models, infrastructure, and monitoring.
+
+## A warning when reading tutorials
+
+Some tutorials tune repeatedly on an object named `X_test` and then describe the
+same score as final evidence. The variable name does not make data untouched.
+If its labels influenced a feature, model, hyperparameter, threshold, or rule,
+it served as validation data. A final claim needs a separate holdout that did
+not choose the system.
