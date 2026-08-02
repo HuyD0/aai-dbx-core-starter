@@ -123,6 +123,29 @@ def one_field_spec(criticality="high", tolerable_error_rate=0.05, **overrides):
     )
 
 
+def adopting_report(spec, *, source_snapshot=None):
+    """A passing gate report for `spec` — what execution now requires.
+
+    A gated spec builds its execute statement from the report that
+    authorised it, so tests exercising the SQL need one. Every declared
+    field scores perfectly on a single stratum.
+    """
+    records = [
+        gbi.EvaluationRecord(
+            stratum="standard",
+            inference=PLACEHOLDER_INFERENCE,
+            gold={field.name: "v" for field in spec.fields},
+            predicted={field.name: "v" for field in spec.fields},
+        )
+    ] * 200
+    report = gbi.evaluate_gate(
+        spec, score(records, spec), source_snapshot=source_snapshot
+    )
+    if report.decision == gbi.GateDecision.PENDING_APPROVAL:
+        report = gbi.approve_gate(report, "platform-team")
+    return report
+
+
 def score(records, spec, population=None):
     """Scoring is bound to the spec being gated and to the population.
 
@@ -581,7 +604,7 @@ def test_execute_sql_uses_the_spec_prompt_and_takes_no_prompt_argument():
     """One source of truth: the statement cannot run a prompt the stamps
     do not describe, because there is nowhere else to supply one."""
     spec = make_spec(prompt_template="Read this slip.\n\nDOCUMENT:\n")
-    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     assert "concat('Read this slip.\\n\\nDOCUMENT:\\n', doc_text)" in sql
     with pytest.raises(TypeError):
         gbi.build_execute_sql(spec, run_id="run-1", **{"prompt_sql": "anything"})
@@ -591,7 +614,7 @@ def test_a_changed_source_document_becomes_pending_again():
     """Correct a document in place and the target must not keep serving
     values derived from text that no longer exists."""
     spec = make_spec()
-    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     anti_join = sql.split("scored AS")[0]
     assert "done.ai_source_digest = sha2(source.doc_text, 256)" in anti_join
     assert "sha2(doc_text, 256) AS ai_source_digest" in sql
@@ -604,7 +627,7 @@ def test_release_sequence_comparisons_survive_migrated_null_rows():
     declines to update those rows while the anti-join keeps re-selecting
     (and re-paying for) them."""
     spec = make_spec()
-    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     assert "coalesce(done.ai_release_sequence, -1) > 1" in sql
     assert (
         "coalesce(target.ai_release_sequence, -1) <= source.ai_release_sequence" in sql
@@ -716,6 +739,171 @@ def test_strata_are_resynced_without_paying_for_inference():
     # It touches only strata — no ai_ column and no inference call.
     assert "ai_query" not in sql
     assert "ai_" not in sql.split("THEN UPDATE SET")[1]
+
+
+def test_the_weighted_row_is_recomputed_not_trusted():
+    """Medium/low fields are gated on the aggregate alone, and its
+    intervals cannot be tied to a row count — so it is rebuilt from the
+    physical rows before it is read as evidence."""
+    spec = one_field_spec(criticality="medium")
+    population = {"standard": 9000, "legacy_scan": 1000}
+    honest = score(
+        records_for("standard", correct=200) + records_for("legacy_scan", wrong=200),
+        spec,
+        population,
+    )
+    # The physical strata disagree, and the honest aggregate reflects it.
+    assert gbi.evaluate_gate(spec, honest).decision == gbi.GateDecision.REJECT
+
+    weighted = next(s for s in honest if s.stratum == gbi.WEIGHTED)
+    others = [s for s in honest if s.stratum != gbi.WEIGHTED]
+
+    # Forge the aggregate's interval while keeping every stamp intact.
+    strong = gbi.wilson_interval(200, 200, spec.confidence_level)
+    forged = weighted.model_copy(update={"precision": strong, "recall": strong})
+    with pytest.raises(gbi.EvidenceMismatch, match="does not follow from its stratum"):
+        gbi.evaluate_gate(spec, [*others, forged])
+
+    # Forging the counts underneath it fails the same way.
+    with pytest.raises(gbi.EvidenceMismatch, match="does not follow from its stratum"):
+        gbi.evaluate_gate(
+            spec, [*others, weighted.model_copy(update={"n_correct": 400})]
+        )
+
+    # So does quietly dropping the failing stratum's weight, which would
+    # otherwise re-weight the population around the passing rows.
+    lightened = weighted.model_copy(
+        update={"stratum_population": (("legacy_scan", 1), ("standard", 9000))}
+    )
+    with pytest.raises(gbi.EvidenceMismatch, match="does not follow from its stratum"):
+        gbi.evaluate_gate(spec, [*others, lightened])
+
+    # An honest set round-trips through JSON and still gates identically.
+    revived = [
+        gbi.FieldStratumScore.model_validate(s.model_dump(mode="json")) for s in honest
+    ]
+    assert gbi.evaluate_gate(spec, revived).decision == gbi.GateDecision.REJECT
+
+
+def test_the_weighted_row_must_carry_the_weights_it_used():
+    """Recomputation is only possible because the weights are persisted."""
+    spec = one_field_spec()
+    scores = score(records_for("s", correct=200), spec)
+    weighted = next(s for s in scores if s.stratum == gbi.WEIGHTED)
+    physical = next(s for s in scores if s.stratum != gbi.WEIGHTED)
+
+    assert dict(weighted.stratum_population) == {"s": 200}
+    assert physical.stratum_population == ()
+    with pytest.raises(ValidationError, match="must carry the weights"):
+        weighted.model_copy(update={"stratum_population": ()}).model_validate(
+            {**weighted.model_dump(mode="json"), "stratum_population": []}
+        )
+    # A physical row carrying weights is the aggregate wearing a disguise.
+    with pytest.raises(ValidationError, match="carries no population weights"):
+        gbi.FieldStratumScore.model_validate(
+            {**physical.model_dump(mode="json"), "stratum_population": [["s", 200]]}
+        )
+
+
+def test_execution_reads_the_delta_version_the_evidence_describes():
+    """Population, sample, gate and cost all describe one snapshot; the run
+    must read that one, not whatever the table has become since."""
+    spec = make_spec()
+    snapshot = gbi.SourceSnapshot(table=spec.source_table, version=42)
+    report = adopting_report(spec, source_snapshot=snapshot)
+    assert report.source_snapshot == snapshot
+
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=report)
+    assert "FROM main.finance_docs.document_text VERSION AS OF 42 AS source" in sql
+    # The strata resync and the preflight read the same pinned rows.
+    assert "VERSION AS OF 42" in gbi.resync_strata_sql(spec, snapshot)
+    assert "VERSION AS OF 42" in gbi.source_preflight_sql(spec, snapshot)
+
+    # A gated spec cannot build a statement without the authorising report,
+    # so the version can never come from somewhere the evidence did not.
+    assert spec.gate_required
+    with pytest.raises(gbi.GateNotPassed, match="report is required"):
+        gbi.build_execute_sql(spec, run_id="run-1")
+    # Nor from a report for a different spec revision.
+    other = make_spec(prompt_version="9.9.9")
+    with pytest.raises(gbi.EvidenceMismatch, match="different spec revision"):
+        gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(other))
+    # Nor can evidence about one table pin a run over another.
+    with pytest.raises(gbi.EvidenceMismatch, match="cannot pin a run"):
+        gbi.evaluate_gate(
+            spec,
+            score(
+                [
+                    gbi.EvaluationRecord(
+                        stratum="standard",
+                        inference=PLACEHOLDER_INFERENCE,
+                        gold={f.name: "v" for f in spec.fields},
+                        predicted={f.name: "v" for f in spec.fields},
+                    )
+                ]
+                * 200,
+                spec,
+            ),
+            source_snapshot=gbi.SourceSnapshot(table="main.other.docs", version=1),
+        )
+
+
+def test_an_unpinned_run_still_reads_the_live_table():
+    """Tier 3 is ungated, so there is no evidence to pin it to."""
+    spec = make_spec(use_tier=3)
+    assert not spec.gate_required
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    assert "FROM main.finance_docs.document_text AS source" in sql
+    assert "VERSION AS OF" not in sql
+
+
+def test_a_declined_field_the_spec_never_declared_is_refused():
+    """A near-miss name passes a free-form schema, matches no field, and
+    the value the model was declining lands as though asserted."""
+    spec = make_spec()
+
+    # The schema no longer permits it in the first place.
+    schema = gbi.response_format(spec)["json_schema"]["schema"]
+    assert schema["properties"]["abstained_fields"]["items"]["enum"] == [
+        "issuer_name",
+        "account_id",
+    ]
+
+    # And the policy refuses it even so, rather than dropping it silently.
+    with pytest.raises(gbi.UnknownAbstainedField, match="issuer_nam"):
+        gbi.apply_abstention_policy(
+            spec,
+            {"issuer_name": "Acme", "account_id": "123"},
+            {"issuer_name": 0.99, "account_id": 0.99},
+            ["issuer_nam"],
+        )
+    # The declared spelling still works normally.
+    permitted, effective = gbi.apply_abstention_policy(
+        spec,
+        {"issuer_name": "Acme", "account_id": "123"},
+        {"issuer_name": 0.99, "account_id": 0.99},
+        ["issuer_name"],
+    )
+    assert permitted["issuer_name"] is None and effective == {"issuer_name"}
+
+
+def test_an_unknown_abstention_sends_the_whole_row_to_the_queue():
+    """SQL cannot raise over a million rows, so it refuses to assert
+    anything from the response and routes it to the exception queue."""
+    spec = make_spec()
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
+    unknown = (
+        "coalesce(size(array_except(parsed.abstained_fields, "
+        "array('issuer_name', 'account_id'))), 0) > 0"
+    )
+    assert unknown in sql
+    # Every value is nulled by it, and the reason reaches ai_error.
+    assert sql.count(unknown) >= len(spec.fields) + 1
+    assert "response declined fields the spec never declared" in sql
+    # The exception queue already selects on ai_error, so it is picked up.
+    assert "ai_error IS NOT NULL" in gbi.exception_queue_view_sql(
+        spec, "main.finance_docs.v_extraction_queue"
+    )
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -1029,16 +1217,27 @@ def test_unusable_source_keys_are_refused_before_the_paid_query():
     resolve it, and one-row-per-key was never true).
     """
     spec = make_spec()
-    check = gbi.source_key_check_sql(spec)
+    check = gbi.source_preflight_sql(spec)
     assert "count_if(doc_id IS NULL) AS null_keys" in check
     assert "count(DISTINCT doc_id)" in check
+    assert "count_if(doc_text IS NULL) AS null_documents" in check
     assert "FROM main.finance_docs.document_text" in check
 
-    gbi.require_usable_source_keys(spec, 0, 0)  # the clean case proceeds
-    with pytest.raises(gbi.UnusableSourceKeys, match="3 row"):
-        gbi.require_usable_source_keys(spec, 3, 0)
-    with pytest.raises(gbi.UnusableSourceKeys, match="2 duplicate"):
-        gbi.require_usable_source_keys(spec, 0, 2)
+    gbi.require_usable_source_rows(spec, 0, 0, 0)  # the clean case proceeds
+    with pytest.raises(gbi.UnusableSourceRows, match="3 row"):
+        gbi.require_usable_source_rows(spec, 3, 0)
+    with pytest.raises(gbi.UnusableSourceRows, match="2 duplicate"):
+        gbi.require_usable_source_rows(spec, 0, 2)
+    # A null document breaks the same contract a third way: sha2(NULL) is
+    # NULL, so the anti-join can never match the row and every run pays to
+    # infer over an empty request again.
+    with pytest.raises(gbi.UnusableSourceRows, match="4 row.*null doc_text"):
+        gbi.require_usable_source_rows(spec, 0, 0, 4)
+    # And the preflight reads the same pinned snapshot the run will use.
+    pinned = gbi.source_preflight_sql(
+        spec, gbi.SourceSnapshot(table=spec.source_table, version=17)
+    )
+    assert "FROM main.finance_docs.document_text VERSION AS OF 17" in pinned
 
 
 def test_the_notebooks_own_wiring_scores_both_releases():
@@ -1091,8 +1290,8 @@ def test_an_older_release_cannot_overwrite_newer_output():
     """
     old = make_spec(prompt_version="1.0.0", release_sequence=1)
     new = make_spec(prompt_version="2.0.0", release_sequence=2)
-    old_sql = gbi.build_execute_sql(old, run_id="run-old")
-    new_sql = gbi.build_execute_sql(new, run_id="run-new")
+    old_sql = gbi.build_execute_sql(old, run_id="run-old", report=adopting_report(old))
+    new_sql = gbi.build_execute_sql(new, run_id="run-new", report=adopting_report(new))
 
     # The old job treats anything from a newer release as already done,
     # so it never even pays to re-infer those rows.
@@ -1158,7 +1357,7 @@ def test_response_format_uses_only_supported_schema_features():
 
 def test_execute_sql_is_idempotent_and_carries_row_provenance():
     spec = make_spec()
-    sql = gbi.build_execute_sql(spec, run_id="run-123")
+    sql = gbi.build_execute_sql(spec, run_id="run-123", report=adopting_report(spec))
     assert "LEFT ANTI JOIN main.finance_docs.document_entities" in sql
     assert "failOnError => false" in sql
     assert "responseFormat =>" in sql
@@ -1180,7 +1379,7 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     the table still served the previous release's values and provenance.
     """
     spec = make_spec(prompt_version="2.0.0", model_version="model-b")
-    sql = gbi.build_execute_sql(spec, run_id="run-9")
+    sql = gbi.build_execute_sql(spec, run_id="run-9", report=adopting_report(spec))
     anti_join = sql.split("scored AS")[0]
     assert "ON source.doc_id = done.doc_id" in anti_join
     assert "done.ai_model_version = 'model-b'" in anti_join
@@ -1192,7 +1391,7 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     edited = spec.model_copy(update={"abstain_threshold": 0.8})
     assert edited.spec_digest != spec.spec_digest
     assert f"done.ai_spec_digest = '{edited.spec_digest}'" in gbi.build_execute_sql(
-        edited, run_id="run-9"
+        edited, run_id="run-9", report=adopting_report(edited)
     )
     assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
     # Updating in place, but never downwards — see the release-ordering test.
@@ -1205,7 +1404,7 @@ def test_merge_source_projects_exactly_the_target_columns():
     columns are the target's columns, in order — and the document text
     used to build the prompt must not leak into the output table."""
     spec = make_spec(strata=("layout", "doc_type"))
-    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     head = sql[: sql.index("\n  FROM parsed")]
     projection = head[head.index("\n", head.rindex("SELECT\n")) :]
     # Split on top-level commas only: projected expressions contain their
@@ -1261,7 +1460,7 @@ def test_abstained_and_low_confidence_values_are_never_landed():
     assert permitted == {"issuer_name": "Maple Grove", "account_id": None}
     assert abstained == frozenset()
 
-    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     for name in ("issuer_name", "account_id"):
         assert f"array_contains(parsed.abstained_fields, '{name}')" in sql
         assert f"coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1" in sql
@@ -1290,7 +1489,7 @@ def test_a_confidence_outside_zero_to_one_is_declined_not_trusted():
     assert permitted["issuer_name"] == "Certain Co"
     assert abstained == frozenset()
 
-    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     for name in ("issuer_name", "account_id"):
         assert f"NOT (coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1)" in sql
 

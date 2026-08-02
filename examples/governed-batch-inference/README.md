@@ -146,7 +146,24 @@ abstention path) then passes the same gate on the same terms.
     beside them, and a `GateReport` derives its aggregate decision from its
     field results and must judge every field in the spec. A truncated or
     edited artifact fails to load rather than authorising a run.
-13. **The run record is written once per `run_id`.** It is a keyed `MERGE`,
+
+    The population-weighted row is the exception that proves it. Its
+    intervals are an effective sample size rather than a row count, so they
+    cannot be checked against one — and it is the only row a medium- or
+    low-criticality field is gated on, which makes it the row worth forging.
+    So it carries the population weights it used and is *recomputed* from
+    the physical strata before it is read. One function builds it, in
+    scoring and in verification alike, so the two cannot drift.
+13. **The run reads the Delta version the evidence describes.** Population,
+    sample, gate and cost estimate are all computed against one snapshot of
+    the source, and a tier 1 spec then waits for a human. `build_execute_sql`
+    therefore takes the report that authorised the run and reads the pinned
+    version off it — never a separate argument that could disagree. Rows
+    that land during review are not lost; they are the next cycle's work,
+    with evidence of their own. (Time travel needs the files to still exist:
+    a review outlasting `VACUUM` retention fails loudly and asks for a
+    re-gate, which is the right answer.)
+14. **The run record is written once per `run_id`.** It is a keyed `MERGE`,
     not an `INSERT`: `ai_run_id` is the join key every landed row uses to
     reach the run metadata, so a duplicate from a retried cell would fan
     out downstream joins and tie one run to two table versions.
@@ -155,15 +172,18 @@ abstention path) then passes the same gate on the same terms.
 
 Work through the spec first — most adaptation is spec, not code:
 
-- **A unique, non-null key is a precondition, not a nicety.** Every
-  idempotence guarantee here rests on key equality. `NULL = NULL` is not true,
-  so a null-keyed row is re-inferred and re-inserted on every run while the
-  restart logic appears to work; a duplicated key matches twice, so the MERGE
-  cannot resolve it and "one current row per key" — which every provenance
-  join assumes — was never true. `require_usable_source_keys` checks both
-  before any spend, and refuses rather than filtering: skipping those rows
-  would shrink coverage of the table the gate just certified. Fix the keys
-  upstream, or narrow the source view.
+- **A unique, non-null key and a non-null document are preconditions, not
+  niceties.** Every idempotence guarantee here rests on key equality.
+  `NULL = NULL` is not true, so a null-keyed row is re-inferred and
+  re-inserted on every run while the restart logic appears to work; a
+  duplicated key matches twice, so the MERGE cannot resolve it and "one
+  current row per key" — which every provenance join assumes — was never
+  true. A null document fails a third way and even more quietly: its content
+  digest is null, so the restart anti-join can never match it and each run
+  pays to infer over an empty request again. `require_usable_source_rows`
+  checks all three before any spend, and refuses rather than filtering:
+  skipping those rows would shrink coverage of the table the gate just
+  certified. Fix them upstream, or narrow the source view.
 - **`release_sequence` must increase with every release.** It is what lets
   the pipeline tell *newer* from merely *different*. Identity alone cannot,
   and without an ordering a delayed retry or an overlapping deploy would see

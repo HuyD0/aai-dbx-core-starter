@@ -151,8 +151,12 @@ class TargetSchemaMismatch(RuntimeError):
     """Raised when the target table still holds columns a release dropped."""
 
 
-class UnusableSourceKeys(RuntimeError):
-    """Raised when source keys cannot support restartable, idempotent landing."""
+class UnusableSourceRows(RuntimeError):
+    """Raised when source rows cannot support restartable, idempotent landing."""
+
+
+class UnknownAbstainedField(RuntimeError):
+    """Raised when a response declines a field the spec never declared."""
 
 
 # ---------------------------------------------------------------------------
@@ -540,19 +544,77 @@ def estimate_cost(
     )
 
 
-def source_key_check_sql(spec: BatchInferenceSpec) -> str:
-    """Count null and duplicated source keys — run this before spending."""
+class SourceSnapshot(BaseModel):
+    """The exact Delta version of the source that evidence describes.
+
+    Population counts, the stratified sample, the gate and the cost
+    estimate are all computed against the source *as it was* when the
+    cycle started. A tier 1 spec then waits for a human to sign off, and
+    that wait is where the table moves: rows land, and with them strata
+    the sample never covered. Executing against "latest" would infer and
+    write those rows on evidence that predates them, and spend past a
+    ceiling approved for a smaller population.
+
+    Recording the version turns "we evaluated this table" into "we
+    evaluated these rows". Delta time travel then makes the run read them
+    back exactly.
+
+    Rows that arrive after the snapshot are not lost — they are simply
+    not *this* run's work. The next cycle re-samples, re-gates and picks
+    them up with evidence of their own.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    table: str
+    version: int = Field(ge=0)
+
+
+def _source_relation(spec: BatchInferenceSpec, snapshot: SourceSnapshot | None) -> str:
+    """The source table, pinned to the evaluated version when one is given.
+
+    ``VERSION AS OF`` reads a historical Delta commit, which requires the
+    files backing it to still exist. ``VACUUM`` removes them after
+    ``delta.deletedFileRetentionDuration`` (7 days by default), so a
+    review that outlasts retention makes the pinned read fail rather than
+    silently return current data — a loud failure that says re-gate, not
+    a quiet one that says ship.
+    """
+    if snapshot is None:
+        return spec.source_table
+    if snapshot.table != spec.source_table:
+        raise EvidenceMismatch(
+            f"the snapshot describes {snapshot.table!r}, but this spec reads "
+            f"{spec.source_table!r}. Evidence about one table cannot pin a "
+            "run over another."
+        )
+    return f"{spec.source_table} VERSION AS OF {snapshot.version}"
+
+
+def source_preflight_sql(
+    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+) -> str:
+    """Count unusable source rows — run this before spending.
+
+    Reads the same pinned snapshot the run will process, so the counts
+    describe exactly the rows that are about to be paid for.
+    """
+    source = _source_relation(spec, snapshot)
     return f"""SELECT
   count_if({spec.key_column} IS NULL) AS null_keys,
   count(*) - count(DISTINCT {spec.key_column})
-    - count_if({spec.key_column} IS NULL) AS duplicate_keys
-FROM {spec.source_table}"""
+    - count_if({spec.key_column} IS NULL) AS duplicate_keys,
+  count_if({spec.document_column} IS NULL) AS null_documents
+FROM {source}"""
 
 
-def require_usable_source_keys(
-    spec: BatchInferenceSpec, null_count: int, duplicate_count: int = 0
+def require_usable_source_rows(
+    spec: BatchInferenceSpec,
+    null_count: int,
+    duplicate_count: int = 0,
+    null_documents: int = 0,
 ) -> None:
-    """Refuse to run when the source keys cannot carry the landing contract.
+    """Refuse to run when the source rows cannot carry the landing contract.
 
     Every idempotence guarantee in this pipeline rests on key equality,
     and ``NULL = NULL`` is not true. A null-keyed row therefore never
@@ -567,21 +629,36 @@ def require_usable_source_keys(
     target it lands two rows under one key — so "one current row per key",
     which every provenance join assumes, was never true.
 
+    A null *document* breaks it a third way, and quietly. ``sha2(NULL)``
+    is NULL, so the row lands with a null ``ai_source_digest``; the
+    restart anti-join then compares NULL to a real digest, which is
+    unknown rather than true, and the row is selected again on every
+    later run. The request itself is ``concat(prompt, NULL)`` — also NULL
+    — so the pipeline pays an endpoint to process nothing, forever.
+
     The check is deliberately a refusal rather than a filter. Skipping
     those rows would quietly shrink coverage of the very table the gate
-    just certified; the key contract is broken and someone has to fix it
+    just certified; the contract is broken and someone has to fix it
     upstream.
     """
     if null_count:
-        raise UnusableSourceKeys(
+        raise UnusableSourceRows(
             f"{null_count} row(s) in {spec.source_table} have a null "
             f"{spec.key_column}. Key equality drives both the restart "
             "anti-join and the MERGE, so those rows would be re-inferred "
             "and re-inserted on every run. Give them keys upstream, or "
             "narrow the source to rows that have one."
         )
+    if null_documents:
+        raise UnusableSourceRows(
+            f"{null_documents} row(s) in {spec.source_table} have a null "
+            f"{spec.document_column}. Their content digest would be null, "
+            "so the restart anti-join could never match them and each run "
+            "would pay to infer over an empty request again. Populate the "
+            "column upstream, or narrow the source to rows that have text."
+        )
     if duplicate_count:
-        raise UnusableSourceKeys(
+        raise UnusableSourceRows(
             f"{duplicate_count} duplicate {spec.key_column} value(s) in "
             f"{spec.source_table}. The MERGE cannot resolve two source rows "
             "onto one target row, and one row per key is what every "
@@ -856,6 +933,7 @@ class FieldStratumScore(BaseModel):
     release: ReleaseIdentity
     confidence: float = Field(gt=0.5, lt=1.0)
     sample_strata: tuple[str, ...] = Field(min_length=1)
+    stratum_population: tuple[tuple[str, int], ...] = ()
     n_rows: int = Field(ge=0)
     n_gold: int = Field(ge=0)
     n_asserted: int = Field(ge=0)
@@ -873,12 +951,32 @@ class FieldStratumScore(BaseModel):
         interval would adopt on evidence from some other group. Each
         interval is therefore tied back to the counts printed beside it.
 
-        The WEIGHTED row is exempt by construction: its intervals are the
-        population estimate expressed through an effective sample size, so
-        their trials are deliberately not a row count.
+        The WEIGHTED row's intervals cannot be checked this way — they are
+        the population estimate expressed through an effective sample
+        size, so their trials are deliberately not a row count. It is
+        checked instead by recomputing it from the physical rows and the
+        weights it carries, in `require_matching_evidence`; that is why
+        those weights are persisted rather than discarded after scoring.
         """
         if self.stratum == WEIGHTED:
+            if not self.stratum_population:
+                raise ValueError(
+                    "the population-weighted row must carry the weights it "
+                    "was computed from, so the gate can recompute it"
+                )
+            if tuple(sorted(name for name, _ in self.stratum_population)) != tuple(
+                sorted(self.sample_strata)
+            ):
+                raise ValueError(
+                    "the weighted row's population weights must cover exactly "
+                    "the strata the sample covered"
+                )
             return self
+        if self.stratum_population:
+            raise ValueError(
+                f"stratum {self.stratum!r} is a physical stratum and carries "
+                "no population weights; only the aggregate row does"
+            )
         if self.n_correct > min(self.n_asserted, self.n_gold):
             raise ValueError(
                 "n_correct cannot exceed the values asserted or the values "
@@ -944,6 +1042,22 @@ def apply_abstention_policy(
     permitted: dict[str, object] = {}
     abstained: set[str] = set()
     listed = set(model_abstained or ())
+    # A declined name that matches no declared field cannot be honoured:
+    # the model may have been withholding a value while misspelling its
+    # name, and silently ignoring the entry would land exactly the value
+    # it was trying to withhold. Here — at evaluation time, on a labelled
+    # sample — that is a bug to fix before the release ships, so it
+    # raises. The generated SQL cannot raise over a million rows without
+    # taking the whole run down with it, so it nulls the row's values and
+    # routes it to the exception queue instead: same refusal to assert,
+    # scaled to where it happens.
+    unknown = sorted(listed - {field.name for field in spec.fields})
+    if unknown:
+        raise UnknownAbstainedField(
+            f"the response declined {unknown}, which {spec.name!r} never "
+            "declared. The intended field cannot be recovered, so nothing "
+            "from this response may be asserted."
+        )
     for field in spec.fields:
         value = values.get(field.name)
         confidence = confidences.get(field.name)
@@ -1170,51 +1284,71 @@ def score_extraction(
             for stratum in sample_strata
         ]
         scores.extend(per_stratum)
-
-        # Weight each stratum by the population share of the rows that
-        # actually enter the metric: for precision that is the estimated
-        # population of asserted values, for recall the estimated
-        # population of true values. Both collapse to the plain population
-        # share when the rates are equal across strata.
-        precision_inputs = []
-        recall_inputs = []
-        for score in per_stratum:
-            population = float(stratum_population[score.stratum])
-            share = population / score.n_rows if score.n_rows else 0.0
-            precision_inputs.append(
-                (share * score.n_asserted, score.n_correct, score.n_asserted)
-            )
-            recall_inputs.append((share * score.n_gold, score.n_correct, score.n_gold))
-        # The abstention rate is a population rate too, so it is weighted
-        # the same way rather than pooled.
-        measured = [score for score in per_stratum if score.n_rows]
-        population_total = sum(stratum_population[s.stratum] for s in measured)
-        weighted_abstention = (
-            sum(
-                stratum_population[score.stratum] * score.abstention_rate
-                for score in measured
-            )
-            / population_total
-            if population_total
-            else 0.0
-        )
-        scores.append(
-            FieldStratumScore(
-                field=field.name,
-                stratum=WEIGHTED,
-                release=release,
-                confidence=confidence,
-                sample_strata=sample_strata,
-                n_rows=sum(score.n_rows for score in per_stratum),
-                n_gold=sum(score.n_gold for score in per_stratum),
-                n_asserted=sum(score.n_asserted for score in per_stratum),
-                n_correct=sum(score.n_correct for score in per_stratum),
-                precision=_weighted_interval(precision_inputs, confidence),
-                recall=_weighted_interval(recall_inputs, confidence),
-                abstention_rate=weighted_abstention,
-            )
-        )
+        scores.append(_weighted_row(field.name, per_stratum, stratum_population))
     return tuple(scores)
+
+
+def _weighted_row(
+    field_name: str,
+    per_stratum: Sequence[FieldStratumScore],
+    stratum_population: Mapping[str, int],
+) -> FieldStratumScore:
+    """Build the population-weighted row from the physical stratum rows.
+
+    Deliberately a pure function of the physical scores plus the
+    population weights, and the *only* place the aggregate is produced.
+    `require_matching_evidence` calls it again on persisted evidence and
+    compares, so scoring and verification cannot drift apart: if the
+    aggregate is ever computed a second way, the check that recomputes it
+    is computing the same thing.
+
+    Weight each stratum by the population share of the rows that actually
+    enter the metric: for precision that is the estimated population of
+    asserted values, for recall the estimated population of true values.
+    Both collapse to the plain population share when the rates are equal
+    across strata.
+    """
+    reference = per_stratum[0]
+    precision_inputs = []
+    recall_inputs = []
+    for score in per_stratum:
+        population = float(stratum_population[score.stratum])
+        share = population / score.n_rows if score.n_rows else 0.0
+        precision_inputs.append(
+            (share * score.n_asserted, score.n_correct, score.n_asserted)
+        )
+        recall_inputs.append((share * score.n_gold, score.n_correct, score.n_gold))
+    # The abstention rate is a population rate too, so it is weighted
+    # the same way rather than pooled.
+    measured = [score for score in per_stratum if score.n_rows]
+    population_total = sum(stratum_population[s.stratum] for s in measured)
+    weighted_abstention = (
+        sum(
+            stratum_population[score.stratum] * score.abstention_rate
+            for score in measured
+        )
+        / population_total
+        if population_total
+        else 0.0
+    )
+    return FieldStratumScore(
+        field=field_name,
+        stratum=WEIGHTED,
+        release=reference.release,
+        confidence=reference.confidence,
+        sample_strata=reference.sample_strata,
+        stratum_population=tuple(
+            (stratum, stratum_population[stratum])
+            for stratum in reference.sample_strata
+        ),
+        n_rows=sum(score.n_rows for score in per_stratum),
+        n_gold=sum(score.n_gold for score in per_stratum),
+        n_asserted=sum(score.n_asserted for score in per_stratum),
+        n_correct=sum(score.n_correct for score in per_stratum),
+        precision=_weighted_interval(precision_inputs, reference.confidence),
+        recall=_weighted_interval(recall_inputs, reference.confidence),
+        abstention_rate=weighted_abstention,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1257,6 +1391,7 @@ class GateReport(BaseModel):
     confidence_level: float
     fields: tuple[FieldGateResult, ...] = Field(min_length=1)
     decision: GateDecision
+    source_snapshot: SourceSnapshot | None = None
     approved_by: str | None = None
     human_review_obligations: tuple[str, ...] = ()
 
@@ -1518,13 +1653,46 @@ def require_matching_evidence(
                 "worst-stratum gate cannot be applied to a filtered set."
             )
 
+    # The aggregate row is the one a medium- or low-criticality field is
+    # gated on, and unlike a physical row its intervals cannot be checked
+    # against a row count — which makes it precisely the row worth
+    # forging: a 200/200 interval with an honest release stamp would win
+    # the gate over failing physical strata. So it is not read as
+    # evidence at all until it has been rebuilt from the physical rows
+    # and the weights it carries, and found identical.
+    by_field_stratum: dict[str, dict[str, FieldStratumScore]] = {}
+    for score in scores:
+        by_field_stratum.setdefault(score.field, {})[score.stratum] = score
+    for field in spec.fields:
+        group = by_field_stratum.get(field.name, {})
+        claimed = group.get(WEIGHTED)
+        if claimed is None:
+            continue
+        physical = [group[stratum] for stratum in manifest if stratum in group]
+        weights = dict(claimed.stratum_population)
+        recomputed = _weighted_row(field.name, physical, weights)
+        if recomputed != claimed:
+            raise EvidenceMismatch(
+                f"the population-weighted row for {field.name!r} does not "
+                "follow from its stratum scores. Recomputing it from those "
+                "rows and the weights it carries gives different evidence, "
+                "so the aggregate was not produced by this sample."
+            )
+
 
 def evaluate_gate(
     spec: BatchInferenceSpec,
     scores: Sequence[FieldStratumScore],
+    *,
+    source_snapshot: SourceSnapshot | None = None,
 ) -> GateReport:
     """Compare interval lower bounds against the tolerances declared in the
     spec — never the point estimates.
+
+    ``source_snapshot`` records which Delta version of the source this
+    evidence describes. ``build_execute_sql`` reads it back off the report
+    and pins the run to it, so the rows that get inferred are the rows the
+    sample was drawn from.
 
     Tier semantics:
 
@@ -1543,6 +1711,8 @@ def evaluate_gate(
     satisfy a spec that declared 99%.
     """
     require_matching_evidence(spec, scores)
+    if source_snapshot is not None:
+        _source_relation(spec, source_snapshot)  # refuses a foreign table
     by_field: dict[str, list[FieldStratumScore]] = {}
     for score in scores:
         by_field.setdefault(score.field, []).append(score)
@@ -1572,6 +1742,7 @@ def evaluate_gate(
         confidence_level=spec.confidence_level,
         fields=results,
         decision=decision,
+        source_snapshot=source_snapshot,
         human_review_obligations=obligations,
     )
 
@@ -1666,7 +1837,13 @@ def response_format(spec: BatchInferenceSpec) -> dict:
         required.extend([field.name, f"{field.name}_confidence"])
     properties["abstained_fields"] = {
         "type": "array",
-        "items": {"type": "string"},
+        # Constrained to the declared vocabulary: a free-form string lets a
+        # near-miss like "issuer_nam" satisfy the schema while matching no
+        # field, so the abstention is dropped and the value the model was
+        # declining lands anyway. The generated SQL rejects unknown names
+        # too — this narrows what the model can emit, that catches what it
+        # emits regardless.
+        "items": {"type": "string", "enum": [field.name for field in spec.fields]},
         "description": (
             "Names of requested fields deliberately not answered because "
             f"confidence was below {spec.abstain_threshold}. Do not guess."
@@ -1847,7 +2024,9 @@ def require_migrated_target(
     return migration
 
 
-def resync_strata_sql(spec: BatchInferenceSpec) -> str:
+def resync_strata_sql(
+    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+) -> str:
     """Refresh landed stratum values from the source, without inference.
 
     Strata are row *metadata*, not model output: correcting a document's
@@ -1869,7 +2048,7 @@ def resync_strata_sql(spec: BatchInferenceSpec) -> str:
         f"NOT (target.{column} <=> source.{column})" for column in spec.strata
     )
     return f"""MERGE INTO {spec.target_table} AS target
-USING {spec.source_table} AS source
+USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
 WHEN MATCHED AND (
      {differs}
@@ -1898,8 +2077,20 @@ def build_execute_sql(
     spec: BatchInferenceSpec,
     *,
     run_id: str,
+    report: GateReport | None = None,
 ) -> str:
     """The full-table execute statement: restartable *and* release-aware.
+
+    - **The evidence chooses the data.** A gated spec must hand over the
+      report that authorised the run, and the source snapshot is read off
+      *that* — never from a separate argument. Population, sample, gate
+      and cost estimate were all computed against one version of the
+      source, and a tier 1 spec then waits for a human; taking the version
+      as its own parameter would let the run read a table that had moved
+      underneath the evidence, inferring rows no sample covered and
+      spending past a ceiling approved for fewer of them. With one source
+      for it, that disagreement cannot be expressed — the same reason the
+      prompt is not a parameter either.
 
     - The request is built from ``spec.prompt_template``, not from a
       caller-supplied expression. Taking the prompt as an argument meant
@@ -1945,12 +2136,39 @@ def build_execute_sql(
       to the exception queue instead of blocking everything else. The
       struct field is ``errorMessage`` (``response`` is null on failure).
     """
+    if spec.gate_required and report is None:
+        raise GateNotPassed(
+            f"tier {spec.use_tier} runs execute against the snapshot their "
+            "gate report describes, so the report is required to build the "
+            "statement"
+        )
+    if report is not None and report.spec_digest != spec.spec_digest:
+        raise EvidenceMismatch(
+            "the report was produced for a different spec revision; its "
+            "source snapshot does not describe this run"
+        )
+    source = _source_relation(spec, report.source_snapshot if report else None)
     # The abstention rule from `apply_abstention_policy`, expressed in SQL
     # so that what the gate measured is exactly what lands: a field the
     # model listed as abstained, or answered below the declared threshold,
     # is nulled rather than written. Landing such a value would put output
     # the precision gate never saw into a consumer's table.
     threshold = spec.abstain_threshold
+    # A name the spec never declared means the response is not about the
+    # fields that were asked for, and the danger is asymmetric: the model
+    # may have been declining `issuer_name` while misspelling it, in which
+    # case the abstention silently evaporates and the value it was trying
+    # to withhold lands as though confidently asserted. Since the intended
+    # target cannot be recovered, nothing from the row is asserted and it
+    # goes to the exception queue — the same treatment a poisoned document
+    # gets, for the same reason.
+    declared_array = (
+        "array("
+        + ", ".join(sql_string_literal(field.name) for field in spec.fields)
+        + ")"
+    )
+    unknown_abstentions = f"array_except(parsed.abstained_fields, {declared_array})"
+    has_unknown = f"coalesce(size({unknown_abstentions}), 0) > 0"
     value_lines = []
     abstained_items = []
     for field in spec.fields:
@@ -1961,7 +2179,8 @@ def build_execute_sql(
         # output rather than a very confident answer.
         confidence_sql = f"coalesce(parsed.{field.name}_confidence, -1)"
         rule = (
-            f"coalesce(array_contains(parsed.abstained_fields, {literal}), false) "
+            f"{has_unknown} "
+            f"OR coalesce(array_contains(parsed.abstained_fields, {literal}), false) "
             f"OR (parsed.{field.name} IS NOT NULL "
             f"AND NOT ({confidence_sql} BETWEEN {threshold} AND 1))"
         )
@@ -1995,7 +2214,7 @@ def build_execute_sql(
 USING (
   WITH pending AS (
     SELECT source.{spec.key_column}, source.{spec.document_column}{pending_strata}
-    FROM {spec.source_table} AS source
+    FROM {source} AS source
     LEFT ANTI JOIN {spec.target_table} AS done
       ON source.{spec.key_column} = done.{spec.key_column}
      AND done.ai_source_digest = sha2(source.{spec.document_column}, 256)
@@ -2031,7 +2250,14 @@ USING (
 {value_block},
     {effective_abstained} AS ai_abstained_fields,
     parsed.abstain_reason AS ai_abstain_reason,
-    error_message AS ai_error,
+    CASE
+      WHEN {has_unknown}
+        THEN concat(
+          'response declined fields the spec never declared: ',
+          concat_ws(', ', {unknown_abstentions})
+        )
+      ELSE error_message
+    END AS ai_error,
     {sql_string_literal(run_id)} AS ai_run_id,
     {digest_literal} AS ai_spec_digest,
     {model_literal} AS ai_model_version,

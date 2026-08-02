@@ -369,15 +369,29 @@ for field in spec_v1.fields:
 
 # COMMAND ----------
 
+# Everything from here — the population counts, the sample, the gate and
+# the cost estimate — describes the source *as it is right now*. Record
+# which version that is, so the run can read those same rows back after
+# labelling and review have moved on. `DESCRIBE HISTORY` is newest-first.
+SOURCE_SNAPSHOT = gbi.SourceSnapshot(
+    table=SOURCE_TABLE,
+    version=spark.sql(f"DESCRIBE HISTORY {SOURCE_TABLE}").first().version,
+)
+print(f"evidence describes {SOURCE_TABLE} at version {SOURCE_SNAPSHOT.version}")
+
 # Pre-flight, before anything is paid for: every idempotence guarantee
 # here rests on key equality, and `NULL = NULL` is not true. A null-keyed
 # row would be re-inferred and re-inserted on every single run while the
-# restart logic appeared to work.
-keys = spark.sql(gbi.source_key_check_sql(spec_v1)).first()
-gbi.require_usable_source_keys(spec_v1, keys.null_keys, keys.duplicate_keys)
+# restart logic appeared to work. A null document does the same via its
+# null content digest, and pays an endpoint to read nothing each time.
+rows = spark.sql(gbi.source_preflight_sql(spec_v1, SOURCE_SNAPSHOT)).first()
+gbi.require_usable_source_rows(
+    spec_v1, rows.null_keys, rows.duplicate_keys, rows.null_documents
+)
 print(
-    f"source keys usable: {keys.null_keys} null and "
-    f"{keys.duplicate_keys} duplicate {spec_v1.key_column} values"
+    f"source rows usable: {rows.null_keys} null and "
+    f"{rows.duplicate_keys} duplicate {spec_v1.key_column} values, "
+    f"{rows.null_documents} null {spec_v1.document_column} values"
 )
 
 CAD_PER_M_INPUT = 0.20  # placeholder — use your negotiated list price
@@ -986,7 +1000,7 @@ print(
 
 records_v2 = evaluation_records(spec_v2)
 scores_v2 = gbi.score_extraction(records_v2, spec_v2, population)
-report_v2 = gbi.evaluate_gate(spec_v2, scores_v2)
+report_v2 = gbi.evaluate_gate(spec_v2, scores_v2, source_snapshot=SOURCE_SNAPSHOT)
 
 gate_run = mlflow.start_run(run_name=f"{spec_v2.name}-prompt-2.0.0-gate")
 RUN_ID = gate_run.info.run_id  # provenance key for everything downstream
@@ -1161,7 +1175,12 @@ for statement in migration.statements:
     spark.sql(statement)
     print(f"migrated: {statement}")
 
-execute_sql = gbi.build_execute_sql(spec_v2, run_id=RUN_ID)
+# The statement is built from the report that authorised it, so the Delta
+# version it reads is the one the evidence describes — not whatever the
+# table has become while the gate was being reviewed. Rows that landed
+# since are not lost; they are the next cycle's work, with evidence of
+# their own.
+execute_sql = gbi.build_execute_sql(spec_v2, run_id=RUN_ID, report=report_v2)
 print(execute_sql[:1200] + "\n…")
 
 # "Pending" is release-aware: rows already landed *by this release* are
@@ -1182,8 +1201,12 @@ release_predicate = f"""
         OR coalesce(done.ai_release_sequence, -1) > {spec_v2.release_sequence}
       )
 """
+# Pinned to the evidence's version, exactly like the generated statement:
+# counting pending rows against a moved table would report work the run
+# is not authorised to do.
+PINNED_SOURCE = f"{SOURCE_TABLE} VERSION AS OF {SOURCE_SNAPSHOT.version}"
 pending_sql = f"""
-    SELECT count(*) AS pending FROM {SOURCE_TABLE} AS source
+    SELECT count(*) AS pending FROM {PINNED_SOURCE} AS source
     LEFT ANTI JOIN {TARGET_TABLE} AS done
       ON source.doc_id = done.doc_id{release_predicate}
 """
@@ -1192,7 +1215,7 @@ pending_sql = f"""
 # calls the row done — but the landed label would stay wrong forever, and
 # monitoring groups by it. Fix the labels directly rather than paying an
 # endpoint to regenerate identical values.
-spark.sql(gbi.resync_strata_sql(spec_v2))
+spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT))
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
@@ -1204,7 +1227,7 @@ else:
     # deterministic extractor standing in for ai_query.
     pending = spark.sql(f"""
         SELECT source.doc_id, source.layout, source.doc_text
-        FROM {SOURCE_TABLE} AS source
+        FROM {PINNED_SOURCE} AS source
         LEFT ANTI JOIN {TARGET_TABLE} AS done
           ON source.doc_id = done.doc_id{release_predicate}
         """).collect()
@@ -1263,13 +1286,20 @@ else:
         .withColumn("ai_executed_at", F.current_timestamp())
         .createOrReplaceTempView("simulated_scored")
     )
-    # Same MERGE the live path uses: update rows carried over from an
-    # older release, insert keys that have never been processed.
+    # Same MERGE the live path uses, including the guard that matters:
+    # update rows carried over from an older release, insert keys never
+    # processed, and never lower a row's release sequence. Without that
+    # last predicate a job whose pending set was collected before a newer
+    # release committed would write its older output over the newer rows —
+    # the teaching path has to carry the discipline it teaches.
     spark.sql(f"""
         MERGE INTO {TARGET_TABLE} AS target
         USING simulated_scored AS source
         ON target.doc_id = source.doc_id
-        WHEN MATCHED THEN UPDATE SET *
+        WHEN MATCHED
+          AND coalesce(target.ai_release_sequence, -1)
+              <= source.ai_release_sequence
+          THEN UPDATE SET *
         WHEN NOT MATCHED THEN INSERT *
         """)
 
