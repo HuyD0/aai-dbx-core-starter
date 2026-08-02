@@ -104,7 +104,7 @@ COMBOS = {
             "overrides": {
                 "project_name": "test-prompt-app",
                 "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
             },
             "expect_present": ["src/app/assistant.py"],
             "expect_absent": [],
@@ -168,7 +168,7 @@ COMBOS = {
             "overrides": {
                 "project_name": "test-rag",
                 "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
                 "model_deployment": "chat",
                 "retrieval_provider": "azure_ai_search",
                 "search_endpoint": "https://search.search.windows.net",
@@ -226,7 +226,7 @@ COMBOS = {
             "overrides": {
                 "project_name": "test-agent-app",
                 "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
                 "model_deployment": "chat",
             },
             # Foundry cannot satisfy serving resource declarations, so the
