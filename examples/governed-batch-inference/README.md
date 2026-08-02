@@ -66,6 +66,17 @@ abstention path) then passes the same gate on the same terms.
    digest** (`require_executable`), and the run is idempotent: an anti-join
    selects only unlanded rows, so a partial failure restarts by re-running
    the same statement.
+8. **Evidence belongs to the release that produced it.** Scores carry a
+   release stamp (spec digest, model version, prompt version) and the
+   declared confidence level; the gate refuses anything else. Re-using the
+   last passing evaluation for a changed prompt — "we tested this, it was
+   fine" — is exactly the shortcut this blocks. Re-scoring is arithmetic
+   over records you already hold, so the strict rule is cheap to satisfy.
+9. **A new release reprocesses the table.** The restart anti-join matches
+   on the key *and* the model and prompt versions, and the write is a
+   `MERGE`. Matching on the key alone would let a newly gated release
+   report success while every row still carried the previous release's
+   values and provenance.
 
 ## Adapting it to a new use case
 

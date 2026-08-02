@@ -99,6 +99,26 @@ def one_field(criticality="high", tolerable_error_rate=0.05):
     )
 
 
+def one_field_spec(criticality="high", tolerable_error_rate=0.05, **overrides):
+    """A spec whose single field is the one `records_for` produces."""
+    return make_spec(
+        fields=(
+            dict(
+                name="f",
+                description="test field",
+                criticality=criticality,
+                tolerable_error_rate=tolerable_error_rate,
+            ),
+        ),
+        **overrides,
+    )
+
+
+def score(records, spec):
+    """Scoring is always bound to the spec being gated."""
+    return gbi.score_extraction(records, spec)
+
+
 # ---------------------------------------------------------------------------
 # Wilson score intervals
 # ---------------------------------------------------------------------------
@@ -198,31 +218,49 @@ def test_allocation_caps_at_full_population():
 
 
 def test_hallucination_hurts_precision_and_abstention_hurts_recall():
-    field = one_field()
     records = records_for("s", correct=8, abstained=1, hallucinated=1)
-    (score,) = [
-        s for s in gbi.score_extraction(records, [field], 0.95) if s.stratum == "s"
-    ]
+    (result,) = [s for s in score(records, one_field_spec()) if s.stratum == "s"]
     # 9 assertions (8 correct + 1 hallucinated); the abstention is not one.
-    assert score.n_asserted == 9
-    assert score.precision.successes == 8
-    assert score.precision.trials == 9
+    assert result.n_asserted == 9
+    assert result.precision.successes == 8
+    assert result.precision.trials == 9
     # 9 rows have a true value (hallucination row has gold None); the
     # abstained row counts as a miss for recall — visible, but a miss.
-    assert score.recall.successes == 8
-    assert score.recall.trials == 9
-    assert score.abstention_rate == pytest.approx(0.1)
+    assert result.recall.successes == 8
+    assert result.recall.trials == 9
+    assert result.abstention_rate == pytest.approx(0.1)
 
 
 def test_scores_include_pooled_and_per_stratum_rows():
-    field = one_field()
     records = records_for("a", correct=5) + records_for("b", correct=5, wrong=5)
-    scores = gbi.score_extraction(records, [field], 0.95)
-    strata = {score.stratum for score in scores}
+    scores = score(records, one_field_spec())
+    strata = {s.stratum for s in scores}
     assert strata == {"a", "b", gbi.POOLED}
     pooled = next(s for s in scores if s.stratum == gbi.POOLED)
     assert pooled.n_rows == 15
     assert pooled.precision.successes == 10
+
+
+def test_scores_carry_the_release_and_confidence_they_measured():
+    spec = one_field_spec()
+    scores = score(records_for("s", correct=10), spec)
+    assert all(s.release == spec.release for s in scores)
+    assert all(s.confidence == spec.confidence_level for s in scores)
+    assert spec.release.prompt_version == spec.prompt_version
+    assert spec.release.spec_digest == spec.spec_digest
+
+
+def test_scoring_honours_a_non_default_confidence_from_the_spec():
+    strict_spec = one_field_spec(confidence_level=0.99)
+    (result,) = [
+        s
+        for s in score(records_for("s", correct=97, wrong=3), strict_spec)
+        if s.stratum == "s"
+    ]
+    assert result.confidence == 0.99
+    assert result.precision.confidence == 0.99
+    # A 99% interval is wider, so its lower bound sits below the 95% one.
+    assert result.precision.lower < gbi.wilson_interval(97, 100, 0.95).lower
 
 
 def test_values_match_is_numeric_aware_and_case_tolerant():
@@ -238,31 +276,19 @@ def test_values_match_is_numeric_aware_and_case_tolerant():
 # ---------------------------------------------------------------------------
 
 
-def central_lesson_scores(field):
-    """Aggregate looks fine; the minority stratum is broken.
+CENTRAL_LESSON_RECORDS = records_for("standard", correct=795, wrong=5) + records_for(
+    "legacy_scan", correct=80, wrong=20
+)
+"""Aggregate looks fine; the minority stratum is broken.
 
-    standard: 795/800 correct (lower ~0.985). legacy_scan: 80/100
-    (lower ~0.711). Pooled: 875/900, lower ~0.959 — which *passes* 0.95.
-    """
-    records = records_for("standard", correct=795, wrong=5) + records_for(
-        "legacy_scan", correct=80, wrong=20
-    )
-    return gbi.score_extraction(records, [field], 0.95)
+standard: 795/800 correct (lower ~0.985). legacy_scan: 80/100
+(lower ~0.711). Pooled: 875/900, lower ~0.959 — which *passes* 0.95.
+"""
 
 
 def test_high_criticality_gates_on_the_worst_stratum_not_the_average():
-    field = one_field(criticality="high")
-    spec = make_spec(
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="high",
-                tolerable_error_rate=0.05,
-            ),
-        )
-    )
-    report = gbi.evaluate_gate(spec, central_lesson_scores(field))
+    spec = one_field_spec(criticality="high")
+    report = gbi.evaluate_gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
     assert report.decision == gbi.GateDecision.REJECT
     (result,) = report.fields
     assert result.decision == gbi.GateDecision.REJECT
@@ -272,38 +298,16 @@ def test_high_criticality_gates_on_the_worst_stratum_not_the_average():
 
 def test_medium_criticality_gates_on_the_pooled_sample():
     """Same evidence, medium criticality: the pooled interval decides."""
-    field = one_field(criticality="medium")
-    spec = make_spec(
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="medium",
-                tolerable_error_rate=0.05,
-            ),
-        )
-    )
-    report = gbi.evaluate_gate(spec, central_lesson_scores(field))
+    spec = one_field_spec(criticality="medium")
+    report = gbi.evaluate_gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
     assert report.decision == gbi.GateDecision.ADOPT
 
 
 def test_gate_compares_lower_bound_never_the_point_estimate():
     """97/100 with a 95% tolerance: the point estimate passes, the run
     does not — it produced an encouraging number with too little evidence."""
-    field = one_field(criticality="medium")
-    spec = make_spec(
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="medium",
-                tolerable_error_rate=0.05,
-            ),
-        )
-    )
-    scores = gbi.score_extraction(
-        records_for("standard", correct=97, wrong=3), [field], 0.95
-    )
+    spec = one_field_spec(criticality="medium")
+    scores = score(records_for("standard", correct=97, wrong=3), spec)
     report = gbi.evaluate_gate(spec, scores)
     (result,) = report.fields
     assert result.binding_point_estimate >= 0.95
@@ -315,22 +319,65 @@ def test_gate_compares_lower_bound_never_the_point_estimate():
 def test_too_small_a_sample_is_inconclusive_not_a_rejection():
     """30/30 correct cannot clear a 95% bar (best possible lower bound is
     ~0.886): the model was not shown to be bad — the sample was too small."""
-    field = one_field(criticality="high")
-    spec = make_spec(
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="high",
-                tolerable_error_rate=0.05,
-            ),
-        )
-    )
-    scores = gbi.score_extraction(records_for("legacy", correct=30), [field], 0.95)
+    spec = one_field_spec(criticality="high")
+    scores = score(records_for("legacy", correct=30), spec)
     report = gbi.evaluate_gate(spec, scores)
     assert report.decision == gbi.GateDecision.INCONCLUSIVE
     (result,) = report.fields
     assert any("label more rows" in reason for reason in result.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Evidence binding: scores belong to the release that produced them
+# ---------------------------------------------------------------------------
+
+
+def test_gate_refuses_evidence_from_a_different_release():
+    """A passing v1 sample must not be able to authorise a v2 run.
+
+    Without this the report would carry v2's digest over v1's numbers and
+    require_executable would accept it — an unvalidated prompt executing
+    on an earlier release's evidence.
+    """
+    spec_v1 = one_field_spec(criticality="medium", prompt_version="1.0.0")
+    spec_v2 = spec_v1.model_copy(update={"prompt_version": "2.0.0"})
+    scores_v1 = score(records_for("standard", correct=200), spec_v1)
+
+    assert gbi.evaluate_gate(spec_v1, scores_v1).decision == gbi.GateDecision.ADOPT
+    with pytest.raises(gbi.EvidenceMismatch, match="prompt 1.0.0"):
+        gbi.evaluate_gate(spec_v2, scores_v1)
+
+
+def test_gate_refuses_a_model_version_change_on_stale_evidence():
+    spec = one_field_spec(criticality="medium")
+    scores = score(records_for("standard", correct=200), spec)
+    retrained = spec.model_copy(update={"model_version": "next-model-build"})
+    with pytest.raises(gbi.EvidenceMismatch):
+        gbi.evaluate_gate(retrained, scores)
+
+
+def test_gate_refuses_intervals_computed_at_another_confidence_level():
+    """Declared 99%, scored at 95% — 485/500 clears 95% but not 99%."""
+    spec = one_field_spec(criticality="medium", confidence_level=0.99)
+    records = records_for("standard", correct=485, wrong=15)
+    at_95 = gbi.wilson_interval(485, 500, 0.95)
+    at_99 = gbi.wilson_interval(485, 500, 0.99)
+    assert at_95.lower >= 0.95 > at_99.lower  # the gap the check protects
+
+    mislabelled = tuple(
+        s.model_copy(update={"confidence": 0.95}) for s in score(records, spec)
+    )
+    with pytest.raises(gbi.EvidenceMismatch, match="confidence"):
+        gbi.evaluate_gate(spec, mislabelled)
+    # Scored properly at the declared level, the same sample is rejected.
+    assert gbi.evaluate_gate(spec, score(records, spec)).decision == (
+        gbi.GateDecision.REJECT
+    )
+
+
+def test_gate_refuses_an_empty_evidence_set():
+    with pytest.raises(gbi.EvidenceMismatch):
+        gbi.evaluate_gate(one_field_spec(), ())
 
 
 def test_rejection_outranks_inconclusive_across_fields():
@@ -359,32 +406,22 @@ def test_rejection_outranks_inconclusive_across_fields():
                 predicted={**row.predicted, "g": "v"},
             )
         )
-    scores = gbi.score_extraction(records, spec.fields, 0.95)
-    # f: 80/100 rejects; g: 100/100 but you'd need... 100 >= 73, so make g
-    # under-evidenced by scoring only 30 rows for it.
-    thin = gbi.score_extraction(records[:30], [spec.field_named("g")], 0.95)
-    combined = [s for s in scores if s.field == "f"] + list(thin)
+    scores = score(records, spec)
+    # f: 80/100 rejects. g would pass on 100 rows, so re-score it over only
+    # 30 to make it under-evidenced.
+    thin = [s for s in score(records[:30], spec) if s.field == "g"]
+    combined = [s for s in scores if s.field == "f"] + thin
     report = gbi.evaluate_gate(spec, combined)
     assert report.decision == gbi.GateDecision.REJECT
 
 
 def test_tier_one_passing_gate_requires_a_named_human():
-    spec = make_spec(
+    spec = one_field_spec(
         use_tier=1,
         rollback_plan="Restore document_entities from the previous table "
         "version and re-point consumers.",
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="high",
-                tolerable_error_rate=0.05,
-            ),
-        ),
     )
-    scores = gbi.score_extraction(
-        records_for("standard", correct=200), [spec.fields[0]], 0.95
-    )
+    scores = score(records_for("standard", correct=200), spec)
     report = gbi.evaluate_gate(spec, scores)
     # Every check passed, and the decision is still not adopt.
     assert all(f.decision == gbi.GateDecision.ADOPT for f in report.fields)
@@ -399,21 +436,11 @@ def test_tier_one_passing_gate_requires_a_named_human():
 
 
 def test_a_rejected_gate_cannot_be_approved_into_adoption():
-    spec = make_spec(
+    spec = one_field_spec(
         use_tier=1,
         rollback_plan="Restore previous table version.",
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="high",
-                tolerable_error_rate=0.05,
-            ),
-        ),
     )
-    scores = gbi.score_extraction(
-        records_for("standard", correct=80, wrong=20), [spec.fields[0]], 0.95
-    )
+    scores = score(records_for("standard", correct=80, wrong=20), spec)
     report = gbi.evaluate_gate(spec, scores)
     assert report.decision == gbi.GateDecision.REJECT
     with pytest.raises(gbi.GateNotPassed):
@@ -423,25 +450,12 @@ def test_a_rejected_gate_cannot_be_approved_into_adoption():
 
 
 def test_execution_guard_checks_tier_gate_and_spec_digest():
-    spec = make_spec(
-        fields=(
-            dict(
-                name="f",
-                description="test field",
-                criticality="high",
-                tolerable_error_rate=0.05,
-            ),
-        )
-    )
+    spec = one_field_spec(criticality="high")
     with pytest.raises(gbi.GateNotPassed):
         gbi.require_executable(spec, None)
     exploratory = make_spec(use_tier=3, target_table="main.sandbox.scratch")
     gbi.require_executable(exploratory, None)  # tier 3: no gate to demand
-    scores = gbi.score_extraction(
-        records_for("standard", correct=200),
-        spec.fields,
-        0.95,
-    )
+    scores = score(records_for("standard", correct=200), spec)
     report = gbi.evaluate_gate(spec, scores)
     assert report.decision == gbi.GateDecision.ADOPT
     drifted = spec.model_copy(update={"prompt_version": "2.0.0"})
@@ -534,6 +548,9 @@ def test_response_format_uses_only_supported_schema_features():
     ]
     assert schema["properties"]["abstained_fields"]["type"] == "array"
     assert set(schema["required"]) == set(schema["properties"])
+    # Closed object: strict mode on an OpenAI-compatible endpoint expects
+    # it, and an extraction contract should not accept undeclared fields.
+    assert schema["additionalProperties"] is False
 
 
 def test_execute_sql_is_idempotent_and_carries_row_provenance():
@@ -546,12 +563,55 @@ def test_execute_sql_is_idempotent_and_carries_row_provenance():
     assert "responseFormat =>" in sql
     assert "'run-123' AS ai_run_id" in sql
     assert "ai_query(" in sql and "'databricks-gpt-oss-20b'" in sql
-    # INSERT column list matches the DDL column order exactly.
+    # failOnError => false returns STRUCT(response, errorMessage).
+    assert "raw.errorMessage AS error_message" in sql
     ddl = gbi.create_target_table_sql(spec)
-    names = [name for name, _ in gbi.target_columns(spec)]
-    assert f"({', '.join(names)})" in sql
-    for name in names:
+    for name, _ in gbi.target_columns(spec):
         assert name in ddl
+        assert name in sql
+
+
+def test_execute_sql_reprocesses_rows_from_an_earlier_release():
+    """The anti-join is release-aware and the write is a MERGE.
+
+    Matching on the key alone would exclude every row landed by an older
+    prompt or model, so a newly gated release could report success while
+    the table still served the previous release's values and provenance.
+    """
+    spec = make_spec(prompt_version="2.0.0", model_version="model-b")
+    sql = gbi.build_execute_sql(
+        spec, run_id="run-9", prompt_sql="concat('extract: ', doc_text)"
+    )
+    anti_join = sql.split("scored AS")[0]
+    assert "ON source.doc_id = done.doc_id" in anti_join
+    assert "done.ai_model_version = 'model-b'" in anti_join
+    assert "done.ai_prompt_version = '2.0.0'" in anti_join
+    assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
+    assert "WHEN MATCHED THEN UPDATE SET *" in sql
+    assert "WHEN NOT MATCHED THEN INSERT *" in sql
+
+
+def test_merge_source_projects_exactly_the_target_columns():
+    """`UPDATE SET *` / `INSERT *` are only correct when the source's
+    columns are the target's columns, in order — and the document text
+    used to build the prompt must not leak into the output table."""
+    spec = make_spec(strata=("layout", "doc_type"))
+    sql = gbi.build_execute_sql(
+        spec, run_id="run-1", prompt_sql="concat('extract: ', doc_text)"
+    )
+    head = sql[: sql.index("\n  FROM parsed")]
+    projection = head[head.rindex("SELECT\n") :]
+    produced = []
+    for line in projection.split("\n")[1:]:
+        # One projected column per line, except the bare key/strata line.
+        # Expressions can contain commas, so alias first, split second.
+        line = line.strip().rstrip(",")
+        if " AS " in line:
+            produced.append(line.rsplit(" AS ", 1)[1])
+        else:
+            produced.extend(item.strip() for item in line.split(",") if item.strip())
+    assert produced == [name for name, _ in gbi.target_columns(spec)]
+    assert spec.document_column not in produced
 
 
 def test_provenance_layers_are_generated():
@@ -566,14 +626,16 @@ def test_provenance_layers_are_generated():
         assert "'ai_run_id' = 'run-123'" in statement
     ddl = gbi.create_run_metadata_table_sql(spec)
     assert "spec_yaml STRING" in ddl and "gate_decision STRING" in ddl
+    records = [
+        gbi.EvaluationRecord(
+            stratum="standard",
+            gold={"issuer_name": "v", "account_id": "v"},
+            predicted={"issuer_name": "v", "account_id": "v"},
+        )
+    ] * 200
     insert = gbi.run_metadata_insert_sql(
         spec,
-        gbi.evaluate_gate(
-            spec,
-            gbi.score_extraction(
-                records_for("standard", correct=200), spec.fields, 0.95
-            ),
-        ),
+        gbi.evaluate_gate(spec, score(records, spec)),
         run_id="run-123",
         projected_cost_cad=12.5,
         target_table_version=4,
@@ -600,3 +662,67 @@ def test_metric_keys_are_mlflow_safe():
     key = gbi.metric_key("issuer_name", "K-1|legacy", "precision")
     assert "|" not in key
     assert key.startswith("issuer_name/")
+
+
+class _RecordingMlflow:
+    """Minimal stand-in so evidence logging is testable without MLflow."""
+
+    def __init__(self):
+        self.params, self.tags, self.metrics = {}, {}, {}
+        self.texts, self.dicts = {}, {}
+
+    def log_params(self, values):
+        self.params.update(values)
+
+    def log_metric(self, key, value):
+        self.metrics[key] = value
+
+    def log_text(self, text, path):
+        self.texts[path] = text
+
+    def log_dict(self, payload, path):
+        self.dicts[path] = payload
+
+    def set_tags(self, values):
+        self.tags.update(values)
+
+
+def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatch):
+    """Platform rule: tags carry no personal data.
+
+    Tags are broadly readable and propagate onto other objects, so the
+    approver's identity belongs in the access-controlled gate artifact and
+    run metadata table — not in a tag.
+    """
+    approver = "j.reviewer@example.invalid"
+    spec = one_field_spec(use_tier=1, rollback_plan="Restore prior version.")
+    scores = score(records_for("standard", correct=200), spec)
+    approved = gbi.approve_gate(gbi.evaluate_gate(spec, scores), approver)
+    estimate = gbi.estimate_cost(
+        spec,
+        row_count=10,
+        probe_input_tokens=[10],
+        probe_output_tokens=[10],
+        cad_per_million_input_tokens=0.1,
+        cad_per_million_output_tokens=0.1,
+    )
+
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    gbi.log_gate_evidence(spec, estimate, {"standard": 200}, scores, approved)
+
+    assert approver not in json.dumps(recorder.tags)
+    assert approver not in json.dumps(recorder.params)
+    assert recorder.tags["human_approved"] == "yes"
+    # ...but the audit trail is intact in the logged gate report.
+    report_artifact = recorder.dicts["governed_batch_inference/gate_report.json"]
+    assert report_artifact["approved_by"] == approver
+
+    metadata_sql = gbi.run_metadata_insert_sql(
+        spec,
+        approved,
+        run_id="run-1",
+        projected_cost_cad=1.0,
+        target_table_version=1,
+    )
+    assert approver in metadata_sql

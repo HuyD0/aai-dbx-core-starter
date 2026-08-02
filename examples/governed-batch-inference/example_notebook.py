@@ -660,7 +660,7 @@ def scores_frame(scores) -> pd.DataFrame:
 
 
 records_v1 = evaluation_records("1.0.0", PROMPT_V1)
-scores_v1 = gbi.score_extraction(records_v1, spec_v1.fields, spec_v1.confidence_level)
+scores_v1 = gbi.score_extraction(records_v1, spec_v1)
 print(
     "Tolerances in force (declared in stage 1, before any of these numbers "
     "existed):",
@@ -747,9 +747,7 @@ for row in naive_rows:
         )
     )
 
-naive_scores = gbi.score_extraction(
-    naive_records, spec_v1.fields, spec_v1.confidence_level
-)
+naive_scores = gbi.score_extraction(naive_records, spec_v1)
 naive_layout_mix = pd.Series(
     [record.stratum for record in naive_records]
 ).value_counts()
@@ -836,7 +834,7 @@ spec_v2 = gbi.BatchInferenceSpec.from_yaml(
 )
 
 records_v2 = evaluation_records("2.0.0", PROMPT_V2)
-scores_v2 = gbi.score_extraction(records_v2, spec_v2.fields, spec_v2.confidence_level)
+scores_v2 = gbi.score_extraction(records_v2, spec_v2)
 report_v2 = gbi.evaluate_gate(spec_v2, scores_v2)
 
 gate_run = mlflow.start_run(run_name=f"{spec_v2.name}-prompt-2.0.0-gate")
@@ -849,6 +847,46 @@ display(
         ["field", "stratum", "metric"]
     )
 )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Evidence belongs to the release that produced it
+# MAGIC
+# MAGIC The most dangerous shortcut available at this point is re-using the
+# MAGIC last passing evaluation for a changed prompt: "we tested this, it was
+# MAGIC fine." A prompt or model change is a new application release, so the
+# MAGIC previous release's numbers say nothing about it. Scores therefore
+# MAGIC carry a release stamp (spec digest, model version, prompt version)
+# MAGIC and the gate refuses evidence that does not match the spec being
+# MAGIC gated — otherwise the digest recorded on the report would describe a
+# MAGIC release the numbers never measured, and `require_executable` would
+# MAGIC wave it through.
+# MAGIC
+# MAGIC The same check catches a subtler mismatch: intervals computed at
+# MAGIC one confidence level cannot satisfy a spec that declared another.
+# MAGIC
+# MAGIC Binding is to the exact spec revision, so editing *any* spec field
+# MAGIC obliges a re-score. That is deliberate and cheap: scoring is
+# MAGIC arithmetic over the labelled records you already hold — no new
+# MAGIC inference, no new labelling — so the strict rule costs almost
+# MAGIC nothing to satisfy and removes a whole class of "we tested
+# MAGIC something like this" reasoning.
+
+# COMMAND ----------
+
+try:
+    gbi.evaluate_gate(spec_v2, scores_v1)  # v1's numbers, v2's spec
+except gbi.EvidenceMismatch as refusal:
+    print(f"EvidenceMismatch: {refusal}\n")
+
+# Evidence that claims a confidence level the spec did not declare is
+# refused on the same principle.
+mislabelled = (scores_v2[0].model_copy(update={"confidence": 0.99}),) + scores_v2[1:]
+try:
+    gbi.evaluate_gate(spec_v2, mislabelled)
+except gbi.EvidenceMismatch as refusal:
+    print(f"EvidenceMismatch: {refusal}")
 
 # COMMAND ----------
 
@@ -877,12 +915,18 @@ spec_tier1 = gbi.BatchInferenceSpec.model_validate(
         ),
     }
 )
-tier1_report = gbi.evaluate_gate(spec_tier1, scores_v2)
+# Same labelled sample, same model outputs, different spec revision — so
+# the scores are re-derived for the release actually being gated.
+tier1_report = gbi.evaluate_gate(
+    spec_tier1, gbi.score_extraction(records_v2, spec_tier1)
+)
 print(f"tier 1 decision with fully passing evidence: {tier1_report.decision.value}")
 for obligation in tier1_report.human_review_obligations:
     print(f"  obligation: {obligation}")
 
-tier1_approved = gbi.approve_gate(tier1_report, "a.reviewer@platform-team")
+# An accountable group, not an individual's email: the value is retained
+# in the gate artifact and run metadata table, and never reaches a tag.
+tier1_approved = gbi.approve_gate(tier1_report, "finance-data-governance-board")
 print(
     f"after named sign-off: {tier1_approved.decision.value} "
     f"(approved_by={tier1_approved.approved_by})"
@@ -902,17 +946,27 @@ print(
 # MAGIC - **Row-level metadata** lands beside every value: `ai_run_id`,
 # MAGIC   `ai_model_version`, `ai_prompt_version`, per-field confidence and
 # MAGIC   abstention flags.
-# MAGIC - **Idempotent restart**: an anti-join selects only rows not yet in
-# MAGIC   the target, so re-running the same statement after a partial
-# MAGIC   failure finishes the job instead of duplicating it. A million-row
-# MAGIC   job *will* fail partway at some point. (Current Databricks guidance
-# MAGIC   is to submit the pending set as **one** query — AI Functions manage
-# MAGIC   parallelization and retries — rather than hand-chunking batches, so
-# MAGIC   that is what the builder emits. This differs deliberately from
-# MAGIC   older manual-batching advice.)
-# MAGIC - **`failOnError => false`**: a poisoned document records its error in
-# MAGIC   `ai_error` and flows to the exception queue instead of killing the
-# MAGIC   run.
+# MAGIC - **Idempotent restart**: an anti-join selects only rows this
+# MAGIC   release has not landed yet, so re-running the same statement after
+# MAGIC   a partial failure finishes the job instead of paying for inference
+# MAGIC   twice. A million-row job *will* fail partway at some point.
+# MAGIC   (Current Databricks guidance is to submit the pending set as
+# MAGIC   **one** query — AI Functions manage parallelization and retries —
+# MAGIC   rather than hand-chunking batches, so that is what the builder
+# MAGIC   emits. This differs deliberately from older manual-batching
+# MAGIC   advice.)
+# MAGIC - **Release awareness**, which is the subtle half of that: the
+# MAGIC   anti-join matches on the key *and* the model and prompt versions,
+# MAGIC   and the write is a `MERGE`. A prompt change is a new application
+# MAGIC   release, so rows carrying the older release must be reprocessed
+# MAGIC   and replaced. Matching on the key alone would skip every
+# MAGIC   previously landed row — the newly gated release would report
+# MAGIC   success while the table still served the old release's values and
+# MAGIC   provenance, which is precisely the silent staleness this pipeline
+# MAGIC   exists to prevent.
+# MAGIC - **`failOnError => false`**: a poisoned document records its error
+# MAGIC   (the struct's `errorMessage` field) in `ai_error` and flows to the
+# MAGIC   exception queue instead of killing the run.
 
 # COMMAND ----------
 
@@ -927,22 +981,29 @@ execute_sql = gbi.build_execute_sql(
 )
 print(execute_sql[:1200] + "\n…")
 
+# "Pending" is release-aware: rows already landed *by this release* are
+# done; rows landed by an older prompt or model are not.
+release_predicate = f"""
+      AND done.ai_model_version = {gbi.sql_string_literal(spec_v2.model_version)}
+      AND done.ai_prompt_version = {gbi.sql_string_literal(spec_v2.prompt_version)}
+"""
 pending_sql = f"""
     SELECT count(*) AS pending FROM {SOURCE_TABLE} AS source
     LEFT ANTI JOIN {TARGET_TABLE} AS done
-      ON source.doc_id = done.doc_id
+      ON source.doc_id = done.doc_id{release_predicate}
 """
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
 if not SIMULATED:
     spark.sql(execute_sql)
 else:
-    # Simulated mode writes the identical schema through the same
-    # anti-join discipline, with the deterministic extractor standing in
-    # for ai_query.
+    # Simulated mode writes the identical schema through the identical
+    # discipline — release-aware anti-join, then MERGE — with the
+    # deterministic extractor standing in for ai_query.
     pending = spark.sql(f"""
         SELECT source.doc_id, source.layout FROM {SOURCE_TABLE} AS source
-        LEFT ANTI JOIN {TARGET_TABLE} AS done ON source.doc_id = done.doc_id
+        LEFT ANTI JOIN {TARGET_TABLE} AS done
+          ON source.doc_id = done.doc_id{release_predicate}
         """).collect()
     gold_by_id = {
         row.doc_id: {name: row[f"gold_{name}"] for name in FIELD_NAMES}
@@ -980,12 +1041,24 @@ else:
     (
         spark.createDataFrame(output_rows, schema=write_schema)
         .withColumn("ai_executed_at", F.current_timestamp())
-        .write.mode("append")
-        .saveAsTable(TARGET_TABLE)
+        .createOrReplaceTempView("simulated_scored")
     )
+    # Same MERGE the live path uses: update rows carried over from an
+    # older release, insert keys that have never been processed.
+    spark.sql(f"""
+        MERGE INTO {TARGET_TABLE} AS target
+        USING simulated_scored AS source
+        ON target.doc_id = source.doc_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+        """)
 
 print(f"pending after run:  {spark.sql(pending_sql).first().pending:,}")
 print("re-running the same statement now would be a no-op — that is the restart")
+print(
+    "a NEW prompt or model version, however, makes every row pending again — "
+    "which is what keeps a gated release from serving stale values"
+)
 
 # COMMAND ----------
 

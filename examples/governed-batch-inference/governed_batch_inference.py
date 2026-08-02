@@ -17,8 +17,11 @@ of the governed pipeline demonstrated in ``example_notebook.py``:
   estimate — against the declared tolerance, and for ``criticality: high``
   fields gates on the *worst-performing stratum*, never the weighted
   average.
+- Evidence bound to the release that produced it: scores carry a
+  ``ReleaseIdentity`` and the gate refuses numbers measured for a
+  different prompt, model, or spec revision.
 - SQL builders for the ``ai_query`` execute step (structured output with an
-  abstention path, idempotent anti-join restart) and for three-layer
+  abstention path, release-aware restartable landing) and for three-layer
   provenance (column naming, Unity Catalog column tags, run metadata).
 
 Everything here is pure Python over plain data so the statistics can be
@@ -91,6 +94,10 @@ class GateNotPassed(RuntimeError):
     """Raised when execution is attempted without an adopting gate decision."""
 
 
+class EvidenceMismatch(RuntimeError):
+    """Raised when evidence does not belong to the release being gated."""
+
+
 # ---------------------------------------------------------------------------
 # 1. Declare — the spec is written before any results exist
 # ---------------------------------------------------------------------------
@@ -117,6 +124,22 @@ class GateDecision(StrEnum):
     REJECT = "reject"
     INCONCLUSIVE = "inconclusive"
     PENDING_APPROVAL = "pending_approval"
+
+
+class ReleaseIdentity(BaseModel):
+    """What produced a piece of evidence.
+
+    A prompt, model, or spec change is an application release, so evidence
+    from one release says nothing about another. Scores carry this stamp
+    and the gate refuses evidence that does not match the spec it is
+    gating — otherwise a passing v1 sample could authorise a v2 run.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    spec_digest: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
 
 
 class FieldSpec(BaseModel):
@@ -222,6 +245,15 @@ class BatchInferenceSpec(BaseModel):
     def spec_digest(self) -> str:
         canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @property
+    def release(self) -> ReleaseIdentity:
+        """The release this spec describes; stamped onto its evidence."""
+        return ReleaseIdentity(
+            spec_digest=self.spec_digest,
+            model_version=self.model_version,
+            prompt_version=self.prompt_version,
+        )
 
     def to_yaml(self) -> str:
         return yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False)
@@ -495,12 +527,19 @@ class FieldStratumScore(BaseModel):
     ``precision`` is None when the model asserted nothing in the stratum
     and ``recall`` is None when gold has no values there — "no evidence",
     which the gate treats as inconclusive, never as a pass.
+
+    ``release`` and ``confidence`` record *what* the evidence measured and
+    *at what confidence level*, so the gate can refuse evidence produced
+    for a different release or computed at a different level than the spec
+    declares.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     field: str
     stratum: str
+    release: ReleaseIdentity
+    confidence: float = Field(gt=0.5, lt=1.0)
     n_rows: int = Field(ge=0)
     n_gold: int = Field(ge=0)
     n_asserted: int = Field(ge=0)
@@ -542,6 +581,7 @@ def _score_group(
     stratum: str,
     records: Sequence[EvaluationRecord],
     confidence: float,
+    release: ReleaseIdentity,
 ) -> FieldStratumScore:
     asserted = 0
     correct = 0
@@ -566,6 +606,8 @@ def _score_group(
     return FieldStratumScore(
         field=field.name,
         stratum=stratum,
+        release=release,
+        confidence=confidence,
         n_rows=len(records),
         n_gold=gold_present,
         n_asserted=asserted,
@@ -582,8 +624,7 @@ def _score_group(
 
 def score_extraction(
     records: Sequence[EvaluationRecord],
-    fields: Sequence[FieldSpec],
-    confidence: float = 0.95,
+    spec: BatchInferenceSpec,
 ) -> tuple[FieldStratumScore, ...]:
     """Score every field in every stratum, plus a pooled row per field.
 
@@ -600,17 +641,27 @@ def score_extraction(
     stratified sample deliberately over-weights rare strata, so its pooled
     proportion estimates nothing about the population — and the gate for
     high-criticality fields never uses it.
+
+    The fields, the confidence level, and the release stamp all come from
+    ``spec``. Passing the spec rather than a loose field list and a
+    defaulted confidence is deliberate: it makes it impossible to compute
+    intervals at one confidence level and gate them at another, or to hand
+    the gate evidence from a different prompt or model version.
     """
     if not records:
         raise ValueError("cannot score an empty sample")
+    confidence = spec.confidence_level
+    release = spec.release
     by_stratum: dict[str, list[EvaluationRecord]] = {}
     for record in records:
         by_stratum.setdefault(record.stratum, []).append(record)
     scores: list[FieldStratumScore] = []
-    for field in fields:
+    for field in spec.fields:
         for stratum in sorted(by_stratum):
-            scores.append(_score_group(field, stratum, by_stratum[stratum], confidence))
-        scores.append(_score_group(field, POOLED, records, confidence))
+            scores.append(
+                _score_group(field, stratum, by_stratum[stratum], confidence, release)
+            )
+        scores.append(_score_group(field, POOLED, records, confidence, release))
     return tuple(scores)
 
 
@@ -753,6 +804,40 @@ def _gate_field(
     )
 
 
+def require_matching_evidence(
+    spec: BatchInferenceSpec,
+    scores: Sequence[FieldStratumScore],
+) -> None:
+    """Refuse evidence that was not produced for exactly this release.
+
+    Without this check, ``evaluate_gate(spec_v2, scores_from_v1)`` would
+    stamp v2's digest onto v1's numbers and ``require_executable`` would
+    then happily accept it — an unvalidated release executing on an
+    earlier release's evidence.
+    """
+    if not scores:
+        raise EvidenceMismatch("no scores supplied; a gate needs evidence")
+    expected = spec.release
+    for score in scores:
+        if score.release != expected:
+            raise EvidenceMismatch(
+                f"score for {score.field!r}/{score.stratum!r} was produced for "
+                f"prompt {score.release.prompt_version} / model "
+                f"{score.release.model_version} (spec digest "
+                f"{score.release.spec_digest[:12]}…), but this gate is for "
+                f"prompt {expected.prompt_version} / model "
+                f"{expected.model_version} (spec digest "
+                f"{expected.spec_digest[:12]}…). Re-score the sample against "
+                "the release being gated."
+            )
+        if score.confidence != spec.confidence_level:
+            raise EvidenceMismatch(
+                f"score for {score.field!r}/{score.stratum!r} was computed at "
+                f"confidence {score.confidence}, but the spec declares "
+                f"{spec.confidence_level}. Re-score at the declared level."
+            )
+
+
 def evaluate_gate(
     spec: BatchInferenceSpec,
     scores: Sequence[FieldStratumScore],
@@ -769,7 +854,14 @@ def evaluate_gate(
       ``PENDING_APPROVAL``. Unreviewed acceptance is not available at this
       tier regardless of measured accuracy; a named human must call
       ``approve_gate``.
+
+    Evidence is checked before it is judged: every score must carry this
+    spec's release stamp and its declared confidence level. A prompt or
+    model change is a new release, so evidence from the previous one is
+    not evidence about this one — and intervals computed at 95% cannot
+    satisfy a spec that declared 99%.
     """
+    require_matching_evidence(spec, scores)
     by_field: dict[str, list[FieldStratumScore]] = {}
     for score in scores:
         by_field.setdefault(score.field, []).append(score)
@@ -809,6 +901,10 @@ def approve_gate(report: GateReport, approver: str) -> GateReport:
     Only a ``PENDING_APPROVAL`` report can be approved: approval is a
     person accepting a passing result's residual risk, never a way to
     override a rejection or to substitute for missing evidence.
+
+    Prefer an accountable role or group over an individual's email. The
+    value is retained in the gate artifact and the run metadata table
+    (both access controlled) and deliberately never reaches a tag.
     """
     if report.decision != GateDecision.PENDING_APPROVAL:
         raise GateNotPassed(
@@ -860,6 +956,12 @@ def response_format(spec: BatchInferenceSpec) -> dict:
     is exactly what the abstention path needs. ``strict`` sits inside
     ``json_schema`` (verified against the structured-outputs documentation;
     re-check when upgrading, this surface has changed before).
+
+    ``additionalProperties: false`` closes the object. The Databricks
+    documentation neither requires nor mentions it, but the endpoint is
+    OpenAI-compatible and strict mode there expects a closed schema — and
+    closed is what is wanted regardless: an extraction contract should not
+    silently accept fields nobody declared.
     """
     properties: dict[str, dict] = {}
     required: list[str] = []
@@ -897,6 +999,7 @@ def response_format(spec: BatchInferenceSpec) -> dict:
                 "type": "object",
                 "properties": properties,
                 "required": required,
+                "additionalProperties": False,
             },
             "strict": True,
         },
@@ -962,70 +1065,88 @@ def build_execute_sql(
     run_id: str,
     prompt_sql: str,
 ) -> str:
-    """The full-table execute statement, restartable by construction.
+    """The full-table execute statement: restartable *and* release-aware.
 
     - ``prompt_sql`` is a SQL expression producing the request string (the
       notebook builds it with ``concat`` from an escaped instruction
       literal and the document column).
-    - The anti-join means a re-run after a partial failure processes only
-      rows that have not landed yet: a million-row job will fail partway
+    - **Restart**: the anti-join drops rows this release has already
+      landed, so a re-run after a partial failure finishes the job instead
+      of paying for inference twice. A million-row job will fail partway
       at some point, and this is what makes that boring. Current guidance
       is to submit the remaining set as one query — AI Functions manage
       parallelization and retries — rather than hand-chunking it.
+    - **Release awareness**: that anti-join matches on the key *and* the
+      model and prompt versions. A prompt or model change is a new
+      application release, so rows carrying an older release must be
+      reprocessed — a key-only anti-join would skip every previously
+      landed row and let a newly gated release report success while the
+      table still held the old release's values and provenance. The MERGE
+      then updates those stale rows in place and inserts genuinely new
+      keys, keeping one current row per key.
     - ``failOnError => false`` keeps one poisoned document from killing
       the run; its error message lands in ``ai_error`` and the row flows
-      to the exception queue instead of blocking everything else.
+      to the exception queue instead of blocking everything else. The
+      struct field is ``errorMessage`` (``response`` is null on failure).
     """
     value_lines = []
     for field in spec.fields:
         name = ai_column(field.name)
-        value_lines.append(f"  parsed.{field.name} AS {name}")
-        value_lines.append(f"  parsed.{field.name}_confidence AS {name}_confidence")
+        value_lines.append(f"    parsed.{field.name} AS {name}")
+        value_lines.append(f"    parsed.{field.name}_confidence AS {name}_confidence")
         value_lines.append(
-            f"  coalesce(array_contains(parsed.abstained_fields, "
+            f"    coalesce(array_contains(parsed.abstained_fields, "
             f"'{field.name}'), false) AS {name}_abstained"
         )
     value_block = ",\n".join(value_lines)
     pending_strata = "".join(f", source.{column}" for column in spec.strata)
     plain_strata = "".join(f", {column}" for column in spec.strata)
-    insert_columns = ", ".join(name for name, _ in target_columns(spec))
     struct_type = sql_string_literal(response_struct_type(spec))
-    return f"""INSERT INTO {spec.target_table} ({insert_columns})
-WITH pending AS (
-  SELECT source.{spec.key_column}, source.{spec.document_column}{pending_strata}
-  FROM {spec.source_table} AS source
-  LEFT ANTI JOIN {spec.target_table} AS done
-    ON source.{spec.key_column} = done.{spec.key_column}
-),
-scored AS (
+    model_literal = sql_string_literal(spec.model_version)
+    prompt_literal = sql_string_literal(spec.prompt_version)
+    return f"""MERGE INTO {spec.target_table} AS target
+USING (
+  WITH pending AS (
+    SELECT source.{spec.key_column}, source.{spec.document_column}{pending_strata}
+    FROM {spec.source_table} AS source
+    LEFT ANTI JOIN {spec.target_table} AS done
+      ON source.{spec.key_column} = done.{spec.key_column}
+     AND done.ai_model_version = {model_literal}
+     AND done.ai_prompt_version = {prompt_literal}
+  ),
+  scored AS (
+    SELECT
+      *,
+      ai_query(
+        {sql_string_literal(spec.endpoint)},
+        {prompt_sql},
+        responseFormat => {response_format_sql_literal(spec)},
+        failOnError => false
+      ) AS raw
+    FROM pending
+  ),
+  parsed AS (
+    SELECT
+      * EXCEPT (raw),
+      from_json(raw.response, {struct_type}) AS parsed,
+      raw.errorMessage AS error_message
+    FROM scored
+  )
   SELECT
-    *,
-    ai_query(
-      {sql_string_literal(spec.endpoint)},
-      {prompt_sql},
-      responseFormat => {response_format_sql_literal(spec)},
-      failOnError => false
-    ) AS raw
-  FROM pending
-),
-parsed AS (
-  SELECT
-    * EXCEPT (raw),
-    from_json(raw.response, {struct_type}) AS parsed,
-    raw.errorMessage AS error_message
-  FROM scored
-)
-SELECT
-  {spec.key_column}{plain_strata},
+    {spec.key_column}{plain_strata},
 {value_block},
-  parsed.abstained_fields AS ai_abstained_fields,
-  parsed.abstain_reason AS ai_abstain_reason,
-  error_message AS ai_error,
-  {sql_string_literal(run_id)} AS ai_run_id,
-  {sql_string_literal(spec.model_version)} AS ai_model_version,
-  {sql_string_literal(spec.prompt_version)} AS ai_prompt_version,
-  current_timestamp() AS ai_executed_at
-FROM parsed"""
+    parsed.abstained_fields AS ai_abstained_fields,
+    parsed.abstain_reason AS ai_abstain_reason,
+    error_message AS ai_error,
+    {sql_string_literal(run_id)} AS ai_run_id,
+    {model_literal} AS ai_model_version,
+    {prompt_literal} AS ai_prompt_version,
+    current_timestamp() AS ai_executed_at
+  FROM parsed
+) AS source
+ON target.{spec.key_column} = source.{spec.key_column}
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *"""
 
 
 # ---------------------------------------------------------------------------
@@ -1196,9 +1317,15 @@ def log_gate_evidence(
     mlflow.log_dict(
         report.model_dump(mode="json"), "governed_batch_inference/gate_report.json"
     )
+    # The approver identity stays out of tags. Tags are broadly readable,
+    # get copied onto downstream objects, and carry no sensitive data by
+    # platform rule — an individual's name or email is exactly what that
+    # rule excludes. The audit trail lives in the gate_report.json artifact
+    # above and in the run metadata table, both of which are access
+    # controlled. Only whether an approval exists is tagged.
     mlflow.set_tags(
         {
             "gate_decision": report.decision.value,
-            "approved_by": report.approved_by or "",
+            "human_approved": "yes" if report.approved_by else "no",
         }
     )
