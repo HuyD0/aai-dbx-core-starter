@@ -397,6 +397,31 @@ def load_selection(project_root: Path | None = None) -> SelectionEvidence:
     return SelectionEvidence.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def get_or_run_candidate_selection(
+    settings: ProjectSettings,
+    project_root: Path | None = None,
+) -> SelectionEvidence:
+    """Reuse compatible selection evidence instead of silently replacing it."""
+
+    manifest = ensure_prepared(settings, project_root)
+    try:
+        selection = load_selection(project_root)
+        _validate_selection_policy(selection, settings)
+        if selection.dataset_sha256 != manifest.dataset_sha256:
+            raise ValueError("Selection evidence belongs to a different dataset")
+    except (OSError, ValueError) as error:
+        decision_path = local_paths(project_root).state_root / "decision.json"
+        if decision_path.is_file():
+            raise ValueError(
+                "Candidate selection evidence cannot be replaced because this "
+                "course workspace already contains a frozen-test decision. Use "
+                "a fresh course workspace for changed code, dependencies, policy, "
+                "or data."
+            ) from error
+        return run_candidate_selection(settings, project_root)
+    return selection
+
+
 def load_decision(project_root: Path | None = None) -> GateEvidence:
     path = local_paths(project_root).state_root / "decision.json"
     return GateEvidence.model_validate_json(path.read_text(encoding="utf-8"))
@@ -631,13 +656,7 @@ def run_full_workflow(
 ) -> dict[str, object]:
     manifest = ensure_prepared(settings, project_root)
     baseline = run_baseline(settings, project_root)
-    try:
-        selection = load_selection(project_root)
-        _validate_selection_policy(selection, settings)
-        if selection.dataset_sha256 != manifest.dataset_sha256:
-            raise ValueError("Selection evidence belongs to a different dataset")
-    except (OSError, ValueError):
-        selection = run_candidate_selection(settings, project_root)
+    selection = get_or_run_candidate_selection(settings, project_root)
     decision = run_frozen_test_gate(settings, project_root, selection)
     promotion = promote_if_approved(settings, decision, project_root, selection)
     return {

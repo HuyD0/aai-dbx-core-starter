@@ -5,7 +5,10 @@ SHELL := /bin/bash
 UV ?= uv
 PYTHON := .venv/bin/python
 KERNEL_NAME := aai-local-classification
-MLFLOW_DIR := $(CURDIR)/.aai/mlflow
+# Bump this version when persisted course evidence becomes incompatible.
+COURSE_ROOT := $(CURDIR)/.aai/course-v1
+COURSE_ENV := AAI_CLASSIFICATION_PROJECT_ROOT="$(COURSE_ROOT)"
+MLFLOW_DIR := $(COURSE_ROOT)/.aai/mlflow
 MLFLOW_DB := $(MLFLOW_DIR)/mlflow.db
 MLFLOW_URI := sqlite:///$(MLFLOW_DB)
 
@@ -19,10 +22,10 @@ install: ## Create the exact locked local environment.
 	$(UV) sync --all-extras --locked
 
 prepare: ## Generate and validate deterministic local data.
-	$(UV) run --frozen --no-sync aai-classification prepare
+	$(COURSE_ENV) $(UV) run --frozen --no-sync aai-classification prepare
 
 pipeline: ## Run baseline, candidate selection, frozen test gate, and registration.
-	$(UV) run --frozen --no-sync aai-classification run
+	$(COURSE_ENV) $(UV) run --frozen --no-sync aai-classification run
 
 check: format-check test notebook-check ## Run the complete local quality gate.
 
@@ -45,7 +48,8 @@ notebook-kernel: ## Register this project's exact Python environment as a kernel
 notebook: notebook-kernel ## Open the course at notebook 00.
 	PATH="$(CURDIR)/.venv/bin:$$PATH" \
 		JUPYTER_PATH="$(CURDIR)/.venv/share/jupyter" \
-		$(PYTHON) -m jupyterlab --no-browser \
+		$(COURSE_ENV) \
+		$(PYTHON) -m jupyterlab \
 		--ServerApp.root_dir="$(CURDIR)" \
 		--LabApp.default_url="/lab/tree/notebooks/00_start_here.ipynb" \
 		--LabApp.extension_manager=readonly
