@@ -128,12 +128,26 @@ class DecisionRecord(ContractModel):
                     "the applied release policy; produce the gate with "
                     "apply_gate() so the policy travels with the result"
                 )
-            if not policy.rules and not policy.minimum_cost_coverage:
+            # A rule only constrains the release if it was actually
+            # applied: an absolute threshold always is, a positive
+            # cost-coverage minimum always is, but a regression-only rule
+            # is skipped by _evaluate_policy when the baseline lacks its
+            # metric and the policy waives missing baselines — evidence
+            # from such a gate proves nothing was checked.
+            baseline = self.gate.baseline_metrics or {}
+            enforced = bool(policy.minimum_cost_coverage) or any(
+                rule.required is not None
+                or (rule.max_regression is not None and rule.metric in baseline)
+                for rule in policy.rules
+            )
+            if not enforced:
                 raise ValueError(
                     "An adopt decision requires gate evidence whose applied "
-                    "policy contains at least one substantive release rule; "
-                    "a rule-free policy — or a zero cost-coverage threshold "
-                    "alone, which rejects no coverage value — gates nothing"
+                    "policy enforced at least one substantive release rule; "
+                    "a rule-free policy, a zero cost-coverage threshold "
+                    "(which rejects no coverage value), and regression-only "
+                    "rules evaluated without their baseline values all gate "
+                    "nothing"
                 )
         return self
 

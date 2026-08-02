@@ -211,6 +211,60 @@ def test_adopt_requires_passing_gate_evidence():
         )
     rejected = _record(decision=Decision.REJECT, gate=failing)
     assert rejected.as_tags()["gate_passed"] == "false"
+
+
+def test_adopt_requires_an_applied_constraint():
+    # A regression-only policy that waives missing baselines skips its
+    # only check when the baseline lacks the metric; such a gate passes
+    # while constraining nothing, so it cannot authorize adoption.
+    regression_only = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="citation_rate",
+                direction=MetricDirection.HIGHER,
+                max_regression=0.05,
+            ),
+        ),
+        allow_missing_regression_baseline=True,
+    )
+
+    with pytest.raises(ValidationError, match="without their baseline"):
+        _record(gate=GateResult(metrics={"citation_rate": 1.0}, policy=regression_only))
+    with pytest.raises(ValidationError, match="without their baseline"):
+        _record(
+            gate=GateResult(
+                metrics={"citation_rate": 1.0},
+                policy=regression_only,
+                baseline_metrics={"unrelated": 0.9},
+            )
+        )
+    # The same rule with its baseline value recorded is genuinely applied.
+    compared = _record(
+        gate=GateResult(
+            metrics={"citation_rate": 1.0},
+            policy=regression_only,
+            baseline_metrics={"citation_rate": 0.98},
+        )
+    )
+    assert compared.decision is Decision.ADOPT
+    # An absolute rule is applied regardless of the waived baseline.
+    absolute_too = _record(
+        gate=GateResult(
+            metrics={"citation_rate": 1.0},
+            policy=GatePolicy(
+                rules=(
+                    MetricRule(
+                        metric="citation_rate",
+                        direction=MetricDirection.HIGHER,
+                        required=1.0,
+                        max_regression=0.05,
+                    ),
+                ),
+                allow_missing_regression_baseline=True,
+            ),
+        )
+    )
+    assert absolute_too.decision is Decision.ADOPT
     ungated_reject = _record(decision=Decision.INCONCLUSIVE, gate=None)
     assert "gate_passed" not in ungated_reject.as_tags()
 

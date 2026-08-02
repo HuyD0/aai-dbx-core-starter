@@ -9,9 +9,12 @@ All notable changes to `aai-core` are documented here.
   platform team, with a maturity checklist and an honest gap roadmap.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
   vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
-  passing, metrics-bearing gate whose recorded policy applied at least one
-  substantive release rule — a zero cost-coverage threshold alone gates
-  nothing; `decided_by` rejects personal emails; `prompt_digest` and
+  passing, metrics-bearing gate whose recorded policy actually enforced at
+  least one substantive release rule — a zero cost-coverage threshold
+  gates nothing, and neither do regression-only rules whose baseline
+  values were absent under a waived-baseline policy, since
+  `_evaluate_policy` skips those checks entirely;
+  `decided_by` rejects personal emails; `prompt_digest` and
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
   content, or secrets cannot enter persisted tags; run ids and
   `change_id` are bounded opaque identifiers and `change_summary` is
