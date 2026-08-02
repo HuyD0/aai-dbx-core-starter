@@ -21,8 +21,8 @@ All notable changes to `aai-core` are documented here.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
   the single resolver for the approved judge endpoint (it had been duplicated
   across five template sites) and rejects setup-placeholder deployments
-  (`replace-with-*`, `unset`, …) so the doctor never reports a placeholder
-  judge as ready; `log_gate_evidence` standardizes the gate
+  (`replace-with-*`, `unset`, `<angle-bracket>` markers, …) so the doctor
+  never reports a placeholder judge as ready; `log_gate_evidence` standardizes the gate
   metrics and `aai.gate_passed` tag templates were hand-writing;
   `evaluate_with_gate` composes native `mlflow.genai.evaluate()` with
   `apply_gate()` through kwargs passthrough and returns the native result by

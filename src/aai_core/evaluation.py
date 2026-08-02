@@ -490,11 +490,18 @@ _QUALIFIER_PLACEHOLDERS = {"unset", "unknown", "todo", "changeme"}
 
 def _is_placeholder(value: str) -> bool:
     """Recognize the setup-placeholder vocabulary shared across the repo:
-    the unconfigured markers plus the ``replace-with-*`` values that
-    ``aai-platform.example.yml`` ships."""
+    the unconfigured markers, the ``replace-with-*`` values that
+    ``aai-platform.example.yml`` ships, and documentation-style
+    ``<angle-bracket>`` markers (the same set the examples runner
+    recognizes)."""
 
     lowered = str(value).strip().lower()
-    return lowered in _QUALIFIER_PLACEHOLDERS or lowered.startswith("replace-with-")
+    return (
+        lowered in _QUALIFIER_PLACEHOLDERS
+        or lowered.startswith("replace-with-")
+        or "<" in lowered
+        or ">" in lowered
+    )
 
 
 def _dataset_qualifier(role: str, value: str) -> str:

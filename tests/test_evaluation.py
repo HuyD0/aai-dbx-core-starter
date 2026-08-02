@@ -362,6 +362,15 @@ def test_judge_resolves_only_an_approved_databricks_deployment():
             {"judge-model": {"provider": "databricks", "deployment": "unset"}},
             "placeholder",
         ),
+        (
+            {
+                "judge-model": {
+                    "provider": "databricks",
+                    "deployment": "<approved-endpoint>",
+                }
+            },
+            "placeholder",
+        ),
     ],
 )
 def test_judge_refuses_missing_or_ungoverned_configuration(models, match):
@@ -504,6 +513,7 @@ def test_dataset_helper_requires_a_logical_unqualified_name():
         ("ChangeMe", "default"),
         ("main", "todo"),
         ("replace-with-catalog", "default"),
+        ("<catalog>", "default"),
     ],
 )
 def test_dataset_helper_fails_locally_on_placeholder_qualifiers(catalog, schema):
