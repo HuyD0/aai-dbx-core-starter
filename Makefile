@@ -21,7 +21,9 @@ APP_NAME ?= aai-platform-console-dev
 	bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
-	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart
+	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
+	classification-install classification-prepare classification-train \
+	classification-check classification-notebook classification-ui
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -77,6 +79,24 @@ local-ui: examples-install ## Serve the isolated local MLflow store at http://12
 	$(PYTHON) -m mlflow ui \
 		--backend-store-uri "$(LOCAL_MLFLOW_URI)" \
 		--default-artifact-root "$(LOCAL_MLFLOW_DIR)/mlruns"
+
+classification-install: check-uv ## Install the locked local classification course.
+	$(MAKE) -C examples/local-classification install
+
+classification-prepare: check-uv ## Generate and validate the synthetic classification data.
+	$(MAKE) -C examples/local-classification prepare
+
+classification-train: check-uv ## Run the complete local classification lifecycle.
+	$(MAKE) -C examples/local-classification pipeline
+
+classification-check: check-uv ## Test code and execute every classification notebook.
+	$(MAKE) -C examples/local-classification check
+
+classification-notebook: check-uv ## Open the local classification notebook course.
+	$(MAKE) -C examples/local-classification notebook
+
+classification-ui: check-uv ## Serve the classification course's local MLflow UI.
+	$(MAKE) -C examples/local-classification mlflow-ui
 
 workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect

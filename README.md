@@ -137,6 +137,30 @@ See the [progressive executable curriculum](examples/README.md) for its
 baseline/change/result/decision/release rubric and the boundary between
 `aai-core` contracts and native MLflow APIs.
 
+### Learn classical classification locally
+
+The standalone [local classification course](examples/local-classification/README.md)
+trains a small sklearn subscription-churn model on deterministic synthetic data.
+It needs no download, cloud credential, GPU, or Databricks workspace and keeps
+its dependencies in a separate exact lock.
+
+```bash
+make classification-install
+make classification-check
+make classification-notebook
+```
+
+The ten notebooks cover problem framing, data contracts, time-based leakage-safe
+splits, a no-skill baseline, sklearn Pipelines, explicit MLflow tracking, model
+and threshold selection, one frozen-test gate, conditional registry promotion,
+model reload, monitoring, and a current Unity Catalog/Databricks handoff. Run a
+completed lifecycle with `make classification-train`, then inspect it in another
+terminal with `make classification-ui`.
+
+The course uses the same lifecycle vocabulary as the platform—`baseline ->
+change -> result -> decision`, with `adopt`, `reject`, or `inconclusive`—while
+keeping sklearn out of the SDK runtime.
+
 ## Install for SDK development
 
 ```bash
