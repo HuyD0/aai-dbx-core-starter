@@ -103,6 +103,7 @@ class FakeMlflow:
         self.params: dict = {}
         self.logged_metrics: dict = {}
         self.artifacts: list = []
+        self.run_artifacts: list = []
         self.evaluate_calls: list = []
         self.traced: list = []
         self.genai = SimpleNamespace(
@@ -138,6 +139,17 @@ class FakeMlflow:
 
     def log_artifact(self, path, artifact_path=None):
         self.artifacts.append((Path(path).name, artifact_path))
+
+    def MlflowClient(self, *args, **kwargs):
+        outer = self
+
+        class _Client:
+            def log_artifact(inner, run_id, local_path, artifact_path=None):
+                outer.run_artifacts.append(
+                    (run_id, Path(local_path).name, artifact_path)
+                )
+
+        return _Client()
 
     # --- genai plumbing -------------------------------------------------
     def trace(self, function):
@@ -670,3 +682,125 @@ def test_agent_override_scores_the_named_target(tmp_path):
 
     assert outcome.results.agent == "models:/main.evaluation.agent/7"
     assert fake.tags["aai.agent_target"] == "models:/main.evaluation.agent/7"
+
+
+TRACE_ROWS = [
+    {
+        "inputs": {"question": f"question {index}"},
+        "expectations": {"expected_response": f"answer {index} about pensions"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {
+                        "type": "RETRIEVER",
+                        "name": "search",
+                        "outputs": [{"page_content": "policy text"}],
+                    }
+                ]
+            }
+        },
+    }
+    for index in range(12)
+]
+
+
+def _trace_project(tmp_path):
+    _project(tmp_path)
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(
+        json.dumps(TRACE_ROWS)
+    )
+    return ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+
+
+def test_trace_backed_dataset_scores_its_own_traces(tmp_path):
+    """The recorded traces are the thing under evaluation.
+
+    MLflow replaces a row's trace when `predict_fn` is supplied, so calling
+    the agent here would score freshly generated behaviour while reporting
+    it against a dataset of production traces.
+    """
+
+    project = _trace_project(tmp_path)
+    mlflow = FakeMlflow(metrics={**JUDGED_METRICS, "retrieval_groundedness/mean": 0.9})
+
+    outcome, code = run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.mode == "traces"
+    call = mlflow.evaluate_calls[0]
+    assert call["predict_fn"] is None
+    assert all("trace" in row for row in call["data"])
+    assert "retrieval_groundedness" in {
+        entry.spec.name for entry in outcome.plan.entries
+    }
+
+
+def test_explicit_live_mode_on_trace_rows_warns_that_they_are_replaced(tmp_path):
+    project = _trace_project(tmp_path)
+    mlflow = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        command="compare",
+        mode="live",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert mlflow.evaluate_calls[0]["predict_fn"] is not None
+    assert any(
+        "recorded traces are not what gets scored" in warning
+        for warning in outcome.warnings
+    )
+
+
+def test_recorded_run_attaches_its_results_record(tmp_path):
+    """The approver reads evidence from the run, not from a job cluster."""
+
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert mlflow.run_artifacts == [("run-1", outcome.results_path.name, "agentkit")]
+    assert any(
+        "agentkit evidence --run run-1" in message for message in outcome.messages
+    )
+
+
+def test_publish_failure_warns_without_failing_the_run(tmp_path):
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("tracking store unavailable")
+
+    mlflow.MlflowClient = _broken
+
+    outcome, code = run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert any("could not attach the results record" in w for w in outcome.warnings)

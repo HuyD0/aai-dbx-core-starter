@@ -32,6 +32,21 @@ All notable changes to `aai-core` are documented here.
   serving endpoint, a Unity Catalog model, or any HTTP/JSON endpoint — so
   execution can move without the record moving. See `docs/agent-evaluation.md`.
 
+  A dataset that carries traces is scored as traces: MLflow replaces a row's
+  recorded trace when a `predict_fn` is supplied, so calling the agent again
+  would evaluate freshly generated behaviour while reporting it against a
+  dataset of production traces. Judge cost accounts for scorer fan-out —
+  MLflow judges retrieval relevance once per retrieved chunk and groundedness
+  once per retriever span — counted from the rows' traces where they exist and
+  assumed (`budget.retrieved_chunks_per_row`) where they do not, so
+  `budget.max_judge_calls` is the ceiling it claims to be. Retrieval and tool
+  scorers that a live plan cannot decide are named in the plan with the line
+  that enables them rather than dropped in silence. Each recorded run attaches
+  its results record to its MLflow run, so `agentkit evidence --run <id>`
+  works from a machine that never saw the job cluster the gate ran on, and
+  every `approval*` tag on a model version is reported rather than only the
+  first.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

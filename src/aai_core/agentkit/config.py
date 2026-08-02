@@ -23,6 +23,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, ValidationError, field_serializer, field_validator
 
+from aai_core.agentkit.cost import DEFAULT_CHUNKS_PER_ROW
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.evaluation import MetricDirection, MetricRule
@@ -69,6 +70,10 @@ class BaselineConfig(ContractModel):
 class BudgetConfig(ContractModel):
     max_judge_calls: int | None = Field(default=None, ge=1)
     judge_price_per_1m_tokens: float | None = Field(default=None, gt=0.0)
+    # MLflow judges retrieval relevance once per retrieved chunk. Before a
+    # live run there are no traces to count, so the estimate needs the
+    # retriever's `k` — the one number only the project knows.
+    retrieved_chunks_per_row: int = Field(default=DEFAULT_CHUNKS_PER_ROW, ge=1, le=1000)
 
     @field_validator("judge_price_per_1m_tokens", mode="before")
     @classmethod

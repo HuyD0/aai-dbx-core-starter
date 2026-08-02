@@ -94,3 +94,109 @@ def test_budget_enforced_before_any_call():
     with pytest.raises(BudgetExceededError) as excinfo:
         enforce_budget(cost, max_judge_calls=7)
     assert "max_judge_calls" in str(excinfo.value)
+
+
+def _rag_rows(count=3, chunks=4):
+    """Rows whose traces carry a retriever span with ``chunks`` documents."""
+
+    return [
+        {
+            "inputs": {"question": f"question {index}"},
+            "expectations": {"expected_response": f"answer {index}"},
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "type": "RETRIEVER",
+                            "name": "search",
+                            "outputs": [
+                                {"page_content": f"chunk {position}"}
+                                for position in range(chunks)
+                            ],
+                        }
+                    ]
+                }
+            },
+        }
+        for index in range(count)
+    ]
+
+
+def _rag_plan(mode="traces", **shape_kwargs):
+    shape = DatasetShape(
+        row_count=3,
+        input_keys=("question",),
+        has_outputs=False,
+        expectation_keys=("expected_response",),
+        has_traces=shape_kwargs.get("has_traces", True),
+        strata_values={},
+        has_retrieval_spans=shape_kwargs.get("has_retrieval_spans", True),
+    )
+    config = AgentkitConfig(
+        version=1,
+        agent="agent.py:respond",
+        dataset="golden.json",
+        scorers={"add": ["retrieval_groundedness", "retrieval_relevance"]},
+    )
+    return select_scorers(shape, config, mode=mode, judges_enabled=True)
+
+
+def test_retrieval_relevance_costs_one_call_per_chunk():
+    """MLflow judges retrieval relevance per chunk, not per row.
+
+    ``RetrievalRelevance._compute_span_relevance`` loops the chunks of each
+    RETRIEVER span. Counting one call per row would make
+    ``budget.max_judge_calls`` a number rather than a ceiling.
+    """
+
+    plan = _rag_plan()
+    rows = _rag_rows(count=3, chunks=4)
+
+    cost = estimate(rows, plan)
+
+    calls = dict(cost.calls_by_scorer)
+    assert calls["retrieval_relevance"] == 12  # 3 rows x 4 chunks
+    assert calls["retrieval_groundedness"] == 3  # 3 rows x 1 retriever span
+    assert calls["correctness"] == 3  # per row
+    assert cost.fanout_counted is True
+
+
+def test_multiple_retriever_spans_multiply_span_scorers():
+    plan = _rag_plan()
+    rows = _rag_rows(count=1, chunks=2)
+    spans = rows[0]["trace"]["data"]["spans"]
+    rows[0]["trace"]["data"]["spans"] = spans + [dict(spans[0])]
+
+    cost = estimate(rows, plan)
+
+    assert dict(cost.calls_by_scorer)["retrieval_groundedness"] == 2
+    assert dict(cost.calls_by_scorer)["retrieval_relevance"] == 4
+
+
+def test_live_run_assumes_chunk_fanout_and_says_so():
+    """A live run has no traces to count, so the estimate is disclosed."""
+
+    plan = _rag_plan(mode="live", has_traces=False, has_retrieval_spans=False)
+    rows = _rows(3)
+
+    cost = estimate(rows, plan, chunks_per_row=10)
+
+    assert cost.fanout_counted is False
+    assert dict(cost.calls_by_scorer)["retrieval_relevance"] == 30
+    assert "assuming 10 chunks per row" in render(cost)
+
+
+def test_budget_ceiling_counts_the_fanout():
+    plan = _rag_plan()
+    rows = _rag_rows(count=3, chunks=4)
+
+    cost = estimate(rows, plan)
+
+    # 12 relevance (per chunk) + 3 groundedness + 3 sufficiency (per
+    # retriever span) + 3 correctness + 3 safety (per row) = 24
+    with pytest.raises(BudgetExceededError) as excinfo:
+        enforce_budget(cost, max_judge_calls=15)
+    assert "24 judge calls" in str(excinfo.value)
+    # the pre-fanout count would have been 5 scorers x 3 rows = 15,
+    # which is exactly the budget it now correctly refuses
+    assert cost.judge_calls > len(plan.judge_specs) * cost.rows

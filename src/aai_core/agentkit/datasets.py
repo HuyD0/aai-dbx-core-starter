@@ -314,6 +314,90 @@ def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
     return retrieval, tools
 
 
+@dataclass(frozen=True)
+class RetrievalFanout:
+    """How much retrieval the rows' own traces contain.
+
+    A judge call is not one per row for the retrieval scorers: MLflow calls
+    the judge once per RETRIEVER span (groundedness, sufficiency) and once
+    per retrieved chunk (relevance). When the rows carry traces, that is
+    countable rather than guessable, which is the difference between a
+    budget ceiling and a hopeful number.
+    """
+
+    rows_counted: int = 0
+    retriever_spans: int = 0
+    retrieved_chunks: int = 0
+
+
+def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
+    """Count retriever spans and retrieved chunks in the rows' traces."""
+
+    rows_counted = spans = chunks = 0
+    for row in rows:
+        trace = row.get("trace") if isinstance(row, Mapping) else None
+        if trace is None:
+            continue
+        row_spans = _retriever_spans(trace)
+        if not row_spans:
+            continue
+        rows_counted += 1
+        spans += len(row_spans)
+        chunks += sum(_chunk_count(span) for span in row_spans)
+    return RetrievalFanout(
+        rows_counted=rows_counted, retriever_spans=spans, retrieved_chunks=chunks
+    )
+
+
+def _retriever_spans(trace: Any) -> list[Any]:
+    plain = _plain(trace)
+    spans: Any = None
+    if isinstance(plain, Mapping):
+        data = plain.get("data")
+        if isinstance(data, Mapping):
+            spans = data.get("spans")
+        if spans is None:
+            spans = plain.get("spans")
+    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
+        return []
+    found = []
+    for span in spans:
+        if isinstance(span, Mapping) and _is_retriever(span):
+            found.append(span)
+    return found
+
+
+def _is_retriever(span: Mapping[str, Any]) -> bool:
+    for key in ("type", "span_type", "spanType"):
+        value = span.get(key)
+        if isinstance(value, str) and value.upper() == "RETRIEVER":
+            return True
+    attributes = span.get("attributes")
+    if isinstance(attributes, Mapping):
+        value = attributes.get("mlflow.spanType")
+        if isinstance(value, str) and "RETRIEVER" in value.upper():
+            return True
+    return False
+
+
+def _chunk_count(span: Mapping[str, Any]) -> int:
+    """Documents a retriever span returned; 1 when the shape is unknown.
+
+    Never zero: a span that returned nothing countable is still one judge
+    call's worth of uncertainty, and rounding a cost estimate down is the
+    direction that breaks a budget.
+    """
+
+    candidates: list[Any] = [span.get("outputs")]
+    attributes = span.get("attributes")
+    if isinstance(attributes, Mapping):
+        candidates.append(attributes.get("mlflow.spanOutputs"))
+    for candidate in candidates:
+        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+            return max(1, len(candidate))
+    return 1
+
+
 def _stratified_indices(
     rows: Sequence[Mapping[str, Any]],
     n: int,

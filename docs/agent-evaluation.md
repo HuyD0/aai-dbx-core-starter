@@ -138,6 +138,25 @@ function today and a deployed endpoint tomorrow with a one-line change:
 
 Execution can sit anywhere. The record stays in one place, which is the point.
 
+### Where the answers come from
+
+A scoring run needs an answer for every row, and there are three honest ways
+to have one. The toolkit picks by looking at the dataset, and `--mode`
+overrides it:
+
+| Mode | The answers are | Chosen when |
+|---|---|---|
+| `live` | produced now, by calling `agent:` | the rows are questions |
+| `traces` | already in the rows, as recorded traces | the rows carry a `trace` |
+| `answer-sheet` | replayed from a recorded file | `agent:` names a `.json`/`.jsonl` answer sheet |
+
+The `traces` mode matters more than it sounds. A dataset of production traces
+has already been answered — by production. MLflow scores those traces when no
+`predict_fn` is supplied, and *replaces* them when one is. Calling the agent
+again would discard the recorded behaviour and score something else that
+merely shares the questions, so a trace-backed dataset defaults to `traces`
+and `--mode live` says out loud what it is about to overwrite.
+
 ## Two speeds, deliberately
 
 | | Where it runs | When | Why |
@@ -168,6 +187,16 @@ many tokens, and the dollar figure if you have configured your negotiated
 rate — and asks before spending. `budget.max_judge_calls` aborts before the
 first call rather than after the last one. `agentkit smoke` is free by
 construction: it runs only code scorers.
+
+A judge call is **not** one per row for every scorer. MLflow calls the
+retrieval-relevance judge once per *retrieved chunk*, and the groundedness and
+sufficiency judges once per *retriever span*, so a 10-row RAG run with 10
+chunks per query is well over a hundred calls. The registry records each
+scorer's fan-out and the estimate multiplies by it — counted from the rows'
+own traces when they have them, and assumed when they do not (a live run has
+no traces until it runs). Set `budget.retrieved_chunks_per_row` to your
+retriever's `k` so the ceiling matches reality; the estimate says when it is
+guessing.
 
 ## What the gate refuses
 
@@ -207,6 +236,12 @@ nobody has interpreted has not concluded anything.
 what ran, on which data version, scored how, against what, with which verdict
 and whose approval. Attach it to the promotion request.
 
+Each recorded run also attaches its results record to the MLflow run itself.
+`.aai/agentkit/results/` is whatever filesystem the run happened on, and for
+the deployment-job gate that is an ephemeral job cluster nobody can reach
+afterwards — so `agentkit evidence --run <run id>` builds the same record from
+any machine. The scoring command prints the exact invocation when it finishes.
+
 ## Promotion and the approval gate
 
 For projects promoting into a Unity Catalog registered model, the template
@@ -230,7 +265,10 @@ Three things about it are worth knowing before you enable it:
   score a specific target without editing the config.
 
 Set `registered_model` in `agentkit.yaml` to have `agentkit evidence` read the
-approval tag off that model's latest version and report who approved.
+approval tags off the model version the run actually scored. Every
+`approval*` tag is reported and all of them must read `Approved`: a job with
+two approval tasks writes two tags, and a renamed task leaves its old one
+behind, so one tag is not a verdict.
 
 The approver needs `APPLY TAG` on the model and `CAN MANAGE RUN` on the job.
 Use governed tag policies when several groups must sign off, so nobody can

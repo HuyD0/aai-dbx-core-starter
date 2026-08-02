@@ -115,6 +115,12 @@ which dataset version, scored by which scorer and prompt versions, against
 which baseline, with which verdict and whose approval. Attach it to the
 promotion request.
 
+For a run that happened somewhere else — the deployment-job gate runs on a
+job cluster whose filesystem nobody can reach afterwards — use
+`agentkit evidence --run <mlflow run id>`. Every recorded run attaches its
+results record to itself, and the scoring command prints that command when it
+finishes.
+
 `resources/optional/` holds the Unity Catalog registered model and the
 deployment-job gate, which adds a human approval step to every new model
 version. They are opt-in — read the comments in those files before enabling

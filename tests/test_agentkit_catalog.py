@@ -116,7 +116,7 @@ def test_code_only_smoke_excludes_judges_with_reason():
     names = _selected_names(plan)
     assert names == {"response_length_ok", "keyword_coverage", "refusal_compliance"}
     assert "code scorers only" in _excluded(plan, "correctness")
-    assert "live agent call" in _excluded(plan, "latency_seconds")
+    assert "needs a trace" in _excluded(plan, "latency_seconds")
 
 
 def test_guidelines_rows_select_expectations_guidelines():
@@ -471,3 +471,51 @@ def test_partially_present_expectations_are_not_scored_dataset_wide():
     assert "keyword_coverage" not in names
     reason = _excluded(plan, "keyword_coverage")
     assert "only some rows" in reason
+
+
+def test_live_plan_names_the_retrieval_scorers_it_cannot_decide():
+    """A live RAG run must not silently drop groundedness.
+
+    Auto-selection reads the dataset, and a live run's traces do not exist
+    until the agent produces them, so plain question rows cannot show that
+    the agent retrieves. Dropping the scorer without a word would let a RAG
+    comparison pass while its default groundedness threshold never ran.
+    """
+
+    plan = select_scorers(
+        _shape(has_traces=False), _config(), mode="live", judges_enabled=True
+    )
+
+    assert "retrieval_groundedness" not in _selected_names(plan)
+    reason = _excluded(plan, "retrieval_groundedness")
+    assert "whether this agent retrieves" in reason
+    assert "name them in scorers.add" in reason
+    assert "calls tools" in _excluded(plan, "tool_call_correctness")
+    # One line per reason, naming every scorer it covers.
+    rendered = [
+        line for line in render_plan(plan).splitlines() if line.startswith("excluded:")
+    ]
+    retrieval = next(line for line in rendered if "retrieval_groundedness" in line)
+    assert "retrieval_relevance" in retrieval
+    assert "retrieval_sufficiency" in retrieval
+    assert sum("whether this agent retrieves" in line for line in rendered) == 1
+
+
+def test_answer_sheet_plan_does_not_suggest_trace_scorers():
+    plan = select_scorers(
+        _shape(has_traces=False), _config(), mode="answer-sheet", judges_enabled=False
+    )
+
+    assert "whether this agent retrieves" not in render_plan(plan)
+
+
+def test_traces_mode_scores_the_spans_the_rows_carry():
+    shape = _shape(has_traces=True, has_retrieval_spans=True, has_tool_spans=False)
+
+    plan = select_scorers(shape, _config(), mode="traces", judges_enabled=True)
+
+    names = _selected_names(plan)
+    assert "retrieval_groundedness" in names
+    assert "latency_seconds" in names
+    assert "tool_call_correctness" not in names
+    assert "carry no tool-call spans" in _excluded(plan, "tool_call_correctness")

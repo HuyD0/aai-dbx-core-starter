@@ -199,9 +199,11 @@ def render_markdown(document: Mapping[str, Any]) -> str:
             f"- Status: **{approver.get('status', 'unknown')}**",
         ]
     )
-    for key in ("tag", "value", "model_version", "reason"):
+    for key in ("model_version", "reason"):
         if approver.get(key):
             lines.append(f"- {key.replace('_', ' ').capitalize()}: {approver[key]}")
+    for tag, value in sorted(dict(approver.get("tags") or {}).items()):
+        lines.append(f"- Approval tag `{tag}`: {value}")
 
     if document["warnings"]:
         lines.extend(["", "## Warnings", ""])
@@ -283,13 +285,24 @@ def databricks_approver_lookup(
                 "model_version": identity,
                 "reason": "no approval tag is set on the model version yet",
             }
-        tag, value = sorted(approvals.items())[0]
-        return {
-            "status": "approved" if str(value).lower() == "approved" else str(value),
-            "tag": tag,
-            "value": value,
+        # Every approval tag counts. A job with two approval tasks writes
+        # two tags, and a renamed task leaves its old one behind: reading
+        # only the first alphabetically would report a version as approved
+        # on the strength of a stale tag while a real gate is still open.
+        recorded = {key: str(value) for key, value in sorted(approvals.items())}
+        outstanding = [
+            key for key, value in recorded.items() if value.lower() != "approved"
+        ]
+        approver: dict[str, Any] = {
+            "status": "approved" if not outstanding else "not approved",
+            "tags": recorded,
             "model_version": identity,
         }
+        if outstanding:
+            approver["reason"] = "not approved: " + ", ".join(
+                f"{key}={recorded[key]}" for key in outstanding
+            )
+        return approver
     except Exception as error:  # pragma: no cover - network/credential paths
         return {"status": "unknown", "reason": f"could not read approval tag: {error}"}
 

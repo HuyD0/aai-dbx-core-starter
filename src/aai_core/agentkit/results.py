@@ -4,6 +4,12 @@ Every scoring command writes one of these under ``.aai/agentkit/results/``.
 ``gate`` and ``evidence`` read the newest record rather than re-running an
 evaluation, so a CI job can score once and gate/report from the same
 evidence.
+
+A recorded run also attaches the record to its MLflow run as an artifact.
+The local directory is whatever filesystem the run happened on — for the
+deployment-job gate that is an ephemeral job cluster the approver will
+never see. Attaching it to the run makes ``agentkit evidence --run <id>``
+the answer to "show me what this version scored", from any machine.
 """
 
 from __future__ import annotations
@@ -20,6 +26,9 @@ from aai_core.agentkit.errors import ConfigError
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 
 RESULTS_GLOB = "*.json"
+RESULTS_ARTIFACT_DIR = "agentkit"
+RESULTS_ARTIFACT_FILE = "results.json"
+RESULTS_ARTIFACT_PATH = f"{RESULTS_ARTIFACT_DIR}/{RESULTS_ARTIFACT_FILE}"
 
 
 class ResultsRecord(ContractModel):
@@ -118,6 +127,50 @@ def read_results(path: Path) -> ResultsRecord:
         return ResultsRecord(**document)
     except ValidationError as error:
         raise ConfigError(f"{path} is not a valid results record: {error}") from error
+
+
+def publish_results(mlflow_module: Any, run_id: str, path: Path) -> str | None:
+    """Attach the results record to its MLflow run.
+
+    Best effort by design: the record is already on disk and the gate has
+    already been decided, so a tracking-store hiccup here must not turn a
+    scored run into a failed one. The caller reports what happened.
+    """
+
+    try:
+        client = mlflow_module.MlflowClient()
+        client.log_artifact(run_id, str(path), artifact_path=RESULTS_ARTIFACT_DIR)
+    except Exception as error:  # pragma: no cover - network/credential paths
+        return f"could not attach the results record to run {run_id}: {error}"
+    return None
+
+
+def fetch_results(run_id: str, *, mlflow_module: Any | None = None) -> ResultsRecord:
+    """Read a run's results record back out of MLflow."""
+
+    if mlflow_module is None:
+        try:
+            import mlflow as mlflow_module  # type: ignore[no-redef]
+        except ImportError as error:
+            from aai_core.agentkit.errors import missing_extra
+
+            raise missing_extra(
+                "reading results from an MLflow run", "genai"
+            ) from error
+    try:
+        local = mlflow_module.artifacts.download_artifacts(
+            run_id=run_id, artifact_path=RESULTS_ARTIFACT_PATH
+        )
+    except Exception as error:
+        raise ConfigError(
+            f"run {run_id} has no agentkit results record ({error})",
+            remediation=(
+                "Check the run id. Only runs recorded by `agentkit compare` "
+                "or `agentkit eval` carry one; `agentkit smoke` scores "
+                "locally and opens no run."
+            ),
+        ) from error
+    return read_results(Path(local))
 
 
 def load_latest_results(directory: Path) -> tuple[ResultsRecord, Path] | None:

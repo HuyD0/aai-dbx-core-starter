@@ -224,3 +224,95 @@ def test_approval_is_read_for_the_evaluated_model_version():
     assert evaluated_model_version("models:/other.model/7", name) is None
     assert evaluated_model_version(f"models:/{name}", name) is None
     assert evaluated_model_version(f"models:/{name}@champion", name) is None
+
+
+def _lookup_with_tags(tmp_path, monkeypatch, tags, agent="models:/main.eval.agent/7"):
+    """Run the real approver lookup against a fake UC registry client."""
+
+    import sys
+    from types import SimpleNamespace
+
+    version = SimpleNamespace(version="7", tags=dict(tags))
+
+    class _Client:
+        def __init__(self, registry_uri=None):
+            self.registry_uri = registry_uri
+
+        def get_model_version(self, name, number):
+            return version
+
+    monkeypatch.setitem(
+        sys.modules, "mlflow", SimpleNamespace(MlflowClient=_Client, __spec__=None)
+    )
+    from aai_core.agentkit.evidence import databricks_approver_lookup
+
+    project = ProjectContext(
+        config=AgentkitConfig(
+            version=1,
+            agent=agent,
+            dataset="evals/data/golden_cases.json",
+            registered_model="main.eval.agent",
+        ),
+        settings=dev_settings(),
+        root=tmp_path,
+    )
+    return databricks_approver_lookup(project, _results(agent=agent))
+
+
+def test_every_approval_tag_counts(tmp_path, monkeypatch):
+    """One approved tag does not approve a second, still-open gate.
+
+    A job with two approval tasks writes two tags, and a renamed task
+    leaves its old one behind. Reading the alphabetically first tag would
+    report a version as approved on the strength of a stale one.
+    """
+
+    approver = _lookup_with_tags(
+        tmp_path,
+        monkeypatch,
+        {"approval_business": "Approved", "approval_risk": "Pending"},
+    )
+
+    assert approver["status"] == "not approved"
+    assert approver["tags"] == {
+        "approval_business": "Approved",
+        "approval_risk": "Pending",
+    }
+    assert "approval_risk=Pending" in approver["reason"]
+
+
+def test_all_approvals_present_reports_approved(tmp_path, monkeypatch):
+    approver = _lookup_with_tags(
+        tmp_path,
+        monkeypatch,
+        {"approval_business": "Approved", "approval_risk": "approved"},
+    )
+
+    assert approver["status"] == "approved"
+    assert "reason" not in approver
+
+
+def test_no_approval_tag_is_pending(tmp_path, monkeypatch):
+    approver = _lookup_with_tags(tmp_path, monkeypatch, {"other": "value"})
+
+    assert approver["status"] == "pending"
+
+
+def test_markdown_lists_every_approval_tag(tmp_path):
+    from aai_core.agentkit.evidence import build_evidence
+
+    project = _project(tmp_path)
+    document, markdown = build_evidence(
+        project,
+        results=_results(),
+        baseline=None,
+        gate_report=None,
+        approver_lookup=lambda *_: {
+            "status": "not approved",
+            "tags": {"approval_business": "Approved", "approval_risk": "Pending"},
+            "model_version": "main.eval.agent v7",
+        },
+    )
+
+    assert "Approval tag `approval_business`: Approved" in markdown
+    assert "Approval tag `approval_risk`: Pending" in markdown

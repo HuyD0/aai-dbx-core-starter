@@ -67,7 +67,15 @@ resources:
           max_retries: 0
           spark_python_task:
             python_file: ../scripts/link_deployment_job.py
-            parameters: ["--await-approval"]
+            parameters:
+              - "--await-approval"
+              # So the approval message can name the evaluation run whose
+              # evidence supports it. The run holds the results record; this
+              # cluster's filesystem does not outlive the job.
+              - "--model"
+              - "{{"{{"}}job.parameters.model_name{{"}}"}}"
+              - "--model-version"
+              - "{{"{{"}}job.parameters.model_version{{"}}"}}"
           job_cluster_key: default
           libraries:
             - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl

@@ -58,9 +58,15 @@ regression_budget:
 
 # Judge spend is estimated before every judged run. Set your negotiated rate
 # to see dollars instead of tokens; max_judge_calls aborts before spending.
+#
+# retrieved_chunks_per_row is your retriever's `k`. MLflow judges retrieval
+# relevance once per retrieved chunk, so a RAG run costs far more than one
+# call per row; before a live run there are no traces to count and this is
+# what the estimate uses.
 # budget:
 #   max_judge_calls: 500
 #   judge_price_per_1m_tokens: 5.0
+#   retrieved_chunks_per_row: 5
 
 # The Unity Catalog model this project promotes into. Set it to have
 # `agentkit evidence` report the approval recorded on the model version by

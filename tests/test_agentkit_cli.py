@@ -360,3 +360,166 @@ def test_evidence_reports_why_approval_is_unknown(project_dir, capsys):
     # instead of silently reporting a bare "unknown".
     assert document["approver"]["status"] == "unknown"
     assert "registered_model" in document["approver"]["reason"]
+
+
+def test_init_passes_the_project_name_to_the_template(tmp_path, capsys, monkeypatch):
+    """`--name` must reach the generated bundle, not just the directory.
+
+    `databricks bundle init` otherwise prompts for the project name and
+    renders the schema default, so the bundle ends up called something
+    other than what was asked for.
+    """
+
+    import json as json_module
+
+    from aai_core.agentkit.init import run_init
+
+    seen = {}
+
+    def runner(command, check=False):
+        index = command.index("--config-file")
+        seen["config"] = json_module.loads(
+            Path(command[index + 1]).read_text(encoding="utf-8")
+        )
+        return SimpleNamespace(returncode=0)
+
+    code = run_init(
+        project_name="pension-agent",
+        template_source="https://example.invalid/org/repo",
+        output_dir=tmp_path / "pension-agent",
+        settings={"repository_url": "https://example.invalid/org/pension-agent"},
+        runner=runner,
+        environ={},
+    )
+
+    assert code == 0
+    assert seen["config"]["project_name"] == "pension-agent"
+    assert seen["config"]["repository_url"] == (
+        "https://example.invalid/org/pension-agent"
+    )
+    # The temporary answer file does not outlive the command.
+    assert list(tmp_path.glob(".*-init.json")) == []
+
+
+def test_init_without_answers_stays_interactive_and_says_what_to_type(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit.init import run_init
+
+    printed = []
+    code = run_init(
+        project_name="pension-agent",
+        template_source="https://example.invalid/org/repo",
+        output_dir=tmp_path / "pension-agent",
+        runner=lambda command, check=False: SimpleNamespace(returncode=0),
+        environ={},
+        emit=printed.append,
+    )
+
+    output = "\n".join(printed)
+    assert code == 0
+    assert "--config-file" not in output
+    assert "answer 'Project and bundle name' with `pension-agent`" in output
+
+
+def test_init_warns_when_the_generated_bundle_has_another_name(tmp_path):
+    from aai_core.agentkit.init import run_init
+
+    destination = tmp_path / "pension-agent"
+
+    def runner(command, check=False):
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "databricks.yml").write_text(
+            "bundle:\n  name: aai-evaluation\n", encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=0)
+
+    printed = []
+    run_init(
+        project_name="pension-agent",
+        template_source="https://example.invalid/org/repo",
+        output_dir=destination,
+        runner=runner,
+        environ={},
+        emit=printed.append,
+    )
+
+    assert any("named aai-evaluation, not pension-agent" in line for line in printed)
+
+
+def test_init_rejects_a_malformed_set_pair(capsys, monkeypatch):
+    monkeypatch.setenv("AAI_TEMPLATE_REPO", "https://example.invalid/org/repo")
+
+    code = main(["init", "--name", "pension-agent", "--set", "nonsense"])
+
+    assert code == 1
+    assert "key=value" in capsys.readouterr().err
+
+
+def test_evidence_reads_a_run_recorded_elsewhere(tmp_path, monkeypatch, capsys):
+    """The deployment-job gate runs on a cluster the approver cannot reach.
+
+    Its results record travels with the MLflow run, so `--run` is how the
+    approver reads what the version scored.
+    """
+
+    from aai_core.agentkit.results import RESULTS_ARTIFACT_PATH, fetch_results
+
+    record = tmp_path / "results.json"
+    record.write_text(
+        json.dumps(
+            {
+                "command": "eval",
+                "recorded_at": "2026-08-02T10:00:00Z",
+                "run_id": "run-9",
+                "agent": "models:/main.eval.agent/7",
+                "dataset": {"ref": "golden.json", "digest": "abc123", "rows": 10},
+                "scope": {"mode": "full", "rows": 10},
+                "mode": "live",
+                "metrics": {"correctness/mean": 0.91},
+                "versions": {
+                    "agent": "models:/main.eval.agent/7",
+                    "scorers": {"correctness": 1},
+                    "aai_core": "0.4.0",
+                },
+                "decision": "inconclusive",
+                "change_id": "abc1234",
+                "gate_passed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    requested = {}
+
+    def download_artifacts(run_id=None, artifact_path=None):
+        requested["run_id"] = run_id
+        requested["artifact_path"] = artifact_path
+        return str(record)
+
+    fake = SimpleNamespace(
+        artifacts=SimpleNamespace(download_artifacts=download_artifacts)
+    )
+
+    results = fetch_results("run-9", mlflow_module=fake)
+
+    assert requested == {"run_id": "run-9", "artifact_path": RESULTS_ARTIFACT_PATH}
+    assert results.run_id == "run-9"
+    assert results.metrics["correctness/mean"] == 0.91
+
+
+def test_fetch_results_explains_a_run_without_a_record():
+    from aai_core.agentkit.errors import ConfigError
+    from aai_core.agentkit.results import fetch_results
+
+    def download_artifacts(run_id=None, artifact_path=None):
+        raise OSError("artifact not found")
+
+    fake = SimpleNamespace(
+        artifacts=SimpleNamespace(download_artifacts=download_artifacts)
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        fetch_results("run-missing", mlflow_module=fake)
+    assert "no agentkit results record" in str(excinfo.value)
+    assert "smoke" in str(excinfo.value)

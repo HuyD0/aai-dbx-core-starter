@@ -49,6 +49,27 @@ class Scale(StrEnum):
     SECONDS = "seconds"
 
 
+class JudgeFanout(StrEnum):
+    """How many judge calls one row actually costs.
+
+    MLflow's retrieval scorers do not make one call per row.
+    ``RetrievalGroundedness`` and ``RetrievalSufficiency`` call the judge
+    once per RETRIEVER span in the trace, and ``RetrievalRelevance`` calls
+    it once per retrieved chunk. A budget that assumes one call per row is
+    not the ceiling it advertises, so the registry records the fan-out and
+    the cost estimate multiplies by it.
+    """
+
+    ROW = "row"
+    RETRIEVER_SPAN = "retriever_span"
+    RETRIEVED_CHUNK = "retrieved_chunk"
+
+
+# The modes in which a trace exists to score. "traces" scores the traces the
+# dataset already carries; "live" produces new ones by calling the agent.
+TRACE_MODES = frozenset({"live", "traces"})
+
+
 class JudgeBinding(ContractModel):
     """How a judged scorer binds to the platform's judge model and prompt."""
 
@@ -73,6 +94,7 @@ class ScorerSpec(ContractModel):
     scale: Scale = Scale.PASS_RATE
     default_threshold: str | None = None
     judge_overhead_tokens: int = Field(default=350, ge=0)
+    fanout: JudgeFanout = JudgeFanout.ROW
 
 
 _DOMAIN_POLICY_RULES = (
@@ -171,6 +193,7 @@ CATALOG: tuple[ScorerSpec, ...] = (
         needs_trace=TraceNeed.RETRIEVAL,
         judge=JudgeBinding(),
         default_threshold=">=0.7",
+        fanout=JudgeFanout.RETRIEVER_SPAN,
     ),
     ScorerSpec(
         name="retrieval_relevance",
@@ -180,6 +203,7 @@ CATALOG: tuple[ScorerSpec, ...] = (
         metric="retrieval_relevance/mean",
         needs_trace=TraceNeed.RETRIEVAL,
         judge=JudgeBinding(),
+        fanout=JudgeFanout.RETRIEVED_CHUNK,
     ),
     ScorerSpec(
         name="retrieval_sufficiency",
@@ -190,6 +214,7 @@ CATALOG: tuple[ScorerSpec, ...] = (
         needs_expectations=("expected_facts", "expected_response"),
         needs_trace=TraceNeed.RETRIEVAL,
         judge=JudgeBinding(),
+        fanout=JudgeFanout.RETRIEVER_SPAN,
     ),
     ScorerSpec(
         name="tool_call_correctness",
@@ -375,6 +400,11 @@ def select_scorers(
                 excluded.append(ExcludedScorer(spec, "removed by scorers.remove"))
             continue
         if not wanted:
+            undecidable = _undecidable_note(
+                spec, shape, mode=mode, judges_enabled=judges_enabled
+            )
+            if undecidable is not None:
+                excluded.append(ExcludedScorer(spec, undecidable))
             continue
         blocker = _contract_blocker(
             spec,
@@ -435,7 +465,7 @@ def _auto_reason(
             return True, "expectations.expected_response present"
         return False, ""
     if spec.name == "latency_seconds":
-        return True, "always on for live runs"
+        return True, "always on when the run has traces"
     if spec.name == "correctness":
         if available.intersection(spec.needs_expectations):
             return True, "expected facts/response present"
@@ -467,6 +497,36 @@ def _auto_reason(
     return False, ""
 
 
+def _undecidable_note(
+    spec: ScorerSpec,
+    shape: DatasetShape,
+    *,
+    mode: str,
+    judges_enabled: bool,
+) -> str | None:
+    """Why a trace scorer was left out of a live plan, in the plan itself.
+
+    Auto-selection reads the dataset, and a live run's traces do not exist
+    until the agent produces them: rows of plain questions cannot show that
+    the agent behind them retrieves. Saying nothing would let a RAG
+    comparison pass without groundedness ever being scored, so the plan
+    names the scorer, the reason, and the one line that turns it on.
+    """
+
+    if mode != "live" or not judges_enabled:
+        return None
+    if spec.needs_trace is TraceNeed.RETRIEVAL and not shape.has_retrieval_spans:
+        behaviour = "retrieves context"
+    elif spec.needs_trace is TraceNeed.TOOLS and not shape.has_tool_spans:
+        behaviour = "calls tools"
+    else:
+        return None
+    return (
+        f"live run: the dataset cannot show whether this agent {behaviour}; "
+        "if it does, name them in scorers.add"
+    )
+
+
 def _contract_blocker(
     spec: ScorerSpec,
     shape: DatasetShape,
@@ -492,8 +552,8 @@ def _contract_blocker(
                 "for the score to mean what it says"
             )
         return f"dataset rows have no {fields}"
-    if spec.needs_trace is TraceNeed.ANY and mode != "live":
-        return "needs a live agent call (answer-sheet rows have no trace)"
+    if spec.needs_trace is TraceNeed.ANY and mode not in TRACE_MODES:
+        return "needs a trace (answer-sheet rows have none)"
     if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS} and mode != "live":
         wanted = (
             shape.has_retrieval_spans
@@ -508,7 +568,7 @@ def _contract_blocker(
             )
             if shape.has_traces:
                 return f"the rows' traces carry no {kind}"
-            return f"needs {kind} in a trace; answer-sheet rows have none"
+            return f"needs {kind} in a trace; these rows have none"
     return None
 
 
@@ -551,8 +611,13 @@ def render_plan(plan: ScorerPlan, *, judge_model_uri: str | None = None) -> str:
         "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
         for row in rows
     ]
+    # Scorers left out for the same reason are one line: five separate
+    # sentences saying the same thing is how a plan stops being read.
+    grouped: dict[str, list[str]] = {}
     for item in plan.excluded:
-        lines.append(f"excluded: {item.spec.name} ({item.reason})")
+        grouped.setdefault(item.reason, []).append(item.spec.name)
+    for reason, names in grouped.items():
+        lines.append(f"excluded: {', '.join(names)} ({reason})")
     if plan.judge_note and plan.judges_enabled is False:
         lines.append(f"note: {plan.judge_note}")
     return "\n".join(lines)

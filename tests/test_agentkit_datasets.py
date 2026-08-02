@@ -280,3 +280,73 @@ def test_span_kinds_are_distinguished(tmp_path):
     assert retrieval_shape.has_traces and tool_shape.has_traces
     assert retrieval_shape.has_retrieval_spans and not retrieval_shape.has_tool_spans
     assert tool_shape.has_tool_spans and not tool_shape.has_retrieval_spans
+
+
+def test_retrieval_fanout_counts_spans_and_chunks():
+    """Judge calls fan out per span and per chunk, so they get counted.
+
+    MLflow calls the retrieval-relevance judge once per retrieved chunk;
+    a per-row count would understate a RAG run's cost several times over.
+    """
+
+    from aai_core.agentkit.datasets import retrieval_fanout
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {
+                "data": {
+                    "spans": [
+                        {"type": "RETRIEVER", "outputs": [{}, {}, {}]},
+                        {"type": "LLM", "outputs": [{}]},
+                    ]
+                }
+            },
+        },
+        {
+            "inputs": {"question": "b"},
+            "trace": {
+                "data": {
+                    "spans": [
+                        {"span_type": "RETRIEVER", "outputs": [{}, {}]},
+                        {"span_type": "RETRIEVER", "outputs": [{}]},
+                    ]
+                }
+            },
+        },
+        {"inputs": {"question": "c"}},
+    ]
+
+    fanout = retrieval_fanout(rows)
+
+    assert fanout.rows_counted == 2
+    assert fanout.retriever_spans == 3
+    assert fanout.retrieved_chunks == 6
+
+
+def test_retrieval_fanout_counts_a_span_of_unknown_shape_as_one_chunk():
+    from aai_core.agentkit.datasets import retrieval_fanout
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {
+                "data": {
+                    "spans": [
+                        {"attributes": {"mlflow.spanType": '"RETRIEVER"'}},
+                    ]
+                }
+            },
+        }
+    ]
+
+    fanout = retrieval_fanout(rows)
+
+    assert fanout.retriever_spans == 1
+    assert fanout.retrieved_chunks == 1
+
+
+def test_retrieval_fanout_ignores_rows_without_retrieval():
+    from aai_core.agentkit.datasets import retrieval_fanout
+
+    assert retrieval_fanout([{"inputs": {"q": "a"}}]).rows_counted == 0

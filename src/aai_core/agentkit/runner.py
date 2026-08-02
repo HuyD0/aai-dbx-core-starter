@@ -52,7 +52,7 @@ from aai_core.agentkit.gate import (
     EXIT_THRESHOLD_FAILED,
     build_policy,
 )
-from aai_core.agentkit.results import ResultsRecord, write_results
+from aai_core.agentkit.results import ResultsRecord, publish_results, write_results
 from aai_core.agentkit.targets import TargetKind, build_predict_fn, resolve_target
 from aai_core.evaluation import GateResult, apply_gate
 from aai_core.experiments import ExperimentRunMetadata, RunPurpose
@@ -156,7 +156,8 @@ def run_scoring(
     target = resolve_target(
         agent or config.agent, root=project.root, settings=project.settings
     )
-    resolved_mode = mode or _default_mode(project, target)
+    resolved_mode = mode or _default_mode(target, dataset)
+    mode_warnings = _mode_warnings(resolved_mode, dataset, explicit=mode is not None)
     full_row_count = dataset.shape.row_count
     if rows_limit:
         dataset = smoke_sample(dataset, rows_limit, strata=config.strata)
@@ -181,6 +182,7 @@ def run_scoring(
         dataset.rows,
         plan,
         price_per_1m_tokens=config.budget.judge_price_per_1m_tokens,
+        chunks_per_row=config.budget.retrieved_chunks_per_row,
     )
     outcome = RunOutcome(plan=plan, cost=cost, dataset=dataset, plan_only=plan_only)
     outcome.messages.append(
@@ -200,7 +202,7 @@ def run_scoring(
             return outcome, EXIT_PASS
 
     baseline: BaselineRecord | None = None
-    warnings: list[str] = []
+    warnings: list[str] = list(mode_warnings)
     if establish_baseline:
         existing, _ = load_baseline(project.baseline_path)
         if existing is not None:
@@ -390,6 +392,17 @@ def run_scoring(
         judges_enabled=judges_enabled,
     )
     results_path = write_results(project.results_dir, results)
+    if mlflow is not None and run_id:
+        # `.aai/agentkit/results/` is the filesystem this run happened on.
+        # For the deployment-job gate that is a job cluster the approver
+        # cannot reach, so the record travels with the run.
+        failure = publish_results(mlflow, run_id, results_path)
+        if failure:
+            warnings.append(failure)
+        else:
+            outcome.messages.append(
+                f"Evidence for this run: agentkit evidence --run {run_id}"
+            )
 
     if establish_baseline:
         write_baseline(
@@ -441,10 +454,31 @@ def submit_job(
     return EXIT_PASS, messages
 
 
-def _default_mode(project: ProjectContext, target: Any) -> str:
+def _default_mode(target: Any, dataset: LoadedDataset) -> str:
+    """Where the answers come from.
+
+    A dataset that already carries traces has already been answered — by
+    production, usually. Scoring it means scoring those traces, which is
+    what MLflow does when ``predict_fn`` is omitted. Calling the agent
+    instead would discard the recorded behaviour and score something else
+    that happens to share the questions.
+    """
+
     if target.kind is TargetKind.ANSWER_SHEET:
         return "answer-sheet"
+    if dataset.shape.has_traces:
+        return "traces"
     return "live"
+
+
+def _mode_warnings(mode: str, dataset: LoadedDataset, *, explicit: bool) -> list[str]:
+    if mode == "live" and dataset.shape.has_traces and explicit:
+        return [
+            "--mode live on a dataset that carries traces: the agent is "
+            "called again and the recorded traces are not what gets scored. "
+            "Use --mode traces to score the traces the dataset holds."
+        ]
+    return []
 
 
 def _answer_sheet_path(project: ProjectContext, target: Any) -> Path:

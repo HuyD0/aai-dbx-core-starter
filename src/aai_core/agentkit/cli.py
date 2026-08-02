@@ -31,6 +31,9 @@ EXIT_ERROR = 1
 EXIT_THRESHOLD_FAILED = 2
 
 DECISIONS = ("adopt", "reject", "inconclusive")
+# Where the answers come from: call the agent, replay a recorded answer
+# sheet, or score the traces the dataset already carries.
+MODES = ("live", "answer-sheet", "traces")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -71,6 +74,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("--output-dir", default=None)
     init.add_argument(
+        "--set",
+        action="append",
+        default=None,
+        dest="settings",
+        metavar="KEY=VALUE",
+        help=(
+            "answer one of the template's prompts (repeatable). Supplying "
+            "any answer skips the prompts entirely, so supply every value "
+            "the template has no default for"
+        ),
+    )
+    init.add_argument(
         "--print-only",
         action="store_true",
         help="print the command and the next steps without running it",
@@ -88,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     compare.add_argument("--full", action="store_true", help="score every row")
     compare.add_argument("--rows", type=int, default=None)
-    compare.add_argument("--mode", choices=("live", "answer-sheet"), default=None)
+    compare.add_argument("--mode", choices=MODES, default=None)
     compare.add_argument("--decision", choices=DECISIONS, default=None)
     compare.add_argument("--baseline-run", default=None)
     compare.set_defaults(handler=_cmd_compare)
@@ -120,7 +135,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run the bundle's release_gate job instead of scoring locally",
     )
     evaluate.add_argument("--target", default="dev", help="bundle target")
-    evaluate.add_argument("--mode", choices=("live", "answer-sheet"), default=None)
+    evaluate.add_argument("--mode", choices=MODES, default=None)
     evaluate.add_argument("--decision", choices=DECISIONS, default=None)
     evaluate.add_argument("--baseline-run", default=None)
     evaluate.add_argument("--establish-baseline", action="store_true")
@@ -139,6 +154,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     evidence.add_argument("--config", default=None)
     evidence.add_argument("--output", default=None)
+    evidence.add_argument(
+        "--run",
+        default=None,
+        dest="run_id",
+        help=(
+            "report on an MLflow run instead of the newest local results "
+            "file — how an approver reads evidence for a run that happened "
+            "on a job cluster"
+        ),
+    )
     evidence.add_argument("--json", action="store_true", dest="as_json")
     evidence.set_defaults(handler=_cmd_evidence)
 
@@ -181,13 +206,14 @@ def _add_scoring_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _cmd_init(arguments: argparse.Namespace) -> int:
-    from aai_core.agentkit.init import run_init
+    from aai_core.agentkit.init import parse_settings, run_init
 
     return run_init(
         project_name=arguments.name,
         template=arguments.template,
         template_source=arguments.template_source,
         output_dir=Path(arguments.output_dir) if arguments.output_dir else None,
+        settings=parse_settings(arguments.settings),
         print_only=arguments.print_only,
     )
 
@@ -275,18 +301,25 @@ def _cmd_evidence(arguments: argparse.Namespace) -> int:
         write_evidence,
     )
     from aai_core.agentkit.gate import evaluate_gate
-    from aai_core.agentkit.results import load_latest_results
+    from aai_core.agentkit.results import fetch_results, load_latest_results
 
     project = _project(arguments)
-    found = load_latest_results(project.results_dir)
-    if found is None:
-        from aai_core.agentkit.errors import EvidenceMissingError
+    if arguments.run_id:
+        results = fetch_results(arguments.run_id)
+    else:
+        found = load_latest_results(project.results_dir)
+        if found is None:
+            from aai_core.agentkit.errors import EvidenceMissingError
 
-        raise EvidenceMissingError(
-            "no evaluation results to report on",
-            remediation="Run `agentkit compare` first.",
-        )
-    results, _ = found
+            raise EvidenceMissingError(
+                "no evaluation results to report on",
+                remediation=(
+                    "Run `agentkit compare` first, or pass `--run <mlflow "
+                    "run id>` to report on a run that happened elsewhere "
+                    "(a deployment-job gate runs on a job cluster, not here)."
+                ),
+            )
+        results, _ = found
     baseline, _ = load_baseline(project.baseline_path)
     report, _ = evaluate_gate(project, results=results, baseline=baseline)
     document, markdown = build_evidence(

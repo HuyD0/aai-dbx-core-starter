@@ -15,12 +15,19 @@ from typing import Any
 
 from pydantic import Field, field_serializer, field_validator
 
-from aai_core.agentkit.catalog import ScorerPlan
+from aai_core.agentkit.catalog import JudgeFanout, ScorerPlan
+from aai_core.agentkit.datasets import retrieval_fanout
 from aai_core.agentkit.errors import BudgetExceededError
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 
 _ASSUMED_JUDGE_OUTPUT_TOKENS = 150
 _CHARS_PER_TOKEN = 4
+# One retriever span per row is the ordinary shape; the chunk count is the
+# retriever's `k`, which only the project knows. It is configurable
+# (`budget.retrieved_chunks_per_row`) because a wrong guess here is the
+# difference between a budget that holds and one that is exceeded 4x.
+_ASSUMED_RETRIEVER_SPANS_PER_ROW = 1
+DEFAULT_CHUNKS_PER_ROW = 5
 
 
 class CostEstimate(ContractModel):
@@ -31,6 +38,11 @@ class CostEstimate(ContractModel):
     estimated_tokens: int = Field(ge=0)
     estimated_usd: float | None = None
     calls_by_scorer: Mapping[str, int] = Field(default_factory=dict)
+    # True when every fan-out multiplier was counted from the rows' own
+    # traces; False when a retrieval scorer's chunk count had to be assumed
+    # because the traces do not exist yet (a live run).
+    fanout_counted: bool = True
+    assumed_chunks_per_row: int = Field(default=DEFAULT_CHUNKS_PER_ROW, ge=1)
 
     @field_validator("calls_by_scorer", mode="after")
     @classmethod
@@ -47,20 +59,45 @@ def estimate(
     plan: ScorerPlan,
     *,
     price_per_1m_tokens: float | None = None,
+    chunks_per_row: int = DEFAULT_CHUNKS_PER_ROW,
 ) -> CostEstimate:
-    """Estimate judge calls and tokens for scoring ``rows`` under ``plan``."""
+    """Estimate judge calls and tokens for scoring ``rows`` under ``plan``.
+
+    Not one call per row: the registry records each scorer's fan-out, and
+    the retrieval scorers fan out per retriever span or per retrieved
+    chunk. Where the rows carry traces the multipliers are counted; where
+    they do not (a live run has no traces until it runs) they are assumed
+    and the estimate says so.
+    """
 
     judge_specs = plan.judge_specs
     row_count = len(rows)
     mean_row_tokens = _mean_row_tokens(rows)
+    needs_fanout = any(spec.fanout is not JudgeFanout.ROW for spec in judge_specs)
+    counted = retrieval_fanout(rows) if needs_fanout else None
+    uncounted_rows = row_count - (counted.rows_counted if counted else 0)
+    fanout_counted = not needs_fanout or uncounted_rows == 0
+    spans = chunks = 0
+    if counted is not None:
+        spans = counted.retriever_spans + uncounted_rows * (
+            _ASSUMED_RETRIEVER_SPANS_PER_ROW
+        )
+        chunks = counted.retrieved_chunks + uncounted_rows * chunks_per_row
+
     total_tokens = 0
     calls_by_scorer: dict[str, int] = {}
     for spec in judge_specs:
-        calls_by_scorer[spec.name] = row_count
-        total_tokens += row_count * (
+        if spec.fanout is JudgeFanout.RETRIEVER_SPAN:
+            calls = spans
+        elif spec.fanout is JudgeFanout.RETRIEVED_CHUNK:
+            calls = chunks
+        else:
+            calls = row_count
+        calls_by_scorer[spec.name] = calls
+        total_tokens += calls * (
             spec.judge_overhead_tokens + mean_row_tokens + _ASSUMED_JUDGE_OUTPUT_TOKENS
         )
-    judge_calls = row_count * len(judge_specs)
+    judge_calls = sum(calls_by_scorer.values())
     estimated_usd = None
     if price_per_1m_tokens is not None and judge_calls:
         estimated_usd = round(total_tokens / 1_000_000 * price_per_1m_tokens, 4)
@@ -72,6 +109,8 @@ def estimate(
         estimated_tokens=total_tokens,
         estimated_usd=estimated_usd,
         calls_by_scorer=calls_by_scorer,
+        fanout_counted=fanout_counted,
+        assumed_chunks_per_row=chunks_per_row,
     )
 
 
@@ -104,6 +143,13 @@ def render(cost: CostEstimate) -> str:
         line += f" (~${cost.estimated_usd:,.4f} at the configured rate)"
     else:
         line += " (set budget.judge_price_per_1m_tokens for a dollar figure)"
+    if not cost.fanout_counted:
+        line += (
+            "\n  Retrieval scorers are judged per retrieved chunk, and a live "
+            f"run has no traces to count yet: assuming "
+            f"{cost.assumed_chunks_per_row} chunks per row "
+            "(budget.retrieved_chunks_per_row)."
+        )
     return line
 
 
