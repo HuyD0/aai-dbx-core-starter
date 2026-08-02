@@ -26,7 +26,9 @@ class FoundryNotebookSession:
 
     @property
     def connected_ready(self) -> bool:
-        return not _is_placeholder(self.deployment)
+        deployment_ready = not _is_placeholder(self.deployment)
+        endpoint_ready = not _is_project_endpoint_placeholder(self.project_endpoint)
+        return deployment_ready and endpoint_ready
 
     def safe_summary(self) -> dict[str, str | bool]:
         """Return non-secret configuration fields safe to display in a notebook."""
@@ -151,8 +153,9 @@ def create_text_response(
         )
     if not session.connected_ready:
         raise RuntimeError(
-            "Set providers.models.foundry-chat.deployment in the selected config "
-            "before making a connected call."
+            f"Set providers.models.{session.logical_model}.endpoint to a real "
+            "Foundry project endpoint and its deployment to a real model "
+            "deployment before making a connected call."
         )
     if not prompt.strip():
         raise ValueError("prompt must not be blank")
@@ -190,3 +193,10 @@ def _validate_project_endpoint(value: str) -> str:
 def _is_placeholder(value: str) -> bool:
     normalized = value.strip().lower()
     return not normalized or normalized.startswith(_PLACEHOLDER_PREFIXES)
+
+
+def _is_project_endpoint_placeholder(value: str) -> bool:
+    parsed = urlsplit(value.strip())
+    account_name = (parsed.hostname or "").partition(".")[0]
+    project_name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return _is_placeholder(account_name) or _is_placeholder(project_name)
