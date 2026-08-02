@@ -78,8 +78,10 @@ All notable changes to `aai-core` are documented here.
   is unchanged. `PromptManager`
   fails locally on unconfigured or placeholder catalog/schema qualifiers
   instead of querying the registry for names like `unset.unset.<name>`,
-  and refuses blank or malformed logical names (`main.app.`) before any
-  registry call; explicit `catalog.schema.name` qualification remains
+  and refuses blank or malformed names (`main.app.`, spaces, punctuation
+  outside the recordable `catalog.schema.name` shape) before any registry
+  call, so every name it accepts can also receive promotion evidence;
+  well-formed explicit `catalog.schema.name` qualification remains
   untouched.
   `is_missing_prompt_error()` is public so callers seeding a first version
   or first promotion can distinguish an absent prompt or alias from

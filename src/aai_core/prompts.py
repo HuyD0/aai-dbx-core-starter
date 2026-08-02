@@ -6,7 +6,7 @@ import hashlib
 import json
 import warnings
 from dataclasses import dataclass
-from re import sub
+from re import fullmatch, sub
 from typing import Any
 
 from aai_core.exceptions import AaiCoreError
@@ -22,6 +22,11 @@ class PromptPromotionError(AaiCoreError):
 # 'candidate' remains accepted only as the deprecated alias name that
 # set_alias() warns about; it is not lifecycle vocabulary.
 _GOVERNED_ALIASES = {"development", "validation", "candidate", "production"}
+
+# The same component shape DecisionRecord.prompt_name accepts: a name the
+# registry would take but the evidence contract refuses could never be
+# promoted, so the mismatch is refused at registration time instead.
+_NAME_COMPONENT = r"[A-Za-z0-9_-]+"
 
 
 @dataclass(frozen=True)
@@ -306,10 +311,15 @@ class PromptManager:
             # as the malformed 'catalog.schema.'.
             if not cleaned:
                 raise ValueError("Prompt names must not be blank")
+            if not fullmatch(_NAME_COMPONENT, cleaned):
+                raise ValueError(
+                    "Prompt names may contain only letters, digits, "
+                    f"underscores, and hyphens; got {cleaned!r}"
+                )
             catalog = _registry_qualifier("catalog", self.catalog)
             schema = _registry_qualifier("schema", self.schema)
             return f"{catalog}.{schema}.{cleaned}"
-        if len(parts) == 3 and all(part.strip() for part in parts):
+        if len(parts) == 3 and all(fullmatch(_NAME_COMPONENT, part) for part in parts):
             return cleaned
         raise ValueError("Prompt names must be unqualified or catalog.schema.name")
 
@@ -352,7 +362,7 @@ def _registry_qualifier(role: str, value: str) -> str:
     from aai_core.evaluation import _is_placeholder
 
     qualifier = str(value).strip()
-    if not qualifier or "." in qualifier or _is_placeholder(qualifier):
+    if not fullmatch(_NAME_COMPONENT, qualifier) or _is_placeholder(qualifier):
         raise ValueError(
             f"{role} must be a configured Unity Catalog qualifier; got "
             f"{value!r}. Set platform.catalog and platform.schema in "

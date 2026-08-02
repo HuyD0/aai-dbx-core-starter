@@ -191,7 +191,18 @@ def test_qualify_rejects_blank_and_malformed_names():
         mlflow_module=object(),
     )
 
-    for bad in ("", "   ", "main.app.", "..", "a..c"):
+    for bad in (
+        "",
+        "   ",
+        "main.app.",
+        "..",
+        "a..c",
+        # The evidence contract refuses these shapes, so a prompt registered
+        # under one could never receive promotion evidence.
+        "monthly summary",
+        "main. app.prompt",
+        "main.app.name with spaces",
+    ):
         with pytest.raises(ValueError):
             manager.qualify(bad)
     with pytest.raises(ValueError, match="blank"):
