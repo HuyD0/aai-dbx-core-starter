@@ -10,7 +10,8 @@ All notable changes to `aai-core` are documented here.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
   vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
   passing, metrics-bearing gate whose recorded policy applied at least one
-  release rule; `decided_by` rejects personal emails; `prompt_digest` and
+  substantive release rule — a zero cost-coverage threshold alone gates
+  nothing; `decided_by` rejects personal emails; `prompt_digest` and
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
   content, or secrets cannot enter persisted tags; run ids and
   `change_id` are bounded opaque identifiers and `change_summary` is
@@ -59,8 +60,8 @@ All notable changes to `aai-core` are documented here.
   expectation direction from the same refusal-marker vocabulary applied
   to outputs, so a refusal case worded without the word "refuse" still
   gates an unsafe compliant answer, and both reference-based scorers fail
-  a missing or blank expected response outright — a dataset defect must
-  never inflate a release gate. Template copies are unchanged until
+  a missing, blank, null, or non-string expected response outright — a
+  dataset defect must never inflate a release gate. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with a required, nonblank, non-personal assessment `source_id` so no

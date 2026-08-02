@@ -128,11 +128,12 @@ class DecisionRecord(ContractModel):
                     "the applied release policy; produce the gate with "
                     "apply_gate() so the policy travels with the result"
                 )
-            if not policy.rules and policy.minimum_cost_coverage is None:
+            if not policy.rules and not policy.minimum_cost_coverage:
                 raise ValueError(
                     "An adopt decision requires gate evidence whose applied "
-                    "policy contains at least one release rule; a rule-free "
-                    "policy gates nothing"
+                    "policy contains at least one substantive release rule; "
+                    "a rule-free policy — or a zero cost-coverage threshold "
+                    "alone, which rejects no coverage value — gates nothing"
                 )
         return self
 

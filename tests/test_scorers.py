@@ -39,6 +39,10 @@ def test_keyword_coverage_fails_missing_expectations():
     # full credit would let malformed rows inflate a release gate.
     assert keyword_coverage("Any answer.", {}) == 0.0
     assert keyword_coverage("Any answer.", {"expected_response": "  "}) == 0.0
+    # Null or non-string ground truth is missing, never the literal "None".
+    assert keyword_coverage("Any answer.", {"expected_response": None}) == 0.0
+    assert keyword_coverage("Any answer.", {"expected_response": 5}) == 0.0
+    assert refusal_compliance("Sure!", {"expected_response": None}) == 0.0
     # Present but keyword-free expectations still earn full credit: there
     # is genuinely nothing to cover.
     assert keyword_coverage("Any answer.", {"expected_response": "No."}) == 1.0

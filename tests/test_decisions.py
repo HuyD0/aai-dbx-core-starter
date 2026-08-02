@@ -197,6 +197,15 @@ def test_adopt_requires_passing_gate_evidence():
         _record(gate=GateResult(metrics={"irrelevant": 1.0}))
     with pytest.raises(ValidationError, match="release rule"):
         _record(gate=GateResult(metrics={"irrelevant": 1.0}, policy=GatePolicy()))
+    # A zero cost-coverage threshold rejects no coverage value, so it is
+    # not a substantive release rule.
+    with pytest.raises(ValidationError, match="zero cost-coverage"):
+        _record(
+            gate=GateResult(
+                metrics={"cost/coverage": 0.0},
+                policy=GatePolicy(minimum_cost_coverage=0.0),
+            )
+        )
     rejected = _record(decision=Decision.REJECT, gate=failing)
     assert rejected.as_tags()["gate_passed"] == "false"
     ungated_reject = _record(decision=Decision.INCONCLUSIVE, gate=None)
