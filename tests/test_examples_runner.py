@@ -356,6 +356,48 @@ providers:
     ]
 
 
+def test_config_preflight_validates_the_effective_experiment(
+    runner, tmp_path, monkeypatch
+):
+    # The connected cell queries effective_experiment_name; a placeholder —
+    # explicit or derived from placeholder components — must fail preflight
+    # before any cloud check, while a properly derived name passes.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: unset
+  team: unset
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "platform.team" in issues[0]
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("team: unset", "team: real-team"),
+        encoding="utf-8",
+    )
+    assert runner._config_issues(runner.EXAMPLES["platform_llm_operations"]) == []
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "experiment_name: unset", "experiment_name: unknown"
+        ),
+        encoding="utf-8",
+    )
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "platform.experiment_name" in issues[0]
+
+
 def test_config_preflight_rejects_dotted_qualifiers(runner, tmp_path, monkeypatch):
     # The SDK helpers reject dotted catalog/schema values; the preflight
     # must fail before any cloud check instead of opening the notebook.
@@ -665,6 +707,9 @@ def test_interactive_workspace_example_prints_configured_exports(
     config.write_text(
         """
 platform:
+  application: demo-app
+  project: demo
+  team: demo-team
   catalog: main
   schema: example_ai
 providers:

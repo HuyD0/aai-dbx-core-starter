@@ -76,7 +76,7 @@ All notable changes to `aai-core` are documented here.
   exist" message wording, the common non-disclosure phrasing, and the
   same shared predicate guards the dataset helper's create path. `promote()` verifies the target version through the
   raw registry client, never the fluent lineage-linking load, so a
-  rejected candidate is not attached to an active run, model, or trace.
+  rejected change is not attached to an active run, model, or trace.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The

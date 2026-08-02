@@ -201,7 +201,7 @@ class PromptManager:
         reference = PromptReference(self.qualify(name), version=version)
         # mlflow.genai.load_prompt links the loaded version to any active
         # run, model, or trace; verification must not attach a
-        # possibly-rejected candidate to evidence lineage, so fetch through
+        # possibly-rejected change to evidence lineage, so fetch through
         # the raw registry client instead.
         registered = self._client().MlflowClient().load_prompt(reference.uri)
         template = getattr(registered, "template", None)

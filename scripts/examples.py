@@ -312,7 +312,43 @@ def _config_issues(example: Example) -> list[str]:
                 f"`{dotted_path}` must be a single Unity Catalog qualifier "
                 f"without dots (current value: {value!r})."
             )
+    if "platform.experiment_name" not in example.config_fields:
+        issue = _effective_experiment_issue(document)
+        if issue:
+            issues.append(issue)
     return issues
+
+
+def _effective_experiment_issue(document: dict[str, Any]) -> str | None:
+    """Validate the experiment the SDK will actually use.
+
+    An explicit name wins unless it is a placeholder; the 'unset' sentinel
+    derives /Shared/<team>-<project>-<application>, which is only as
+    configured as its components.
+    """
+
+    platform = document.get("platform")
+    platform = platform if isinstance(platform, dict) else {}
+    explicit = platform.get("experiment_name")
+    if explicit not in (None, "", "unset"):
+        if _is_placeholder(explicit):
+            return (
+                "Configure `platform.experiment_name` in aai-platform.yml "
+                f"(current value: {explicit!r})."
+            )
+        return None
+    unset_components = [
+        f"platform.{field}"
+        for field in ("team", "project", "application")
+        if _is_placeholder(platform.get(field))
+    ]
+    if unset_components:
+        return (
+            "`platform.experiment_name` derives from "
+            + ", ".join(unset_components)
+            + "; configure them or set an explicit experiment path."
+        )
+    return None
 
 
 def _run_check(
