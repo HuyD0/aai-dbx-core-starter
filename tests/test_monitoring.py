@@ -174,6 +174,30 @@ def test_traces_with_feedback_excludes_expectation_assessments():
     assert traces_with_feedback([reviewed], name="correct", value=False) == [reviewed]
 
 
+def test_traces_with_feedback_excludes_errored_scorer_feedback():
+    # A failed scorer's Feedback stays valid and feedback-typed but carries
+    # an error; a wildcard query must not curate it as reviewed feedback.
+    top_level_error = SimpleNamespace(
+        name="correct", value=None, error=SimpleNamespace(error_code="SCORER_ERROR")
+    )
+    nested_error = SimpleNamespace(
+        name="correct",
+        value=None,
+        feedback=SimpleNamespace(value=None, error=SimpleNamespace(code="boom")),
+    )
+    reviewed = SimpleNamespace(name="correct", value=False)
+
+    assert (
+        traces_with_feedback([_trace("errored", [top_level_error])], name="correct")
+        == []
+    )
+    assert (
+        traces_with_feedback([_trace("nested", [nested_error])], name="correct") == []
+    )
+    trace = _trace("mixed", [top_level_error, reviewed])
+    assert traces_with_feedback([trace], name="correct") == [trace]
+
+
 def test_traces_with_feedback_excludes_issue_references():
     issue_link = SimpleNamespace(
         name="correct", value=None, expectation=None, issue=SimpleNamespace(id="i-1")

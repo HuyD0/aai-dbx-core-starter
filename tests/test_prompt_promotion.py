@@ -55,12 +55,19 @@ class FakeClient:
             return self.owner.pages[index]
         return list(self.owner.versions)
 
+    def load_prompt(self, uri):
+        return SimpleNamespace(
+            uri=uri, template=self.owner.genai.templates_by_uri.get(uri)
+        )
+
 
 class FakeGenAI:
     def __init__(self, templates_by_uri=None):
         self.registered = []
         self.alias = None
         self.templates_by_uri = dict(templates_by_uri or {})
+        # The fluent load links to active lineage; promote() must never use it.
+        self.linking_loads: list = []
 
     def register_prompt(self, **kwargs):
         self.registered.append(kwargs)
@@ -69,6 +76,7 @@ class FakeGenAI:
         )
 
     def load_prompt(self, uri, **kwargs):
+        self.linking_loads.append(uri)
         return SimpleNamespace(uri=uri, template=self.templates_by_uri.get(uri))
 
     def set_prompt_alias(self, **kwargs):
@@ -306,6 +314,9 @@ def test_promote_accepts_an_adopt_decision_bound_by_prompt_digest():
     _manager(mlflow).promote("earnings_summary", version=2, evidence=record)
 
     assert mlflow.genai.alias["alias"] == "production"
+    # Verification fetches through the raw client: the fluent load would
+    # link the candidate to any active run, model, or trace.
+    assert mlflow.genai.linking_loads == []
 
 
 def test_promote_rejects_unknown_evidence_types():

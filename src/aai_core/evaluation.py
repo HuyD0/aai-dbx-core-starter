@@ -194,11 +194,26 @@ def _evaluate_policy(
 
     if policy.fail_on_scorer_errors:
         for metric, value in metrics.items():
-            if metric.endswith(policy.scorer_error_metric_suffix) and value > 0:
+            if not metric.endswith(policy.scorer_error_metric_suffix):
+                continue
+            if value > 0:
                 failures.append(
                     GateFailure(
                         metric=metric,
                         reason=f"{value:g} scorer invocation(s) failed",
+                    )
+                )
+            elif value < 0:
+                # A count cannot be negative; this runs inside the
+                # recomputation, so even a hand-built result cannot claim a
+                # pass over corrupt scorer-health evidence.
+                failures.append(
+                    GateFailure(
+                        metric=metric,
+                        reason=(
+                            f"error count {value:g} is negative; scorer "
+                            "health evidence is corrupt"
+                        ),
                     )
                 )
 

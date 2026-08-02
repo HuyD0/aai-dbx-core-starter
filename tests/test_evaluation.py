@@ -148,6 +148,21 @@ def test_scorer_error_metrics_fail_without_exposing_error_text():
     assert result.failures[0].reason == "2 scorer invocation(s) failed"
 
 
+def test_gate_fails_negative_scorer_error_counts_as_corrupt():
+    result = apply_gate({"correctness/error_count": -1}, policy=GatePolicy())
+
+    assert not result.passed
+    assert "negative" in result.failures[0].reason
+    # The check runs inside the recomputation, so a hand-built result
+    # cannot claim a pass over a negative count either.
+    with pytest.raises(ValidationError, match="apply_gate"):
+        GateResult(
+            metrics={"correctness/error_count": -1.0},
+            failures=(),
+            policy=GatePolicy(),
+        )
+
+
 def test_gate_refuses_non_finite_scorer_error_counts():
     # A NaN error count means scorer health is unknown; dropping it like
     # other malformed metrics would let the gate pass anyway.

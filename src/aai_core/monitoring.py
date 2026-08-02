@@ -143,7 +143,13 @@ def _is_curated_feedback(assessment: Any) -> bool:
     # artifacts; neither is reviewed feedback.
     if getattr(assessment, "expectation", None) is not None:
         return False
-    return getattr(assessment, "issue", None) is None
+    if getattr(assessment, "issue", None) is not None:
+        return False
+    # A failed scorer records an error, not reviewed feedback; a wildcard
+    # match must never curate scorer failures into the regression dataset.
+    if getattr(assessment, "error", None) is not None:
+        return False
+    return getattr(getattr(assessment, "feedback", None), "error", None) is None
 
 
 def _assessment_matches(assessment: Any, *, name: str, value: Any | None) -> bool:

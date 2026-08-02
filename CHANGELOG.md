@@ -28,7 +28,8 @@ All notable changes to `aai-core` are documented here.
   them at construction, so gate evidence is self-describing and cannot claim
   a pass its own metrics contradict; while scorer-error enforcement is on,
   `apply_gate` refuses to produce evidence from a non-finite scorer
-  error-count metric instead of silently discarding scorer health;
+  error-count metric instead of silently discarding scorer health, and a
+  negative error count fails the gate as corrupt inside the recomputation;
   `get_or_create_evaluation_dataset` promotes the governed dataset helper
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder catalog/schema
@@ -46,8 +47,9 @@ All notable changes to `aai-core` are documented here.
   with a required, nonblank, non-personal assessment `source_id` so no
   governed feedback lands without provenance, and `traces_with_feedback()`
   for curating reviewed production traces into the governed regression
-  dataset, counting only valid feedback assessments — expectations and
-  invalidated (overridden) entries never select a trace; convert selected
+  dataset, counting only valid feedback assessments — expectations,
+  invalidated (overridden) entries, and errored scorer feedback never
+  select a trace; convert selected
   traces to record dictionaries before `merge_records` (managed datasets
   reject native traces). Sampled-scorer registration remains a documented
   notebook step.
@@ -66,7 +68,9 @@ All notable changes to `aai-core` are documented here.
   `is_missing_prompt_error()` is public so callers seeding a first version
   or first promotion can distinguish an absent prompt or alias from
   authentication, permission, and transient registry failures instead of
-  catching broadly.
+  catching broadly. `promote()` verifies the target version through the
+  raw registry client, never the fluent lineage-linking load, so a
+  rejected candidate is not attached to an active run, model, or trace.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The
