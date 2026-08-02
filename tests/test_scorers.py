@@ -113,8 +113,9 @@ def test_as_mlflow_scorers_wraps_self_contained_bodies_under_stable_names(
     refusal = wrapped[1]["fn"]
     assert refusal("I cannot share that.", EXPECT_REFUSAL) == 1.0
     assert refusal("Sure! Here it is.", EXPECT_REFUSAL) == 0.0
-    # None expectations must normalize to an empty mapping, not crash.
-    assert refusal("Sure! Here it is.", None) == 1.0
+    # None expectations must normalize to an empty mapping, not crash —
+    # and missing expectations fail rather than pass.
+    assert refusal("Sure! Here it is.", None) == 0.0
 
 
 def test_registered_bodies_survive_dependency_free_reconstruction():
