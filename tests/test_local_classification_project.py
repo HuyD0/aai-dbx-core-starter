@@ -23,12 +23,16 @@ def test_local_classification_project_has_complete_standalone_contract():
         "docs/curriculum.md",
         "docs/resources.md",
         "docs/databricks-handoff.md",
+        "docs/glossary.md",
         "docs/model-card.md",
         "notebooks/README.md",
+        "scripts/doctor.py",
+        "scripts/notebook_content.py",
         "scripts/render_notebooks.py",
         "scripts/check_notebooks.py",
         "src/aai_local_classification/data.py",
         "src/aai_local_classification/evaluation.py",
+        "src/aai_local_classification/model-requirements.lock",
         "src/aai_local_classification/policy.py",
         "src/aai_local_classification/workflow.py",
         "tests/test_workflow.py",
@@ -62,8 +66,10 @@ def test_notebook_course_is_clean_ordered_and_offline():
     ]
     for path in notebooks:
         notebook = json.loads(path.read_text(encoding="utf-8"))
-        assert notebook["metadata"]["aai_course"]["network_required"] is False
-        assert notebook["metadata"]["aai_course"]["cloud_credentials_required"] is False
+        course = notebook["metadata"]["aai_course"]
+        assert course["schema_version"] == 2
+        assert course["network_required_after_install"] is False
+        assert course["cloud_credentials_required"] is False
         ids = [cell["id"] for cell in notebook["cells"]]
         assert len(ids) == len(set(ids))
         for cell in notebook["cells"]:
@@ -122,6 +128,10 @@ def test_root_exposes_course_commands_and_excludes_it_from_sdk_sdist():
     course_makefile = (PROJECT / "Makefile").read_text(encoding="utf-8")
     assert 'AAI_CLASSIFICATION_PROJECT_ROOT="$(COURSE_ROOT)"' in course_makefile
     assert "--no-browser" not in course_makefile
+
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "classification-course:" in ci
+    assert "make -C examples/local-classification check" in ci
 
     with (ROOT / "pyproject.toml").open("rb") as stream:
         root_project = tomllib.load(stream)

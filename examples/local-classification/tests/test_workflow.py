@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import mlflow
 import pytest
 
@@ -9,6 +12,8 @@ from aai_local_classification.inference import load_champion
 from aai_local_classification.settings import PROJECT_ROOT
 from aai_local_classification.tracking import local_paths
 from aai_local_classification.workflow import (
+    _locked_model_requirements,
+    _model_conda_environment,
     get_or_run_candidate_selection,
     load_decision,
     load_selection,
@@ -16,6 +21,51 @@ from aai_local_classification.workflow import (
     run_frozen_test_gate,
     run_full_workflow,
 )
+
+
+def test_logged_model_environment_uses_the_resolved_runtime_closure():
+    environment = _model_conda_environment()
+    dependencies = environment["dependencies"]
+    pip_requirements = dependencies[-1]["pip"]
+
+    assert dependencies[0].startswith("python=")
+    assert dependencies[1].startswith("pip=")
+    assert all("==" in requirement for requirement in pip_requirements)
+    names = {requirement.split("==", 1)[0] for requirement in pip_requirements}
+    assert len(pip_requirements) > 50
+    assert {
+        "joblib",
+        "mlflow",
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "scipy",
+        "skops",
+        "threadpoolctl",
+    } <= names
+
+
+def test_packaged_model_requirements_match_the_certified_uv_lock():
+    result = subprocess.run(
+        [
+            "uv",
+            "export",
+            "--locked",
+            "--no-dev",
+            "--no-emit-project",
+            "--no-hashes",
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    exported = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line and not line.startswith(("#", " "))
+    ]
+    assert _locked_model_requirements() == exported
 
 
 def test_environment_selects_an_isolated_course_workspace(monkeypatch, tmp_path):
@@ -29,14 +79,29 @@ def test_environment_selects_an_isolated_course_workspace(monkeypatch, tmp_path)
     assert paths.state_root == tmp_path.resolve() / ".aai" / "state"
 
 
-def test_complete_local_mlflow_release_and_reload(settings, tmp_path):
+def test_complete_local_mlflow_release_and_reload(settings, tmp_path, caplog):
     result = run_full_workflow(settings, tmp_path)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any(
+        "Failed to resolve installed pip version" in item for item in messages
+    )
+    assert not any("model type looks like" in item for item in messages)
 
     assert result["decision"]["decision"] == PromotionDecision.ADOPT.value
     assert all(result["decision"]["checks"].values())
     assert result["promotion"]["registered"] is True
     assert result["promotion"]["alias"] == "champion"
     assert result["selection"]["selected_candidate"] == "logistic-regression"
+
+    model_info = mlflow.models.get_model_info(result["selection"]["selected_model_uri"])
+    artifact_root = Path(
+        mlflow.artifacts.download_artifacts(artifact_uri=model_info.artifact_path)
+    )
+    logged_requirements = (artifact_root / "requirements.txt").read_text(
+        encoding="utf-8"
+    )
+    assert logged_requirements.splitlines() == _locked_model_requirements()
 
     paths = local_paths(tmp_path)
     assert paths.mlflow_root.joinpath("mlflow.db").is_file()

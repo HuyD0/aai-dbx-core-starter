@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ensurepip
 import json
+import platform
 import warnings
+from importlib.resources import files
 from pathlib import Path
 
 import mlflow
@@ -62,6 +65,38 @@ def _positive_probability(model, features):
 def _representative_example(features):
     complete = features.dropna()
     return (complete if len(complete) >= 5 else features).head(5)
+
+
+def _locked_model_requirements() -> list[str]:
+    """Read the exact runtime closure exported from the certified uv lock."""
+
+    exported = (
+        files("aai_local_classification")
+        .joinpath("model-requirements.lock")
+        .read_text(encoding="utf-8")
+    )
+    requirements = [
+        line.strip()
+        for line in exported.splitlines()
+        if line and not line.startswith(("#", " "))
+    ]
+    if not requirements or any("==" not in item for item in requirements):
+        raise RuntimeError("The packaged model requirement closure is invalid")
+    return requirements
+
+
+def _model_conda_environment() -> dict[str, object]:
+    """Describe the exact environment required to reload a logged model."""
+
+    return {
+        "name": "aai-local-classification-model",
+        "channels": ["conda-forge"],
+        "dependencies": [
+            f"python={platform.python_version()}",
+            f"pip={ensurepip.version()}",
+            {"pip": _locked_model_requirements()},
+        ],
+    }
 
 
 def _write_state(paths, name: str, payload: dict[str, object]) -> Path:
@@ -150,6 +185,7 @@ def _log_sklearn_model(
     return mlflow.sklearn.log_model(
         sk_model=model,
         name="model",
+        conda_env=_model_conda_environment(),
         input_example=_representative_example(features),
         signature=signature,
         serialization_format="skops",
@@ -522,7 +558,10 @@ def run_frozen_test_gate(
         # Native classic evaluation is diagnostic evidence. The explicit gate above
         # remains authoritative because it includes the selected business threshold.
         evaluation_frame = x_test.copy()
-        evaluation_frame[settings.data.target_column] = y_test.to_numpy()
+        # MLflow 3.14's classifier inference recognizes boolean and categorical
+        # labels, but reports integer 0/1 labels as an unknown model type. Boolean
+        # labels preserve the binary meaning and avoid that false warning.
+        evaluation_frame[settings.data.target_column] = y_test.astype(bool).to_numpy()
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -530,13 +569,14 @@ def run_frozen_test_gate(
                 category=UserWarning,
             )
             mlflow.models.evaluate(
-                model=lambda frame: (
-                    _positive_probability(model, frame) >= threshold
-                ).astype(int),
+                model=lambda frame: _positive_probability(model, frame) >= threshold,
                 data=evaluation_frame,
                 targets=settings.data.target_column,
                 model_type="classifier",
-                evaluator_config={"log_model_explainability": False},
+                evaluator_config={
+                    "log_model_explainability": False,
+                    "pos_label": True,
+                },
             )
         mlflow.log_table(slices, "evaluation/recall-slices.json")
         rationale = (
