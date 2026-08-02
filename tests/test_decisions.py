@@ -109,6 +109,15 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
     assert record.as_tags()["prompt_digest"] == "a" * 64
 
 
+def test_prompt_digest_field_accepts_only_a_sha256_hexdigest():
+    # Raw prompt text, user content, or secrets must never reach the
+    # persisted tag through this field.
+    for bad in ("Summarize {{excerpt}} politely.", "A" * 64, "deadbeef", ""):
+        with pytest.raises(ValidationError):
+            _record(prompt_digest=bad)
+    assert _record(prompt_digest="0123456789abcdef" * 4).prompt_digest
+
+
 def test_decision_parses_the_documented_string_vocabulary():
     assert _record(decision="  Reject ").decision is Decision.REJECT
     with pytest.raises(ValidationError):

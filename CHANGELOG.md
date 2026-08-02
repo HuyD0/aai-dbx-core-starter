@@ -10,8 +10,9 @@ All notable changes to `aai-core` are documented here.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
   vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
   passing, metrics-bearing gate whose recorded policy applied at least one
-  release rule; `decided_by` rejects personal emails), and
-  `record_decision()`
+  release rule; `decided_by` rejects personal emails; `prompt_digest`
+  accepts only a sha256 hexdigest so raw prompt text, user content, or
+  secrets cannot enter persisted tags), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
