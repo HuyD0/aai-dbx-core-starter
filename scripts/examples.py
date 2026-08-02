@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -305,12 +306,16 @@ def _config_issues(example: Example) -> list[str]:
                 f"Configure `{dotted_path}` in aai-platform.yml "
                 f"(current value: {value!r})."
             )
-        elif dotted_path in _QUALIFIER_FIELDS and "." in str(value):
-            # The SDK's qualifier validation rejects dotted values; fail the
-            # preflight instead of opening cloud checks that will refuse.
+        elif dotted_path in _QUALIFIER_FIELDS and not re.fullmatch(
+            r"[A-Za-z0-9_-]+", str(value).strip()
+        ):
+            # The SDK's qualifier validation rejects dots and any character
+            # outside the identifier set; fail the preflight instead of
+            # opening cloud checks that will refuse.
             issues.append(
                 f"`{dotted_path}` must be a single Unity Catalog qualifier "
-                f"without dots (current value: {value!r})."
+                "(letters, digits, underscores, and hyphens; no dots) "
+                f"(current value: {value!r})."
             )
     if "platform.experiment_name" not in example.config_fields:
         issue = _effective_experiment_issue(document)

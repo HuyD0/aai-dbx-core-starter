@@ -398,9 +398,10 @@ platform:
     assert "platform.experiment_name" in issues[0]
 
 
-def test_config_preflight_rejects_dotted_qualifiers(runner, tmp_path, monkeypatch):
-    # The SDK helpers reject dotted catalog/schema values; the preflight
-    # must fail before any cloud check instead of opening the notebook.
+def test_config_preflight_rejects_malformed_qualifiers(runner, tmp_path, monkeypatch):
+    # The SDK helpers reject dotted or invalid-character qualifiers; the
+    # preflight must fail before any cloud check instead of opening the
+    # notebook.
     config = tmp_path / "aai-platform.yml"
     config.write_text(
         """
@@ -416,8 +417,19 @@ platform:
     issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
     assert issues == [
         "`platform.catalog` must be a single Unity Catalog qualifier "
-        "without dots (current value: 'main.extra')."
+        "(letters, digits, underscores, and hyphens; no dots) "
+        "(current value: 'main.extra')."
     ]
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "catalog: main.extra", "catalog: main catalog"
+        ),
+        encoding="utf-8",
+    )
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "'main catalog'" in issues[0]
 
 
 def test_connect_creates_local_config_once(runner, tmp_path, monkeypatch, capsys):

@@ -304,6 +304,8 @@ class PromptManager:
         )
 
     def qualify(self, name: str) -> str:
+        from aai_core.evaluation import _is_placeholder
+
         cleaned = str(name).strip()
         parts = cleaned.split(".")
         if len(parts) == 1:
@@ -316,10 +318,20 @@ class PromptManager:
                     "Prompt names may contain only letters, digits, "
                     f"underscores, and hyphens; got {cleaned!r}"
                 )
+            if _is_placeholder(cleaned):
+                raise ValueError(f"Prompt names must not be placeholders; got {name!r}")
             catalog = _registry_qualifier("catalog", self.catalog)
             schema = _registry_qualifier("schema", self.schema)
             return f"{catalog}.{schema}.{cleaned}"
         if len(parts) == 3 and all(fullmatch(_NAME_COMPONENT, part) for part in parts):
+            # Explicit qualification is not an escape hatch from the
+            # placeholder vocabulary: unset.app.prompt is as unconfigured
+            # as the derived form.
+            if any(_is_placeholder(part) for part in parts):
+                raise ValueError(
+                    "Qualified prompt names must not contain placeholder "
+                    f"components; got {name!r}"
+                )
             return cleaned
         raise ValueError("Prompt names must be unqualified or catalog.schema.name")
 

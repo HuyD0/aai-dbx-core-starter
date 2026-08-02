@@ -202,6 +202,11 @@ def test_qualify_rejects_blank_and_malformed_names():
         "monthly summary",
         "main. app.prompt",
         "main.app.name with spaces",
+        # Explicit qualification is not an escape hatch from the
+        # placeholder vocabulary.
+        "unset.app.prompt",
+        "replace-with-catalog.app.prompt",
+        "unset",
     ):
         with pytest.raises(ValueError):
             manager.qualify(bad)
