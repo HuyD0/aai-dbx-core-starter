@@ -481,6 +481,16 @@ print(
 # MAGIC - **Per field, not aggregate** — a single accuracy number hides
 # MAGIC   everything.
 # MAGIC - **Per stratum, not pooled** — this is what catches clustered failure.
+# MAGIC - **The all-strata figure is population-weighted, never pooled.**
+# MAGIC   Stage 3 deliberately over-sampled `legacy_scan` by about 19×, so
+# MAGIC   simply pooling the sample's rows would describe a population that
+# MAGIC   does not exist — one that is 38% hard documents instead of 2%.
+# MAGIC   Each stratum is therefore weighted back to its true share, and the
+# MAGIC   interval is widened for the unequal sampling (a design effect):
+# MAGIC   the weighted variance is converted to an *effective sample size*
+# MAGIC   and the Wilson interval taken at that n. Reporting a raw pooled
+# MAGIC   proportion from a stratified sample is a real and common error —
+# MAGIC   it silently answers a question nobody asked.
 # MAGIC - **Precision and recall separately** — extraction fails two different
 # MAGIC   ways. Precision asks: of the values the model *asserted*, how many
 # MAGIC   were right (hallucination control)? Recall asks: of the values that
@@ -615,16 +625,29 @@ def evaluation_records(version: str, prompt: str) -> list:
     )
     live = live_extraction(prompt, version, SAMPLE_TABLE) if not SIMULATED else {}
     records = []
+    failed = 0
     for row in sample:
         gold = {name: row[f"gold_{name}"] for name in FIELD_NAMES}
+        abstained: set[str] = set()
         if SIMULATED:
             predicted, abstained = simulate_extraction(
                 row.doc_id, row.layout, gold, version
             )
         else:
-            parsed = live[row.doc_id].parsed
-            predicted = {name: parsed[name] for name in FIELD_NAMES}
-            abstained = set(parsed["abstained_fields"] or [])
+            result = live[row.doc_id]
+            parsed = result.parsed
+            if parsed is None:
+                # failOnError => false nulls the response for a failed row,
+                # so `parsed` is null. One poisoned document must not abort
+                # the whole gate: score it as producing no value — a miss
+                # for recall, no assertion for precision — and report the
+                # count. Deliberately NOT counted as an abstention: the
+                # model did not decline, the call failed.
+                failed += 1
+                predicted = dict.fromkeys(FIELD_NAMES)
+            else:
+                predicted = {name: parsed[name] for name in FIELD_NAMES}
+                abstained = set(parsed["abstained_fields"] or [])
         records.append(
             gbi.EvaluationRecord(
                 stratum=row.layout,
@@ -633,6 +656,10 @@ def evaluation_records(version: str, prompt: str) -> list:
                 abstained=frozenset(abstained),
             )
         )
+    if failed:
+        # A high rate here means the evidence is thin for infrastructure
+        # reasons, not model reasons — investigate before trusting the gate.
+        print(f"WARNING: {failed}/{len(sample)} sample rows failed inference")
     return records
 
 
@@ -660,7 +687,7 @@ def scores_frame(scores) -> pd.DataFrame:
 
 
 records_v1 = evaluation_records("1.0.0", PROMPT_V1)
-scores_v1 = gbi.score_extraction(records_v1, spec_v1)
+scores_v1 = gbi.score_extraction(records_v1, spec_v1, population)
 print(
     "Tolerances in force (declared in stage 1, before any of these numbers "
     "existed):",
@@ -693,7 +720,7 @@ point estimate.""")
 
 # The same situation usually occurs naturally in this very evaluation:
 for score in scores_v1:
-    if score.stratum == gbi.POOLED or score.precision is None:
+    if score.stratum == gbi.WEIGHTED or score.precision is None:
         continue
     required = spec_v1.field_named(score.field).required_rate
     interval = score.precision
@@ -711,14 +738,22 @@ for score in scores_v1:
 # MAGIC ## Interlude — what a naive random sample would have told you
 # MAGIC
 # MAGIC The central lesson. Score a **proportional** random sample of the same
-# MAGIC size, pooled — the way this validation is usually done when it is done
-# MAGIC at all. Every field sails past its tolerance, because ~2% of a
-# MAGIC proportional sample is `legacy_scan` and its failures drown in the
-# MAGIC average. Same model, same documents, same tolerances: "ship it."
+# MAGIC size and look at the all-strata figure — the way this validation is
+# MAGIC usually done when it is done at all. Every field sails past its
+# MAGIC tolerance. Same model, same documents, same tolerances: "ship it."
+# MAGIC
+# MAGIC Note what is *not* wrong with that number: it is a perfectly good
+# MAGIC estimate of the population error rate. That is the trap. A population
+# MAGIC aggregate cannot fail on a segment holding 2% of the rows — the
+# MAGIC arithmetic will not let it, no matter how broken that segment is. The
+# MAGIC naive sample compounds this by containing only a handful of
+# MAGIC `legacy_scan` rows, far too few to say anything about them even if
+# MAGIC someone thought to look.
 # MAGIC
 # MAGIC The stratified per-stratum table above says the opposite for the one
-# MAGIC population segment that matters. Aggregate accuracy is irrelevant when
-# MAGIC the failures concentrate in non-standard filings.
+# MAGIC population segment that matters. Aggregate accuracy — however
+# MAGIC correctly computed — is the wrong question when the failures
+# MAGIC concentrate in non-standard filings.
 
 # COMMAND ----------
 
@@ -747,16 +782,16 @@ for row in naive_rows:
         )
     )
 
-naive_scores = gbi.score_extraction(naive_records, spec_v1)
+naive_scores = gbi.score_extraction(naive_records, spec_v1, population)
 naive_layout_mix = pd.Series(
     [record.stratum for record in naive_records]
 ).value_counts()
 print(f"naive sample stratum mix:\n{naive_layout_mix}\n")
-naive_pooled = scores_frame(
-    [score for score in naive_scores if score.stratum == gbi.POOLED]
+naive_aggregate = scores_frame(
+    [score for score in naive_scores if score.stratum == gbi.WEIGHTED]
 )
-print("naive pooled view — every lower bound clears its tolerance:")
-display(naive_pooled)
+print("naive population-level view — every lower bound clears its tolerance:")
+display(naive_aggregate)
 
 # COMMAND ----------
 
@@ -765,13 +800,20 @@ display(naive_pooled)
 # MAGIC
 # MAGIC Per field: compare the Wilson **lower bound** against the tolerance
 # MAGIC declared in stage 1. For `criticality: high` fields the gate uses the
-# MAGIC **worst-performing stratum**, never the weighted average. Three
-# MAGIC outcomes are possible, and they are different:
+# MAGIC **worst-performing stratum**, never any aggregate. Medium and low
+# MAGIC fields are judged on the population-weighted estimate instead —
+# MAGIC that is what their criticality means. Three outcomes are possible,
+# MAGIC and they are different:
 # MAGIC
-# MAGIC - `adopt` — the evidence clears the declared bar;
-# MAGIC - `reject` — the evidence shows the bar is missed;
-# MAGIC - `inconclusive` — the sample cannot support a decision either way
-# MAGIC   (label more rows; the model has not been shown to be bad).
+# MAGIC - `adopt` — the interval's lower bound clears the declared bar;
+# MAGIC - `reject` — the bar was not demonstrated. Decisively so when the
+# MAGIC   interval's *upper* bound also sits below it: 0/30 and 30/30 are
+# MAGIC   both too small to pass, but only 30/30 is uninformative. Telling
+# MAGIC   someone to "label more rows" when the model got nothing right
+# MAGIC   would waste a week to confirm what the first 30 rows established;
+# MAGIC - `inconclusive` — the interval straddles the bar and the group is
+# MAGIC   too small for any result to clear it. Label more rows; the model
+# MAGIC   has not been shown to be bad.
 # MAGIC
 # MAGIC The outcome, evidence, and approver are logged as an MLflow run — the
 # MAGIC gate artifact everything else joins back to.
@@ -834,7 +876,7 @@ spec_v2 = gbi.BatchInferenceSpec.from_yaml(
 )
 
 records_v2 = evaluation_records("2.0.0", PROMPT_V2)
-scores_v2 = gbi.score_extraction(records_v2, spec_v2)
+scores_v2 = gbi.score_extraction(records_v2, spec_v2, population)
 report_v2 = gbi.evaluate_gate(spec_v2, scores_v2)
 
 gate_run = mlflow.start_run(run_name=f"{spec_v2.name}-prompt-2.0.0-gate")
@@ -843,7 +885,7 @@ gbi.log_gate_evidence(spec_v2, estimate, allocation, scores_v2, report_v2)
 
 print(f"gate decision for prompt 2.0.0: {report_v2.decision.value}")
 display(
-    scores_frame([s for s in scores_v2 if s.stratum != gbi.POOLED]).sort_values(
+    scores_frame([s for s in scores_v2 if s.stratum != gbi.WEIGHTED]).sort_values(
         ["field", "stratum", "metric"]
     )
 )
@@ -918,7 +960,7 @@ spec_tier1 = gbi.BatchInferenceSpec.model_validate(
 # Same labelled sample, same model outputs, different spec revision — so
 # the scores are re-derived for the release actually being gated.
 tier1_report = gbi.evaluate_gate(
-    spec_tier1, gbi.score_extraction(records_v2, spec_tier1)
+    spec_tier1, gbi.score_extraction(records_v2, spec_tier1, population)
 )
 print(f"tier 1 decision with fully passing evidence: {tier1_report.decision.value}")
 for obligation in tier1_report.human_review_obligations:
@@ -984,6 +1026,7 @@ print(execute_sql[:1200] + "\n…")
 # "Pending" is release-aware: rows already landed *by this release* are
 # done; rows landed by an older prompt or model are not.
 release_predicate = f"""
+      AND done.ai_spec_digest = {gbi.sql_string_literal(spec_v2.spec_digest)}
       AND done.ai_model_version = {gbi.sql_string_literal(spec_v2.model_version)}
       AND done.ai_prompt_version = {gbi.sql_string_literal(spec_v2.prompt_version)}
 """
@@ -1028,6 +1071,7 @@ else:
         )
         record["ai_error"] = None
         record["ai_run_id"] = RUN_ID
+        record["ai_spec_digest"] = spec_v2.spec_digest
         record["ai_model_version"] = spec_v2.model_version
         record["ai_prompt_version"] = spec_v2.prompt_version
         output_rows.append(record)

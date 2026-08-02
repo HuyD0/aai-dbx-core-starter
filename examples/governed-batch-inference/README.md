@@ -48,35 +48,49 @@ abstention path) then passes the same gate on the same terms.
    n=100 the lower bound is ≈0.915. Gating on point estimates is the most
    common silent failure of this pattern.
 3. **`criticality: high` fields gate on the worst-performing stratum, never
-   the weighted average.** Aggregate accuracy is irrelevant when the failures
-   concentrate in the one segment that matters.
-4. **Precision and recall are reported separately.** Extraction fails two
+   an aggregate.** Aggregate accuracy is irrelevant when the failures
+   concentrate in the one segment that matters — and a population aggregate
+   *cannot* fail on a segment holding 2% of the rows, however broken it is.
+4. **The all-strata figure is population-weighted, never pooled.** The
+   sample deliberately over-samples rare strata, so pooling its rows would
+   describe a population that does not exist. Each stratum is weighted back
+   to its true share and the interval widened for the unequal sampling (a
+   design effect, applied by converting the weighted variance to an
+   effective sample size). Medium- and low-criticality fields gate on that.
+5. **Precision and recall are reported separately.** Extraction fails two
    ways — hallucinating and missing — and a single accuracy figure hides
    whichever one your consumers care about. Abstention hurts recall, never
    precision: that asymmetry is what makes the abstention path the single
    highest-value change to an extraction pipeline.
-5. **Insufficient evidence is `inconclusive`, not `reject` — and not a pass.**
-   If even a flawless sample of the stratum's size could not clear the bar
-   (lower bound of n/n caps at n/(n+z²)), the verdict is "label more rows".
-6. **Tier 1 cannot be auto-approved.** A fully passing result returns
+6. **Insufficient evidence is `inconclusive`; a demonstrated failure is
+   `reject`; neither is a pass.** If the interval straddles the bar and even
+   a flawless sample of that size could not clear it (the lower bound of n/n
+   caps at n/(n+z²)), the verdict is "label more rows". But if the whole
+   interval sits *below* the bar, that is a rejection however small the
+   sample: 0/30 and 30/30 are the same size and not the same evidence.
+7. **Tier 1 cannot be auto-approved.** A fully passing result returns
    `pending_approval`; a named human accepts residual risk via
    `approve_gate`, abstentions get human review, and a rollback path is on
    file. Approval can never resurrect a rejection.
-7. **Execution is refused without an adopting gate for the exact spec
+8. **Execution is refused without an adopting gate for the exact spec
    digest** (`require_executable`), and the run is idempotent: an anti-join
    selects only unlanded rows, so a partial failure restarts by re-running
    the same statement.
-8. **Evidence belongs to the release that produced it.** Scores carry a
+9. **Evidence belongs to the release that produced it.** Scores carry a
    release stamp (spec digest, model version, prompt version) and the
    declared confidence level; the gate refuses anything else. Re-using the
    last passing evaluation for a changed prompt — "we tested this, it was
    fine" — is exactly the shortcut this blocks. Re-scoring is arithmetic
    over records you already hold, so the strict rule is cheap to satisfy.
-9. **A new release reprocesses the table.** The restart anti-join matches
-   on the key *and* the model and prompt versions, and the write is a
-   `MERGE`. Matching on the key alone would let a newly gated release
-   report success while every row still carried the previous release's
-   values and provenance.
+10. **A new release reprocesses the table.** The restart anti-join matches
+    on the key *and* the full release identity — spec digest, model
+    version, prompt version — and the write is a `MERGE`. Matching on the
+    key alone would let a newly gated release report success while every
+    row still carried the previous release's values and provenance;
+    matching on model and prompt alone would do the same whenever the spec
+    changed while those labels held still. Bump `spec_version` when a code
+    change alters what the pipeline produces, since the digest covers the
+    spec rather than the module.
 
 ## Adapting it to a new use case
 

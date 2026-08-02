@@ -15,8 +15,9 @@ of the governed pipeline demonstrated in ``example_notebook.py``:
   confidence intervals.
 - A gate that compares the *lower bound* of the interval — never the point
   estimate — against the declared tolerance, and for ``criticality: high``
-  fields gates on the *worst-performing stratum*, never the weighted
-  average.
+  fields gates on the *worst-performing stratum*, never an aggregate.
+  Lower-criticality fields use a population-weighted estimate, because the
+  raw pool of a stratified sample describes no real population.
 - Evidence bound to the release that produced it: scores carry a
   ``ReleaseIdentity`` and the gate refuses numbers measured for a
   different prompt, model, or spec revision.
@@ -50,11 +51,30 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # Constants and small helpers
 # ---------------------------------------------------------------------------
 
-#: Stratum label used for scores computed over the whole (pooled) sample.
-POOLED = "__pooled__"
+#: Label for the population-weighted estimate across all strata. It is not
+#: a raw pool of the sample: a stratified sample deliberately over-weights
+#: rare strata, so pooling its rows estimates nothing about the population.
+WEIGHTED = "__population_weighted__"
 
 #: Prefix that travels with AI-derived columns through a ``SELECT *``.
 AI_COLUMN_PREFIX = "ai_"
+
+#: Provenance columns every landed row carries, beside the extracted values.
+PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("ai_abstained_fields", "ARRAY<STRING>"),
+    ("ai_abstain_reason", "STRING"),
+    ("ai_error", "STRING"),
+    ("ai_run_id", "STRING"),
+    ("ai_spec_digest", "STRING"),
+    ("ai_model_version", "STRING"),
+    ("ai_prompt_version", "STRING"),
+    ("ai_executed_at", "TIMESTAMP"),
+)
+
+#: Response-schema keys the extraction contract reserves for itself. Each
+#: has a matching ``ai_``-prefixed provenance column above, which is what
+#: makes the column collision check cover the response schema as well.
+RESERVED_RESPONSE_KEYS = frozenset({"abstained_fields", "abstain_reason"})
 
 #: Rough characters-per-token used for pre-run cost estimation. This is an
 #: estimate, not a measurement: exact tokenization is model-specific and
@@ -79,6 +99,17 @@ def _require_three_part_name(value: str, what: str) -> str:
     for part in parts:
         _require_identifier(part, f"{what} part")
     return value
+
+
+def ai_column(field_name: str) -> str:
+    """Layer 1 of provenance: a prefix that survives ``SELECT *``."""
+    return f"{AI_COLUMN_PREFIX}{field_name}"
+
+
+def _generated_column_names(field_name: str) -> tuple[str, ...]:
+    """The three target columns one extracted field expands into."""
+    name = ai_column(field_name)
+    return (name, f"{name}_confidence", f"{name}_abstained")
 
 
 def sql_string_literal(text: str) -> str:
@@ -228,7 +259,43 @@ class BatchInferenceSpec(BaseModel):
             raise ValueError(
                 "tier 1 (consequential) requires a documented rollback_plan"
             )
+        self._reject_expanded_name_collisions()
         return self
+
+    def _reject_expanded_name_collisions(self) -> None:
+        """Unique field names are not enough — the *expanded* names must be
+        unique too.
+
+        Each field becomes three target columns, so distinct fields can
+        still collide: a field named ``error`` produces ``ai_error``, which
+        is a provenance column, and fields ``x`` and ``x_confidence`` both
+        produce ``ai_x_confidence``. Catch it here, at the configuration
+        boundary, rather than as a confusing SQL error or — worse — a
+        silently overwritten provenance column.
+
+        Checking the columns is enough to cover the response schema too:
+        the ``ai_`` prefix is injective and every response key maps onto a
+        checked column, so a duplicate response key cannot exist without a
+        duplicate column.
+        """
+        seen: dict[str, str] = {}
+
+        def claim(name: str, owner: str) -> None:
+            if name in seen:
+                raise ValueError(
+                    f"name collision: {owner} and {seen[name]} both produce "
+                    f"{name!r}. Rename one of the fields."
+                )
+            seen[name] = owner
+
+        claim(self.key_column, "the key column")
+        for column in self.strata:
+            claim(column, f"stratum column {column!r}")
+        for name, _ in PROVENANCE_COLUMNS:
+            claim(name, "a reserved provenance column")
+        for field in self.fields:
+            for column in _generated_column_names(field.name):
+                claim(column, f"field {field.name!r}")
 
     def field_named(self, name: str) -> FieldSpec:
         for field in self.fields:
@@ -532,6 +599,11 @@ class FieldStratumScore(BaseModel):
     *at what confidence level*, so the gate can refuse evidence produced
     for a different release or computed at a different level than the spec
     declares.
+
+    On the ``WEIGHTED`` row the counts remain raw sample totals, while the
+    intervals are the population-weighted estimate expressed through an
+    effective sample size — so ``precision.trials`` there is that
+    effective n, not a row count.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -622,11 +694,55 @@ def _score_group(
     )
 
 
+def _weighted_interval(
+    per_stratum: Sequence[tuple[float, int, int]],
+    confidence: float,
+) -> ConfidenceInterval | None:
+    """Combine per-stratum rates into one population-level interval.
+
+    ``per_stratum`` is ``(population_weight, successes, denominator)`` per
+    stratum. The estimate is the standard stratified one,
+    ``p̂ = Σ wₕ p̂ₕ`` with ``wₕ`` normalised population weights, and its
+    variance is ``V = Σ wₕ² p̂ₕ(1-p̂ₕ)/nₕ``.
+
+    Rather than report a Wald interval — which misbehaves exactly where
+    this pipeline lives, near a rate of 1 and at small n — the variance is
+    converted to an *effective sample size*, ``n_eff = p̂(1-p̂)/V``, and the
+    Wilson interval is taken at ``(p̂·n_eff, n_eff)``. That is the usual
+    design-effect correction: it keeps the interval inside [0, 1], stays
+    sensible at 100 percent observed success, and shrinks the interval by
+    exactly the amount the unequal sampling probabilities justify. When
+    every stratum rate is 0 or 1 the variance vanishes, and the design's
+    own effective size ``1/Σ(wₕ²/nₕ)`` is used instead.
+    """
+    usable = [(w, s, n) for w, s, n in per_stratum if n > 0 and w > 0]
+    if not usable:
+        return None
+    total_weight = sum(weight for weight, _, _ in usable)
+    normalised = [(weight / total_weight, s, n) for weight, s, n in usable]
+
+    estimate = sum(weight * (s / n) for weight, s, n in normalised)
+    variance = sum(
+        weight**2 * (s / n) * (1.0 - s / n) / n for weight, s, n in normalised
+    )
+    design_size = 1.0 / sum(weight**2 / n for weight, _, n in normalised)
+    if variance > 0.0 and 0.0 < estimate < 1.0:
+        effective = estimate * (1.0 - estimate) / variance
+    else:
+        effective = design_size
+    # Never claim more evidence than was actually labelled.
+    effective = min(effective, float(sum(n for _, _, n in usable)))
+    trials = max(1, round(effective))
+    successes = min(trials, max(0, round(estimate * trials)))
+    return wilson_interval(successes, trials, confidence)
+
+
 def score_extraction(
     records: Sequence[EvaluationRecord],
     spec: BatchInferenceSpec,
+    stratum_population: Mapping[str, int],
 ) -> tuple[FieldStratumScore, ...]:
-    """Score every field in every stratum, plus a pooled row per field.
+    """Score every field in every stratum, plus one population-weighted row.
 
     Precision — of the values the model *asserted*, how many were right —
     and recall — of the values that truly exist, how many were correctly
@@ -637,10 +753,13 @@ def score_extraction(
     against precision (nothing false was asserted): the abstention path
     converts silent errors into visible work.
 
-    The pooled row (stratum ``POOLED``) is reported for context only. A
-    stratified sample deliberately over-weights rare strata, so its pooled
-    proportion estimates nothing about the population — and the gate for
-    high-criticality fields never uses it.
+    ``stratum_population`` is the row count of each stratum in the *source
+    table* — the same mapping handed to ``allocate_stratified_sample``. It
+    is required because the sample is not a simple random sample: rare
+    strata are deliberately over-sampled, so pooling the sample's rows
+    would estimate the population rate of nothing. The ``WEIGHTED`` row
+    re-weights each stratum back to its true share, which is what the gate
+    uses for medium- and low-criticality fields.
 
     The fields, the confidence level, and the release stamp all come from
     ``spec``. Passing the spec rather than a loose field list and a
@@ -655,13 +774,75 @@ def score_extraction(
     by_stratum: dict[str, list[EvaluationRecord]] = {}
     for record in records:
         by_stratum.setdefault(record.stratum, []).append(record)
+
+    unknown = sorted(set(by_stratum) - set(stratum_population))
+    if unknown:
+        raise ValueError(
+            f"sampled strata {unknown} have no population count; the "
+            "population-weighted estimate cannot be computed without one"
+        )
+    unmeasured = sorted(
+        stratum
+        for stratum, count in stratum_population.items()
+        if count > 0 and stratum not in by_stratum
+    )
+    if unmeasured:
+        raise ValueError(
+            f"strata {unmeasured} exist in the population but not in the "
+            "sample; there is no evidence about them. Sample them or "
+            "restate the population deliberately."
+        )
+
     scores: list[FieldStratumScore] = []
     for field in spec.fields:
-        for stratum in sorted(by_stratum):
-            scores.append(
-                _score_group(field, stratum, by_stratum[stratum], confidence, release)
+        per_stratum = [
+            _score_group(field, stratum, by_stratum[stratum], confidence, release)
+            for stratum in sorted(by_stratum)
+        ]
+        scores.extend(per_stratum)
+
+        # Weight each stratum by the population share of the rows that
+        # actually enter the metric: for precision that is the estimated
+        # population of asserted values, for recall the estimated
+        # population of true values. Both collapse to the plain population
+        # share when the rates are equal across strata.
+        precision_inputs = []
+        recall_inputs = []
+        for score in per_stratum:
+            population = float(stratum_population[score.stratum])
+            share = population / score.n_rows if score.n_rows else 0.0
+            precision_inputs.append(
+                (share * score.n_asserted, score.n_correct, score.n_asserted)
             )
-        scores.append(_score_group(field, POOLED, records, confidence, release))
+            recall_inputs.append((share * score.n_gold, score.n_correct, score.n_gold))
+        # The abstention rate is a population rate too, so it is weighted
+        # the same way rather than pooled.
+        measured = [score for score in per_stratum if score.n_rows]
+        population_total = sum(stratum_population[s.stratum] for s in measured)
+        weighted_abstention = (
+            sum(
+                stratum_population[score.stratum] * score.abstention_rate
+                for score in measured
+            )
+            / population_total
+            if population_total
+            else 0.0
+        )
+        scores.append(
+            FieldStratumScore(
+                field=field.name,
+                stratum=WEIGHTED,
+                release=release,
+                confidence=confidence,
+                n_rows=sum(score.n_rows for score in per_stratum),
+                n_gold=sum(score.n_gold for score in per_stratum),
+                n_asserted=sum(score.n_asserted for score in per_stratum),
+                n_correct=sum(score.n_correct for score in per_stratum),
+                precision=_weighted_interval(precision_inputs, confidence),
+                recall=_weighted_interval(recall_inputs, confidence),
+                abstention_rate=weighted_abstention,
+            )
+        )
     return tuple(scores)
 
 
@@ -707,22 +888,52 @@ def _gate_metric(
     metric: str,
     required: float,
 ) -> tuple[GateDecision, str | None, float | None, float | None]:
-    """Judge one metric in one stratum. Returns (decision, reason, lower, point).
+    """Judge one metric in one group. Returns (decision, reason, lower, point).
 
-    Inconclusive is distinct from reject: when the sample is so small that
-    even a flawless result could not clear the bar (max achievable lower
-    bound = n/(n+z²) < required), the evidence is insufficient — label more
-    rows; the model has not been shown to be bad.
+    Three outcomes, in the order they are decided:
+
+    1. ``adopt`` — the interval's lower bound clears the tolerance.
+    2. ``reject`` — the interval's *upper* bound is below the tolerance.
+       Even the optimistic end of the estimate misses the bar, so this is
+       a demonstrated failure and more labelling will not rescue it. This
+       test comes before the power check on purpose: 0/30 and 30/30 are
+       both "too small to pass", but only one of them is uninformative.
+    3. ``inconclusive`` — the interval straddles the tolerance and the
+       group is too small for any result to clear it (a flawless n/n tops
+       out at a lower bound of n/(n+z²)). The evidence is insufficient;
+       label more rows. The model has not been shown to be bad.
+
+    Anything else — straddling with adequate power — is a ``reject``: the
+    run did not demonstrate the declared rate, and the default is not to
+    ship.
     """
+    where = (
+        "the population-weighted estimate"
+        if score.stratum == WEIGHTED
+        else f"stratum {score.stratum!r}"
+    )
     if interval is None:
         return (
             GateDecision.INCONCLUSIVE,
-            f"no {metric} evidence in stratum {score.stratum!r}",
+            f"no {metric} evidence for {where}",
             None,
             None,
         )
     if interval.lower >= required:
         return (GateDecision.ADOPT, None, interval.lower, interval.point)
+    if interval.upper < required:
+        return (
+            GateDecision.REJECT,
+            (
+                f"{metric} for {where}: the whole interval "
+                f"[{interval.lower:.4f}, {interval.upper:.4f}] sits below the "
+                f"required {required:.4f} ({interval.successes}/"
+                f"{interval.trials}) — a demonstrated failure, not a small "
+                "sample; more labelling will not change it"
+            ),
+            interval.lower,
+            interval.point,
+        )
     best_possible = wilson_interval(
         interval.trials, interval.trials, interval.confidence
     ).lower
@@ -730,10 +941,10 @@ def _gate_metric(
         return (
             GateDecision.INCONCLUSIVE,
             (
-                f"{metric} in stratum {score.stratum!r} has only "
-                f"{interval.trials} labelled rows; even a flawless sample "
-                f"tops out at a lower bound of {best_possible:.4f} < "
-                f"{required:.4f} — insufficient evidence, label more rows"
+                f"{metric} for {where} has only {interval.trials} labelled "
+                f"rows; even a flawless sample tops out at a lower bound of "
+                f"{best_possible:.4f} < {required:.4f} — insufficient "
+                "evidence, label more rows"
             ),
             interval.lower,
             interval.point,
@@ -741,7 +952,7 @@ def _gate_metric(
     return (
         GateDecision.REJECT,
         (
-            f"{metric} in stratum {score.stratum!r}: lower bound "
+            f"{metric} for {where}: lower bound "
             f"{interval.lower:.4f} < required {required:.4f} "
             f"(point estimate {interval.point:.4f} from "
             f"{interval.successes}/{interval.trials} — the point estimate "
@@ -759,12 +970,14 @@ def _gate_field(
     required = field.required_rate
     # criticality: high → every stratum must clear the bar on its own.
     # Aggregate performance is irrelevant if the failures concentrate in
-    # the one stratum that matters, so the weighted average never appears
-    # here. medium / low → the pooled sample decides.
+    # the one stratum that matters, so no average appears here at all.
+    # medium / low → the population-weighted estimate decides. Never the
+    # raw pool of a stratified sample, which over-weights rare strata and
+    # so estimates nothing about the population.
     if field.criticality == Criticality.HIGH:
-        considered = [score for score in scores if score.stratum != POOLED]
+        considered = [score for score in scores if score.stratum != WEIGHTED]
     else:
-        considered = [score for score in scores if score.stratum == POOLED]
+        considered = [score for score in scores if score.stratum == WEIGHTED]
     if not considered:
         raise ValueError(f"no scores supplied for field {field.name!r}")
 
@@ -942,11 +1155,6 @@ def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> N
 # ---------------------------------------------------------------------------
 
 
-def ai_column(field_name: str) -> str:
-    """Layer 1 of provenance: a prefix that survives ``SELECT *``."""
-    return f"{AI_COLUMN_PREFIX}{field_name}"
-
-
 def response_format(spec: BatchInferenceSpec) -> dict:
     """The ``responseFormat`` JSON schema for ``ai_query`` structured output.
 
@@ -1041,21 +1249,11 @@ def target_columns(spec: BatchInferenceSpec) -> tuple[tuple[str, str], ...]:
     columns: list[tuple[str, str]] = [(spec.key_column, "STRING")]
     columns.extend((column, "STRING") for column in spec.strata)
     for field in spec.fields:
-        name = ai_column(field.name)
-        columns.append((name, "STRING"))
-        columns.append((f"{name}_confidence", "DOUBLE"))
-        columns.append((f"{name}_abstained", "BOOLEAN"))
-    columns.extend(
-        [
-            ("ai_abstained_fields", "ARRAY<STRING>"),
-            ("ai_abstain_reason", "STRING"),
-            ("ai_error", "STRING"),
-            ("ai_run_id", "STRING"),
-            ("ai_model_version", "STRING"),
-            ("ai_prompt_version", "STRING"),
-            ("ai_executed_at", "TIMESTAMP"),
-        ]
-    )
+        value, confidence, abstained = _generated_column_names(field.name)
+        columns.append((value, "STRING"))
+        columns.append((confidence, "DOUBLE"))
+        columns.append((abstained, "BOOLEAN"))
+    columns.extend(PROVENANCE_COLUMNS)
     return tuple(columns)
 
 
@@ -1077,13 +1275,20 @@ def build_execute_sql(
       is to submit the remaining set as one query — AI Functions manage
       parallelization and retries — rather than hand-chunking it.
     - **Release awareness**: that anti-join matches on the key *and* the
-      model and prompt versions. A prompt or model change is a new
-      application release, so rows carrying an older release must be
-      reprocessed — a key-only anti-join would skip every previously
-      landed row and let a newly gated release report success while the
-      table still held the old release's values and provenance. The MERGE
-      then updates those stale rows in place and inserts genuinely new
+      full release identity — spec digest, model version, prompt version.
+      Any of those changing is a new application release, so rows carrying
+      an older one must be reprocessed. A key-only anti-join would skip
+      every previously landed row and let a newly gated release report
+      success while the table still held the old release's values and
+      provenance; matching on model and prompt alone would do the same
+      whenever the spec changed while those two labels stayed put (new
+      abstention threshold, changed field set, edited instructions). The
+      MERGE then updates stale rows in place and inserts genuinely new
       keys, keeping one current row per key.
+
+      The digest covers the spec, not this module's code. Bump
+      ``spec_version`` when a code change alters what the pipeline
+      produces — that is what makes the release identity honest.
     - ``failOnError => false`` keeps one poisoned document from killing
       the run; its error message lands in ``ai_error`` and the row flows
       to the exception queue instead of blocking everything else. The
@@ -1091,17 +1296,18 @@ def build_execute_sql(
     """
     value_lines = []
     for field in spec.fields:
-        name = ai_column(field.name)
-        value_lines.append(f"    parsed.{field.name} AS {name}")
-        value_lines.append(f"    parsed.{field.name}_confidence AS {name}_confidence")
+        value, confidence, abstained = _generated_column_names(field.name)
+        value_lines.append(f"    parsed.{field.name} AS {value}")
+        value_lines.append(f"    parsed.{field.name}_confidence AS {confidence}")
         value_lines.append(
             f"    coalesce(array_contains(parsed.abstained_fields, "
-            f"'{field.name}'), false) AS {name}_abstained"
+            f"'{field.name}'), false) AS {abstained}"
         )
     value_block = ",\n".join(value_lines)
     pending_strata = "".join(f", source.{column}" for column in spec.strata)
     plain_strata = "".join(f", {column}" for column in spec.strata)
     struct_type = sql_string_literal(response_struct_type(spec))
+    digest_literal = sql_string_literal(spec.spec_digest)
     model_literal = sql_string_literal(spec.model_version)
     prompt_literal = sql_string_literal(spec.prompt_version)
     return f"""MERGE INTO {spec.target_table} AS target
@@ -1111,6 +1317,7 @@ USING (
     FROM {spec.source_table} AS source
     LEFT ANTI JOIN {spec.target_table} AS done
       ON source.{spec.key_column} = done.{spec.key_column}
+     AND done.ai_spec_digest = {digest_literal}
      AND done.ai_model_version = {model_literal}
      AND done.ai_prompt_version = {prompt_literal}
   ),
@@ -1139,6 +1346,7 @@ USING (
     parsed.abstain_reason AS ai_abstain_reason,
     error_message AS ai_error,
     {sql_string_literal(run_id)} AS ai_run_id,
+    {digest_literal} AS ai_spec_digest,
     {model_literal} AS ai_model_version,
     {prompt_literal} AS ai_prompt_version,
     current_timestamp() AS ai_executed_at

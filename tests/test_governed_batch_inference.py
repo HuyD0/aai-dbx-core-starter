@@ -114,9 +114,19 @@ def one_field_spec(criticality="high", tolerable_error_rate=0.05, **overrides):
     )
 
 
-def score(records, spec):
-    """Scoring is always bound to the spec being gated."""
-    return gbi.score_extraction(records, spec)
+def score(records, spec, population=None):
+    """Scoring is bound to the spec being gated and to the population.
+
+    Default population: each sampled stratum weighted by its own sample
+    size, i.e. the sample is treated as proportional. Tests that care
+    about weighting pass a real population.
+    """
+    if population is None:
+        counts: dict[str, int] = {}
+        for record in records:
+            counts[record.stratum] = counts.get(record.stratum, 0) + 1
+        population = counts
+    return gbi.score_extraction(records, spec, population)
 
 
 # ---------------------------------------------------------------------------
@@ -235,8 +245,8 @@ def test_scores_include_pooled_and_per_stratum_rows():
     records = records_for("a", correct=5) + records_for("b", correct=5, wrong=5)
     scores = score(records, one_field_spec())
     strata = {s.stratum for s in scores}
-    assert strata == {"a", "b", gbi.POOLED}
-    pooled = next(s for s in scores if s.stratum == gbi.POOLED)
+    assert strata == {"a", "b", gbi.WEIGHTED}
+    pooled = next(s for s in scores if s.stratum == gbi.WEIGHTED)
     assert pooled.n_rows == 15
     assert pooled.precision.successes == 10
 
@@ -296,11 +306,52 @@ def test_high_criticality_gates_on_the_worst_stratum_not_the_average():
     assert result.binding_lower_bound == pytest.approx(0.71117, abs=5e-5)
 
 
-def test_medium_criticality_gates_on_the_pooled_sample():
-    """Same evidence, medium criticality: the pooled interval decides."""
+def test_medium_criticality_gates_on_the_population_weighted_estimate():
+    """Same evidence, medium criticality: the all-strata estimate decides."""
     spec = one_field_spec(criticality="medium")
     report = gbi.evaluate_gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
     assert report.decision == gbi.GateDecision.ADOPT
+    (result,) = report.fields
+    assert result.binding_stratum == gbi.WEIGHTED
+
+
+def test_weighted_estimate_is_not_the_raw_pool_of_a_stratified_sample():
+    """Over-sampling a hard stratum must not distort the population rate.
+
+    Population is 1% hard, but the sample is 50% hard by design. Pooling
+    the sample's rows would describe a population that does not exist and
+    reject a field whose true rate is fine.
+    """
+    spec = one_field_spec(criticality="medium", tolerable_error_rate=0.10)
+    records = records_for("easy", correct=100) + records_for(
+        "hard", correct=60, wrong=40
+    )
+    population = {"easy": 9900, "hard": 100}
+
+    raw_pool = gbi.wilson_interval(160, 200, spec.confidence_level)
+    assert raw_pool.lower < 0.90  # pooling would reject
+
+    weighted = next(
+        s for s in score(records, spec, population) if s.stratum == gbi.WEIGHTED
+    )
+    assert weighted.precision.point > 0.99
+    assert weighted.precision.lower >= 0.90
+    assert gbi.evaluate_gate(spec, score(records, spec, population)).decision == (
+        gbi.GateDecision.ADOPT
+    )
+    # And the effective sample size never exceeds what was labelled.
+    assert weighted.precision.trials <= 200
+
+
+def test_weighted_estimate_needs_a_population_for_every_stratum():
+    spec = one_field_spec(criticality="medium")
+    records = records_for("easy", correct=10) + records_for("hard", correct=10)
+    with pytest.raises(ValueError, match="no population count"):
+        gbi.score_extraction(records, spec, {"easy": 100})
+    with pytest.raises(ValueError, match="not in the sample"):
+        gbi.score_extraction(
+            records, spec, {"easy": 100, "hard": 100, "never_sampled": 50}
+        )
 
 
 def test_gate_compares_lower_bound_never_the_point_estimate():
@@ -325,6 +376,24 @@ def test_too_small_a_sample_is_inconclusive_not_a_rejection():
     assert report.decision == gbi.GateDecision.INCONCLUSIVE
     (result,) = report.fields
     assert any("label more rows" in reason for reason in result.reasons)
+
+
+def test_a_decisive_failure_is_rejected_even_at_the_same_small_size():
+    """0/30 is the same size as 30/30 but not the same evidence.
+
+    Its whole interval sits below the bar, so it is a demonstrated
+    failure — telling the team to label more rows would waste a week
+    confirming what the first 30 rows already showed.
+    """
+    spec = one_field_spec(criticality="high")
+    interval = gbi.wilson_interval(0, 30, spec.confidence_level)
+    assert interval.upper < 0.95  # decisive, despite n = 30
+
+    report = gbi.evaluate_gate(spec, score(records_for("legacy", wrong=30), spec))
+    assert report.decision == gbi.GateDecision.REJECT
+    (result,) = report.fields
+    assert any("demonstrated failure" in reason for reason in result.reasons)
+    assert not any("label more rows" in reason for reason in result.reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +573,40 @@ def test_spec_is_strict_and_frozen():
         )
 
 
+def test_spec_rejects_expanded_column_name_collisions():
+    """Unique field names are not enough — the expanded names must be too."""
+
+    def field(name, **kwargs):
+        return dict(
+            name=name,
+            description="d",
+            criticality="low",
+            tolerable_error_rate=0.1,
+            **kwargs,
+        )
+
+    # ai_error would overwrite the reserved provenance column.
+    with pytest.raises(ValidationError, match="collision"):
+        make_spec(fields=(field("error"),))
+    # ai_x_confidence generated twice, from `x` and from `x_confidence`.
+    with pytest.raises(ValidationError, match="collision"):
+        make_spec(fields=(field("x"), field("x_confidence")))
+    # A field colliding with the key or a stratum column.
+    with pytest.raises(ValidationError, match="collision"):
+        make_spec(fields=(field("issuer"),), key_column="ai_issuer")
+    with pytest.raises(ValidationError, match="collision"):
+        make_spec(fields=(field("layout"),), strata=("ai_layout",))
+    # Reserved response-schema keys are covered by the same check, because
+    # each one has a matching ai_-prefixed provenance column.
+    for reserved in gbi.RESERVED_RESPONSE_KEYS:
+        with pytest.raises(ValidationError, match="collision"):
+            make_spec(fields=(field(reserved),))
+    # The ordinary case still validates, and expands without duplicates.
+    spec = make_spec()
+    names = [name for name, _ in gbi.target_columns(spec)]
+    assert len(names) == len(set(names))
+
+
 def test_cost_estimate_fails_before_execution_when_over_ceiling():
     spec = make_spec(cost_ceiling_cad=5.0)
     estimate = gbi.estimate_cost(
@@ -586,6 +689,15 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     assert "ON source.doc_id = done.doc_id" in anti_join
     assert "done.ai_model_version = 'model-b'" in anti_join
     assert "done.ai_prompt_version = '2.0.0'" in anti_join
+    # The spec digest too: a changed abstention threshold or field set is
+    # also a new release, even when the model and prompt labels hold still.
+    assert f"done.ai_spec_digest = '{spec.spec_digest}'" in anti_join
+    assert f"'{spec.spec_digest}' AS ai_spec_digest" in sql
+    edited = spec.model_copy(update={"abstain_threshold": 0.8})
+    assert edited.spec_digest != spec.spec_digest
+    assert f"done.ai_spec_digest = '{edited.spec_digest}'" in gbi.build_execute_sql(
+        edited, run_id="run-9", prompt_sql="concat('extract: ', doc_text)"
+    )
     assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
     assert "WHEN MATCHED THEN UPDATE SET *" in sql
     assert "WHEN NOT MATCHED THEN INSERT *" in sql
