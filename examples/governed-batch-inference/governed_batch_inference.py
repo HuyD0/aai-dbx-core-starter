@@ -182,6 +182,33 @@ class ReleaseIdentity(BaseModel):
     prompt_version: str = Field(min_length=1)
 
 
+class InferenceIdentity(BaseModel):
+    """What produced a *prediction*, as distinct from how it is judged.
+
+    A spec holds two kinds of thing, and conflating them is expensive:
+
+    - what determines the model's output — endpoint, model version, prompt
+      version, the fields and descriptions that build the response schema,
+      and the abstention threshold that decides what may be asserted;
+    - how that output is judged — tolerances, criticality, strata, tier,
+      consumers, the rollback plan, the release sequence.
+
+    Predictions are bound to the first. Binding them to the whole spec
+    would mean a pure policy change — raising a tier, naming another
+    consumer — invalidated model output that is byte-for-byte what the new
+    policy would produce, forcing a paid re-run to learn nothing. Scores
+    still carry the full ``ReleaseIdentity``, because *judging* the same
+    predictions under a new policy does require re-scoring; that is
+    arithmetic over records already held.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    inference_digest: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+
+
 class FieldSpec(BaseModel):
     """One extracted field and the error its consumers can tolerate."""
 
@@ -359,9 +386,43 @@ class BatchInferenceSpec(BaseModel):
 
     @property
     def release(self) -> ReleaseIdentity:
-        """The release this spec describes; stamped onto its evidence."""
+        """The release this spec describes; stamped onto its scores."""
         return ReleaseIdentity(
             spec_digest=self.spec_digest,
+            model_version=self.model_version,
+            prompt_version=self.prompt_version,
+        )
+
+    @property
+    def inference_digest(self) -> str:
+        """Digest of only the parts that determine the model's output.
+
+        Deliberately excludes tolerances, criticality, strata, tier,
+        consumers, tables, cost ceiling, and release sequence: none of
+        them change a single character the model returns.
+        """
+        canonical = json.dumps(
+            {
+                "endpoint": self.endpoint,
+                "model_version": self.model_version,
+                "prompt_version": self.prompt_version,
+                "abstain_threshold": self.abstain_threshold,
+                # The response schema is built from these, so they are part
+                # of the request the model actually sees.
+                "fields": [
+                    {"name": field.name, "description": field.description}
+                    for field in self.fields
+                ],
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @property
+    def inference(self) -> InferenceIdentity:
+        """What produced a prediction; stamped onto every record."""
+        return InferenceIdentity(
+            inference_digest=self.inference_digest,
             model_version=self.model_version,
             prompt_version=self.prompt_version,
         )
@@ -522,31 +583,58 @@ def require_within_ceiling(estimate: CostEstimate) -> CostEstimate:
 
 
 class ConfidenceInterval(BaseModel):
-    """A proportion with the uncertainty its sample size actually supports."""
+    """A proportion with the uncertainty its sample size actually supports.
+
+    ``point``, ``lower`` and ``upper`` are *derived*, so they are verified
+    against the counts rather than trusted. This model is a persisted
+    evidence boundary — gate reports round-trip through MLflow as JSON —
+    and the gate reads ``lower`` directly, so evidence reconstructed with
+    `successes=0, lower=1.0` would otherwise adopt a release on numbers
+    nothing produced.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     successes: int = Field(ge=0)
     trials: int = Field(gt=0)
     confidence: float = Field(gt=0.5, lt=1.0)
-    point: float
-    lower: float
-    upper: float
+    point: float = Field(ge=0.0, le=1.0)
+    lower: float = Field(ge=0.0, le=1.0)
+    upper: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _bounds_match_the_counts(self) -> ConfidenceInterval:
+        if self.successes > self.trials:
+            raise ValueError("successes cannot exceed trials")
+        expected_point, expected_lower, expected_upper = _wilson_bounds(
+            self.successes, self.trials, self.confidence
+        )
+        for name, given, expected in (
+            ("point", self.point, expected_point),
+            ("lower", self.lower, expected_lower),
+            ("upper", self.upper, expected_upper),
+        ):
+            if not math.isclose(given, expected, rel_tol=1e-9, abs_tol=1e-9):
+                raise ValueError(
+                    f"{name} {given!r} does not match the Wilson value "
+                    f"{expected:.12g} implied by {self.successes}/"
+                    f"{self.trials} at confidence {self.confidence}"
+                )
+        return self
 
 
 def _z_value(confidence: float) -> float:
     return NormalDist().inv_cdf(0.5 + confidence / 2.0)
 
 
-def wilson_interval(
-    successes: int, trials: int, confidence: float = 0.95
-) -> ConfidenceInterval:
-    """Wilson score interval for a binomial proportion.
+def _wilson_bounds(
+    successes: int, trials: int, confidence: float
+) -> tuple[float, float, float]:
+    """(point, lower, upper) for a Wilson score interval.
 
-    Preferred over the naive normal approximation because it stays inside
-    [0, 1], behaves sensibly at 0 and 100 percent observed success, and is
-    accurate at the small per-stratum sample sizes human labelling budgets
-    actually produce.
+    Split out from ``wilson_interval`` so ``ConfidenceInterval`` can check
+    a reconstructed interval against the same arithmetic that produced it,
+    without recursing through the model it is validating.
     """
     if trials <= 0:
         raise ValueError("trials must be positive; no evidence is not evidence")
@@ -563,13 +651,27 @@ def wilson_interval(
     half_width = (
         z * math.sqrt(p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n)) / denominator
     )
+    return p_hat, max(0.0, centre - half_width), min(1.0, centre + half_width)
+
+
+def wilson_interval(
+    successes: int, trials: int, confidence: float = 0.95
+) -> ConfidenceInterval:
+    """Wilson score interval for a binomial proportion.
+
+    Preferred over the naive normal approximation because it stays inside
+    [0, 1], behaves sensibly at 0 and 100 percent observed success, and is
+    accurate at the small per-stratum sample sizes human labelling budgets
+    actually produce.
+    """
+    point, lower, upper = _wilson_bounds(successes, trials, confidence)
     return ConfidenceInterval(
         successes=successes,
         trials=trials,
         confidence=confidence,
-        point=p_hat,
-        lower=max(0.0, centre - half_width),
-        upper=min(1.0, centre + half_width),
+        point=point,
+        lower=lower,
+        upper=upper,
     )
 
 
@@ -682,18 +784,21 @@ def allocate_stratified_sample(
 class EvaluationRecord(BaseModel):
     """One labelled sample row: gold values, model values, abstentions.
 
-    ``release`` records which prompt, model, and spec revision actually
-    produced ``predicted``. It is set where the prediction is made, not
-    where it is scored: a score's release stamp is only as trustworthy as
-    the thing it was copied from, and taking it from the spec handed to
-    ``score_extraction`` would let v1 predictions certify themselves as v2
-    evidence.
+    ``inference`` records what actually produced ``predicted``. It is set
+    where the prediction is made, not where it is scored: taking it from
+    the spec handed to ``score_extraction`` would let v1 predictions
+    certify themselves as v2 evidence.
+
+    It is the *inference* identity rather than the full release, so the
+    same predictions can be re-judged under a changed policy — a new tier,
+    another consumer — without paying to regenerate output that would come
+    back identical.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     stratum: str
-    release: ReleaseIdentity
+    inference: InferenceIdentity
     gold: Mapping[str, str | int | float | None]
     predicted: Mapping[str, str | int | float | None]
     abstained: frozenset[str] = frozenset()
@@ -932,21 +1037,23 @@ def score_extraction(
         raise ValueError("cannot score an empty sample")
     confidence = spec.confidence_level
     release = spec.release
-    # The records say which release produced them; the spec says which
-    # release is being gated. If they disagree, scoring would mint
-    # evidence that certifies itself — the one thing the release stamp on
-    # a score exists to prevent.
+    # The records say what produced them; the spec says what is being
+    # gated. If the *inference* identities disagree, scoring would mint
+    # evidence that certifies itself — the one thing a stamp exists to
+    # prevent. Policy-only differences are fine and deliberately so: the
+    # same predictions may be re-judged under a new tier or tolerance.
+    inference = spec.inference
     for record in records:
-        if record.release != release:
+        if record.inference != inference:
             raise EvidenceMismatch(
                 f"a sample row in stratum {record.stratum!r} was produced by "
-                f"prompt {record.release.prompt_version} / model "
-                f"{record.release.model_version} (spec digest "
-                f"{record.release.spec_digest[:12]}…), but is being scored as "
-                f"prompt {release.prompt_version} / model "
-                f"{release.model_version} (spec digest "
-                f"{release.spec_digest[:12]}…). Re-run inference for the "
-                "release being gated."
+                f"prompt {record.inference.prompt_version} / model "
+                f"{record.inference.model_version} (inference digest "
+                f"{record.inference.inference_digest[:12]}…), but is being "
+                f"scored as prompt {inference.prompt_version} / model "
+                f"{inference.model_version} (inference digest "
+                f"{inference.inference_digest[:12]}…). Re-run inference for "
+                "the release being gated."
             )
     by_stratum: dict[str, list[EvaluationRecord]] = {}
     for record in records:

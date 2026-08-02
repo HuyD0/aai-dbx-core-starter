@@ -76,13 +76,22 @@ abstention path) then passes the same gate on the same terms.
    digest** (`require_executable`), and the run is idempotent: an anti-join
    selects only unlanded rows, so a partial failure restarts by re-running
    the same statement.
-9. **Evidence belongs to the release that produced it, and must be
-   complete.** The binding starts at the record: each `EvaluationRecord`
-   names the prompt, model, and spec revision that produced its
-   prediction, and `score_extraction` refuses to score it against a
-   different one. Taking the stamp from the spec at scoring time instead
-   would let v1 output certify itself as v2 evidence — the gate's release
-   check would then be reading a label the same call had just written.
+9. **Evidence belongs to what produced it, and must be complete.** The
+   binding starts at the record: each `EvaluationRecord` names the
+   *inference identity* — endpoint, model version, prompt version,
+   abstention threshold, and the fields that build the response schema —
+   that produced its prediction, and `score_extraction` refuses to score
+   it against a different one. Taking the stamp from the spec at scoring
+   time instead would let v1 output certify itself as v2 evidence: the
+   gate's release check would be reading a label the same call had just
+   written.
+   Predictions bind to the inference identity rather than the whole spec
+   because the spec holds two different things. Tier, consumers,
+   tolerances, strata and the release sequence change how output is
+   *judged*, not what the model returns — binding predictions to them
+   would force a paid re-run to obtain byte-identical results. Scores
+   still carry the full release, because re-judging under a new policy
+   does require re-scoring; that is arithmetic over records you hold.
    Scores additionally carry the declared confidence level (checked on
    every interval, not just the score) and the sample's stratum manifest,
    so quietly dropping the failing stratum before gating fails too.

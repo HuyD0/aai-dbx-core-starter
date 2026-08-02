@@ -65,8 +65,10 @@ def make_spec(**overrides):
 # Records must name the release that produced them. Tests build them with
 # this placeholder and `score()` re-stamps to the spec under test, so the
 # release-binding tests below stay the only place the stamp is meaningful.
-PLACEHOLDER_RELEASE = gbi.ReleaseIdentity(
-    spec_digest="placeholder", model_version="placeholder", prompt_version="placeholder"
+PLACEHOLDER_INFERENCE = gbi.InferenceIdentity(
+    inference_digest="placeholder",
+    model_version="placeholder",
+    prompt_version="placeholder",
 )
 
 
@@ -75,7 +77,7 @@ def records_for(stratum, *, correct=0, wrong=0, abstained=0, hallucinated=0):
 
     def record(**kwargs):
         return gbi.EvaluationRecord(
-            stratum=stratum, release=PLACEHOLDER_RELEASE, **kwargs
+            stratum=stratum, inference=PLACEHOLDER_INFERENCE, **kwargs
         )
 
     rows = []
@@ -133,7 +135,7 @@ def score(records, spec, population=None):
             counts[record.stratum] = counts.get(record.stratum, 0) + 1
         population = counts
     stamped = [
-        record.model_copy(update={"release": spec.release}) for record in records
+        record.model_copy(update={"inference": spec.inference}) for record in records
     ]
     return gbi.score_extraction(stamped, spec, population)
 
@@ -171,6 +173,34 @@ def test_wilson_narrows_with_evidence_and_confidence():
     assert large.lower > small.lower
     stricter = gbi.wilson_interval(97, 100, 0.99)
     assert stricter.lower < small.lower
+
+
+def test_an_interval_cannot_claim_bounds_its_counts_do_not_support():
+    """Gate reports round-trip through MLflow as JSON, and the gate reads
+    `lower` directly — so a reconstructed interval must be checked against
+    its own counts, not trusted."""
+    honest = gbi.wilson_interval(0, 10, 0.95)
+    assert honest.lower == pytest.approx(0.0, abs=1e-12)
+
+    # 0/10 with a lower bound of 1.0 would adopt any release.
+    with pytest.raises(ValidationError, match="does not match the Wilson value"):
+        gbi.ConfidenceInterval(
+            successes=0, trials=10, confidence=0.95, point=1.0, lower=1.0, upper=1.0
+        )
+    # Subtler: honest counts, one nudged bound.
+    with pytest.raises(ValidationError, match="does not match the Wilson value"):
+        honest.model_copy(update={"lower": 0.96}).model_validate(
+            honest.model_copy(update={"lower": 0.96}).model_dump()
+        )
+    # Out-of-range values are refused before the arithmetic check.
+    with pytest.raises(ValidationError):
+        gbi.ConfidenceInterval(
+            successes=5, trials=10, confidence=0.95, point=1.5, lower=0.0, upper=1.0
+        )
+    # A faithful round-trip still validates.
+    assert (
+        gbi.ConfidenceInterval.model_validate(honest.model_dump(mode="json")) == honest
+    )
 
 
 def test_wilson_rejects_bad_input():
@@ -355,7 +385,7 @@ def test_weighted_estimate_is_not_the_raw_pool_of_a_stratified_sample():
 def test_weighted_estimate_needs_a_population_for_every_stratum():
     spec = one_field_spec(criticality="medium")
     records = [
-        record.model_copy(update={"release": spec.release})
+        record.model_copy(update={"inference": spec.inference})
         for record in records_for("easy", correct=10) + records_for("hard", correct=10)
     ]
     with pytest.raises(ValueError, match="no population count"):
@@ -482,7 +512,7 @@ def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
     records = [
         gbi.EvaluationRecord(
             stratum="standard",
-            release=PLACEHOLDER_RELEASE,
+            inference=PLACEHOLDER_INFERENCE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )
@@ -506,22 +536,72 @@ def test_scoring_refuses_records_produced_by_a_different_release():
     spec_v1 = one_field_spec(criticality="high")
     spec_v2 = spec_v1.model_copy(update={"prompt_version": "2.0.0"})
     v1_records = [
-        record.model_copy(update={"release": spec_v1.release})
+        record.model_copy(update={"inference": spec_v1.inference})
         for record in records_for("standard", correct=200)
     ]
     population = {"standard": 200}
 
-    gbi.score_extraction(v1_records, spec_v1, population)  # its own release: fine
+    gbi.score_extraction(v1_records, spec_v1, population)  # its own output: fine
     with pytest.raises(gbi.EvidenceMismatch, match="Re-run inference"):
         gbi.score_extraction(v1_records, spec_v2, population)
 
     # One stale row among fresh ones is caught too.
     mixed = [
-        record.model_copy(update={"release": spec_v2.release}) for record in v1_records
+        record.model_copy(update={"inference": spec_v2.inference})
+        for record in v1_records
     ]
-    mixed[7] = mixed[7].model_copy(update={"release": spec_v1.release})
+    mixed[7] = mixed[7].model_copy(update={"inference": spec_v1.inference})
     with pytest.raises(gbi.EvidenceMismatch):
         gbi.score_extraction(mixed, spec_v2, population)
+
+
+def test_a_policy_change_re_judges_the_same_predictions_without_re_inference():
+    """Changing how output is judged does not change the output.
+
+    Tier, consumers, tolerances, strata and the release sequence do not
+    alter a single character the model returns, so binding predictions to
+    the whole spec would force a paid re-run to obtain identical results.
+    Predictions bind to the inference identity; scores still carry the
+    full release, because re-*judging* does require re-scoring.
+    """
+    operational = one_field_spec(criticality="high")
+    records = [
+        record.model_copy(update={"inference": operational.inference})
+        for record in records_for("standard", correct=200)
+    ]
+    population = {"standard": 200}
+
+    consequential = gbi.BatchInferenceSpec.model_validate(
+        {
+            **operational.model_dump(mode="json"),
+            "use_tier": 1,
+            "consumed_by": ["member_statements"],
+            "rollback_plan": "restore the previous table version",
+            "release_sequence": operational.release_sequence + 1,
+        }
+    )
+    # A different release, but the same inference — so the same rows.
+    assert consequential.release != operational.release
+    assert consequential.inference == operational.inference
+
+    scores = gbi.score_extraction(records, consequential, population)
+    assert all(score.release == consequential.release for score in scores)
+    assert (
+        gbi.evaluate_gate(consequential, scores).decision
+        == gbi.GateDecision.PENDING_APPROVAL
+    )
+
+    # But anything that changes the request still invalidates the records.
+    for change in (
+        {"prompt_version": "9.9.9"},
+        {"model_version": "another-model"},
+        {"endpoint": "another-endpoint"},
+        {"abstain_threshold": 0.99},
+    ):
+        with pytest.raises(gbi.EvidenceMismatch):
+            gbi.score_extraction(
+                records, operational.model_copy(update=change), population
+            )
 
 
 def test_gate_refuses_intervals_computed_at_the_wrong_confidence():
@@ -573,7 +653,7 @@ def test_rejection_outranks_inconclusive_across_fields():
         records.append(
             gbi.EvaluationRecord(
                 stratum="s",
-                release=PLACEHOLDER_RELEASE,
+                inference=PLACEHOLDER_INFERENCE,
                 gold={**row.gold, "g": "v"},
                 predicted={**row.predicted, "g": "v"},
             )
@@ -786,6 +866,47 @@ def test_unusable_source_keys_are_refused_before_the_paid_query():
         gbi.require_usable_source_keys(spec, 3, 0)
     with pytest.raises(gbi.UnusableSourceKeys, match="2 duplicate"):
         gbi.require_usable_source_keys(spec, 0, 2)
+
+
+def test_the_notebooks_own_wiring_scores_both_releases():
+    """Mirrors how the notebook derives v2 and stamps its records.
+
+    The previous round added `release_sequence` and bumped it for v2,
+    which changed v2's spec digest — and the notebook stamped records from
+    `spec_v1.model_copy(prompt_version=...)`, so scoring raised and the
+    walkthrough could not run past the gate. Nothing tested the notebook's
+    own wiring, so nothing caught it. This does.
+    """
+    spec_v1 = one_field_spec(criticality="high")
+    spec_v2 = gbi.BatchInferenceSpec.from_yaml(
+        spec_v1.to_yaml()
+        .replace("prompt_version: 1.0.0", "prompt_version: 2.0.0")
+        .replace("release_sequence: 1", "release_sequence: 2")
+    )
+    population = {"standard": 200}
+
+    for spec in (spec_v1, spec_v2):
+        records = [
+            record.model_copy(update={"inference": spec.inference})
+            for record in records_for("standard", correct=200)
+        ]
+        scores = gbi.score_extraction(records, spec, population)
+        assert gbi.evaluate_gate(spec, scores).decision == gbi.GateDecision.ADOPT
+
+        # And the tier-1 demonstration re-judges those same predictions.
+        tier1 = gbi.BatchInferenceSpec.model_validate(
+            {
+                **spec.model_dump(mode="json"),
+                "use_tier": 1,
+                "consumed_by": ["member_statements"],
+                "rollback_plan": "restore the previous table version",
+            }
+        )
+        tier1_scores = gbi.score_extraction(records, tier1, population)
+        assert (
+            gbi.evaluate_gate(tier1, tier1_scores).decision
+            == gbi.GateDecision.PENDING_APPROVAL
+        )
 
 
 def test_an_older_release_cannot_overwrite_newer_output():
@@ -1118,7 +1239,7 @@ def test_provenance_layers_are_generated():
     records = [
         gbi.EvaluationRecord(
             stratum="standard",
-            release=PLACEHOLDER_RELEASE,
+            inference=PLACEHOLDER_INFERENCE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )

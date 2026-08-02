@@ -646,9 +646,8 @@ def simulate_extraction(doc_id: str, layout: str, gold: dict, version: str):
     return predicted, abstained
 
 
-def live_extraction(prompt: str, version: str, table: str) -> dict:
+def live_extraction(spec, prompt: str, table: str) -> dict:
     """ai_query with structured output over `table`; returns {doc_id: row}."""
-    spec = spec_v1.model_copy(update={"prompt_version": version})
     request = f"concat({gbi.sql_string_literal(prompt)}, doc_text)"
     rows = spark.sql(f"""
         SELECT doc_id,
@@ -670,14 +669,13 @@ def live_extraction(prompt: str, version: str, table: str) -> dict:
     return {row.doc_id: row for row in rows}
 
 
-def evaluation_records(version: str, prompt: str) -> list:
+def evaluation_records(spec, version: str, prompt: str) -> list:
     sample = (
         spark.table(SAMPLE_TABLE)
         .join(spark.table(GOLD_TABLE).drop("layout"), "doc_id")
         .collect()
     )
-    live = live_extraction(prompt, version, SAMPLE_TABLE) if not SIMULATED else {}
-    spec = spec_v1.model_copy(update={"prompt_version": version})
+    live = live_extraction(spec, prompt, SAMPLE_TABLE) if not SIMULATED else {}
     records = []
     failed = 0
     for row in sample:
@@ -728,8 +726,9 @@ def evaluation_records(version: str, prompt: str) -> list:
                 stratum=row.layout,
                 # Stamped where the prediction was produced. Scoring
                 # verifies it against the spec being gated, so v1 output
-                # cannot be scored as v2 evidence.
-                release=spec.release,
+                # cannot be scored as v2 evidence — while a pure policy
+                # change (tier, consumers) re-judges these same rows.
+                inference=spec.inference,
                 gold=gold,
                 predicted=permitted,
                 abstained=abstained,
@@ -765,7 +764,7 @@ def scores_frame(scores) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-records_v1 = evaluation_records("1.0.0", PROMPT_V1)
+records_v1 = evaluation_records(spec_v1, "1.0.0", PROMPT_V1)
 scores_v1 = gbi.score_extraction(records_v1, spec_v1, population)
 print(
     "Tolerances in force (declared in stage 1, before any of these numbers "
@@ -855,7 +854,7 @@ for row in naive_rows:
     naive_records.append(
         gbi.EvaluationRecord(
             stratum=row.layout,
-            release=spec_v1.release,
+            inference=spec_v1.inference,
             gold=gold,
             predicted=predicted,
             abstained=frozenset(abstained),
@@ -974,7 +973,7 @@ print(
     "CAD for the longer instruction, still inside the declared ceiling"
 )
 
-records_v2 = evaluation_records("2.0.0", PROMPT_V2)
+records_v2 = evaluation_records(spec_v2, "2.0.0", PROMPT_V2)
 scores_v2 = gbi.score_extraction(records_v2, spec_v2, population)
 report_v2 = gbi.evaluate_gate(spec_v2, scores_v2)
 
