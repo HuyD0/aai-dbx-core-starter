@@ -99,6 +99,7 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
             "metrics": {"citation_rate": 1.0},
             "failures": [],
             "policy": CITATION_POLICY.model_dump(mode="json"),
+            "baseline_metrics": None,
         },
         "prompt_digest": "a" * 64,
         "release_digest": "digest-1",

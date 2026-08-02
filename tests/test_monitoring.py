@@ -151,6 +151,15 @@ def test_traces_with_feedback_excludes_expectation_assessments():
     assert traces_with_feedback([reviewed], name="correct", value=False) == [reviewed]
 
 
+def test_traces_with_feedback_excludes_issue_references():
+    issue_link = SimpleNamespace(
+        name="correct", value=None, expectation=None, issue=SimpleNamespace(id="i-1")
+    )
+    trace = _trace("issue-linked", [issue_link])
+
+    assert traces_with_feedback([trace], name="correct") == []
+
+
 def test_traces_with_feedback_requests_only_feedback_from_native_search():
     requested: dict = {}
 

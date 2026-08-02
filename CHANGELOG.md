@@ -22,7 +22,9 @@ All notable changes to `aai-core` are documented here.
   `apply_gate()` through kwargs passthrough and returns the native result by
   identity — unlike the removed 0.2.0 `EvaluationSuite.run_tracked`, it owns
   no run and mirrors no native parameters; `GateResult` records the applied
-  `GatePolicy` so gate evidence is self-describing;
+  `GatePolicy` and regression baseline and re-validates its failures against
+  them at construction, so gate evidence is self-describing and cannot claim
+  a pass its own metrics contradict;
   `get_or_create_evaluation_dataset` promotes the governed dataset helper
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder catalog/schema

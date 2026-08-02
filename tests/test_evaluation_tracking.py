@@ -52,6 +52,7 @@ def test_gate_result_contains_only_immutable_release_evidence():
         "metrics": {"quality/mean": 0.95},
         "failures": [],
         "policy": GatePolicy().model_dump(mode="json"),
+        "baseline_metrics": None,
     }
 
 

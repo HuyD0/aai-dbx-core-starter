@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from aai_core.evaluation import (
     EvaluationGateError,
     GatePolicy,
+    GateResult,
     MetricDirection,
     MetricRule,
     apply_gate,
@@ -196,7 +197,51 @@ def test_gate_contracts_are_strict_frozen_and_serializable():
         "metrics": {"quality": 0.9},
         "failures": [],
         "policy": policy.model_dump(mode="json"),
+        "baseline_metrics": None,
     }
+
+
+def test_gate_result_refuses_failures_inconsistent_with_its_policy():
+    policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="quality",
+                direction=MetricDirection.HIGHER,
+                required=0.8,
+            ),
+        )
+    )
+
+    with pytest.raises(ValidationError, match="recorded policy"):
+        GateResult(metrics={"quality": 0.0}, failures=(), policy=policy)
+    with pytest.raises(ValidationError, match="recorded policy"):
+        GateResult(metrics={"irrelevant": 1.0}, failures=(), policy=policy)
+    # Policy-less results remain constructible for fakes and refusal demos.
+    assert GateResult(metrics={"quality": 0.0}).passed
+
+
+def test_gate_result_with_regression_rule_round_trips_with_its_baseline():
+    policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="score",
+                direction=MetricDirection.HIGHER,
+                max_regression=0.02,
+            ),
+        )
+    )
+    result = apply_gate(
+        {"score": 0.94},
+        policy=policy,
+        baseline_metrics={"score": 0.95},
+    )
+    assert result.passed
+    assert dict(result.baseline_metrics) == {"score": 0.95}
+
+    rebuilt = GateResult(**result.model_dump())
+
+    assert rebuilt == result
+    assert rebuilt.passed
 
 
 def test_gate_rejects_values_without_a_native_metrics_mapping():

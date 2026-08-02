@@ -79,23 +79,48 @@ class GateFailure(ContractModel):
 class GateResult(ContractModel):
     """Immutable release-gate evidence; native evaluation results stay native.
 
-    ``policy`` records exactly which rules produced this result, making the
-    evidence self-describing: an adopt decision is accepted only when the
-    recorded policy applied at least one release rule.
+    ``policy`` and ``baseline_metrics`` record exactly which rules and which
+    comparison baseline produced this result, and a policy-bearing result
+    re-evaluates itself at construction: the stored failures must be exactly
+    what the recorded policy yields for the recorded metrics, so a
+    hand-built or deserialized result cannot claim ``passed`` while its own
+    metrics violate its own policy.
     """
 
     metrics: Mapping[str, float]
     failures: tuple[GateFailure, ...] = ()
     policy: GatePolicy | None = None
+    baseline_metrics: Mapping[str, float] | None = None
 
-    @field_validator("metrics", mode="after")
+    @field_validator("metrics", "baseline_metrics", mode="after")
     @classmethod
-    def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
-        return freeze_value(value)
+    def freeze_metrics(
+        cls, value: Mapping[str, float] | None
+    ) -> Mapping[str, float] | None:
+        return None if value is None else freeze_value(value)
 
-    @field_serializer("metrics")
-    def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
-        return thaw_value(value)
+    @field_serializer("metrics", "baseline_metrics")
+    def serialize_metrics(
+        self, value: Mapping[str, float] | None
+    ) -> dict[str, float] | None:
+        return None if value is None else thaw_value(value)
+
+    @model_validator(mode="after")
+    def failures_match_the_recorded_policy(self) -> Self:
+        if self.policy is None:
+            return self
+        recomputed = _evaluate_policy(
+            dict(self.metrics),
+            self.policy,
+            dict(self.baseline_metrics or {}),
+        )
+        if tuple(self.failures) != recomputed:
+            raise ValueError(
+                "failures do not match what the recorded policy yields for "
+                "the recorded metrics; produce gate evidence with "
+                "apply_gate()"
+            )
+        return self
 
     @property
     def passed(self) -> bool:
@@ -125,6 +150,21 @@ def apply_gate(
 
     metrics = _extract_metrics(evaluation_result)
     baseline = dict(baseline_metrics or {})
+    return GateResult(
+        metrics=metrics,
+        failures=_evaluate_policy(metrics, policy, baseline),
+        policy=policy,
+        baseline_metrics=(
+            dict(baseline_metrics) if baseline_metrics is not None else None
+        ),
+    )
+
+
+def _evaluate_policy(
+    metrics: dict[str, float],
+    policy: GatePolicy,
+    baseline: dict[str, float],
+) -> tuple[GateFailure, ...]:
     failures: list[GateFailure] = []
 
     if policy.fail_on_scorer_errors:
@@ -206,7 +246,7 @@ def apply_gate(
                 )
             )
 
-    return GateResult(metrics=metrics, failures=tuple(failures), policy=policy)
+    return tuple(failures)
 
 
 def _extract_metrics(result: Any) -> dict[str, float]:

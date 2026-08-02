@@ -127,8 +127,11 @@ def _trace_assessments(trace: Any) -> list[Any]:
 def _is_curated_feedback(assessment: Any) -> bool:
     if getattr(assessment, "valid", True) is False:
         return False
-    # Expectations are ground truth, not reviewed feedback.
-    return getattr(assessment, "expectation", None) is None
+    # Expectations are ground truth and issue references are triage
+    # artifacts; neither is reviewed feedback.
+    if getattr(assessment, "expectation", None) is not None:
+        return False
+    return getattr(assessment, "issue", None) is None
 
 
 def _assessment_matches(assessment: Any, *, name: str, value: Any | None) -> bool:
