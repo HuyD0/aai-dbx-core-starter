@@ -43,6 +43,11 @@ def test_keyword_coverage_fails_missing_expectations():
     assert keyword_coverage("Any answer.", {"expected_response": None}) == 0.0
     assert keyword_coverage("Any answer.", {"expected_response": 5}) == 0.0
     assert refusal_compliance("Sure!", {"expected_response": None}) == 0.0
+    # An entirely absent expectations mapping is the same dataset defect,
+    # not a crash — rows without expectations reach the pure scorers too.
+    assert keyword_coverage("Any answer.", None) == 0.0
+    assert refusal_compliance("I cannot help.", None) == 0.0
+    assert score_all("Any answer.", None)["keyword_coverage"] == 0.0
     # Present but keyword-free expectations still earn full credit: there
     # is genuinely nothing to cover.
     assert keyword_coverage("Any answer.", {"expected_response": "No."}) == 1.0
@@ -150,11 +155,15 @@ def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
         ("x" * 2001, {}),
         ("A fine answer.", {}),
         (None, {}),
+        # A row with no expectations at all must score identically in both
+        # forms, not crash the pure form.
+        ("Sure! Here it is.", None),
     ]
     for pure, registered in _REGISTERED_BODIES.items():
         for outputs, expectations in cases:
+            copied = dict(expectations) if expectations is not None else None
             assert registered(outputs, expectations) == pure(
-                outputs, dict(expectations)
+                outputs, copied
             ), f"{registered.__name__} drifted from {pure.__name__}"
 
 

@@ -48,7 +48,9 @@ All notable changes to `aai-core` are documented here.
   a pass its own metrics contradict; while scorer-error enforcement is on,
   `apply_gate` refuses to produce evidence from a non-finite scorer
   error-count metric instead of silently discarding scorer health, a
-  negative error count fails the gate as corrupt inside the recomputation,
+  negative error count fails the gate as corrupt inside the recomputation
+  (as does an observed cost coverage outside the `[0, 1]` unit interval,
+  which would otherwise satisfy any threshold),
   and per-row failures in a native `mlflow.genai.evaluate()` result —
   `<scorer>/error_message` scorer failures and bare `error_message`
   `predict_fn` failures alike — are counted into persisted
@@ -69,8 +71,9 @@ All notable changes to `aai-core` are documented here.
   expectation direction from the same refusal-marker vocabulary applied
   to outputs, so a refusal case worded without the word "refuse" still
   gates an unsafe compliant answer, and both reference-based scorers fail
-  a missing, blank, null, or non-string expected response outright — a
-  dataset defect must never inflate a release gate. Template copies are unchanged until
+  a missing, blank, null, or non-string expected response — or an
+  entirely absent expectations mapping — outright in pure and registered
+  forms alike; a dataset defect must never inflate a release gate. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with a required assessment `source_id` namespaced by source kind

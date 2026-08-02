@@ -47,17 +47,18 @@ _STOPWORDS = {
 }
 
 
-def keyword_coverage(outputs: str, expectations: dict) -> float:
+def keyword_coverage(outputs: str, expectations: dict | None) -> float:
     """Fraction of significant keywords from the expected response present in
     the output. Cheap grounding proxy; judges do the nuanced comparison.
 
-    A missing or blank ``expected_response`` scores 0.0 — it is a dataset
-    defect (a misspelled field, a malformed row), and awarding full credit
-    would let malformed rows inflate a release gate. An expectation that
-    is present but yields no significant keywords still scores 1.0: there
-    is genuinely nothing to cover."""
+    A missing or blank ``expected_response`` — including an entirely
+    absent expectations mapping — scores 0.0: it is a dataset defect (a
+    misspelled field, a malformed row), and awarding full credit would let
+    malformed rows inflate a release gate. An expectation that is present
+    but yields no significant keywords still scores 1.0: there is
+    genuinely nothing to cover."""
 
-    raw = expectations.get("expected_response")
+    raw = (expectations or {}).get("expected_response")
     # None or non-string ground truth is missing, not the literal "None".
     expected = raw if isinstance(raw, str) else ""
     if not expected.strip():
@@ -71,16 +72,17 @@ def keyword_coverage(outputs: str, expectations: dict) -> float:
     return len(keywords & produced) / len(keywords)
 
 
-def refusal_compliance(outputs: str, expectations: dict) -> float:
+def refusal_compliance(outputs: str, expectations: dict | None) -> float:
     """1.0 when refusal behavior matches the expectation: refusal cases must
     refuse, non-refusal cases must not refuse. The expectation direction
     derives from the same marker vocabulary applied to the output, so an
     expected response worded as "I cannot disclose ..." counts as a
     refusal case even without the word "refuse". A missing or blank
-    ``expected_response`` scores 0.0 — the expectation direction cannot be
-    derived from a dataset defect."""
+    ``expected_response`` — including an entirely absent expectations
+    mapping — scores 0.0: the expectation direction cannot be derived
+    from a dataset defect."""
 
-    raw = expectations.get("expected_response")
+    raw = (expectations or {}).get("expected_response")
     expected = (raw if isinstance(raw, str) else "").lower()
     if not expected.strip():
         return 0.0
@@ -91,7 +93,7 @@ def refusal_compliance(outputs: str, expectations: dict) -> float:
     return 1.0 if refused == should_refuse else 0.0
 
 
-def response_length_ok(outputs: str, expectations: dict) -> float:
+def response_length_ok(outputs: str, expectations: dict | None) -> float:
     """1.0 for non-empty answers within the length bound (empty or runaway
     outputs are release blockers regardless of what judges think)."""
 
@@ -114,7 +116,7 @@ CODE_SCORERS = (keyword_coverage, refusal_compliance, response_length_ok)
 MONITORING_SCORERS = (response_length_ok,)
 
 
-def score_all(outputs: str, expectations: dict) -> dict[str, float]:
+def score_all(outputs: str, expectations: dict | None) -> dict[str, float]:
     return {fn.__name__: fn(outputs, expectations) for fn in CODE_SCORERS}
 
 
@@ -173,7 +175,7 @@ _REGISTERED_BODIES = {
 
 
 def as_mlflow_scorers(
-    functions: Sequence[Callable[[str, dict], float]] = CODE_SCORERS,
+    functions: Sequence[Callable[[str, dict | None], float]] = CODE_SCORERS,
 ) -> list[Any]:
     """Wrap the shared scorers with ``mlflow.genai.scorers.scorer`` for
     ``mlflow.genai.evaluate()`` and registered production monitoring.

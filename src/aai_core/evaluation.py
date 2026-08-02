@@ -239,6 +239,21 @@ def _evaluate_policy(
                     reason="cost coverage is unknown",
                 )
             )
+        elif not 0.0 <= observed <= 1.0:
+            # Coverage is a fraction by definition (the policy bounds its
+            # threshold to [0, 1]); an impossible observed value would
+            # otherwise satisfy any threshold. This runs inside the
+            # recomputation, so a hand-built result cannot claim a pass
+            # over corrupt coverage evidence.
+            failures.append(
+                GateFailure(
+                    metric=policy.cost_coverage_metric,
+                    reason=(
+                        f"coverage {observed:g} is outside the unit "
+                        "interval; cost-coverage evidence is corrupt"
+                    ),
+                )
+            )
         elif observed < policy.minimum_cost_coverage:
             failures.append(
                 GateFailure(

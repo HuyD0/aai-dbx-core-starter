@@ -135,6 +135,23 @@ def test_unknown_or_incomplete_cost_evidence_never_becomes_zero():
     assert complete_zero.passed
 
 
+def test_impossible_cost_coverage_fails_as_corrupt_evidence():
+    # Coverage is a [0, 1] fraction by definition; malformed
+    # instrumentation reporting 2.0 would otherwise satisfy any threshold.
+    # The check runs inside the recomputation, so a hand-built result
+    # cannot claim a pass over corrupt coverage either.
+    policy = GatePolicy(minimum_cost_coverage=1.0)
+
+    inflated = apply_gate({"cost/coverage": 2.0}, policy=policy)
+    negative = apply_gate({"cost/coverage": -0.25}, policy=policy)
+
+    assert not inflated.passed
+    assert "unit interval" in inflated.failures[0].reason
+    assert not negative.passed
+    with pytest.raises(ValidationError, match="failures do not match"):
+        GateResult(metrics={"cost/coverage": 2.0}, policy=policy, failures=())
+
+
 def test_scorer_error_metrics_fail_without_exposing_error_text():
     result = apply_gate(
         {
