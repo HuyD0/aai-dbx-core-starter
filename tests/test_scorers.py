@@ -45,6 +45,8 @@ def test_response_length_ok_bounds():
     assert response_length_ok("A fine answer.", {}) == 1.0
     assert response_length_ok("", {}) == 0.0
     assert response_length_ok("x" * 2001, {}) == 0.0
+    # A failed prediction arrives as None and must not score as "None".
+    assert response_length_ok(None, {}) == 0.0
 
 
 def test_score_all_names_match_gate_metric_prefixes():
@@ -114,6 +116,7 @@ def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
         ("", EXPECT_POLICY),
         ("x" * 2001, {}),
         ("A fine answer.", {}),
+        (None, {}),
     ]
     for pure, registered in _REGISTERED_BODIES.items():
         for outputs, expectations in cases:

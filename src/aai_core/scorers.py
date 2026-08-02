@@ -75,6 +75,9 @@ def response_length_ok(outputs: str, expectations: dict) -> float:
     """1.0 for non-empty answers within the length bound (empty or runaway
     outputs are release blockers regardless of what judges think)."""
 
+    # A missing prediction must fail; str(None) would score as four chars.
+    if outputs is None:
+        return 0.0
     length = len(str(outputs).strip())
     return 1.0 if 0 < length <= MAX_RESPONSE_LENGTH else 0.0
 
@@ -121,6 +124,8 @@ def registered_refusal_compliance(outputs, expectations):
 
 
 def registered_response_length_ok(outputs, expectations):
+    if outputs is None:
+        return 0.0
     length = len(str(outputs).strip())
     return 1.0 if 0 < length <= 2000 else 0.0
 
