@@ -38,6 +38,24 @@ curriculum are synthetic. They are teaching data, not market data, and the
 assistant must summarize the supplied excerpt without making an investment
 recommendation.
 
+## Separate classical ML course
+
+[`local-classification/`](local-classification/README.md) is a standalone,
+zero-download sklearn and MLflow course. It is not another stage in the numbered
+GenAI curriculum below and has its own exact environment, local SQLite tracking
+store, tests, and ten-notebook path.
+
+Use it when you want to learn a conventional binary-classification lifecycle:
+problem and data contracts, time splits, leakage-safe Pipelines, imbalance-aware
+metrics, validation-only model/threshold selection, a frozen release test,
+registry aliases, inference, drift, and the move to Databricks. Start with:
+
+```bash
+make classification-install
+make classification-check
+make classification-notebook
+```
+
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or
