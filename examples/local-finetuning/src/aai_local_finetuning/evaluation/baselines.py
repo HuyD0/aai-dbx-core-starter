@@ -1,4 +1,9 @@
-"""Deterministic, train-only baselines for the support-intent task."""
+"""Deterministic baselines for the support-intent task.
+
+Label statistics are fitted on train.  The keyword baseline also applies the
+explicit human-authored phrase and escalation rules in this module; callers and
+teaching material must not describe the whole method as train-derived.
+"""
 
 from __future__ import annotations
 
@@ -164,7 +169,7 @@ class KeywordRuleBaseline:
         *,
         phrase_rules: Mapping[str, Sequence[str]] | None = None,
     ) -> Self:
-        """Learn all label statistics from the train records only."""
+        """Learn label statistics from train and attach the supplied phrase rules."""
 
         _validate_training_records(train_records)
         labels = tuple(sorted({record.target.intent for record in train_records}))

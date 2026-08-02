@@ -115,6 +115,72 @@ def test_every_notebook_has_narrative_exercises_and_checkpoints():
         assert "Next:" in markdown or "Final checkpoint" in markdown, path.name
 
 
+def test_every_notebook_teaches_beginner_context_before_code():
+    required_headings = (
+        "## Why this matters",
+        "## Key terms in plain language",
+        "## Mental model — how to think about this",
+        "### Running example",
+        "### Questions to ask before continuing",
+        "## Current best practices",
+        "## Common mistakes and why they fail",
+        "### What kind of guidance is this?",
+    )
+    required_tags = {
+        "concepts",
+        "mental-model",
+        "best-practices",
+        "standards-reference",
+        "setup-guidance",
+        "setup-run-do-not-edit",
+    }
+
+    for path, notebook in _notebooks():
+        metadata = notebook["metadata"]["aai_curriculum"]
+        assert metadata["practice_guidance_reviewed_on"] == "2026-08-01", path.name
+        assert len(metadata["concepts_introduced"]) >= 6, path.name
+        assert metadata["pedagogical_structure"][:7] == [
+            "why",
+            "terms",
+            "mental_model",
+            "running_example",
+            "decision_questions",
+            "best_practices",
+            "common_mistakes",
+        ], path.name
+
+        first_code_index = next(
+            index
+            for index, cell in enumerate(notebook["cells"])
+            if cell["cell_type"] == "code"
+        )
+        teaching_before_code = "\n".join(
+            _source(cell) for cell in notebook["cells"][:first_code_index]
+        )
+        for heading in required_headings:
+            assert heading in teaching_before_code, (path.name, heading)
+
+        tags = {
+            tag
+            for cell in notebook["cells"]
+            for tag in cell.get("metadata", {}).get("tags", [])
+        }
+        assert required_tags.issubset(tags), path.name
+
+
+def test_start_here_teaches_notebook_mechanics_and_an_interpretation_loop():
+    _, notebook = _notebooks()[0]
+    markdown = "\n".join(
+        _source(cell) for cell in notebook["cells"] if cell["cell_type"] == "markdown"
+    )
+
+    assert "## How to use this course" in markdown
+    assert "Shift+Enter" in markdown
+    assert "What does it say?" in markdown
+    assert "What would concern me?" in markdown
+    assert "What would I do next?" in markdown
+
+
 def test_opening_markdown_renders_as_headings_not_indented_code():
     for path, notebook in _notebooks():
         opening = _source(notebook["cells"][0])
@@ -214,6 +280,97 @@ def test_required_lifecycle_behaviors_are_taught_in_order():
     }
     for notebook, fragments in required.items():
         assert all(fragment in sources[notebook] for fragment in fragments), notebook
+
+
+def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
+    sources = {
+        path.name: "\n".join(_source(cell) for cell in notebook["cells"])
+        for path, notebook in _notebooks()
+    }
+
+    assert "Offline study is not ready" in sources["00_start_here.ipynb"]
+    assert "same bytes?" in sources["01_dataset_provenance_and_license.ipynb"]
+    assert (
+        "Local data bytes differ" in sources["01_dataset_provenance_and_license.ipynb"]
+    )
+    assert "record funnel" in sources["02_dataset_exploration_and_validation.ipynb"]
+    assert "declared coverage" in sources["02_dataset_exploration_and_validation.ipynb"]
+    assert (
+        'manifest["processing"]["near_duplicate_threshold"]'
+        in sources["03_leakage_safe_splits.ipynb"]
+    )
+    assert (
+        "includes human-authored phrase" in sources["04_deterministic_baselines.ipynb"]
+    )
+    assert (
+        "escalation rules locked in source code"
+        in sources["04_deterministic_baselines.ipynb"]
+    )
+    assert '"support": [' in sources["04_deterministic_baselines.ipynb"]
+    assert "Absent supported intents score zero" in sources["05_prompt_baselines.ipynb"]
+    assert (
+        "QLoRA (LoRA over a 4-bit base in MLX-LM)"
+        in sources["06_lora_finetuning.ipynb"]
+    )
+    assert "observational,\nnot gating" in sources["07_frozen_evaluation.ipynb"]
+    assert "macro-F1 gain ≥ 0.01" in sources["08_mlflow_and_promotion.ipynb"]
+    assert "decision/assessment.json" in sources["08_mlflow_and_promotion.ipynb"]
+    assert '"state": "unknown"' in sources["11_design_the_next_project.ipynb"]
+    for field in (
+        "permitted_use",
+        "redistribution",
+        "source_modalities",
+        "model_input_modality",
+    ):
+        assert f'"{field}",' in sources["11_design_the_next_project.ipynb"]
+
+
+def test_capstone_training_precedes_its_frozen_boundary():
+    sources = {
+        path.name: [
+            _source(cell) for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        for path, notebook in _notebooks()
+    }
+
+    notebook_09 = "\n".join(sources["09_capstone_policy_dataset.ipynb"])
+    assert "test.jsonl" not in notebook_09
+    assert '"test_rows_loaded": False' in notebook_09
+
+    notebook_10 = sources["10_capstone_model_vs_hybrid.ipynb"]
+    training_index = next(
+        index for index, source in enumerate(notebook_10) if "run_lora" in source
+    )
+    test_index = next(
+        index for index, source in enumerate(notebook_10) if "test.jsonl" in source
+    )
+    assert training_index < test_index
+    assert all("test_records[0]" not in source for source in notebook_10)
+    assert any("validation_records[0]" in source for source in notebook_10)
+    assert any(
+        "demo-not-evidence" in cell.get("metadata", {}).get("tags", [])
+        for _, notebook in _notebooks()
+        if notebook["metadata"]["aai_curriculum"]["order"] == 10
+        for cell in notebook["cells"]
+    )
+
+
+def test_support_decision_thresholds_are_locked_before_test_load():
+    _, notebook = _notebooks()[7]
+    code_sources = [
+        _source(cell) for cell in notebook["cells"] if cell["cell_type"] == "code"
+    ]
+    threshold_index = next(
+        index
+        for index, source in enumerate(code_sources)
+        if "locked_thresholds = PromotionThresholds()" in source
+    )
+    test_index = next(
+        index
+        for index, source in enumerate(code_sources)
+        if "load_support_splits(settings)" in source
+    )
+    assert threshold_index < test_index
 
 
 def test_renderer_and_index_cover_the_same_course():

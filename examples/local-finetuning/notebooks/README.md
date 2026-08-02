@@ -5,6 +5,13 @@ Every notebook starts by enabling local-only library controls. The course uses
 the prepared dataset, model, Python environment, and MLflow store; it does not
 install or download anything.
 
+This is a beginner-first sequence. Before the first code cell, every module
+answers **why the topic matters**, defines its vocabulary, provides a mental
+model and running example, asks decision questions, and names both current best
+practices and common mistakes. Primary links are categorized as specification,
+tool guidance, or risk guidance; they are optional because the teaching itself
+is complete offline.
+
 | Notebook | Main question | Typical live work |
 |---|---|---:|
 | `00_start_here.ipynb` | What are we trying to prove, and is this machine ready? | 20 min |
@@ -19,6 +26,16 @@ install or download anything.
 | `09_capstone_policy_dataset.ipynb` | How should domain ground truth be generated and governed? | 50 min |
 | `10_capstone_model_vs_hybrid.ipynb` | Does a model belong in the authoritative decision path? | 55 min |
 | `11_design_the_next_project.ipynb` | How should evaluation change for another task? | 35 min |
+
+The full course is about 8¾ hours. It is easier to retain as four resumable
+sessions:
+
+| Session | Notebooks | Theme |
+|---|---|---|
+| 1 | `00`–`03` | Setup and trustworthy data |
+| 2 | `04`–`06` | Baselines, prompting, and adapter training |
+| 3 | `07`–`08` | Frozen evaluation and an evidence-backed decision |
+| 4 | `09`–`11` | Policy-grounded capstone, hybrid design, and transfer |
 
 The first executable cell in every notebook verifies the exact nested Python
 kernel and enables the offline environment. The launch target registers that
@@ -36,7 +53,8 @@ same prompt, adapter, response policy, or thresholds. A follow-up remediation is
 a new change and needs a new untouched evaluation version.
 
 The generated notebooks are tracked. Maintainers can reproduce them after
-editing the narrative source with:
+editing the executable narrative in `scripts/render_notebooks.py` or the
+beginner primers in `scripts/notebook_pedagogy.py` with:
 
 ```bash
 .venv/bin/python scripts/render_notebooks.py

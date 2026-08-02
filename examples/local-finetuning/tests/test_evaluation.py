@@ -29,6 +29,12 @@ from aai_local_finetuning.evaluation import (
 )
 
 
+def test_default_promotion_contract_requires_a_minimum_useful_gain():
+    thresholds = PromotionThresholds()
+
+    assert thresholds.minimum_macro_f1_gain == 0.01
+
+
 def _record(
     example_id: str,
     text: str,

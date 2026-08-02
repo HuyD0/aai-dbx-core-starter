@@ -85,9 +85,18 @@ ordered index, learning questions, and expected study time are in the
 [`notebooks/README.md`](notebooks/README.md). Each notebook contains:
 
 - learning objectives, prerequisites, and expected evidence;
+- plain-language definitions before a term is used in code;
+- a mental model, one running example, and decision questions;
+- current best practices, common failure modes, and categorized primary guidance;
 - small executable Python cells over local artifacts;
 - interpretation guidance, exercises, hints, and checkpoints;
 - a clear handoff to the next notebook.
+
+The course distinguishes formal specifications, official tool guidance,
+voluntary risk guidance, and conservative course rules. The explanations are
+self-contained offline; links are optional reading after the flight. Maintainers
+edit the generated narrative in `scripts/render_notebooks.py` and
+`scripts/notebook_pedagogy.py`, then regenerate the tracked notebooks.
 
 The CLI is not required for the lessons. It remains available for repeatable
 preflight checks and longer unattended runs.

@@ -23,12 +23,17 @@ class BaselineEvaluation(StrictEvidenceModel):
 
 
 class PromotionThresholds(StrictEvidenceModel):
-    """Absolute output gates plus the required macro-F1 improvement."""
+    """Versioned course gates, including a one-point minimum useful F1 gain.
+
+    These defaults are conservative teaching choices, not universal production
+    thresholds.  A real owner must derive thresholds and uncertainty policy from
+    domain risk, sample size, and operational budgets before frozen evaluation.
+    """
 
     minimum_schema_validity_rate: float = Field(default=0.98, ge=0.0, le=1.0)
     minimum_policy_compliance_rate: float = Field(default=0.95, ge=0.0, le=1.0)
     maximum_unsupported_intent_rate: float = Field(default=0.0, ge=0.0, le=1.0)
-    minimum_macro_f1_gain: float = Field(default=0.0, ge=0.0)
+    minimum_macro_f1_gain: float = Field(default=0.01, ge=0.0)
 
 
 class EvaluationSnapshot(StrictEvidenceModel):

@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
 
+from notebook_pedagogy import (
+    PRACTICE_REVIEWED_ON,
+    PRIMERS,
+    REFERENCE_URLS,
+    RUNNING_EXAMPLES,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_DIR = PROJECT_ROOT / "notebooks"
 
@@ -82,6 +89,124 @@ def intro(
     )
 
 
+def _reference_line(reference: str) -> str:
+    """Render a categorized primary reference without nested Markdown brackets."""
+
+    category, title = reference.removeprefix("[").split("] ", maxsplit=1)
+    return f"- **{category}:** [{title}]({REFERENCE_URLS[reference]})"
+
+
+def pedagogy_cells(notebook: Notebook) -> tuple[Cell, ...]:
+    """Build the beginner-first conceptual layer that precedes execution."""
+
+    primer = PRIMERS[notebook.order]
+    terms = [f"- **{term}:** {meaning}." for term, meaning in primer.terms]
+    decisions = [f"- {question}" for question in primer.decision_questions]
+    practices = [f"- {practice}" for practice in primer.practices]
+    mistakes = [f"- {mistake}" for mistake in primer.mistakes]
+    references = [_reference_line(reference) for reference in primer.references]
+
+    mechanics: tuple[Cell, ...] = ()
+    if notebook.order == 0:
+        mechanics = (
+            md(
+                """
+                ## How to use this course
+
+                A **Markdown cell** explains an idea; a **code cell** performs a
+                small local experiment. Read the explanation first, select the
+                `AAI Local Fine-Tuning (offline)` kernel, and press **Shift+Enter**
+                to run one cell at a time. Cells headed **Setup — run, do not edit**
+                are plumbing rather than lesson exercises.
+
+                When a cell returns a table or dictionary, interpret it in three
+                steps:
+
+                1. **What does it say?** Describe the measured value without judgment.
+                2. **What would concern me?** Connect the value to a failure risk.
+                3. **What would I do next?** Name a check, mitigation, or stop condition.
+
+                The notebooks contain worked examples, then exercises and checkpoints.
+                Generated `.ipynb` files are outputs: maintainers change the narrative
+                in `scripts/render_notebooks.py` or `scripts/notebook_pedagogy.py` and
+                regenerate them.
+                """,
+                "course-mechanics",
+                "concepts",
+            ),
+        )
+
+    return (
+        *mechanics,
+        md(
+            "\n".join(
+                [
+                    "## Why this matters",
+                    "",
+                    primer.why,
+                    "",
+                    "## Key terms in plain language",
+                    "",
+                    *terms,
+                ]
+            ),
+            "concepts",
+        ),
+        md(
+            "\n".join(
+                [
+                    "## Mental model — how to think about this",
+                    "",
+                    primer.mental_model,
+                    "",
+                    "### Running example",
+                    "",
+                    RUNNING_EXAMPLES[notebook.order],
+                    "",
+                    "### Questions to ask before continuing",
+                    "",
+                    *decisions,
+                ]
+            ),
+            "mental-model",
+        ),
+        md(
+            "\n".join(
+                [
+                    "## Current best practices",
+                    "",
+                    (
+                        f"**Guidance reviewed:** {PRACTICE_REVIEWED_ON}. "
+                        "These are reasons to inspect future tool changes, not a "
+                        "claim that practice stops evolving."
+                    ),
+                    "",
+                    *practices,
+                    "",
+                    "## Common mistakes and why they fail",
+                    "",
+                    *mistakes,
+                    "",
+                    "### What kind of guidance is this?",
+                    "",
+                    (
+                        "A **specification** defines a technical contract; **tool "
+                        "guidance** describes current official library behavior; "
+                        "**risk guidance** is voluntary governance guidance; and a "
+                        "**course rule** is this project's deliberately conservative "
+                        "choice. Do not call all four a formal standard. The lesson is "
+                        "complete offline; these primary links are optional follow-up reading."
+                    ),
+                    "",
+                    *references,
+                ]
+            ),
+            "best-practices",
+            "standards-reference",
+        ),
+    )
+
+
 OFFLINE_SETUP = code(
     """
     import sys
@@ -122,8 +247,33 @@ OFFLINE_SETUP = code(
         "aai_local_finetuning.offline"
     ).enable_offline_environment
     enable_offline_environment()
+
+    {
+        "setup": "ready",
+        "kernel": "AAI Local Fine-Tuning (offline)",
+        "python": str(active_python),
+        "network_library_flags": "enabled",
+        "note": "Continue to the lesson; this cell is setup, not an exercise.",
+    }
     """,
     "offline-setup",
+    "setup-run-do-not-edit",
+)
+
+
+SETUP_GUIDANCE = md(
+    """
+    ## Setup — run, do not edit
+
+    Run the next cell once. It verifies the dedicated local Python kernel, finds
+    this sample project, and enables supported offline flags **before** model or
+    tracking libraries are imported. A successful cell ends with `setup: ready`.
+
+    This is one defense layer, not proof that every native library is physically
+    incapable of networking. The flight-preparation manifest, cached assets,
+    socket-denial checks, and a Wi-Fi-off rehearsal provide the other layers.
+    """,
+    "setup-guidance",
 )
 
 
@@ -164,9 +314,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Check this prepared machine
 
-                The paths below stay local. A red row means preparation is incomplete;
-                it does not trigger a download. The model, source archive, generated
-                data, adapters, and MLflow database are deliberately ignored by Git.
+                The paths below stay local. A row with `ready: false` means preparation
+                is incomplete; it does not trigger a download. The cell stops rather
+                than letting a missing asset become an in-flight surprise. The model,
+                source archive, generated data, adapters, and MLflow database are
+                deliberately ignored by Git.
                 """,
                 "what-to-notice",
             ),
@@ -189,6 +341,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     }
                     for check in [machine, *asset_checks(settings)]
                 ]
+                not_ready = [item for item in readiness if not item["ready"]]
+                if not_ready:
+                    failed = ", ".join(item["asset"] for item in not_ready)
+                    raise RuntimeError(
+                        "Offline study is not ready. Re-run `make prepare-flight` while "
+                        f"online, then rehearse with Wi-Fi off. Failed checks: {failed}"
+                    )
                 readiness
                 """),
             md(
@@ -214,7 +373,18 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 The model must return exactly four typed fields. A plausible-looking
                 sentence is not enough, and a high intent score cannot conceal invalid
-                or unsafe generated output.
+                or policy-breaking generated output. In this course, “response-policy
+                compliant” means only that the output passed a small versioned set of
+                wording checks; it is not a broad production-safety claim.
+
+                A valid example has all four fields and the correct types:
+
+                ```json
+                {"intent":"recover_password","category":"account","requires_escalation":false,"response":"I can help you reset your password."}
+                ```
+
+                `{"intent":"recover_password"}` is valid JSON but fails the schema
+                because fields are missing. `intent=recover_password` is not JSON at all.
                 """,
                 "what-to-notice",
             ),
@@ -328,7 +498,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 A filename can be silently replaced. SHA-256 binds later results to the
                 exact archive and CSV inspected for the course. Hashing is read-only and
-                streams the files, so the raw directory remains immutable.
+                streams the files, so the raw directory remains unchanged. “Immutable”
+                here is a process rule: the hash detects changed bytes but cannot prevent
+                a person or program from replacing them.
                 """,
                 "what-to-notice",
             ),
@@ -344,6 +516,14 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "archive_sha256": settings.dataset.archive_sha256,
                     "csv_sha256": settings.dataset.csv_sha256,
                 }
+                if not all(
+                    local_integrity[key]
+                    for key in ("archive_matches", "csv_matches")
+                ):
+                    raise RuntimeError(
+                        "Local data bytes differ from the reviewed course snapshot. "
+                        "Stop; do not explore, train, or reuse the old license review."
+                    )
                 local_integrity
                 """),
             md("""
@@ -458,9 +638,22 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Quality audit
 
+                The record funnel explains why counts can shrink:
+
+                | Stage | Meaning |
+                |---|---|
+                | Source | Every parsed CSV row |
+                | Valid | Rows satisfying the required field and type contract |
+                | Unique | Repeated normalized learning content counted once |
+                | Non-conflicting | Duplicate groups whose labels do not disagree |
+                | Curated | Eligible records selected under the versioned balance policy |
+                | Split | Curated records assigned to train, validation, or frozen test |
+
                 The report contains counts and distributions, not raw samples. Exact
                 duplicates are measured after canonicalization. Near duplicates and
                 inferred templates are heuristic evidence and must be documented as such.
+                Expect this aggregate audit to take roughly one to several minutes on the
+                prepared laptop; the exact tokenizer pass is usually the slowest part.
                 """,
                 "what-to-notice",
             ),
@@ -493,7 +686,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 Pattern matches are counts only. Email-, URL-, phone-like text and
                 placeholders are masked before portable training records are written.
                 Source flags remain explicit evaluation slices; difficulty is a separate
-                versioned heuristic, not a human quality label.
+                versioned heuristic, not a human quality label. Language below is the
+                source's declared coverage, not language detected independently in every row.
                 """,
                 "what-to-notice",
             ),
@@ -502,7 +696,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 distribution_report = {
                     "intents": audit_payload["intent_distribution"],
                     "categories": audit_payload["category_distribution"],
-                    "languages": {settings.dataset.language: audit_payload["source_records"]},
+                    "declared_language_coverage": {
+                        settings.dataset.language: audit_payload["source_records"]
+                    },
                     "instruction_characters": audit_payload["instruction_characters"],
                     "instruction_word_proxy": audit_payload["instruction_words"],
                     "pinned_tokenizer_tokens": token_lengths.model_dump(mode="json"),
@@ -515,11 +711,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 distribution_report
                 """),
             md("""
-                ## Automated split-integrity gate
+                ## Preview the prepared split-integrity gate
 
-                This gate examines the prepared evidence boundaries without displaying
-                frozen test content. It checks exact, inferred-template, and near-duplicate
-                overlap plus target and demonstration leakage.
+                Notebook 03 teaches how the split is constructed. For now, this is a
+                preview of already-prepared evidence: the gate examines boundaries
+                without displaying frozen test content. It checks exact, inferred-template,
+                and near-duplicate overlap plus target and demonstration leakage.
                 """),
             code("""
                 integrity = check_split_files(processed_dir)
@@ -620,17 +817,28 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Evidence boundaries
 
-                Train fits weights and train-derived rules. Validation selects prompts
-                and settings. The frozen test is opened only after those choices stop.
-                This notebook reads its manifest and runs automated leakage checks, but
-                does not display or use test examples.
+                | Split | May influence | Must not influence |
+                |---|---|---|
+                | Train | Learned weights, train-derived statistics, demonstrations | Final generalization claim |
+                | Validation | Prompt, checkpoint, threshold, and configuration choice | Learned examples or final claim |
+                | Frozen test | Final measurement of already-locked methods | Any earlier design choice |
+
+                “Frozen” is a governance promise, not a file permission. A hash reveals
+                changed bytes but does not stop a person from reading them. This notebook
+                reads manifest metadata and runs automated checks, but does not display or
+                use test examples. If a test result later causes a prompt change, that test
+                has become development data and a fresh untouched boundary is required.
                 """,
                 "what-to-notice",
             ),
             code("""
                 import json
 
-                from aai_local_finetuning.data import check_split_files, text_similarity
+                from aai_local_finetuning.data import (
+                    check_split_files,
+                    text_similarity,
+                    verify_manifest,
+                )
                 from aai_local_finetuning.evaluation import load_records_jsonl
                 from aai_local_finetuning.settings import load_settings
 
@@ -649,7 +857,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     }
                     for name, descriptor in manifest["splits"].items()
                 }
-                split_contract
+                verification = verify_manifest(processed / "manifest.json")
+                {
+                    "splits": split_contract,
+                    "artifact_hashes_valid": verification.valid,
+                    "checked_files": verification.checked_files,
+                    "mismatches": verification.mismatches,
+                }
                 """),
             md(
                 """
@@ -715,6 +929,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Run the automated leakage gate
 
+                The gate distinguishes exact overlap, inferred-template overlap, near
+                duplicates, shared source groups, target leakage, and demonstration
+                leakage. Development contamination—changing a method after test feedback—is
+                a process failure and cannot be detected from files alone.
+
                 A passing gate means no configured relationship crossed the prepared
                 boundaries. It does not prove that heuristic grouping discovered every
                 semantic relationship in the world.
@@ -744,7 +963,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 sentence_a = "I forgot my password and cannot sign in"
                 sentence_b = "I cannot sign in because I forgot the password"
                 similarity = text_similarity(sentence_a, sentence_b)
-                threshold = 0.88
+                threshold = manifest["processing"]["near_duplicate_threshold"]
                 grouping_decision = similarity >= threshold
                 limitation = (
                     "Similarity is a reproducible heuristic; it is not a verified "
@@ -752,6 +971,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 )
                 {
                     "similarity": round(similarity, 3),
+                    "configured_threshold": threshold,
                     "same_group_at_threshold": grouping_decision,
                     "limitation": limitation,
                 }
@@ -786,7 +1006,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
         stage="baselines",
         duration=45,
         prerequisites=("03_leakage_safe_splits.ipynb",),
-        evidence="validation metrics for majority and train-derived keyword baselines",
+        evidence="validation metrics for majority and locked keyword/rule baselines",
         cells=(
             intro(
                 4,
@@ -798,16 +1018,19 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "Interpret macro and weighted classification metrics.",
                     "Score structured output, response policy, performance, slices, and errors separately.",
                 ),
-                evidence="validation metrics for majority and train-derived keyword baselines",
+                evidence="validation metrics for majority and locked keyword/rule baselines",
             ),
             OFFLINE_SETUP,
             md(
                 """
                 ## Fit only on training evidence
 
-                Both baselines learn from train. Validation estimates how well a method
-                generalizes while prompts and settings may still change. The frozen test
-                remains unopened.
+                The majority baseline learns its fixed label from train. The keyword/rule
+                baseline learns label counts, token weights, category mappings, and
+                escalation defaults from train **and** includes human-authored phrase and
+                escalation rules locked in source code before validation. It is therefore
+                transparent and input-aware, but not wholly train-derived. Validation
+                estimates behavior while methods may still change; test remains unopened.
                 """,
                 "what-to-notice",
             ),
@@ -837,6 +1060,14 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 The same evaluator parses JSON, validates the schema, rejects unsupported
                 labels, checks response policy, calculates classification metrics, and
                 summarizes latency, output tokens, memory, slices, and bounded errors.
+
+                Read the evaluation ladder from basic usability toward task quality:
+
+                `parseable JSON → schema-valid fields → allowed label → correct task answer →`
+                `course-policy-compliant response → acceptable latency/tokens/memory`
+
+                One record can fail several layers, so error-kind counts can overlap and
+                must not be added together to infer a number of failed records.
                 """),
             code("""
                 baseline_reports = {
@@ -855,6 +1086,29 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     [report_row(name, report) for name, report in baseline_reports.items()]
                 )
                 """),
+            md(
+                """
+                ## How to read the score table
+
+                | Field | Better direction | Question it answers |
+                |---|---:|---|
+                | Intent accuracy | Higher | How often was the exact intent correct? |
+                | Macro precision / recall / F1 | Higher | How well does each intent perform when every intent has equal influence? |
+                | Weighted F1 | Higher | How well does the observed label mix perform, giving common intents more influence? |
+                | Category / escalation accuracy | Higher | Were the other authoritative target fields correct? |
+                | JSON parse / schema validity | Higher | Can code read the output, and does it satisfy the exact contract? |
+                | Unsupported-intent rate | Lower | How often did the method invent a label outside the vocabulary? |
+                | Response-policy compliance | Higher | Did wording pass this course's narrow lexical policy? |
+                | Latency, tokens, memory | Context or lower | What local resource cost accompanied the result? |
+
+                “Support” in a per-intent table means the number of true evaluation
+                examples for that intent; it does not mean customer-support quality.
+                Passing the response policy does not establish truthfulness, helpfulness,
+                privacy, or general safety.
+                """,
+                "interpretation",
+                "what-to-notice",
+            ),
             md(
                 """
                 ## Why macro F1 matters
@@ -877,6 +1131,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 "keyword-rule"
                             ].classification.per_intent_f1.values()
                         ),
+                        "support": [
+                            baseline_reports["keyword-rule"].by_intent[intent].count
+                            for intent in baseline_reports[
+                                "keyword-rule"
+                            ].classification.per_intent_f1
+                        ],
                     }
                 ).sort_values("f1").head(10)
                 """),
@@ -884,9 +1144,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Inspect what the transparent baseline learned
 
-                Terms come only from training records. They are useful for debugging and
-                also reveal brittleness: lexical shortcuts can fail on paraphrases,
-                ambiguity, negation, or intents with overlapping vocabulary.
+                The displayed weighted terms come only from training records. Separate
+                phrase rules and escalation triggers are human-authored course rules.
+                Both are useful for debugging and reveal brittleness: lexical shortcuts
+                can fail on paraphrases, ambiguity, negation, or overlapping vocabulary.
                 """,
                 "what-to-notice",
             ),
@@ -1038,16 +1299,34 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Small measured validation experiment
 
-                This default uses six validation examples so Run All remains practical on
-                a MacBook Air. It teaches mechanics, not statistical certainty. Increase
-                the limit only while prompts are still unlocked; record the final choice
-                before opening the frozen evaluation notebook.
+                This default selects one record from each of six distinct intents so Run
+                All remains practical on a MacBook Air. It is a stratified smoke probe,
+                not a representative validation estimate. Macro F1 is still calculated
+                over all 27 supported intents, so the 21 absent intents receive zero and
+                the absolute value is deliberately not a prompt-quality claim. Use probe
+                coverage plus obvious contract failures here; a broad validation run is
+                required before locking a winner.
                 """,
                 "what-to-notice",
             ),
             code("""
                 VALIDATION_LIMIT = 6
-                validation_probe = splits.validation[:VALIDATION_LIMIT]
+                first_by_intent = {}
+                for record in splits.validation:
+                    first_by_intent.setdefault(record.target.intent, record)
+                    if len(first_by_intent) == VALIDATION_LIMIT:
+                        break
+                validation_probe = tuple(first_by_intent.values())
+                probe_context = {
+                    "selection": "one validation record per distinct intent",
+                    "records": len(validation_probe),
+                    "covered_intents": sorted(first_by_intent),
+                    "supported_intents": len(allowed_intents),
+                    "macro_f1_warning": (
+                        "Absent supported intents score zero; do not interpret this "
+                        "small-probe macro F1 as an absolute quality estimate."
+                    ),
+                }
                 predictor = LocalMLXPredictor(settings.model_dir)
                 prompt_reports = {}
                 prompt_predictions = {}
@@ -1065,9 +1344,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         predictions,
                         supported_intents=allowed_intents,
                     )
-                pd.DataFrame(
+                display(pd.DataFrame(
                     [report_row(name, report) for name, report in prompt_reports.items()]
-                )
+                ))
+                probe_context
                 """),
             md(
                 """
@@ -1075,7 +1355,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 A raw preview helps diagnose format errors. The strict report—not visual
                 plausibility—determines JSON parse, schema validity, supported labels,
-                classification, response policy, latency, tokens, and memory.
+                classification, response policy, latency, tokens, and memory. This course
+                currently records output tokens only; few-shot prompts also consume more
+                **input** tokens, so the displayed token field is not a total-cost comparison.
+                The first local generation can pay compilation/warm-up cost, which also
+                makes a six-record latency comparison diagnostic rather than definitive.
                 """,
                 "what-to-notice",
             ),
@@ -1105,8 +1389,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 chosen_strategy = "strong"
                 choice_rationale = (
-                    "Use the constrained label and schema contract as the default; the "
-                    "small probe is insufficient to claim few-shot superiority."
+                    "This is a conservative course default, not the computed winner. Use "
+                    "the constrained contract until a broad validation run compares all "
+                    "strategies; the small probe cannot establish few-shot superiority."
                 )
                 assert chosen_strategy in prompt_reports
                 {
@@ -1170,6 +1455,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 The base model revision and 4-bit weights stay fixed. LoRA learns a small
                 adapter over selected projections. The configuration is versioned so the
                 change can be reproduced and hashed with its later evaluation evidence.
+                MLX-LM calls LoRA training over this quantized base **QLoRA**. The YAML's
+                `fine_tune_type: lora` names the adapter type; the local model's 4-bit
+                weights determine that quantized training path.
                 """,
                 "what-to-notice",
             ),
@@ -1220,7 +1508,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 Batch size 1, gradient accumulation, eight adapted layers, a bounded
                 sequence length, prompt masking, and checkpointing reduce unified-memory
                 pressure. They are design choices for the prepared 24 GB Apple-silicon
-                machine, not universal optimal values.
+                machine, not universal optimal values. `grad_checkpoint` recomputes
+                intermediate activations to save memory; it is different from a saved
+                adapter checkpoint. With batch size 1 and four accumulation steps, the
+                approximate effective batch is four sequences per optimizer update.
                 """,
                 "what-to-notice",
             ),
@@ -1231,16 +1522,25 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "model",
                         "train",
                         "fine_tune_type",
+                        "optimizer",
                         "num_layers",
                         "batch_size",
                         "grad_accumulation_steps",
+                        "learning_rate",
                         "max_seq_length",
                         "mask_prompt",
                         "grad_checkpoint",
                         "iters",
+                        "steps_per_eval",
+                        "save_every",
                         "seed",
                     )
                 }
+                training_anatomy["method"] = "QLoRA (LoRA over a 4-bit base in MLX-LM)"
+                training_anatomy["approximate_effective_batch_sequences"] = (
+                    training_config["batch_size"]
+                    * training_config["grad_accumulation_steps"]
+                )
                 training_anatomy["lora_parameters"] = training_config.get(
                     "lora_parameters"
                 )
@@ -1305,7 +1605,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 After a run, compare training and validation losses and measured peak
                 memory. Success means your conclusion avoids claiming that lower loss
-                proves better frozen-test behavior or safer responses.
+                proves better frozen-test behavior or safer responses. One or ten
+                iterations prove plumbing, not a trustworthy loss trend. A formal run
+                should also record the selected checkpoint, adapter hash, base revision,
+                configuration hash, seed, and whether examples were truncated at 512 tokens.
                 """,
                 "exercise",
             ),
@@ -1365,6 +1668,35 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 evidence="comparable frozen reports, slice tables, and bounded error evidence",
             ),
             OFFLINE_SETUP,
+            md(
+                """
+                ## Lock the decision contract before opening test
+
+                These versioned **course defaults** require at least a 0.01 absolute
+                macro-F1 gain over the strongest meaningful baseline, schema validity
+                ≥ 0.98, response-policy compliance ≥ 0.95, and zero unsupported labels.
+                They are fixed now, before any test row or result is loaded.
+
+                Category accuracy, escalation accuracy, latency, input/output tokens,
+                peak memory, and adapter size are still reported but are **observational,
+                not gating**, because this learning project has not invented business
+                budgets for them. A production owner must set risk-based non-regression
+                and resource gates. This compact course also uses point estimates; a
+                higher-stakes decision should add paired uncertainty analysis and, for
+                training variance, repeated seeds.
+                """,
+                "decision-contract",
+                "best-practices",
+            ),
+            code(
+                """
+                from aai_local_finetuning.evaluation import PromotionThresholds
+
+                locked_thresholds = PromotionThresholds()
+                locked_thresholds.model_dump(mode="json")
+                """,
+                "decision-contract",
+            ),
             md(
                 """
                 ## Open the frozen boundary once choices are locked
@@ -1657,23 +1989,31 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ]
                 """),
             md("""
-                ## Log a learner checkpoint
+                ## Understand a run before writing one
 
-                This small run records that the notebook reached the decision stage. It
-                does not masquerade as a frozen evaluation run and does not overwrite
-                official evidence.
+                An MLflow **experiment** groups related work. A **run** is one evidence
+                envelope: parameters describe inputs and configuration, metrics record
+                numeric results, tags make purpose searchable, and artifacts preserve
+                files such as reports and decisions. The local SQLite store is the index;
+                the artifact directory holds evidence files. This notebook writes one
+                decision run only after it has assembled the assessment below.
                 """),
             code("""
-                with mlflow.start_run(run_name="notebook-decision-checkpoint") as run:
-                    mlflow.set_tags(
-                        {
-                            "run_purpose": "learner_checkpoint",
-                            "execution_mode": "offline_local",
-                        }
-                    )
-                    mlflow.log_metric("notebook_stage_complete", 1.0)
-                    checkpoint_run_id = run.info.run_id
-                checkpoint_run_id
+                tracking_contract = {
+                    "experiment": settings.tracking.experiment,
+                    "backend_store": settings.tracking.uri,
+                    "artifact_root": settings.tracking.artifact_root,
+                    "planned_run_purpose": "promotion_assessment",
+                    "required_lineage": [
+                        "evaluation fingerprint",
+                        "model revision",
+                        "adapter and configuration hashes",
+                        "evaluator and policy versions",
+                        "locked thresholds",
+                        "reports and final decision",
+                    ],
+                }
+                tracking_contract
                 """),
             md(
                 """
@@ -1710,9 +2050,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ## Apply the decision contract
 
                 Defaults require schema validity ≥ 0.98, response-policy compliance ≥
-                0.95, unsupported-intent rate = 0, and macro F1 strictly above the
-                strongest meaningful baseline. Majority is retained as a floor but is
-                excluded from the meaningful-baseline competition.
+                0.95, unsupported-intent rate = 0, and an absolute macro-F1 gain ≥ 0.01
+                over the strongest meaningful baseline. These course defaults were shown
+                and locked before notebook 07 opened test. Majority is retained as a floor
+                but excluded from the meaningful-baseline competition. The point-estimate
+                gate is suitable for this lab, not a substitute for risk-based thresholds
+                and paired uncertainty in a higher-stakes decision.
                 """,
                 "what-to-notice",
             ),
@@ -1763,6 +2106,45 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "available_reports": report_status,
                     }
                 assessment
+                """),
+            md(
+                """
+                ## Persist the assessment with its contract
+
+                Now the notebook writes one MLflow run whose purpose is explicit. The
+                assessment artifact is useful whether the decision is adopt, reject, or
+                inconclusive. Re-running creates a new attempt with a new run ID instead
+                of silently replacing prior evidence.
+                """,
+                "what-to-notice",
+            ),
+            code("""
+                with mlflow.start_run(run_name="notebook-promotion-assessment") as run:
+                    mlflow.set_tags(
+                        {
+                            "run_purpose": "promotion_assessment",
+                            "execution_mode": "offline_local",
+                            "decision": str(assessment["decision"]),
+                        }
+                    )
+                    mlflow.log_params(
+                        {
+                            f"threshold.{name}": value
+                            for name, value in thresholds.model_dump(mode="json").items()
+                        }
+                    )
+                    mlflow.log_dict(assessment, "decision/assessment.json")
+                    if complete_and_comparable:
+                        mlflow.log_param(
+                            "evaluation_fingerprint",
+                            next(iter(fingerprints)),
+                        )
+                        for name, value in loaded_reports[
+                            "lora-change"
+                        ].flat_metrics().items():
+                            mlflow.log_metric(f"change.{name}", value)
+                    decision_run_id = run.info.run_id
+                {"decision_run_id": decision_run_id, "assessment": assessment}
                 """),
             md(
                 """
@@ -1849,8 +2231,6 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 from aai_local_finetuning.capstone import (
                     REQUIRED_FROZEN_TEST_SLICES,
-                    deterministic_capstone_predictions,
-                    evaluate_capstone_predictions,
                     evaluate_manifest,
                     generate_capstone_dataset,
                     load_capstone_records,
@@ -1938,31 +2318,29 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """),
             md(
                 """
-                ## Verify the frozen slice contract and deterministic ceiling
+                ## Lock the frozen contract without opening test rows
 
-                Every required slice must occur. The policy engine is the accuracy ceiling
-                for rules it fully determines, so replacing those decisions with a model
-                cannot improve correctness.
+                The generator commits the test count, file hash, ID hash, and required
+                slice vocabulary. We can inspect that contract without loading examples,
+                labels, or predictions. The deterministic engine is the *declared*
+                correctness ceiling for rules it fully determines; notebook 10 measures
+                that claim only after its model probe and optional training are finished.
                 """,
                 "what-to-notice",
             ),
             code("""
-                test_records = load_capstone_records(source_dir / "test.jsonl")
-                test_slices = Counter(
-                    slice_name
-                    for record in test_records
-                    for slice_name in record.metadata.slices
-                )
-                missing_slices = sorted(set(REQUIRED_FROZEN_TEST_SLICES) - set(test_slices))
-                policy_report = evaluate_capstone_predictions(
-                    test_records,
-                    deterministic_capstone_predictions(test_records),
+                test_artifact = next(
+                    artifact
+                    for artifact in split_manifest.artifacts
+                    if artifact.split.value == "test"
                 )
                 {
-                    "missing_required_slices": missing_slices,
-                    "exact_review_rate": policy_report.aggregate.exact_review_rate,
-                    "schema_validity": policy_report.aggregate.schema_validity_rate,
-                    "slice_counts": dict(sorted(test_slices.items())),
+                    "test_rows_loaded": False,
+                    "frozen": split_manifest.frozen_test,
+                    "record_count": test_artifact.record_count,
+                    "sha256": test_artifact.sha256,
+                    "example_ids_sha256": test_artifact.example_ids_sha256,
+                    "required_slice_contract": list(REQUIRED_FROZEN_TEST_SLICES),
                 }
                 """),
             md(
@@ -2005,8 +2383,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Checkpoint
 
-                You now have deterministic, versioned ground truth and a measurable
-                ceiling—not LLM-generated labels presented as facts.
+                You now have deterministic, versioned ground truth and a declared
+                correctness ceiling ready for a locked measurement—not LLM-generated
+                labels presented as facts. Test rows have not been opened.
 
                 **Next:** `10_capstone_model_vs_hybrid.ipynb` tests where a tiny model may
                 add value without owning authoritative readiness decisions.
@@ -2022,7 +2401,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
         stage="capstone_architecture",
         duration=55,
         prerequisites=("09_capstone_policy_dataset.ipynb",),
-        evidence="a policy/model comparison and an explicit architecture choice",
+        evidence="a validation mechanics probe, frozen ceiling check, and explicit architecture choice",
         cells=(
             intro(
                 10,
@@ -2030,21 +2409,23 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 minutes=55,
                 prerequisites="09 — Capstone policy-derived ground truth",
                 objectives=(
-                    "Compare a deterministic ceiling with an untouched tiny-model probe.",
+                    "Distinguish a one-record mechanics probe from comparative evidence.",
                     "Prove that a hybrid renderer cannot alter authoritative decisions.",
                     "Decide which behavior, if any, justifies a language model.",
                 ),
-                evidence="a policy/model comparison and an explicit architecture choice",
+                evidence="a validation mechanics probe, frozen ceiling check, and explicit architecture choice",
             ),
             OFFLINE_SETUP,
             md(
                 """
-                ## Start with the accuracy ceiling
+                ## Rehearse the deterministic method on validation
 
-                The full deterministic frozen report should be exact for completely
-                specified rules. The model must therefore justify itself through a
-                different capability—such as bounded wording—rather than replacing
-                correct policy decisions with probabilistic ones.
+                Test is still closed. The deterministic method should be exact on
+                validation for fully specified rules because the same versioned policy
+                engine generated the labels. This rehearses the evaluator; it is not yet
+                the frozen ceiling measurement. A model must justify a different
+                capability—such as bounded wording—rather than probabilistically
+                duplicating already-computable policy decisions.
                 """,
                 "what-to-notice",
             ),
@@ -2064,22 +2445,27 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 settings = load_settings()
                 source_dir = PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1"
-                test_records = load_capstone_records(source_dir / "test.jsonl")
-                deterministic_report = evaluate_capstone_predictions(
-                    test_records,
-                    deterministic_capstone_predictions(test_records),
+                validation_records = load_capstone_records(
+                    source_dir / "validation.jsonl"
                 )
-                deterministic_report.aggregate.model_dump(mode="json")
+                deterministic_validation_report = evaluate_capstone_predictions(
+                    validation_records,
+                    deterministic_capstone_predictions(validation_records),
+                )
+                deterministic_validation_report.aggregate.model_dump(mode="json")
                 """),
             md("""
-                ## One untouched-model probe
+                ## One untouched-model validation probe — demo, not evidence
 
-                This bounded example shows mechanics, not a winner. The compact model
-                contract asks for status and non-pass checks. A full model comparison is
-                expensive and should be run only after methods are locked.
+                This bounded **validation** example shows mechanics, not a winner and not
+                a model-versus-policy comparison. The compact model contract asks for
+                status and non-pass checks. One output has no useful uncertainty or slice
+                coverage; a claimed comparison must score locked methods on identical
+                records and fingerprints.
                 """),
-            code("""
-                probe_record = test_records[0]
+            code(
+                """
+                probe_record = validation_records[0]
                 predictor = LocalMLXPredictor(settings.model_dir)
                 generated = predictor.generate(
                     [
@@ -2109,8 +2495,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "output_preview": generated.text[:500],
                     "metrics": model_probe_report.aggregate.model_dump(mode="json"),
                     "performance": model_probe_report.performance.model_dump(mode="json"),
+                    "evidence_status": "mechanics demo only; do not rank methods",
                 }
-                """),
+                """,
+                "demo-not-evidence",
+            ),
             md(
                 """
                 ## The hybrid authority boundary
@@ -2142,6 +2531,42 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     ),
                     "explanation_preview": hybrid.explanations[0].model_dump(
                         mode="json"
+                    ),
+                }
+                """),
+            md(
+                """
+                ## Prove fallback—and understand what the type boundary cannot prove
+
+                A renderer exception cannot weaken the policy decision: deterministic
+                wording replaces it. The typed boundary also prevents the renderer from
+                changing status or severity. It does **not** prove that arbitrary prose is
+                truthful, so generated explanations still need their own groundedness and
+                human-review evaluation.
+                """,
+                "what-to-notice",
+            ),
+            code("""
+                def failing_renderer(_check):
+                    raise RuntimeError("simulated renderer outage")
+
+
+                fallback_review = build_hybrid_review(
+                    probe_record.manifest,
+                    renderer=failing_renderer,
+                    renderer_name="simulated_failure",
+                )
+                {
+                    "authoritative_review_unchanged": (
+                        fallback_review.deterministic_review
+                        == hybrid.deterministic_review
+                    ),
+                    "fallback_is_nonempty": all(
+                        explanation.text for explanation in fallback_review.explanations
+                    ),
+                    "remaining_risk": (
+                        "A nonempty generated explanation may still be misleading; "
+                        "evaluate wording separately."
                     ),
                 }
                 """),
@@ -2183,6 +2608,76 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             ),
             md(
                 """
+                ## Lock methods, then open the capstone test once
+
+                All model probing and optional training now precede this boundary. The
+                deterministic ceiling is measured on the complete test. The expensive
+                base-model comparison is opt-in, but when enabled it uses every identical
+                test record so the two reports share a defensible scope. Leaving it off
+                produces **missing model evidence**, not permission to infer a winner.
+                """,
+                "frozen-boundary",
+                "what-to-notice",
+            ),
+            code(
+                """
+                test_records = load_capstone_records(source_dir / "test.jsonl")
+                deterministic_report = evaluate_capstone_predictions(
+                    test_records,
+                    deterministic_capstone_predictions(test_records),
+                )
+
+                RUN_FROZEN_MODEL_COMPARISON = False
+                model_frozen_report = None
+                if RUN_FROZEN_MODEL_COMPARISON:
+                    model_predictions = []
+                    for record in test_records:
+                        generated = predictor.generate(
+                            [
+                                {"role": "system", "content": CAPSTONE_SYSTEM_PROMPT},
+                                {
+                                    "role": "user",
+                                    "content": json.dumps(
+                                        record.manifest,
+                                        separators=(",", ":"),
+                                        sort_keys=True,
+                                    ),
+                                },
+                            ],
+                            max_tokens=160,
+                        )
+                        model_predictions.append(
+                            CapstonePrediction(
+                                example_id=record.example_id,
+                                raw_text=generated.text,
+                                latency_ms=generated.latency_ms,
+                                output_tokens=generated.output_tokens,
+                                peak_memory_mb=generated.peak_memory_mb,
+                            )
+                        )
+                    model_frozen_report = evaluate_capstone_predictions(
+                        test_records,
+                        tuple(model_predictions),
+                    )
+
+                frozen_comparison = {
+                    "records": len(test_records),
+                    "deterministic_policy": (
+                        deterministic_report.aggregate.model_dump(mode="json")
+                    ),
+                    "untouched_model": (
+                        model_frozen_report.aggregate.model_dump(mode="json")
+                        if model_frozen_report is not None
+                        else "not run; comparative model evidence is absent"
+                    ),
+                    "comparison_complete": model_frozen_report is not None,
+                }
+                frozen_comparison
+                """,
+                "frozen-boundary",
+            ),
+            md(
+                """
                 ## Exercise — choose the production shape
 
                 Fill in one row per behavior. Success means deterministic checks retain
@@ -2198,16 +2693,29 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "behavior": "readiness decision",
                         "owner": "deterministic policy engine",
                         "reason": "exact, auditable rules already define the answer",
+                        "failure_handling": "fail closed to not-ready or review",
+                        "evidence": "policy tests and frozen deterministic report",
                     },
                     {
                         "behavior": "external registry fact",
                         "owner": "authorized lookup",
                         "reason": "the fact is absent from the local manifest",
+                        "failure_handling": "route to review; never assume false",
+                        "evidence": "lookup provenance and authorization record",
+                    },
+                    {
+                        "behavior": "residual risk acceptance",
+                        "owner": "qualified human",
+                        "reason": "risk appetite is a governed judgment, not a text prediction",
+                        "failure_handling": "await an explicit recorded decision",
+                        "evidence": "reviewer identity, rationale, and timestamp",
                     },
                     {
                         "behavior": "remediation wording",
                         "owner": "policy text or constrained tiny-model renderer",
                         "reason": "wording may vary without changing authority",
+                        "failure_handling": "deterministic wording fallback",
+                        "evidence": "groundedness, policy, latency, and fallback tests",
                     },
                 ]
                 architecture_decision
@@ -2319,6 +2827,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "redistribution",
                     "size",
                     "formats",
+                    "source_modalities",
+                    "model_input_modality",
                     "columns",
                     "languages",
                     "label_quality",
@@ -2335,21 +2845,45 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Exercise — draft, but do not invent, a review
 
-                Choose one project. Fill only facts you have verified later while online;
-                leave unknowns as `None`. The suitability gate must remain false whenever
-                the license, schema, access, or modality is unknown.
+                Choose one project. Every field carries an explicit `verified`, `unknown`,
+                or `blocked` state. A plausible placeholder is not verified evidence. The
+                gate stays false whenever rights, permitted use, redistribution, access,
+                schema, or modality is unknown or blocked.
                 """,
                 "exercise",
             ),
             code(
                 """
-                dataset_review = {field: None for field in required_review_fields}
-                dataset_review["title"] = "<verify current title online>"
-                dataset_review["accessible"] = None
-                blocking_fields = ("license", "columns", "accessible")
-                suitable_for_lab = all(dataset_review[field] for field in blocking_fields)
+                selected_project = "invoice extraction"
+                dataset_review = {
+                    field: {
+                        "state": "unknown",
+                        "value": None,
+                        "evidence": None,
+                    }
+                    for field in required_review_fields
+                }
+                dataset_review["title"]["value"] = "verify current title online"
+                blocking_fields = (
+                    "license",
+                    "permitted_use",
+                    "redistribution",
+                    "formats",
+                    "source_modalities",
+                    "model_input_modality",
+                    "columns",
+                    "accessible",
+                )
+                suitable_for_lab = all(
+                    dataset_review[field]["state"] == "verified"
+                    and dataset_review[field]["value"] not in (None, "", [], {})
+                    and dataset_review[field]["evidence"]
+                    for field in blocking_fields
+                )
                 {
+                    "project": selected_project,
                     "review": dataset_review,
+                    "blocking_fields": blocking_fields,
                     "suitable_for_lab": suitable_for_lab,
                     "decision": (
                         "continue to adapter design"
@@ -2373,7 +2907,21 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             code(
                 """
                 evaluation_plan = {
-                    "task": "invoice text extraction",
+                    "project": selected_project,
+                    "task_contract": {
+                        "input": "verified OCR text, not invoice image pixels",
+                        "output": "strict optional invoice fields with normalized values",
+                        "authority": "human-reviewed annotations from the verified source",
+                    },
+                    "split_risks": [
+                        "same vendor template crossing splits",
+                        "duplicate invoice or OCR variants crossing splits",
+                    ],
+                    "baselines": [
+                        "null/empty-field sanity baseline",
+                        "deterministic pattern-and-normalization extractor",
+                        "untouched prompted text model",
+                    ],
                     "principal_metrics": [
                         "field-level precision/recall/F1",
                         "normalized date and currency exactness",
@@ -2386,7 +2934,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "modality_boundary": (
                         "requires reliable OCR text; a tiny text model cannot read images"
                     ),
+                    "resource_constraints": (
+                        "verify context-length distribution, latency, and peak memory on "
+                        "the prepared 24 GB laptop before training"
+                    ),
                 }
+                assert evaluation_plan["project"] == selected_project
                 evaluation_plan
                 """,
                 "exercise",
@@ -2432,11 +2985,23 @@ def _cell_payload(notebook: Notebook, index: int, cell: Cell) -> dict[str, objec
     return payload
 
 
+def _expanded_cells(notebook: Notebook) -> tuple[Cell, ...]:
+    """Place explanation before execution and label shared setup consistently."""
+
+    cells: list[Cell] = [notebook.cells[0], *pedagogy_cells(notebook)]
+    for cell in notebook.cells[1:]:
+        if cell is OFFLINE_SETUP:
+            cells.append(SETUP_GUIDANCE)
+        cells.append(cell)
+    return tuple(cells)
+
+
 def render(notebook: Notebook) -> None:
+    primer = PRIMERS[notebook.order]
+    cells = _expanded_cells(notebook)
     payload = {
         "cells": [
-            _cell_payload(notebook, index, cell)
-            for index, cell in enumerate(notebook.cells)
+            _cell_payload(notebook, index, cell) for index, cell in enumerate(cells)
         ],
         "metadata": {
             "aai_curriculum": {
@@ -2445,6 +3010,19 @@ def render(notebook: Notebook) -> None:
                 "duration_minutes": notebook.duration,
                 "prerequisites": list(notebook.prerequisites),
                 "learner_evidence": notebook.evidence,
+                "concepts_introduced": [term for term, _ in primer.terms],
+                "practice_guidance_reviewed_on": PRACTICE_REVIEWED_ON,
+                "pedagogical_structure": [
+                    "why",
+                    "terms",
+                    "mental_model",
+                    "running_example",
+                    "decision_questions",
+                    "best_practices",
+                    "common_mistakes",
+                    "practice",
+                    "checkpoint",
+                ],
             },
             "kernelspec": {
                 "display_name": "AAI Local Fine-Tuning (offline)",
