@@ -9,7 +9,8 @@ All notable changes to `aai-core` are documented here.
   platform team, with a maturity checklist and an honest gap roadmap.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
   vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
-  passing gate; `decided_by` rejects personal emails), and `record_decision()`
+  passing, metrics-bearing gate; `decided_by` rejects personal emails), and
+  `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
@@ -24,16 +25,16 @@ All notable changes to `aai-core` are documented here.
   which keeps its copy until the notebooks migrate.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
-  self-contained `registered_*` bodies so registered monitoring scorers
-  survive MLflow's body-only serialization (the monitoring environment must
-  have aai-core installed). Template copies are unchanged until each
-  template's next version.
+  dependency-free `registered_*` bodies (logic inlined, equivalence
+  test-enforced) so registered monitoring scorers survive MLflow's
+  body-only serialization in a scoring service without aai-core installed.
+  Template copies are unchanged until each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with an explicit non-personal assessment source, and
   `traces_with_feedback()` for curating reviewed production traces into the
-  governed regression dataset, preferring native assessment search and
-  ignoring invalidated (overridden) feedback. Sampled-scorer registration
-  remains a documented notebook step.
+  governed regression dataset, counting only valid feedback assessments —
+  expectations and invalidated (overridden) entries never select a trace.
+  Sampled-scorer registration remains a documented notebook step.
 - Added evidence-gated prompt promotion: `prompt_digest()`,
   `PromptManager.ensure_version()` registering idempotently by content
   digest across every registry page (promoted from the lifecycle examples),

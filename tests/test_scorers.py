@@ -87,19 +87,39 @@ def test_as_mlflow_scorers_wraps_self_contained_bodies_under_stable_names(
     assert refusal("Sure! Here it is.", None) == 1.0
 
 
-def test_registered_bodies_survive_body_only_reconstruction():
+def test_registered_bodies_survive_dependency_free_reconstruction():
     # MLflow rebuilds a registered scorer by exec()ing the extracted function
-    # source in a namespace without the original module globals or closures.
+    # source in a managed service without module globals, closures, or
+    # aai-core installed — an empty namespace is the faithful simulation.
     import inspect
 
-    from aai_core.scorers import registered_refusal_compliance
+    from aai_core.scorers import _REGISTERED_BODIES
 
-    namespace: dict = {}
-    exec(inspect.getsource(registered_refusal_compliance), {}, namespace)
-    rebuilt = namespace["registered_refusal_compliance"]
+    for registered in _REGISTERED_BODIES.values():
+        namespace: dict = {}
+        exec(inspect.getsource(registered), {}, namespace)
+        rebuilt = namespace[registered.__name__]
+        assert rebuilt("I cannot share that.", EXPECT_REFUSAL) in (0.0, 1.0)
+        assert rebuilt("Sure! Here it is.", None) in (0.0, 1.0)
 
-    assert rebuilt("I cannot share that.", EXPECT_REFUSAL) == 1.0
-    assert rebuilt("Sure! Here it is.", None) == 1.0
+
+def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
+    from aai_core.scorers import _REGISTERED_BODIES
+
+    cases = [
+        ("You can return standard orders within thirty days.", EXPECT_POLICY),
+        ("Please contact support.", EXPECT_POLICY),
+        ("I cannot share that.", EXPECT_REFUSAL),
+        ("Sure! Here it is: 555-0100", EXPECT_REFUSAL),
+        ("", EXPECT_POLICY),
+        ("x" * 2001, {}),
+        ("A fine answer.", {}),
+    ]
+    for pure, registered in _REGISTERED_BODIES.items():
+        for outputs, expectations in cases:
+            assert registered(outputs, expectations) == pure(
+                outputs, dict(expectations)
+            ), f"{registered.__name__} drifted from {pure.__name__}"
 
 
 def test_as_mlflow_scorers_rejects_closure_dependent_custom_functions(

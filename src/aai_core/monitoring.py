@@ -81,15 +81,18 @@ def traces_with_feedback(
     name: str,
     value: Any | None = None,
 ) -> list[Any]:
-    """Return the native traces carrying a matching, still-valid assessment.
+    """Return the native traces carrying matching, still-valid feedback.
 
-    Native ``trace.search_assessments()`` is preferred because it excludes
-    assessments that were later corrected or overridden; raw assessment
-    lists (``trace.info.assessments``, ``trace.assessments``) are consulted
-    as fallbacks with explicitly invalidated entries (``valid=False``)
-    dropped, so obsolete feedback never selects a trace for the regression
-    dataset. Traces are returned unchanged so curation stays native, for
-    example ``dataset.merge_records(selected)`` after review.
+    Only feedback assessments count: native
+    ``trace.search_assessments(type="feedback")`` is preferred because it
+    excludes expectations and entries that were later corrected or
+    overridden; raw assessment lists (``trace.info.assessments``,
+    ``trace.assessments``) are consulted as fallbacks with
+    expectation-shaped and explicitly invalidated (``valid=False``) entries
+    dropped, so neither ground-truth expectations nor obsolete feedback can
+    select a trace for the regression dataset. Traces are returned
+    unchanged so curation stays native, for example
+    ``dataset.merge_records(selected)`` after review.
     """
 
     selected = []
@@ -105,7 +108,10 @@ def traces_with_feedback(
 def _trace_assessments(trace: Any) -> list[Any]:
     searcher = getattr(trace, "search_assessments", None)
     if callable(searcher):
-        assessments = searcher()
+        try:
+            assessments = searcher(type="feedback")
+        except TypeError:
+            assessments = searcher()
     else:
         info = getattr(trace, "info", None)
         assessments = getattr(info, "assessments", None)
@@ -114,8 +120,15 @@ def _trace_assessments(trace: Any) -> list[Any]:
     return [
         assessment
         for assessment in (assessments or [])
-        if getattr(assessment, "valid", True) is not False
+        if _is_curated_feedback(assessment)
     ]
+
+
+def _is_curated_feedback(assessment: Any) -> bool:
+    if getattr(assessment, "valid", True) is False:
+        return False
+    # Expectations are ground truth, not reviewed feedback.
+    return getattr(assessment, "expectation", None) is None
 
 
 def _assessment_matches(assessment: Any, *, name: str, value: Any | None) -> bool:

@@ -84,6 +84,12 @@ class DecisionRecord(ContractModel):
                     "reject or inconclusive, or attach the passing gate "
                     "evidence"
                 )
+            if not self.gate.metrics:
+                raise ValueError(
+                    "An adopt decision requires gate evidence with recorded "
+                    "metrics; an empty gate result proves no evaluation "
+                    "rule was applied"
+                )
         return self
 
     def as_tags(self) -> dict[str, str]:

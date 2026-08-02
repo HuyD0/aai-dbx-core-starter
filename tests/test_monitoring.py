@@ -139,6 +139,31 @@ def test_traces_with_feedback_ignores_invalidated_assessments():
     assert traces_with_feedback([trace], name="correct", value=True) == [trace]
 
 
+def test_traces_with_feedback_excludes_expectation_assessments():
+    expectation = SimpleNamespace(
+        name="correct", value=False, expectation=SimpleNamespace(value=False)
+    )
+    feedback = SimpleNamespace(name="correct", value=False)
+    only_expectation = _trace("ground-truth", [expectation])
+    reviewed = _trace("reviewed", [expectation, feedback])
+
+    assert traces_with_feedback([only_expectation], name="correct", value=False) == []
+    assert traces_with_feedback([reviewed], name="correct", value=False) == [reviewed]
+
+
+def test_traces_with_feedback_requests_only_feedback_from_native_search():
+    requested: dict = {}
+
+    def search_assessments(**kwargs):
+        requested.update(kwargs)
+        return [SimpleNamespace(name="correct", value=False)]
+
+    trace = SimpleNamespace(trace_id="typed", search_assessments=search_assessments)
+
+    assert traces_with_feedback([trace], name="correct", value=False) == [trace]
+    assert requested == {"type": "feedback"}
+
+
 def test_traces_with_feedback_prefers_native_assessment_search():
     stale = SimpleNamespace(name="correct", value=False)
     corrected = SimpleNamespace(name="correct", value=True)

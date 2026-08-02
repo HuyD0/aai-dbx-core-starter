@@ -106,6 +106,8 @@ def test_adopt_requires_passing_gate_evidence():
         _record(gate=failing)
     with pytest.raises(ValidationError, match="requires gate evidence"):
         _record(gate=None)
+    with pytest.raises(ValidationError, match="recorded metrics"):
+        _record(gate=GateResult(metrics={}))
     rejected = _record(decision=Decision.REJECT, gate=failing)
     assert rejected.as_tags()["gate_passed"] == "false"
     ungated_reject = _record(decision=Decision.INCONCLUSIVE, gate=None)
