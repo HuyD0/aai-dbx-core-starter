@@ -130,6 +130,29 @@ def test_tagged_change_fields_are_bounded():
     assert _record(change_summary="x" * 200).change_summary
 
 
+def test_free_text_evidence_must_be_substantive():
+    # min_length=1 alone accepts "   ": a whitespace summary would tag
+    # aai.change_summary blank and a whitespace rationale would persist a
+    # decision.json stating no reason at all.
+    for blank in ("   ", "\t", "\n"):
+        with pytest.raises(ValidationError, match="substantive"):
+            _record(change_summary=blank)
+        with pytest.raises(ValidationError, match="substantive"):
+            _record(rationale=blank)
+        with pytest.raises(ValidationError, match="substantive"):
+            _record(decided_by=blank)
+    # Surrounding whitespace is trimmed so the stored evidence is exactly
+    # what a reader sees in the tag and the artifact.
+    trimmed = _record(
+        change_summary="  Require one exact source citation.  ",
+        rationale="\tCitation rate reached 1.0.\n",
+        decided_by=" group:app-owners ",
+    )
+    assert trimmed.change_summary == "Require one exact source citation."
+    assert trimmed.rationale == "Citation rate reached 1.0."
+    assert trimmed.decided_by == "group:app-owners"
+
+
 def test_run_ids_accept_only_bounded_opaque_identifiers():
     # Free text and secrets must never reach governed tags through the
     # run-id fields.

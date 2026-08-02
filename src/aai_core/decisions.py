@@ -78,6 +78,23 @@ class DecisionRecord(ContractModel):
             raise TypeError("decision must be a string or Decision")
         return Decision(value.strip().lower())
 
+    @field_validator("change_summary", "rationale", "decided_by")
+    @classmethod
+    def require_substantive_text(cls, value: str | None) -> str | None:
+        # min_length alone accepts "   ", which would tag a blank summary
+        # and persist a decision.json with no stated reasoning. Trim so
+        # the stored evidence is exactly what a reader sees, and refuse a
+        # value that says nothing.
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError(
+                "decision evidence must be substantive; a whitespace-only "
+                "value records nothing"
+            )
+        return trimmed
+
     @field_validator("prompt_name")
     @classmethod
     def refuse_placeholder_components(cls, value: str | None) -> str | None:

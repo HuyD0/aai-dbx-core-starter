@@ -18,7 +18,10 @@ All notable changes to `aai-core` are documented here.
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
   content, or secrets cannot enter persisted tags; run ids and
   `change_id` are bounded opaque identifiers and `change_summary` is
-  bounded prose because both become searchable tags; `prompt_name`
+  bounded prose because both become searchable tags; the free-text
+  `change_summary`, `rationale`, and `decided_by` are trimmed and must
+  stay nonblank, so no decision is persisted with a whitespace-only
+  summary tag or an artifact stating no reason; `prompt_name`
   accepts only the qualified
   `catalog.schema.name` shape with no placeholder components and, with
   `prompt_version`, binds the registry identity the evidence was recorded
