@@ -98,7 +98,8 @@ All notable changes to `aai-core` are documented here.
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The
   prompt-registry preflight applies the same qualifier validation as the
-  SDK helpers (placeholder vocabulary and dotted values alike), and an
+  SDK helpers (placeholder vocabulary, dotted values, and invalid
+  identifier characters alike), and an
   experiment name that is a placeholder — explicit, or derived from
   placeholder team/project/application components — reports skip instead
   of passing the literal through to the registry.

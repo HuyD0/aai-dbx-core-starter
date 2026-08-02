@@ -113,6 +113,15 @@ def test_doctor_treats_dotted_qualifiers_as_unconfigured(tmp_path):
     by_name = {check.name: check for check in checks}
     assert by_name["lifecycle:prompt-registry"].status == "skip"
 
+    # Invalid identifier characters are just as unusable as dots.
+    config.write_text(
+        VALID_CONFIG + "  catalog: main catalog\n  schema: app\n",
+        encoding="utf-8",
+    )
+    checks = run_doctor(config_path=config)
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+
 
 def test_doctor_treats_replace_with_values_as_unconfigured(tmp_path):
     # The example config ships replace-with-* values; the doctor must not
