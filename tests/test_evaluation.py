@@ -148,6 +148,20 @@ def test_scorer_error_metrics_fail_without_exposing_error_text():
     assert result.failures[0].reason == "2 scorer invocation(s) failed"
 
 
+def test_gate_refuses_non_finite_scorer_error_counts():
+    # A NaN error count means scorer health is unknown; dropping it like
+    # other malformed metrics would let the gate pass anyway.
+    metrics = {"quality": 1.0, "correctness/error_count": float("nan")}
+
+    with pytest.raises(ValueError, match="correctness/error_count"):
+        apply_gate(metrics, policy=GatePolicy())
+
+    # Opting out of scorer-error enforcement restores plain dropping.
+    result = apply_gate(metrics, policy=GatePolicy(fail_on_scorer_errors=False))
+    assert dict(result.metrics) == {"quality": 1.0}
+    assert result.passed
+
+
 def test_non_numeric_and_non_finite_native_metrics_are_not_gate_evidence():
     result = apply_gate(
         {

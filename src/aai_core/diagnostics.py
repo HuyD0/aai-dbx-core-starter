@@ -83,7 +83,14 @@ def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
     # never reports ready what the connected workflow will refuse.
     catalog = str(settings.catalog).strip()
     schema = str(settings.schema_name).strip()
-    if not catalog or not schema or _is_placeholder(catalog) or _is_placeholder(schema):
+    if (
+        not catalog
+        or not schema
+        or "." in catalog
+        or "." in schema
+        or _is_placeholder(catalog)
+        or _is_placeholder(schema)
+    ):
         checks.append(
             DoctorCheck(
                 "lifecycle:prompt-registry",

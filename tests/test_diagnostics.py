@@ -65,6 +65,21 @@ def test_doctor_treats_every_placeholder_qualifier_as_unconfigured(tmp_path):
     assert by_name["lifecycle:prompt-registry"].status == "skip"
 
 
+def test_doctor_treats_dotted_qualifiers_as_unconfigured(tmp_path):
+    # The SDK helpers reject dotted qualifiers; the doctor must not report
+    # ready what the connected workflow will refuse.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  catalog: main.extra\n  schema: app\n",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+
+
 def test_doctor_treats_replace_with_values_as_unconfigured(tmp_path):
     # The example config ships replace-with-* values; the doctor must not
     # report them as ready, and the judge must fail locally, not remotely.

@@ -155,9 +155,25 @@ def apply_gate(
     policy: GatePolicy,
     baseline_metrics: Mapping[str, float] | None = None,
 ) -> GateResult:
-    """Apply deterministic policy to a native MLflow result or metric mapping."""
+    """Apply deterministic policy to a native MLflow result or metric mapping.
+
+    A scorer error-count metric that is not a finite number is corrupt
+    scorer-health evidence: dropping it like other malformed metrics would
+    let the gate pass with scorer health unknown, and gate evidence cannot
+    carry non-finite values. While ``fail_on_scorer_errors`` is enforced,
+    such a result is refused outright instead of becoming evidence.
+    """
 
     metrics = _extract_metrics(evaluation_result)
+    if policy.fail_on_scorer_errors:
+        for name in _metric_source(evaluation_result):
+            key = str(name)
+            if key.endswith(policy.scorer_error_metric_suffix) and key not in metrics:
+                raise ValueError(
+                    f"scorer error metric {key!r} is not a finite number; "
+                    "refusing to produce gate evidence with scorer health "
+                    "unknown"
+                )
     baseline = dict(baseline_metrics or {})
     return GateResult(
         metrics=metrics,
@@ -258,14 +274,18 @@ def _evaluate_policy(
     return tuple(failures)
 
 
-def _extract_metrics(result: Any) -> dict[str, float]:
+def _metric_source(result: Any) -> Mapping[str, Any]:
     source = result if isinstance(result, Mapping) else getattr(result, "metrics", None)
     if not isinstance(source, Mapping):
         raise TypeError(
             "evaluation_result must be a metric mapping or expose a metrics mapping"
         )
+    return source
+
+
+def _extract_metrics(result: Any) -> dict[str, float]:
     metrics: dict[str, float] = {}
-    for name, value in source.items():
+    for name, value in _metric_source(result).items():
         if isinstance(value, bool) or not isinstance(value, Real):
             continue
         numeric = float(value)

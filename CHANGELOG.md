@@ -26,7 +26,9 @@ All notable changes to `aai-core` are documented here.
   no run and mirrors no native parameters; `GateResult` records the applied
   `GatePolicy` and regression baseline and re-validates its failures against
   them at construction, so gate evidence is self-describing and cannot claim
-  a pass its own metrics contradict;
+  a pass its own metrics contradict; while scorer-error enforcement is on,
+  `apply_gate` refuses to produce evidence from a non-finite scorer
+  error-count metric instead of silently discarding scorer health;
   `get_or_create_evaluation_dataset` promotes the governed dataset helper
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder catalog/schema
@@ -63,7 +65,9 @@ All notable changes to `aai-core` are documented here.
   explicit `catalog.schema.name` qualification remains untouched.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
-  configuration reports skip with remediation, never fail.
+  configuration reports skip with remediation, never fail. The
+  prompt-registry preflight applies the same qualifier validation as the
+  SDK helpers (placeholder vocabulary and dotted values alike).
 - Aligned the executable examples' release decision with the documented
   vocabulary: `aai.decision` and `LIFECYCLE_RESULT` now record
   `adopt`/`reject` instead of `release_change`/`keep_baseline`.
