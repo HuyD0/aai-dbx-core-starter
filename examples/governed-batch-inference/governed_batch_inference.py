@@ -277,16 +277,22 @@ class BatchInferenceSpec(BaseModel):
         the ``ai_`` prefix is injective and every response key maps onto a
         checked column, so a duplicate response key cannot exist without a
         duplicate column.
+
+        Comparison is case-insensitive because Spark SQL identifiers are:
+        fields ``x`` and ``X`` are two distinct names here but one column
+        there.
         """
         seen: dict[str, str] = {}
 
         def claim(name: str, owner: str) -> None:
-            if name in seen:
+            key = name.casefold()
+            if key in seen:
                 raise ValueError(
-                    f"name collision: {owner} and {seen[name]} both produce "
-                    f"{name!r}. Rename one of the fields."
+                    f"name collision: {owner} and {seen[key]} both produce "
+                    f"{name!r} (SQL identifiers are case-insensitive). "
+                    "Rename one of the fields."
                 )
-            seen[name] = owner
+            seen[key] = owner
 
         claim(self.key_column, "the key column")
         for column in self.strata:
@@ -598,7 +604,9 @@ class FieldStratumScore(BaseModel):
     ``release`` and ``confidence`` record *what* the evidence measured and
     *at what confidence level*, so the gate can refuse evidence produced
     for a different release or computed at a different level than the spec
-    declares.
+    declares. ``sample_strata`` lists every stratum the sample covered, so
+    the gate can tell a complete evidence set from a filtered one — the
+    worst-stratum rule is only as good as the strata it is given.
 
     On the ``WEIGHTED`` row the counts remain raw sample totals, while the
     intervals are the population-weighted estimate expressed through an
@@ -612,6 +620,7 @@ class FieldStratumScore(BaseModel):
     stratum: str
     release: ReleaseIdentity
     confidence: float = Field(gt=0.5, lt=1.0)
+    sample_strata: tuple[str, ...] = Field(min_length=1)
     n_rows: int = Field(ge=0)
     n_gold: int = Field(ge=0)
     n_asserted: int = Field(ge=0)
@@ -619,6 +628,45 @@ class FieldStratumScore(BaseModel):
     precision: ConfidenceInterval | None
     recall: ConfidenceInterval | None
     abstention_rate: float = Field(ge=0.0, le=1.0)
+
+
+def apply_abstention_policy(
+    spec: BatchInferenceSpec,
+    values: Mapping[str, object],
+    confidences: Mapping[str, float | None],
+    model_abstained: Sequence[str] | None = None,
+) -> tuple[dict[str, object], frozenset[str]]:
+    """Decide what a response is actually allowed to assert.
+
+    The model can contradict itself — return a value *and* list the field
+    as abstained — and it can return a value below the confidence
+    threshold it was told to respect. Neither may reach a consumer: a
+    value the evaluation treated as an abstention has never been through
+    the precision gate, so landing it would put unmeasured output in the
+    table. The rule is therefore applied identically here and in the
+    generated SQL, and both evaluation and execution call it, so what was
+    measured is exactly what lands.
+
+    Returns the permitted values (abstained ones nulled) and the effective
+    abstention set. A field that is simply absent from the document stays
+    null without being an abstention — that is a legitimate answer, not a
+    declined one.
+    """
+    permitted: dict[str, object] = {}
+    abstained: set[str] = set()
+    listed = set(model_abstained or ())
+    for field in spec.fields:
+        value = values.get(field.name)
+        confidence = confidences.get(field.name)
+        below_threshold = value is not None and (
+            confidence is None or confidence < spec.abstain_threshold
+        )
+        if field.name in listed or below_threshold:
+            abstained.add(field.name)
+            permitted[field.name] = None
+        else:
+            permitted[field.name] = value
+    return permitted, frozenset(abstained)
 
 
 _AMOUNT_JUNK = re.compile(r"[,$\s]")
@@ -654,6 +702,7 @@ def _score_group(
     records: Sequence[EvaluationRecord],
     confidence: float,
     release: ReleaseIdentity,
+    sample_strata: tuple[str, ...],
 ) -> FieldStratumScore:
     asserted = 0
     correct = 0
@@ -680,6 +729,7 @@ def _score_group(
         stratum=stratum,
         release=release,
         confidence=confidence,
+        sample_strata=sample_strata,
         n_rows=len(records),
         n_gold=gold_present,
         n_asserted=asserted,
@@ -793,11 +843,14 @@ def score_extraction(
             "restate the population deliberately."
         )
 
+    sample_strata = tuple(sorted(by_stratum))
     scores: list[FieldStratumScore] = []
     for field in spec.fields:
         per_stratum = [
-            _score_group(field, stratum, by_stratum[stratum], confidence, release)
-            for stratum in sorted(by_stratum)
+            _score_group(
+                field, stratum, by_stratum[stratum], confidence, release, sample_strata
+            )
+            for stratum in sample_strata
         ]
         scores.extend(per_stratum)
 
@@ -834,6 +887,7 @@ def score_extraction(
                 stratum=WEIGHTED,
                 release=release,
                 confidence=confidence,
+                sample_strata=sample_strata,
                 n_rows=sum(score.n_rows for score in per_stratum),
                 n_gold=sum(score.n_gold for score in per_stratum),
                 n_asserted=sum(score.n_asserted for score in per_stratum),
@@ -1021,12 +1075,19 @@ def require_matching_evidence(
     spec: BatchInferenceSpec,
     scores: Sequence[FieldStratumScore],
 ) -> None:
-    """Refuse evidence that was not produced for exactly this release.
+    """Refuse evidence that was not produced for exactly this release, or
+    that does not cover everything the gate is supposed to judge.
 
-    Without this check, ``evaluate_gate(spec_v2, scores_from_v1)`` would
-    stamp v2's digest onto v1's numbers and ``require_executable`` would
-    then happily accept it — an unvalidated release executing on an
+    Without the release check, ``evaluate_gate(spec_v2, scores_from_v1)``
+    would stamp v2's digest onto v1's numbers and ``require_executable``
+    would then happily accept it — an unvalidated release executing on an
     earlier release's evidence.
+
+    Without the completeness check, a filtered score list would quietly
+    weaken the gate instead of failing it: drop the failing stratum's rows
+    and the worst-stratum rule has nothing bad left to find. Evidence must
+    therefore cover every field in the spec and every stratum the sample
+    measured.
     """
     if not scores:
         raise EvidenceMismatch("no scores supplied; a gate needs evidence")
@@ -1048,6 +1109,27 @@ def require_matching_evidence(
                 f"score for {score.field!r}/{score.stratum!r} was computed at "
                 f"confidence {score.confidence}, but the spec declares "
                 f"{spec.confidence_level}. Re-score at the declared level."
+            )
+
+    manifests = {score.sample_strata for score in scores}
+    if len(manifests) != 1:
+        raise EvidenceMismatch(
+            f"scores disagree about which strata the sample covered: "
+            f"{sorted(manifests)}. They did not come from one scoring run."
+        )
+    (manifest,) = manifests
+    required_groups = set(manifest) | {WEIGHTED}
+    present: dict[str, set[str]] = {}
+    for score in scores:
+        present.setdefault(score.field, set()).add(score.stratum)
+    for field in spec.fields:
+        groups = present.get(field.name, set())
+        missing = sorted(required_groups - groups)
+        if missing:
+            raise EvidenceMismatch(
+                f"evidence for field {field.name!r} is incomplete: no scores "
+                f"for {missing}. The sample covered {list(manifest)}, and a "
+                "worst-stratum gate cannot be applied to a filtered set."
             )
 
 
@@ -1235,9 +1317,75 @@ def response_struct_type(spec: BatchInferenceSpec) -> str:
 
 
 def create_target_table_sql(spec: BatchInferenceSpec) -> str:
-    """DDL for the output table, provenance columns included from birth."""
+    """DDL for the output table, provenance columns included from birth.
+
+    ``IF NOT EXISTS`` means this creates the table once and never changes
+    it. When the field set changes — which is a new release — the existing
+    table needs migrating; see ``plan_target_migration``.
+    """
     body = ",\n".join(f"  {name} {sql_type}" for name, sql_type in target_columns(spec))
     return f"CREATE TABLE IF NOT EXISTS {spec.target_table} (\n{body}\n)"
+
+
+class TargetMigration(BaseModel):
+    """What an existing target table needs before this release can land."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    add: tuple[tuple[str, str], ...] = ()
+    stale: tuple[str, ...] = ()
+    statements: tuple[str, ...] = ()
+
+    @property
+    def required(self) -> bool:
+        return bool(self.add or self.stale)
+
+
+def plan_target_migration(
+    spec: BatchInferenceSpec, existing_columns: Sequence[str]
+) -> TargetMigration:
+    """Diff the target table against the columns this release produces.
+
+    Adding or removing a field changes the MERGE source, and
+    ``CREATE TABLE IF NOT EXISTS`` will not touch a table that already
+    exists. Without this step, adding a field makes ``INSERT *`` fail
+    analysis against the old schema, and removing one leaves a column that
+    the current release no longer writes — so it keeps serving a previous
+    release's values under an ``ai_`` name, which is exactly the
+    provenance failure the three-layer scheme exists to prevent.
+
+    Columns to add come back as ready statements. Columns gone stale are
+    *reported, not dropped*: deleting a column is destructive and losing
+    the old values may itself be a governance event, so a human decides.
+    Comparison is case-insensitive, like Spark identifiers.
+    """
+    existing = {column.casefold() for column in existing_columns}
+    expected = target_columns(spec)
+    expected_names = {name.casefold() for name, _ in expected}
+
+    add = tuple(
+        (name, sql_type)
+        for name, sql_type in expected
+        if name.casefold() not in existing
+    )
+    stale = tuple(
+        column
+        for column in existing_columns
+        if column.casefold() not in expected_names
+        and column.casefold().startswith(AI_COLUMN_PREFIX)
+    )
+    statements: list[str] = []
+    if add:
+        columns = ", ".join(f"{name} {sql_type}" for name, sql_type in add)
+        statements.append(f"ALTER TABLE {spec.target_table} ADD COLUMNS ({columns})")
+    for column in stale:
+        # Emitted for a human to run deliberately, never executed for them.
+        statements.append(
+            f"-- review before running: {spec.target_table}.{column} is no "
+            "longer produced by this release and now holds values from an "
+            f"earlier one\n-- ALTER TABLE {spec.target_table} DROP COLUMN {column}"
+        )
+    return TargetMigration(add=add, stale=stale, statements=tuple(statements))
 
 
 def target_columns(spec: BatchInferenceSpec) -> tuple[tuple[str, str], ...]:
@@ -1294,16 +1442,36 @@ def build_execute_sql(
       to the exception queue instead of blocking everything else. The
       struct field is ``errorMessage`` (``response`` is null on failure).
     """
+    # The abstention rule from `apply_abstention_policy`, expressed in SQL
+    # so that what the gate measured is exactly what lands: a field the
+    # model listed as abstained, or answered below the declared threshold,
+    # is nulled rather than written. Landing such a value would put output
+    # the precision gate never saw into a consumer's table.
+    threshold = spec.abstain_threshold
     value_lines = []
+    abstained_items = []
     for field in spec.fields:
         value, confidence, abstained = _generated_column_names(field.name)
-        value_lines.append(f"    parsed.{field.name} AS {value}")
-        value_lines.append(f"    parsed.{field.name}_confidence AS {confidence}")
-        value_lines.append(
-            f"    coalesce(array_contains(parsed.abstained_fields, "
-            f"'{field.name}'), false) AS {abstained}"
+        literal = sql_string_literal(field.name)
+        rule = (
+            f"coalesce(array_contains(parsed.abstained_fields, {literal}), false) "
+            f"OR (parsed.{field.name} IS NOT NULL "
+            f"AND coalesce(parsed.{field.name}_confidence, -1) < {threshold})"
         )
+        value_lines.append(
+            f"    CASE WHEN {rule} THEN NULL ELSE parsed.{field.name} END AS {value}"
+        )
+        # Confidence is kept even when abstaining: it is diagnostic for
+        # whoever works the exception queue, not an asserted value.
+        value_lines.append(f"    parsed.{field.name}_confidence AS {confidence}")
+        value_lines.append(f"    ({rule}) AS {abstained}")
+        abstained_items.append(f"CASE WHEN {rule} THEN {literal} END")
     value_block = ",\n".join(value_lines)
+    # Re-derive the landed list from the same rule, so a threshold
+    # abstention the model did not declare still reaches the queue.
+    effective_abstained = (
+        "array_compact(array(\n      " + ",\n      ".join(abstained_items) + "\n    ))"
+    )
     pending_strata = "".join(f", source.{column}" for column in spec.strata)
     plain_strata = "".join(f", {column}" for column in spec.strata)
     struct_type = sql_string_literal(response_struct_type(spec))
@@ -1342,7 +1510,7 @@ USING (
   SELECT
     {spec.key_column}{plain_strata},
 {value_block},
-    parsed.abstained_fields AS ai_abstained_fields,
+    {effective_abstained} AS ai_abstained_fields,
     parsed.abstain_reason AS ai_abstain_reason,
     error_message AS ai_error,
     {sql_string_literal(run_id)} AS ai_run_id,

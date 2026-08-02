@@ -76,12 +76,14 @@ abstention path) then passes the same gate on the same terms.
    digest** (`require_executable`), and the run is idempotent: an anti-join
    selects only unlanded rows, so a partial failure restarts by re-running
    the same statement.
-9. **Evidence belongs to the release that produced it.** Scores carry a
-   release stamp (spec digest, model version, prompt version) and the
-   declared confidence level; the gate refuses anything else. Re-using the
-   last passing evaluation for a changed prompt — "we tested this, it was
-   fine" — is exactly the shortcut this blocks. Re-scoring is arithmetic
-   over records you already hold, so the strict rule is cheap to satisfy.
+9. **Evidence belongs to the release that produced it, and must be
+   complete.** Scores carry a release stamp (spec digest, model version,
+   prompt version), the declared confidence level, and the sample's stratum
+   manifest; the gate refuses anything else. Re-using the last passing
+   evaluation for a changed prompt — "we tested this, it was fine" — is
+   exactly the shortcut this blocks, and so is quietly dropping the failing
+   stratum from the score list before gating. Re-scoring is arithmetic over
+   records you already hold, so the strict rule is cheap to satisfy.
 10. **A new release reprocesses the table.** The restart anti-join matches
     on the key *and* the full release identity — spec digest, model
     version, prompt version — and the write is a `MERGE`. Matching on the
@@ -90,7 +92,15 @@ abstention path) then passes the same gate on the same terms.
     matching on model and prompt alone would do the same whenever the spec
     changed while those labels held still. Bump `spec_version` when a code
     change alters what the pipeline produces, since the digest covers the
-    spec rather than the module.
+    spec rather than the module. A field-set change also needs the target
+    table migrated (`plan_target_migration`) — `CREATE TABLE IF NOT EXISTS`
+    will not touch a table that already exists.
+11. **An abstention is enforced, not merely recorded.** A value the model
+    both returned and declared abstained, or answered below the declared
+    threshold, is nulled rather than landed — scoring treated it as an
+    abstention, so it never went through the precision gate. The same rule
+    runs in evaluation and in execution (`apply_abstention_policy` and the
+    generated SQL), so what was measured is what lands.
 
 ## Adapting it to a new use case
 

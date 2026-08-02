@@ -438,8 +438,12 @@ display(comparison)
 # and keep the first `allocation[stratum]`. Re-running selects the same
 # rows, so labelling work is never invalidated by a re-run.
 spark.table(SOURCE_TABLE).createOrReplaceTempView("source_docs")
+# Stratum values are table data, not configuration, so they are escaped
+# rather than pasted between quotes — a value containing an apostrophe is
+# ordinary in real data and must not be able to reshape the statement.
 allocation_case = " ".join(
-    f"WHEN '{stratum}' THEN {quota}" for stratum, quota in allocation.items()
+    f"WHEN {gbi.sql_string_literal(stratum)} THEN {quota}"
+    for stratum, quota in allocation.items()
 )
 spark.sql(f"""
     CREATE OR REPLACE TABLE {SAMPLE_TABLE} AS
@@ -624,15 +628,26 @@ def evaluation_records(version: str, prompt: str) -> list:
         .collect()
     )
     live = live_extraction(prompt, version, SAMPLE_TABLE) if not SIMULATED else {}
+    spec = spec_v1.model_copy(update={"prompt_version": version})
     records = []
     failed = 0
     for row in sample:
         gold = {name: row[f"gold_{name}"] for name in FIELD_NAMES}
-        abstained: set[str] = set()
+        declared: set[str] = set()
         if SIMULATED:
-            predicted, abstained = simulate_extraction(
+            predicted, declared = simulate_extraction(
                 row.doc_id, row.layout, gold, version
             )
+            confidences = {
+                name: (
+                    None
+                    if name in declared
+                    else round(
+                        doc_rng(row.doc_id, f"{name}|conf").uniform(0.72, 0.99), 3
+                    )
+                )
+                for name in FIELD_NAMES
+            }
         else:
             result = live[row.doc_id]
             parsed = result.parsed
@@ -645,15 +660,26 @@ def evaluation_records(version: str, prompt: str) -> list:
                 # model did not decline, the call failed.
                 failed += 1
                 predicted = dict.fromkeys(FIELD_NAMES)
+                confidences = dict.fromkeys(FIELD_NAMES)
             else:
                 predicted = {name: parsed[name] for name in FIELD_NAMES}
-                abstained = set(parsed["abstained_fields"] or [])
+                confidences = {
+                    name: parsed[f"{name}_confidence"] for name in FIELD_NAMES
+                }
+                declared = set(parsed["abstained_fields"] or [])
+        # Score what would actually land, not what the model returned: the
+        # execute stage nulls anything abstained or under-confident, so
+        # measuring the raw response would gate output that never ships
+        # and miss output that does.
+        permitted, abstained = gbi.apply_abstention_policy(
+            spec, predicted, confidences, declared
+        )
         records.append(
             gbi.EvaluationRecord(
                 stratum=row.layout,
                 gold=gold,
-                predicted=predicted,
-                abstained=frozenset(abstained),
+                predicted=permitted,
+                abstained=abstained,
             )
         )
     if failed:
@@ -985,9 +1011,25 @@ print(
 # MAGIC   Nullable fields use the `[type, "null"]` form — the only union the
 # MAGIC   Foundation Model structured-output subset supports — which is
 # MAGIC   exactly what the abstention path needs.
+# MAGIC - **The abstention is enforced, not just recorded.** A model can
+# MAGIC   contradict itself — return a value *and* list the field as
+# MAGIC   abstained — or answer below the threshold it was told to respect.
+# MAGIC   Either way the value is nulled rather than written, because the
+# MAGIC   evaluation treated it as an abstention and so it has never been
+# MAGIC   through the precision gate. Landing it would put unmeasured output
+# MAGIC   in a consumer's table. Stage 4 applies the identical rule, so what
+# MAGIC   was measured is exactly what lands.
 # MAGIC - **Row-level metadata** lands beside every value: `ai_run_id`,
-# MAGIC   `ai_model_version`, `ai_prompt_version`, per-field confidence and
-# MAGIC   abstention flags.
+# MAGIC   `ai_spec_digest`, `ai_model_version`, `ai_prompt_version`,
+# MAGIC   per-field confidence and abstention flags. Confidence is kept even
+# MAGIC   when abstaining — it is diagnostic for whoever works the queue.
+# MAGIC - **The target schema is migrated first.** `CREATE TABLE IF NOT
+# MAGIC   EXISTS` does nothing to a table that already exists, so a release
+# MAGIC   that added a field would fail `INSERT *` against the old schema,
+# MAGIC   and one that removed a field would leave a column still serving
+# MAGIC   the previous release's values. Added columns are applied; stale
+# MAGIC   ones are reported for a human, since dropping a column destroys
+# MAGIC   data and may itself be a governance event.
 # MAGIC - **Idempotent restart**: an anti-join selects only rows this
 # MAGIC   release has not landed yet, so re-running the same statement after
 # MAGIC   a partial failure finishes the job instead of paying for inference
@@ -1015,6 +1057,21 @@ print(
 gbi.require_executable(spec_v2, report_v2)  # raises unless the gate adopted
 
 spark.sql(gbi.create_target_table_sql(spec_v2))
+
+# `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+# exists, so a release that changed the field set has to migrate it. Skip
+# this and `INSERT *` fails analysis against the previous spec's schema.
+migration = gbi.plan_target_migration(
+    spec_v2, [field.name for field in spark.table(TARGET_TABLE).schema.fields]
+)
+for statement in migration.statements:
+    if statement.startswith("ALTER TABLE"):
+        spark.sql(statement)
+        print(f"migrated: {statement}")
+    else:
+        # Dropping a column destroys data and may itself be a governance
+        # event, so it is printed for a human, never run automatically.
+        print(statement)
 
 execute_sql = gbi.build_execute_sql(
     spec_v2,
@@ -1057,14 +1114,25 @@ else:
         predicted, abstained = simulate_extraction(
             row.doc_id, row.layout, gold_by_id[row.doc_id], "2.0.0"
         )
+        confidences = {
+            name: (
+                None
+                if name in abstained
+                else round(doc_rng(row.doc_id, f"{name}|conf").uniform(0.72, 0.99), 3)
+            )
+            for name in FIELD_NAMES
+        }
+        # The same policy the generated SQL applies: nothing the gate would
+        # have treated as an abstention is allowed to land as a value.
+        permitted, effective = gbi.apply_abstention_policy(
+            spec_v2, predicted, confidences, abstained
+        )
         record: dict = {"doc_id": row.doc_id, "layout": row.layout}
         for name in FIELD_NAMES:
-            confidence = doc_rng(row.doc_id, f"{name}|conf").uniform(0.72, 0.99)
-            record[gbi.ai_column(name)] = predicted[name]
-            record[f"{gbi.ai_column(name)}_confidence"] = (
-                None if name in abstained else round(confidence, 3)
-            )
-            record[f"{gbi.ai_column(name)}_abstained"] = name in abstained
+            record[gbi.ai_column(name)] = permitted[name]
+            record[f"{gbi.ai_column(name)}_confidence"] = confidences[name]
+            record[f"{gbi.ai_column(name)}_abstained"] = name in effective
+        abstained = effective
         record["ai_abstained_fields"] = sorted(abstained)
         record["ai_abstain_reason"] = (
             "confidence below threshold on scanned copy" if abstained else None

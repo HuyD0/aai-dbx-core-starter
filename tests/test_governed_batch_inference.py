@@ -449,6 +449,48 @@ def test_gate_refuses_an_empty_evidence_set():
         gbi.evaluate_gate(one_field_spec(), ())
 
 
+def test_gate_refuses_evidence_with_a_stratum_filtered_out():
+    """Dropping the failing stratum must fail the gate, not weaken it.
+
+    The worst-stratum rule is only as good as the strata it is handed, so
+    the evidence carries the sample's stratum manifest and the gate checks
+    the set is complete.
+    """
+    spec = one_field_spec(criticality="high")
+    scores = score(CENTRAL_LESSON_RECORDS, spec)
+    assert gbi.evaluate_gate(spec, scores).decision == gbi.GateDecision.REJECT
+
+    without_the_bad_one = [s for s in scores if s.stratum != "legacy_scan"]
+    with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
+        gbi.evaluate_gate(spec, without_the_bad_one)
+
+
+def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
+    spec = make_spec()  # two fields
+    records = [
+        gbi.EvaluationRecord(
+            stratum="standard",
+            gold={"issuer_name": "v", "account_id": "v"},
+            predicted={"issuer_name": "v", "account_id": "v"},
+        )
+    ] * 200
+    scores = score(records, spec)
+    assert gbi.evaluate_gate(spec, scores).decision == gbi.GateDecision.ADOPT
+
+    with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
+        gbi.evaluate_gate(spec, [s for s in scores if s.field != "account_id"])
+    with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
+        gbi.evaluate_gate(spec, [s for s in scores if s.stratum != gbi.WEIGHTED])
+
+
+def test_gate_refuses_scores_spliced_from_two_scoring_runs():
+    spec = one_field_spec(criticality="high")
+    two_strata = score(CENTRAL_LESSON_RECORDS, spec)
+    one_stratum = score(records_for("standard", correct=200), spec)
+    with pytest.raises(gbi.EvidenceMismatch, match="disagree"):
+        gbi.evaluate_gate(spec, list(two_strata) + list(one_stratum))
+
+
 def test_rejection_outranks_inconclusive_across_fields():
     spec = make_spec(
         fields=(
@@ -596,6 +638,11 @@ def test_spec_rejects_expanded_column_name_collisions():
         make_spec(fields=(field("issuer"),), key_column="ai_issuer")
     with pytest.raises(ValidationError, match="collision"):
         make_spec(fields=(field("layout"),), strata=("ai_layout",))
+    # Spark identifiers are case-insensitive, so `x` and `X` are one column.
+    with pytest.raises(ValidationError, match="case-insensitive"):
+        make_spec(fields=(field("x"), field("X")))
+    with pytest.raises(ValidationError, match="case-insensitive"):
+        make_spec(fields=(field("ERROR"),))
     # Reserved response-schema keys are covered by the same check, because
     # each one has a matching ai_-prefixed provenance column.
     for reserved in gbi.RESERVED_RESPONSE_KEYS:
@@ -712,18 +759,108 @@ def test_merge_source_projects_exactly_the_target_columns():
         spec, run_id="run-1", prompt_sql="concat('extract: ', doc_text)"
     )
     head = sql[: sql.index("\n  FROM parsed")]
-    projection = head[head.rindex("SELECT\n") :]
-    produced = []
-    for line in projection.split("\n")[1:]:
-        # One projected column per line, except the bare key/strata line.
-        # Expressions can contain commas, so alias first, split second.
-        line = line.strip().rstrip(",")
-        if " AS " in line:
-            produced.append(line.rsplit(" AS ", 1)[1])
+    projection = head[head.index("\n", head.rindex("SELECT\n")) :]
+    # Split on top-level commas only: projected expressions contain their
+    # own (CASE WHEN coalesce(...), false) ... END), so a naive split by
+    # comma or by line would mis-count the columns.
+    items, depth, current = [], 0, []
+    for character in projection:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        if character == "," and depth == 0:
+            items.append("".join(current))
+            current = []
         else:
-            produced.extend(item.strip() for item in line.split(",") if item.strip())
+            current.append(character)
+    items.append("".join(current))
+
+    produced = []
+    for item in items:
+        item = " ".join(item.split())
+        if item:
+            produced.append(item.rsplit(" AS ", 1)[1] if " AS " in item else item)
     assert produced == [name for name, _ in gbi.target_columns(spec)]
     assert spec.document_column not in produced
+
+
+def test_abstained_and_low_confidence_values_are_never_landed():
+    """A value the gate treated as an abstention must not reach the table.
+
+    Scoring ignores abstained predictions, so landing one would put output
+    the precision gate never saw in front of a consumer. The rule is
+    applied identically in Python and in the generated SQL.
+    """
+    spec = make_spec(abstain_threshold=0.7)
+    permitted, abstained = gbi.apply_abstention_policy(
+        spec,
+        {"issuer_name": "Contradictory Co", "account_id": "AC1"},
+        {"issuer_name": 0.99, "account_id": 0.42},
+        ["issuer_name"],  # model asserted a value AND declared abstention
+    )
+    assert permitted == {"issuer_name": None, "account_id": None}
+    assert abstained == frozenset({"issuer_name", "account_id"})
+
+    # A confident value passes through; a genuinely absent one stays null
+    # without being counted as an abstention.
+    permitted, abstained = gbi.apply_abstention_policy(
+        spec,
+        {"issuer_name": "Maple Grove", "account_id": None},
+        {"issuer_name": 0.95, "account_id": None},
+        [],
+    )
+    assert permitted == {"issuer_name": "Maple Grove", "account_id": None}
+    assert abstained == frozenset()
+
+    sql = gbi.build_execute_sql(
+        spec, run_id="run-1", prompt_sql="concat('x', doc_text)"
+    )
+    for name in ("issuer_name", "account_id"):
+        assert f"array_contains(parsed.abstained_fields, '{name}')" in sql
+        assert f"coalesce(parsed.{name}_confidence, -1) < 0.7" in sql
+        assert f"THEN NULL ELSE parsed.{name} END AS ai_{name}" in sql
+    # The landed list is re-derived, so a threshold abstention the model
+    # never declared still reaches the exception queue.
+    assert "array_compact(array(" in sql
+    assert "parsed.abstained_fields AS ai_abstained_fields" not in sql
+
+
+def test_target_migration_plans_added_columns_and_flags_stale_ones():
+    """A changed field set is a new release, and CREATE TABLE IF NOT EXISTS
+    will not touch a table that already exists."""
+    spec = make_spec()
+    expected = [name for name, _ in gbi.target_columns(spec)]
+
+    assert not gbi.plan_target_migration(spec, expected).required
+
+    # Table built for a previous spec: missing the account_id columns,
+    # carrying columns for a field this release no longer produces.
+    previous = [
+        column for column in expected if not column.startswith("ai_account_id")
+    ] + ["ai_legacy_field", "ai_legacy_field_confidence"]
+    migration = gbi.plan_target_migration(spec, previous)
+    assert migration.required
+    assert [name for name, _ in migration.add] == [
+        "ai_account_id",
+        "ai_account_id_confidence",
+        "ai_account_id_abstained",
+    ]
+    assert migration.stale == ("ai_legacy_field", "ai_legacy_field_confidence")
+    add_statement = migration.statements[0]
+    assert add_statement.startswith(
+        "ALTER TABLE main.finance_docs.document_entities ADD COLUMNS ("
+    )
+    assert "ai_account_id STRING" in add_statement
+    # Stale columns are reported for a human, never dropped automatically.
+    drops = [s for s in migration.statements if "DROP COLUMN" in s]
+    assert all(line.strip().startswith("--") for s in drops for line in s.split("\n"))
+
+
+def test_target_migration_compares_case_insensitively():
+    spec = make_spec()
+    shouting = [name.upper() for name, _ in gbi.target_columns(spec)]
+    assert not gbi.plan_target_migration(spec, shouting).required
 
 
 def test_provenance_layers_are_generated():
