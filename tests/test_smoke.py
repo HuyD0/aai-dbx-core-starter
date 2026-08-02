@@ -56,7 +56,7 @@ def test_learning_artifacts_have_one_contiguous_numbered_order():
     )
 
     assert [path.name[:2] for path in artifacts] == [
-        f"{number:02d}" for number in range(13)
+        f"{number:02d}" for number in range(15)
     ]
     assert all(
         not re.match(r"\d{2}_", helper)
@@ -74,6 +74,8 @@ def test_all_numbered_example_notebooks_are_safe_clean_and_compilable():
         "10_layered_judges.ipynb",
         "11_cost_quality_tradeoff.ipynb",
         "12_agent_alignment_optimization.ipynb",
+        "13_decision_and_promotion_lifecycle.ipynb",
+        "14_platform_llm_operations.ipynb",
     ]
 
     for path in notebooks:
@@ -185,8 +187,9 @@ def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
 
 def test_advanced_notebooks_run_all_on_the_credential_free_default_path():
     pytest.importorskip("pandas")
+    # 14 is connected-guarded like 05/07 and deliberately excluded here.
     for path in sorted((ROOT / "examples").glob("0[89]_*.ipynb")) + sorted(
-        (ROOT / "examples").glob("1[0-2]_*.ipynb")
+        (ROOT / "examples").glob("1[0-3]_*.ipynb")
     ):
         notebook = json.loads(path.read_text(encoding="utf-8"))
         namespace = {"__name__": f"notebook_{path.stem}"}

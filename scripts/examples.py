@@ -169,6 +169,21 @@ EXAMPLES = {
             local=True,
             interactive=True,
         ),
+        Example(
+            name="decision_promotion_lifecycle",
+            path="examples/13_decision_and_promotion_lifecycle.ipynb",
+            description="Recorded adopt/reject decisions gate prompt promotion",
+            connected=False,
+            local=True,
+            interactive=True,
+        ),
+        Example(
+            name="platform_llm_operations",
+            path="examples/14_platform_llm_operations.ipynb",
+            description="Platform-team judge, gateway-tag, cost, and fleet loop",
+            connected=True,
+            interactive=True,
+        ),
     )
 }
 

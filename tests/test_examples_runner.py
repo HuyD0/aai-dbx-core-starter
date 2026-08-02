@@ -223,14 +223,17 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
         "layered_judges",
         "cost_quality_tradeoff",
         "agent_alignment_optimization",
+        "decision_promotion_lifecycle",
     ):
         assert runner.EXAMPLES[name].connected is False
         assert runner.EXAMPLES[name].local is True
         assert runner.EXAMPLES[name].interactive is True
+    assert runner.EXAMPLES["platform_llm_operations"].connected is True
+    assert runner.EXAMPLES["platform_llm_operations"].interactive is True
 
     numbered_paths = [example.path for example in runner.EXAMPLES.values()]
     assert [Path(path).name[:2] for path in numbered_paths] == [
-        f"{number:02d}" for number in range(13)
+        f"{number:02d}" for number in range(15)
     ]
 
 
