@@ -214,3 +214,69 @@ def test_validate_dataset_passes_clean_rows(tmp_path):
     dataset = load_dataset("golden.json", root=tmp_path)
 
     assert validate_dataset(dataset) == []
+
+
+def test_expectation_keys_require_every_row(tmp_path):
+    """Coverage is per row: a field half the rows carry is not available.
+
+    keyword_coverage scores a missing expected response as a vacuous 1.0,
+    so treating a partially-present field as dataset-wide inflates the
+    aggregate the gate reads.
+    """
+
+    rows = [
+        {"inputs": {"question": "a"}, "expectations": {"expected_response": "yes"}},
+        {"inputs": {"question": "b"}},
+    ]
+    _write_dataset(tmp_path, rows)
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert dataset.shape.expectation_keys == ()
+    assert dataset.shape.partial_expectation_keys == ("expected_response",)
+
+
+def test_empty_expectation_values_do_not_count_as_present(tmp_path):
+    rows = [
+        {"inputs": {"question": "a"}, "expectations": {"expected_response": "yes"}},
+        {"inputs": {"question": "b"}, "expectations": {"expected_response": ""}},
+    ]
+    _write_dataset(tmp_path, rows)
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert dataset.shape.expectation_keys == ()
+    assert dataset.shape.partial_expectation_keys == ("expected_response",)
+
+
+def test_fully_covered_expectations_are_available(tmp_path):
+    _write_dataset(tmp_path, _rows(3))
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert dataset.shape.expectation_keys == ("expected_response",)
+    assert dataset.shape.partial_expectation_keys == ()
+
+
+def test_span_kinds_are_distinguished(tmp_path):
+    retrieval = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {"data": {"spans": [{"type": "RETRIEVER", "name": "search"}]}},
+        }
+    ]
+    tools = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {"data": {"spans": [{"type": "TOOL", "name": "lookup"}]}},
+        }
+    ]
+    _write_dataset(tmp_path, retrieval, name="retrieval.json")
+    _write_dataset(tmp_path, tools, name="tools.json")
+
+    retrieval_shape = load_dataset("retrieval.json", root=tmp_path).shape
+    tool_shape = load_dataset("tools.json", root=tmp_path).shape
+
+    assert retrieval_shape.has_traces and tool_shape.has_traces
+    assert retrieval_shape.has_retrieval_spans and not retrieval_shape.has_tool_spans
+    assert tool_shape.has_tool_spans and not tool_shape.has_retrieval_spans

@@ -255,22 +255,32 @@ def databricks_approver_lookup(
             "status": "unknown",
             "reason": "reading the approval tag requires the genai extra",
         }
+    # Read the approval of the version that was actually evaluated. Taking
+    # the newest version instead would let evidence for version N report
+    # version N+1's approval the moment someone registers another one.
+    evaluated = evaluated_model_version(results.agent, model_name)
     try:
         client = MlflowClient(registry_uri="databricks-uc")
-        versions = client.search_model_versions(f"name='{model_name}'")
-        if not versions:
-            return {"status": "unknown", "reason": "no model versions found"}
-        latest = max(versions, key=lambda item: int(item.version))
-        tags = dict(getattr(latest, "tags", {}) or {})
+        if evaluated is not None:
+            version = client.get_model_version(model_name, evaluated)
+        else:
+            versions = client.search_model_versions(f"name='{model_name}'")
+            if not versions:
+                return {"status": "unknown", "reason": "no model versions found"}
+            version = max(versions, key=lambda item: int(item.version))
+        tags = dict(getattr(version, "tags", {}) or {})
         approvals = {
             key: value
             for key, value in tags.items()
             if key.lower().startswith("approval")
         }
+        identity = f"{model_name} v{version.version}"
+        if evaluated is None:
+            identity += " (latest; the run did not name a model version)"
         if not approvals:
             return {
                 "status": "pending",
-                "model_version": f"{model_name} v{latest.version}",
+                "model_version": identity,
                 "reason": "no approval tag is set on the model version yet",
             }
         tag, value = sorted(approvals.items())[0]
@@ -278,10 +288,29 @@ def databricks_approver_lookup(
             "status": "approved" if str(value).lower() == "approved" else str(value),
             "tag": tag,
             "value": value,
-            "model_version": f"{model_name} v{latest.version}",
+            "model_version": identity,
         }
     except Exception as error:  # pragma: no cover - network/credential paths
         return {"status": "unknown", "reason": f"could not read approval tag: {error}"}
+
+
+def evaluated_model_version(agent: str, model_name: str) -> str | None:
+    """The model version an agent reference names, when it names one.
+
+    ``models:/<catalog>.<schema>.<model>/<version>`` is what the
+    deployment-job gate scores; anything else (an endpoint, a callable)
+    identifies no version.
+    """
+
+    reference = str(agent or "")
+    if not reference.startswith("models:/"):
+        return None
+    remainder = reference.removeprefix("models:/")
+    name, separator, version = remainder.partition("/")
+    if not separator or name != model_name:
+        return None
+    version = version.strip()
+    return version if version.isdigit() else None
 
 
 def _metric_rows(results: ResultsRecord) -> list[dict[str, Any]]:

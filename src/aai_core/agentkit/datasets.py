@@ -32,9 +32,16 @@ class DatasetShape:
     row_count: int
     input_keys: tuple[str, ...]
     has_outputs: bool
+    # Expectation keys populated on EVERY row — the only ones a scorer can
+    # be applied to without silently skipping rows.
     expectation_keys: tuple[str, ...]
     has_traces: bool
     strata_values: Mapping[str, tuple[str, ...]]
+    # Present on some rows but not all; reported so the plan can say why a
+    # scorer was not selected instead of leaving it a mystery.
+    partial_expectation_keys: tuple[str, ...] = ()
+    has_retrieval_spans: bool = False
+    has_tool_spans: bool = False
 
 
 @dataclass(frozen=True)
@@ -213,8 +220,16 @@ def _build_dataset(
 
 def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
     input_keys: set[str] = set()
-    expectation_keys: set[str] = set()
+    # Expectation coverage is per-row, not per-dataset. A scorer is only
+    # applicable when EVERY row can satisfy its contract: a row with no
+    # expected response cannot be scored against one, and letting it
+    # through means the scorer silently returns a perfect score for a row
+    # it never checked, inflating the aggregate the gate reads.
+    expectation_keys: set[str] | None = None
+    partial_expectation_keys: set[str] = set()
     has_traces = False
+    has_retrieval_spans = False
+    has_tool_spans = False
     has_outputs = bool(rows)
     candidate_strata: dict[str, set[str]] = {}
     for row in rows:
@@ -229,10 +244,20 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
                         {f"<{type(value).__name__}>", "<mixed>"}
                     )
         expectations = row.get("expectations")
-        if isinstance(expectations, Mapping):
-            expectation_keys.update(str(key) for key in expectations)
+        present = (
+            {str(key) for key in expectations if _is_populated(expectations[key])}
+            if isinstance(expectations, Mapping)
+            else set()
+        )
+        partial_expectation_keys |= present
+        expectation_keys = (
+            present if expectation_keys is None else expectation_keys & present
+        )
         if "trace" in row:
             has_traces = True
+            retrieval, tools = _trace_span_kinds(row["trace"])
+            has_retrieval_spans = has_retrieval_spans or retrieval
+            has_tool_spans = has_tool_spans or tools
         if row.get("outputs") is None:
             has_outputs = False
     strata_values = {
@@ -241,14 +266,52 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         if 1 < len(values) <= _STRATA_CARDINALITY_LIMIT
         and not any(value.startswith("<") for value in values)
     }
+    complete = expectation_keys or set()
     return DatasetShape(
         row_count=len(rows),
         input_keys=tuple(sorted(input_keys)),
         has_outputs=has_outputs,
-        expectation_keys=tuple(sorted(expectation_keys)),
+        expectation_keys=tuple(sorted(complete)),
+        partial_expectation_keys=tuple(sorted(partial_expectation_keys - complete)),
         has_traces=has_traces,
+        has_retrieval_spans=has_retrieval_spans,
+        has_tool_spans=has_tool_spans,
         strata_values=strata_values,
     )
+
+
+def _is_populated(value: Any) -> bool:
+    """An empty expectation cannot satisfy a scorer's input contract."""
+
+    if value is None:
+        return False
+    if isinstance(value, (str, list, tuple, dict, set)):
+        return len(value) > 0
+    return True
+
+
+_RETRIEVAL_SPAN_MARKERS = ("RETRIEVER", '"retriever"')
+_TOOL_SPAN_MARKERS = ("TOOL", '"tool"', "tool_calls")
+
+
+def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
+    """Which span kinds a row's trace carries.
+
+    Retrieval judges need RETRIEVER spans and tool judges need tool spans;
+    selecting both because a trace merely exists spends judge calls on
+    scorers whose contract was never present. Detection is deliberately
+    tolerant of trace shape, and unknown shapes report neither — a scorer
+    the toolkit cannot prove is applicable is not auto-selected.
+    """
+
+    try:
+        payload = json.dumps(_plain(trace), default=str)
+    except (TypeError, ValueError):  # pragma: no cover - exotic trace objects
+        payload = str(trace)
+    upper = payload.upper()
+    retrieval = any(marker.upper() in upper for marker in _RETRIEVAL_SPAN_MARKERS)
+    tools = any(marker.upper() in upper for marker in _TOOL_SPAN_MARKERS)
+    return retrieval, tools
 
 
 def _stratified_indices(

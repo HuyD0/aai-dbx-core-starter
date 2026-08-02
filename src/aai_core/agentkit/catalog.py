@@ -424,20 +424,24 @@ def _auto_reason(
     judges_enabled: bool,
 ) -> tuple[bool, str]:
     expectation_keys = set(shape.expectation_keys)
+    # A field present on only some rows still makes the scorer a candidate,
+    # so the plan can explain why it did not run instead of leaving the
+    # developer wondering where their correctness score went.
+    available = expectation_keys | set(shape.partial_expectation_keys)
     if spec.name == "response_length_ok":
         return True, "always on"
     if spec.name in {"keyword_coverage", "refusal_compliance"}:
-        if "expected_response" in expectation_keys:
+        if "expected_response" in available:
             return True, "expectations.expected_response present"
         return False, ""
     if spec.name == "latency_seconds":
         return True, "always on for live runs"
     if spec.name == "correctness":
-        if expectation_keys.intersection(spec.needs_expectations):
+        if available.intersection(spec.needs_expectations):
             return True, "expected facts/response present"
         return False, ""
     if spec.name == "expectations_guidelines":
-        if "guidelines" in expectation_keys:
+        if "guidelines" in available:
             return True, "expectations.guidelines present"
         return False, ""
     if spec.name == "relevance":
@@ -450,10 +454,16 @@ def _auto_reason(
         if config.scorers.guidelines:
             return True, "scorers.guidelines configured"
         return False, ""
-    if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS}:
-        if shape.has_traces:
-            return True, "rows carry traces"
-        return False, ""
+    if spec.needs_trace is TraceNeed.RETRIEVAL:
+        if shape.has_retrieval_spans:
+            return True, "rows carry retrieval spans"
+        # Traces exist but hold no retrieval spans: a candidate, so the
+        # plan says so rather than dropping it without explanation.
+        return shape.has_traces, "rows carry traces"
+    if spec.needs_trace is TraceNeed.TOOLS:
+        if shape.has_tool_spans:
+            return True, "rows carry tool-call spans"
+        return shape.has_traces, "rows carry traces"
     return False, ""
 
 
@@ -473,16 +483,31 @@ def _contract_blocker(
         spec.needs_expectations
     ):
         fields = " or ".join(f"expectations.{key}" for key in spec.needs_expectations)
+        if set(shape.partial_expectation_keys).intersection(spec.needs_expectations):
+            # Scoring only the rows that carry the field would average a
+            # subset while reporting it as the whole dataset; the rows
+            # without it would score as vacuously perfect.
+            return (
+                f"only some rows have {fields}; every row must provide it "
+                "for the score to mean what it says"
+            )
         return f"dataset rows have no {fields}"
     if spec.needs_trace is TraceNeed.ANY and mode != "live":
         return "needs a live agent call (answer-sheet rows have no trace)"
-    if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS}:
-        if mode != "live" and not shape.has_traces:
+    if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS} and mode != "live":
+        wanted = (
+            shape.has_retrieval_spans
+            if spec.needs_trace is TraceNeed.RETRIEVAL
+            else shape.has_tool_spans
+        )
+        if not wanted:
             kind = (
                 "RETRIEVER spans"
                 if spec.needs_trace is TraceNeed.RETRIEVAL
                 else "tool-call spans"
             )
+            if shape.has_traces:
+                return f"the rows' traces carry no {kind}"
             return f"needs {kind} in a trace; answer-sheet rows have none"
     return None
 

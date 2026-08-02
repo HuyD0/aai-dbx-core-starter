@@ -29,6 +29,9 @@ def _shape(
     has_traces=False,
     row_count=10,
     has_outputs=True,
+    partial_expectation_keys=(),
+    has_retrieval_spans=None,
+    has_tool_spans=None,
 ):
     return DatasetShape(
         row_count=row_count,
@@ -37,6 +40,11 @@ def _shape(
         expectation_keys=tuple(expectation_keys),
         has_traces=has_traces,
         strata_values={},
+        partial_expectation_keys=tuple(partial_expectation_keys),
+        has_retrieval_spans=(
+            has_traces if has_retrieval_spans is None else has_retrieval_spans
+        ),
+        has_tool_spans=has_traces if has_tool_spans is None else has_tool_spans,
     )
 
 
@@ -413,3 +421,53 @@ def test_build_prompt_judge_falls_back_to_guidelines_without_make_judge():
     assert built.class_name == "Guidelines"
     assert built.kwargs["name"] == "pension_domain_policy"
     assert len(built.kwargs["guidelines"]) == 3
+
+
+def test_retrieval_traces_do_not_select_tool_scorers():
+    """A retrieval trace must not buy tool-judge calls it cannot satisfy."""
+
+    plan = select_scorers(
+        _shape(has_traces=True, has_retrieval_spans=True, has_tool_spans=False),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "retrieval_groundedness" in names
+    assert "tool_call_correctness" not in names
+    assert "no tool-call spans" in _excluded(plan, "tool_call_correctness")
+
+
+def test_tool_traces_do_not_select_retrieval_scorers():
+    plan = select_scorers(
+        _shape(has_traces=True, has_retrieval_spans=False, has_tool_spans=True),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "tool_call_correctness" in names
+    assert "retrieval_groundedness" not in names
+
+
+def test_partially_present_expectations_are_not_scored_dataset_wide():
+    """A field only some rows carry cannot be scored as if all rows had it.
+
+    keyword_coverage returns a vacuous 1.0 when there is nothing to check,
+    so running it on rows without an expected response would inflate the
+    aggregate the gate reads.
+    """
+
+    plan = select_scorers(
+        _shape(expectation_keys=(), partial_expectation_keys=("expected_response",)),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=False,
+    )
+
+    names = _selected_names(plan)
+    assert "keyword_coverage" not in names
+    reason = _excluded(plan, "keyword_coverage")
+    assert "only some rows" in reason

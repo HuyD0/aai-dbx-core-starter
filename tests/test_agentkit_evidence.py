@@ -210,3 +210,17 @@ def test_approver_lookup_without_a_registered_model_says_why(tmp_path):
 
     assert approver["status"] == "unknown"
     assert "registered_model" in approver["reason"]
+
+
+def test_approval_is_read_for_the_evaluated_model_version():
+    """Evidence for version N must not report version N+1's approval."""
+
+    from aai_core.agentkit.evidence import evaluated_model_version
+
+    name = "main.evaluation.agent"
+    assert evaluated_model_version(f"models:/{name}/7", name) == "7"
+    # Not a UC model reference, a different model, or no version: no claim.
+    assert evaluated_model_version("endpoints:/serving", name) is None
+    assert evaluated_model_version("models:/other.model/7", name) is None
+    assert evaluated_model_version(f"models:/{name}", name) is None
+    assert evaluated_model_version(f"models:/{name}@champion", name) is None
