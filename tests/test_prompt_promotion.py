@@ -122,10 +122,19 @@ def test_is_missing_prompt_error_recognizes_only_absence():
 
     assert is_missing_prompt_error(RegistryError("x", error_code="NOT_FOUND"))
     assert is_missing_prompt_error(RegistryError("prompt does not exist"))
+    # MlflowException defaults to INTERNAL_ERROR even for message-only
+    # raises, so a non-authoritative code still falls through to markers.
+    assert is_missing_prompt_error(
+        RegistryError("prompt does not exist", error_code="INTERNAL_ERROR")
+    )
     # Auth, permission, and transient failures are not absence: a caller
-    # seeding a first promotion must never swallow them.
+    # seeding a first promotion must never swallow them — even when the
+    # registry words the denial as "does not exist" to avoid disclosure.
     assert not is_missing_prompt_error(
         RegistryError("denied", error_code="PERMISSION_DENIED")
+    )
+    assert not is_missing_prompt_error(
+        RegistryError("prompt does not exist", error_code="PERMISSION_DENIED")
     )
     assert not is_missing_prompt_error(RegistryError("401 unauthorized"))
     assert not is_missing_prompt_error(RegistryError("connection reset"))

@@ -72,7 +72,8 @@ All notable changes to `aai-core` are documented here.
   `is_missing_prompt_error()` is public so callers seeding a first version
   or first promotion can distinguish an absent prompt or alias from
   authentication, permission, and transient registry failures instead of
-  catching broadly. `promote()` verifies the target version through the
+  catching broadly; structured non-missing codes override "does not
+  exist" message wording, the common non-disclosure phrasing. `promote()` verifies the target version through the
   raw registry client, never the fluent lineage-linking load, so a
   rejected candidate is not attached to an active run, model, or trace.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
