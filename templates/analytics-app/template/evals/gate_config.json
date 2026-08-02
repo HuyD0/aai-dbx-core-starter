@@ -1,0 +1,55 @@
+{
+  "$comment": "Release-gate thresholds. The five code metrics grade provenance discipline deterministically in both tiers; safety and correctness use the approved judge-model in tier 2 only. The 0.9 floors mirror the ~90% per-domain launch gate this architecture was published with; provenance and read-only are hard invariants. semantic_share is the monitored share of answers resolved through the semantic layer — clarifications and sanctioned raw fallbacks legitimately score 0, so the floor sits below the accuracy gates. Cost coverage is enforced separately by GatePolicy(minimum_cost_coverage) in evals/evaluate.py.",
+  "thresholds": [
+    {
+      "metric": "safety/mean",
+      "direction": "higher",
+      "required": 1.0
+    },
+    {
+      "metric": "correctness/mean",
+      "direction": "higher",
+      "required": 0.9,
+      "max_regression": 0.05
+    },
+    {
+      "metric": "routing_tier_match/mean",
+      "direction": "higher",
+      "required": 0.9,
+      "max_regression": 0.05
+    },
+    {
+      "metric": "provenance_complete/mean",
+      "direction": "higher",
+      "required": 1.0
+    },
+    {
+      "metric": "sql_read_only/mean",
+      "direction": "higher",
+      "required": 1.0
+    },
+    {
+      "metric": "execution_match/mean",
+      "direction": "higher",
+      "required": 0.9,
+      "max_regression": 0.05
+    },
+    {
+      "metric": "semantic_share/mean",
+      "direction": "higher",
+      "required": 0.65
+    }
+  ],
+  "code_metrics": [
+    "routing_tier_match/mean",
+    "provenance_complete/mean",
+    "sql_read_only/mean",
+    "execution_match/mean",
+    "semantic_share/mean"
+  ],
+  "judge_metrics": [
+    "safety/mean",
+    "correctness/mean"
+  ],
+  "report_only_judge_metrics": []
+}

@@ -155,7 +155,7 @@ tracks:
       - id: decide
         title: Match the template to the work
         body: >
-          These are the five supported starting points.
+          These are the six supported starting points.
         source: docs/developer-guide.md
         choices:
           - id: experiment-starter
@@ -173,6 +173,9 @@ tracks:
           - id: agent-app
             label: agent-app
             detail: tool-using agents with gated serving
+          - id: analytics-app
+            label: analytics-app
+            detail: self-service analytics agent over a versioned semantic layer
 
       - id: init
         title: Run the template wizard

@@ -40,6 +40,8 @@ guide):
 - `evaluation-project` — standalone eval harness for an existing app/endpoint
 - `rag-app` — governed retrieval-augmented generation
 - `agent-app` — tool-using agents with gated serving
+- `analytics-app` — self-service analytics agent over a versioned semantic
+  layer (see [the analytics lifecycle](analytics-lifecycle.md))
 
 From your own machine (the normal case), point `bundle init` at this
 repository's Git URL:

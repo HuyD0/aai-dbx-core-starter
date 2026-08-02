@@ -62,7 +62,21 @@ All notable changes to `aai-core` are documented here.
   `14_platform_llm_operations.ipynb` (the platform team's operating loop:
   judge governance, gateway request tags, cost by tag, fleet provenance,
   monitoring adoption, and rollback levers).
-
+- Added the `analytics-app` template: a self-service analytics agent
+  implementing the published four-layer architecture (canonical data,
+  semantic layer first, knowledge + runbook skills, offline-pinned
+  validation) over a **neutral, repo-owned semantic layer** — a strictly
+  validated YAML contract compiled to portable SQL by pure application
+  code, executed behind a three-method `WarehouseExecutor` protocol
+  (Databricks statement-execution adapter shipped; other warehouses are an
+  application-code implementation away). Every answer carries a
+  code-rendered provenance footer (tier › sources › owner › freshness ›
+  SQL) and per-pass token accounting; the two-tier gate reproduces every
+  golden value credential-free from a versioned snapshot, then re-judges
+  against the live warehouse with cost-coverage enforcement. The platform
+  console offers the template, and `docs/analytics-lifecycle.md` documents
+  the lifecycle, eval-set design, tokenomics, and context engineering.
+  `aai-core` itself is unchanged.
 - Made `platform-identifiers.json` the only file a clone edits for environment
   identifiers. `scripts/sync_template_shared.py` now stamps the four
   platform-controlled defaults in every template schema and the identifier

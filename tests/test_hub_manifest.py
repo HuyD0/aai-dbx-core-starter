@@ -558,7 +558,7 @@ def test_shared_template_renders_to_a_valid_manifest_and_is_synced_everywhere():
         for path in (ROOT / "templates").iterdir()
         if (path / "databricks_template_schema.json").is_file()
     )
-    assert len(template_roots) == 5
+    assert len(template_roots) == 6
     for template in template_roots:
         copied = template / "template" / "ai-app.yaml.tmpl"
         assert copied.read_text(encoding="utf-8") == canonical

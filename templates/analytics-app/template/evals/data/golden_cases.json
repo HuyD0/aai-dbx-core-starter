@@ -1,0 +1,211 @@
+[
+  {
+    "inputs": {
+      "question": "What was total revenue in March 2024?"
+    },
+    "expectations": {
+      "expected_response": "Revenue for March 2024 was 600.75, excluding cancelled orders.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["revenue"],
+        "filters": [
+          {"dimension": "order_date", "value": "2024-03", "grain": "month"}
+        ]
+      },
+      "expected_value": 600.75,
+      "category": "metric_lookup"
+    }
+  },
+  {
+    "inputs": {
+      "question": "How many orders have we received overall?"
+    },
+    "expectations": {
+      "expected_response": "We have received 12 orders in total, including cancelled ones.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["order_count"]
+      },
+      "expected_value": 12,
+      "category": "metric_lookup"
+    }
+  },
+  {
+    "inputs": {
+      "question": "How many distinct customers have placed at least one order?"
+    },
+    "expectations": {
+      "expected_response": "6 distinct customers have placed at least one order.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["active_customers"]
+      },
+      "expected_value": 6,
+      "category": "metric_lookup"
+    }
+  },
+  {
+    "inputs": {
+      "question": "What was revenue in April 2024?"
+    },
+    "expectations": {
+      "expected_response": "Revenue for April 2024 was 711.25, excluding cancelled orders.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["revenue"],
+        "filters": [
+          {"dimension": "order_date", "value": "2024-04", "grain": "month"}
+        ]
+      },
+      "expected_value": 711.25,
+      "category": "metric_lookup"
+    }
+  },
+  {
+    "inputs": {
+      "question": "Break down March 2024 revenue by region."
+    },
+    "expectations": {
+      "expected_response": "March 2024 revenue by region: north 200.50, south 260.25, west 140. The east region had no orders that month. Cancelled orders are excluded.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["revenue"],
+        "dimensions": ["region"],
+        "filters": [
+          {"dimension": "order_date", "value": "2024-03", "grain": "month"}
+        ]
+      },
+      "expected_value": null,
+      "category": "grouped_metric"
+    }
+  },
+  {
+    "inputs": {
+      "question": "Show the monthly revenue trend for 2024."
+    },
+    "expectations": {
+      "expected_response": "Monthly revenue in 2024: March 600.75 and April 711.25, excluding cancelled orders.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["revenue"],
+        "time_dimension": "order_date",
+        "time_grain": "month",
+        "filters": [
+          {"dimension": "order_date", "value": "2024", "grain": "year"}
+        ]
+      },
+      "expected_value": null,
+      "category": "grouped_metric"
+    }
+  },
+  {
+    "inputs": {
+      "question": "How many shipped orders did we have in March 2024?"
+    },
+    "expectations": {
+      "expected_response": "There were 4 shipped orders in March 2024, filtering on the status code S for shipped.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["order_count"],
+        "filters": [
+          {"dimension": "order_status", "value": "S"},
+          {"dimension": "order_date", "value": "2024-03", "grain": "month"}
+        ]
+      },
+      "expected_value": 4,
+      "category": "encoding_trap"
+    }
+  },
+  {
+    "inputs": {
+      "question": "How many orders were cancelled overall?"
+    },
+    "expectations": {
+      "expected_response": "2 orders have been cancelled overall, using the status code C for cancelled.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["order_count"],
+        "filters": [
+          {"dimension": "order_status", "value": "C"}
+        ]
+      },
+      "expected_value": 2,
+      "category": "encoding_trap"
+    }
+  },
+  {
+    "inputs": {
+      "question": "What was the average order value in March 2024?"
+    },
+    "expectations": {
+      "expected_response": "The average order value in March 2024 was 120.15, excluding cancelled orders.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["average_order_value"],
+        "filters": [
+          {"dimension": "order_date", "value": "2024-03", "grain": "month"}
+        ]
+      },
+      "expected_value": 120.15,
+      "category": "metric_lookup"
+    }
+  },
+  {
+    "inputs": {
+      "question": "Is the orders data fresh enough to report on right now?"
+    },
+    "expectations": {
+      "expected_response": "No. The orders table was last loaded at the 2024-05-01T06:00:00Z snapshot, which is outside its 24 hour freshness SLA, so treat any report as stale demo data.",
+      "expected_tier": "raw_table",
+      "expected_value": null,
+      "category": "freshness"
+    }
+  },
+  {
+    "inputs": {
+      "question": "What is our total revenue across all time?"
+    },
+    "expectations": {
+      "expected_response": "Total revenue across all time is 1312.00, excluding cancelled orders.",
+      "expected_tier": "semantic_layer",
+      "expected_query": {
+        "metrics": ["revenue"]
+      },
+      "expected_value": 1312.0,
+      "category": "metric_lookup"
+    }
+  },
+  {
+    "inputs": {
+      "question": "How is revenue doing?"
+    },
+    "expectations": {
+      "expected_response": "That question is ambiguous. Revenue excludes cancelled orders by definition; do you want a specific month such as April 2024, the monthly trend for 2024, or the all-time total?",
+      "expected_tier": "curated_reference",
+      "expected_value": null,
+      "category": "ambiguity_clarify"
+    }
+  },
+  {
+    "inputs": {
+      "question": "List the three largest individual orders with their ids."
+    },
+    "expectations": {
+      "expected_response": "The three largest orders by amount are O-1004 at 999.99 (which was cancelled), O-1009 at 310.00, and O-1012 at 210.00. This needed row-level detail, so it bypassed the semantic layer via the guarded read-only fallback.",
+      "expected_tier": "raw_table",
+      "expected_value": null,
+      "category": "raw_fallback"
+    }
+  },
+  {
+    "inputs": {
+      "question": "What will the weather be in Paris tomorrow?"
+    },
+    "expectations": {
+      "expected_response": "I cannot answer that: this analytics surface only covers the governed sales model (orders, revenue, customers, regions). Weather is outside its documented scope.",
+      "expected_tier": "curated_reference",
+      "expected_value": null,
+      "category": "out_of_scope_refusal"
+    }
+  }
+]
