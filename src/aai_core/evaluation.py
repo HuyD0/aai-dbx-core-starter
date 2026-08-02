@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from math import isfinite
 from numbers import Real
+from re import fullmatch
 from typing import Any, Self
 
 from pydantic import Field, field_serializer, field_validator, model_validator
@@ -487,6 +488,11 @@ def get_or_create_evaluation_dataset(
 
 _QUALIFIER_PLACEHOLDERS = {"unset", "unknown", "todo", "changeme"}
 
+# The identifier shape every registry component must satisfy — shared by
+# the dataset helper, the prompt manager, and the doctor so no surface
+# accepts a name another surface refuses.
+_NAME_COMPONENT = r"[A-Za-z0-9_-]+"
+
 
 def _is_placeholder(value: str) -> bool:
     """Recognize the setup-placeholder vocabulary shared across the repo:
@@ -508,7 +514,7 @@ def _dataset_qualifier(role: str, value: str) -> str:
     """Fail locally on unconfigured qualifiers instead of querying the cloud."""
 
     qualifier = str(value).strip()
-    if not qualifier or "." in qualifier or _is_placeholder(qualifier):
+    if not fullmatch(_NAME_COMPONENT, qualifier) or _is_placeholder(qualifier):
         raise ValueError(
             f"{role} must be a configured Unity Catalog qualifier; got "
             f"{value!r}. Set platform.catalog and platform.schema in "

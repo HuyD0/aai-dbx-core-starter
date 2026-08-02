@@ -514,6 +514,7 @@ def test_dataset_helper_requires_a_logical_unqualified_name():
         ("main", "todo"),
         ("replace-with-catalog", "default"),
         ("<catalog>", "default"),
+        ("main catalog", "default"),
     ],
 )
 def test_dataset_helper_fails_locally_on_placeholder_qualifiers(catalog, schema):

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from re import fullmatch, sub
 from typing import Any
 
+from aai_core.evaluation import _NAME_COMPONENT
 from aai_core.exceptions import AaiCoreError
 from aai_core.tags import ResourceContext
 
@@ -22,11 +23,6 @@ class PromptPromotionError(AaiCoreError):
 # 'candidate' remains accepted only as the deprecated alias name that
 # set_alias() warns about; it is not lifecycle vocabulary.
 _GOVERNED_ALIASES = {"development", "validation", "candidate", "production"}
-
-# The same component shape DecisionRecord.prompt_name accepts: a name the
-# registry would take but the evidence contract refuses could never be
-# promoted, so the mismatch is refused at registration time instead.
-_NAME_COMPONENT = r"[A-Za-z0-9_-]+"
 
 
 @dataclass(frozen=True)

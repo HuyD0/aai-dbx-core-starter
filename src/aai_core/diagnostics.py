@@ -10,9 +10,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from re import fullmatch
 
-from aai_core.evaluation import _is_placeholder, judge_model_uri
+from aai_core.evaluation import _NAME_COMPONENT, _is_placeholder, judge_model_uri
 from aai_core.identity import identity_summary
-from aai_core.prompts import _NAME_COMPONENT
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings
 

@@ -124,6 +124,10 @@ def test_prompt_name_accepts_only_a_qualified_registry_name():
         "a.b.c.d",
         "Summarize {{excerpt}} politely.",
         "main.app.name with spaces",
+        # Placeholder components pass the character class but are still
+        # unusable evidence.
+        "unset.app.prompt",
+        "replace-with-catalog.app.prompt",
     ):
         with pytest.raises(ValidationError):
             _record(prompt_name=bad)

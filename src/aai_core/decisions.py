@@ -19,7 +19,7 @@ from typing import Any, Literal, Self
 from pydantic import Field, field_validator, model_validator
 
 from aai_core.contracts import ContractModel
-from aai_core.evaluation import GateResult
+from aai_core.evaluation import GateResult, _is_placeholder
 from aai_core.experiments import (
     ExperimentManager,
     ExperimentRunMetadata,
@@ -71,6 +71,18 @@ class DecisionRecord(ContractModel):
         if not isinstance(value, str):
             raise TypeError("decision must be a string or Decision")
         return Decision(value.strip().lower())
+
+    @field_validator("prompt_name")
+    @classmethod
+    def refuse_placeholder_components(cls, value: str | None) -> str | None:
+        if value is not None and any(
+            _is_placeholder(part) for part in value.split(".")
+        ):
+            raise ValueError(
+                "prompt_name must not contain placeholder components; record "
+                "the real qualified prompt name the evidence was made for"
+            )
+        return value
 
     @field_validator("decided_by")
     @classmethod
