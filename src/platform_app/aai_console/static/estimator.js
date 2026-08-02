@@ -228,7 +228,10 @@ async function render() {
     restoreCommitted();
     return "rejected";
   } finally {
-    target.removeAttribute("aria-busy");
+    // Only the newest render owns the busy flag: a superseded render's
+    // cleanup must not announce completion while its replacement is in
+    // flight.
+    if (renderAbort.signal === signal) target.removeAttribute("aria-busy");
   }
 }
 
