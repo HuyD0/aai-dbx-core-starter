@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from aai_core.evaluation import _QUALIFIER_PLACEHOLDERS, judge_model_uri
+from aai_core.evaluation import _is_placeholder, judge_model_uri
 from aai_core.identity import identity_summary
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings
@@ -83,12 +83,7 @@ def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
     # never reports ready what the connected workflow will refuse.
     catalog = str(settings.catalog).strip()
     schema = str(settings.schema_name).strip()
-    if (
-        not catalog
-        or not schema
-        or catalog.lower() in _QUALIFIER_PLACEHOLDERS
-        or schema.lower() in _QUALIFIER_PLACEHOLDERS
-    ):
+    if not catalog or not schema or _is_placeholder(catalog) or _is_placeholder(schema):
         checks.append(
             DoctorCheck(
                 "lifecycle:prompt-registry",

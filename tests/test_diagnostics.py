@@ -65,6 +65,32 @@ def test_doctor_treats_every_placeholder_qualifier_as_unconfigured(tmp_path):
     assert by_name["lifecycle:prompt-registry"].status == "skip"
 
 
+def test_doctor_treats_replace_with_values_as_unconfigured(tmp_path):
+    # The example config ships replace-with-* values; the doctor must not
+    # report them as ready, and the judge must fail locally, not remotely.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + """
+  catalog: replace-with-catalog
+  schema: app
+
+providers:
+  models:
+    judge-model:
+      provider: databricks
+      deployment: replace-with-serving-endpoint
+""",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+    assert by_name["lifecycle:judge-model"].status == "skip"
+    assert "placeholder" in by_name["lifecycle:judge-model"].detail
+
+
 def test_doctor_passes_lifecycle_checks_when_configured(tmp_path):
     config = tmp_path / "aai-platform.yml"
     config.write_text(

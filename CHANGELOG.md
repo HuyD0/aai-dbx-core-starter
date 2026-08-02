@@ -16,7 +16,9 @@ All notable changes to `aai-core` are documented here.
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
   the single resolver for the approved judge endpoint (it had been duplicated
-  across five template sites); `log_gate_evidence` standardizes the gate
+  across five template sites) and rejects setup-placeholder deployments
+  (`replace-with-*`, `unset`, …) so the doctor never reports a placeholder
+  judge as ready; `log_gate_evidence` standardizes the gate
   metrics and `aai.gate_passed` tag templates were hand-writing;
   `evaluate_with_gate` composes native `mlflow.genai.evaluate()` with
   `apply_gate()` through kwargs passthrough and returns the native result by
@@ -55,7 +57,10 @@ All notable changes to `aai-core` are documented here.
   the registry version's actual template
   (`aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
   carries no template identity, so evidence gathered for one template can
-  never promote another version. `set_alias()` is unchanged.
+  never promote another version. `set_alias()` is unchanged. `PromptManager`
+  fails locally on unconfigured or placeholder catalog/schema qualifiers
+  instead of querying the registry for names like `unset.unset.<name>`;
+  explicit `catalog.schema.name` qualification remains untouched.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail.

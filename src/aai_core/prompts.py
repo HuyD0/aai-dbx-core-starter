@@ -240,7 +240,9 @@ class PromptManager:
     def qualify(self, name: str) -> str:
         parts = name.split(".")
         if len(parts) == 1:
-            return f"{self.catalog}.{self.schema}.{name}"
+            catalog = _registry_qualifier("catalog", self.catalog)
+            schema = _registry_qualifier("schema", self.schema)
+            return f"{catalog}.{schema}.{name}"
         if len(parts) == 3:
             return name
         raise ValueError("Prompt names must be unqualified or catalog.schema.name")
@@ -275,6 +277,22 @@ def prompt_digest(template: str | list[dict[str, str]]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _registry_qualifier(role: str, value: str) -> str:
+    """Fail locally on unconfigured qualifiers instead of querying the
+    registry for names like ``unset.unset.<name>``."""
+
+    from aai_core.evaluation import _is_placeholder
+
+    qualifier = str(value).strip()
+    if not qualifier or "." in qualifier or _is_placeholder(qualifier):
+        raise ValueError(
+            f"{role} must be a configured Unity Catalog qualifier; got "
+            f"{value!r}. Set platform.catalog and platform.schema in "
+            "aai-platform.yml before using the governed prompt registry."
+        )
+    return qualifier
 
 
 def _is_missing_prompt(error: Exception) -> bool:

@@ -101,6 +101,34 @@ def _manager(mlflow):
     )
 
 
+@pytest.mark.parametrize(
+    ("catalog", "schema"),
+    [
+        ("unset", "app"),
+        ("main", "todo"),
+        ("replace-with-catalog", "app"),
+        ("main", " "),
+    ],
+)
+def test_manager_fails_locally_on_placeholder_qualifiers(catalog, schema):
+    manager = PromptManager(
+        context=dev_settings().resource,
+        catalog=catalog,
+        schema=schema,
+        # Any registry use would fail loudly: validation must come first.
+        mlflow_module=object(),
+    )
+
+    with pytest.raises(ValueError, match="platform.catalog"):
+        manager.ensure_version(
+            "earnings_summary", TEMPLATE, commit_message="Initial version"
+        )
+    with pytest.raises(ValueError, match="platform.catalog"):
+        manager.load("earnings_summary", version=1)
+    # Explicit full qualification remains the caller's escape hatch.
+    assert manager.qualify("main.app.earnings_summary") == "main.app.earnings_summary"
+
+
 def test_prompt_digest_is_stable_and_content_sensitive():
     assert prompt_digest(TEMPLATE) == prompt_digest(TEMPLATE)
     assert prompt_digest(TEMPLATE) != prompt_digest(TEMPLATE + " Cite {{source_id}}.")

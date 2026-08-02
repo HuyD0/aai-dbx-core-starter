@@ -304,6 +304,13 @@ def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
             remediation=f"Set providers.models.{logical_name}.deployment to "
             "the approved serving endpoint name.",
         )
+    if _is_placeholder(deployment):
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} deployment {deployment.strip()!r} "
+            "is a setup placeholder",
+            remediation=f"Replace providers.models.{logical_name}.deployment "
+            "with the approved serving endpoint before running evaluation.",
+        )
     return f"endpoints:/{deployment.strip()}"
 
 
@@ -402,15 +409,20 @@ def get_or_create_evaluation_dataset(
 _QUALIFIER_PLACEHOLDERS = {"unset", "unknown", "todo", "changeme"}
 
 
+def _is_placeholder(value: str) -> bool:
+    """Recognize the setup-placeholder vocabulary shared across the repo:
+    the unconfigured markers plus the ``replace-with-*`` values that
+    ``aai-platform.example.yml`` ships."""
+
+    lowered = str(value).strip().lower()
+    return lowered in _QUALIFIER_PLACEHOLDERS or lowered.startswith("replace-with-")
+
+
 def _dataset_qualifier(role: str, value: str) -> str:
     """Fail locally on unconfigured qualifiers instead of querying the cloud."""
 
     qualifier = str(value).strip()
-    if (
-        not qualifier
-        or "." in qualifier
-        or qualifier.lower() in (_QUALIFIER_PLACEHOLDERS)
-    ):
+    if not qualifier or "." in qualifier or _is_placeholder(qualifier):
         raise ValueError(
             f"{role} must be a configured Unity Catalog qualifier; got "
             f"{value!r}. Set platform.catalog and platform.schema in "
