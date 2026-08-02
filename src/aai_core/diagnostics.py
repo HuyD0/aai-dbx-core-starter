@@ -72,17 +72,28 @@ def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
     """Report lifecycle readiness; optional configuration skips, never fails."""
 
     # An explicit placeholder name would pass straight through
-    # effective_experiment_name to get_experiment_by_name(); only the
-    # 'unset' sentinel derives the conventional /Shared/... name.
+    # effective_experiment_name to get_experiment_by_name(), and a derived
+    # /Shared/<team>-<project>-<application> name built from placeholder
+    # components (/Shared/unset-unset-unset) is just as unconfigured.
     experiment = settings.effective_experiment_name
-    if _is_placeholder(experiment):
+    resource = settings.resource
+    derived = settings.experiment_name in {"", "unset"}
+    unconfigured = _is_placeholder(experiment) or (
+        derived
+        and any(
+            _is_placeholder(component)
+            for component in (resource.team, resource.project, resource.application)
+        )
+    )
+    if unconfigured:
         checks = [
             DoctorCheck(
                 "lifecycle:experiment",
                 "skip",
                 "set platform.experiment_name to a real experiment path, or "
-                "leave it 'unset' to derive "
-                "/Shared/<team>-<project>-<application>",
+                "leave it 'unset' and configure platform.team, "
+                "platform.project, and platform.application so the derived "
+                "/Shared/<team>-<project>-<application> name is real",
             )
         ]
     else:

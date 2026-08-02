@@ -81,6 +81,24 @@ def test_doctor_treats_placeholder_experiment_names_as_unconfigured(tmp_path):
     assert "platform.experiment_name" in by_name["lifecycle:experiment"].detail
 
 
+def test_doctor_treats_derived_names_with_placeholder_components_as_unconfigured(
+    tmp_path,
+):
+    # /Shared/unset-... is not a real experiment; the derived name is only
+    # as configured as the components it is built from.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG.replace("team: test-team", "team: unset"),
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:experiment"].status == "skip"
+    assert "platform.team" in by_name["lifecycle:experiment"].detail
+
+
 def test_doctor_treats_dotted_qualifiers_as_unconfigured(tmp_path):
     # The SDK helpers reject dotted qualifiers; the doctor must not report
     # ready what the connected workflow will refuse.

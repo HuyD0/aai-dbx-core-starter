@@ -80,8 +80,9 @@ All notable changes to `aai-core` are documented here.
   configuration reports skip with remediation, never fail. The
   prompt-registry preflight applies the same qualifier validation as the
   SDK helpers (placeholder vocabulary and dotted values alike), and an
-  explicit placeholder experiment name reports skip instead of passing the
-  literal through to the registry.
+  experiment name that is a placeholder — explicit, or derived from
+  placeholder team/project/application components — reports skip instead
+  of passing the literal through to the registry.
 - Aligned the executable examples' release decision with the documented
   vocabulary: `aai.decision` and `LIFECYCLE_RESULT` now record
   `adopt`/`reject` instead of `release_change`/`keep_baseline`.
