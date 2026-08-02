@@ -79,7 +79,7 @@ def test_flight_manifest_rejects_governed_source_or_package_drift(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
-    def contract(*, source_digest: str, package_version: str):
+    def contract(*, source_digest: str, package_versions: tuple[str, ...]):
         source_files = (
             training.TrainingFileEvidence(
                 path="src/aai_local_finetuning/training.py",
@@ -87,11 +87,12 @@ def test_flight_manifest_rejects_governed_source_or_package_drift(
                 size_bytes=10,
             ),
         )
-        packages = (
+        packages = tuple(
             training.RuntimePackageEvidence(
                 name="aai-local-finetuning",
-                version=package_version,
-            ),
+                version=version,
+            )
+            for version in package_versions
         )
         return training.ExecutionContract(
             python_version="3.12.11",
@@ -104,7 +105,12 @@ def test_flight_manifest_rejects_governed_source_or_package_drift(
             runtime_packages_sha256=training._evidence_sequence_sha256(packages),
         )
 
-    state = {"contract": contract(source_digest="a" * 64, package_version="0.1.0")}
+    state = {
+        "contract": contract(
+            source_digest="a" * 64,
+            package_versions=("0.1.0", "0.1.0-vendored"),
+        )
+    }
     settings = SimpleNamespace(
         archive_path=archive,
         csv_path=csv,
@@ -125,13 +131,23 @@ def test_flight_manifest_rejects_governed_source_or_package_drift(
 
     path = write_flight_manifest(settings)  # type: ignore[arg-type]
     written = json.loads(path.read_text(encoding="utf-8"))
-    assert written["schema_version"] == "2.0.0"
+    assert written["schema_version"] == "3.0.0"
     assert written["source_files"] == {"src/aai_local_finetuning/training.py": "a" * 64}
+    assert written["packages"] == [
+        {"name": "aai-local-finetuning", "version": "0.1.0"},
+        {"name": "aai-local-finetuning", "version": "0.1.0-vendored"},
+    ]
 
     state["contract"] = (
-        contract(source_digest="c" * 64, package_version="0.1.0")
+        contract(
+            source_digest="c" * 64,
+            package_versions=("0.1.0", "0.1.0-vendored"),
+        )
         if mutation == "source"
-        else contract(source_digest="a" * 64, package_version="0.2.0")
+        else contract(
+            source_digest="a" * 64,
+            package_versions=("0.1.0", "0.2.0-vendored"),
+        )
     )
     with pytest.raises(OfflineAssetError, match="changed after flight preparation"):
         verify_flight_manifest(settings)  # type: ignore[arg-type]

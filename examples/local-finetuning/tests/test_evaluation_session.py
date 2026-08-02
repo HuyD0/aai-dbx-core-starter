@@ -24,6 +24,7 @@ from aai_local_finetuning.evaluation import (
     Prediction,
     SupportOutput,
     evaluate_predictions,
+    recheck_evaluation_session,
     start_evaluation_session,
 )
 
@@ -87,19 +88,11 @@ def governed_runtime(
         encoding="utf-8",
     )
 
-    distribution_dir = tmp_path / "site-packages" / "session_runtime-1.0.0.dist-info"
-    distribution_dir.mkdir(parents=True)
-    metadata_path = distribution_dir / "METADATA"
-    metadata_path.write_text(
-        "Metadata-Version: 2.1\nName: session-runtime\nVersion: 1.0.0\n",
-        encoding="utf-8",
+    distribution, metadata_path = _write_distribution(
+        tmp_path / "site-packages",
+        name="session-runtime",
+        version="1.0.0",
     )
-    (distribution_dir / "RECORD").write_text(
-        "session_runtime-1.0.0.dist-info/METADATA,,\n"
-        "session_runtime-1.0.0.dist-info/RECORD,,\n",
-        encoding="utf-8",
-    )
-    distribution = PathDistribution(distribution_dir)
 
     monkeypatch.setattr(training, "PROJECT_ROOT", project_root)
     monkeypatch.setattr(
@@ -108,6 +101,28 @@ def governed_runtime(
         lambda: (distribution,),
     )
     return project_root, source_path, metadata_path
+
+
+def _write_distribution(
+    root: Path,
+    *,
+    name: str,
+    version: str,
+) -> tuple[PathDistribution, Path]:
+    normalized_name = name.replace("-", "_")
+    directory_name = f"{normalized_name}-{version}.dist-info"
+    distribution_dir = root / directory_name
+    distribution_dir.mkdir(parents=True)
+    metadata_path = distribution_dir / "METADATA"
+    metadata_path.write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        encoding="utf-8",
+    )
+    (distribution_dir / "RECORD").write_text(
+        f"{directory_name}/METADATA,,\n{directory_name}/RECORD,,\n",
+        encoding="utf-8",
+    )
+    return PathDistribution(distribution_dir), metadata_path
 
 
 def _replace_with_original_bytes(path: Path) -> None:
@@ -187,6 +202,43 @@ def test_support_and_capstone_reports_bind_the_prestarted_session_hash(
         capstone_report.evaluation_execution_contract_sha256
         == session.execution_contract_sha256
     )
+
+
+def test_session_preserves_distinct_vendored_versions_with_the_same_name(
+    governed_runtime: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _project_root, _source_path, metadata_path = governed_runtime
+    primary = PathDistribution(metadata_path.parent)
+    vendored, _vendored_metadata = _write_distribution(
+        metadata_path.parents[2] / "provider" / "_vendor",
+        name="session-runtime",
+        version="0.9.0",
+    )
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (primary, primary, vendored),
+    )
+
+    session = start_evaluation_session()
+
+    assert tuple(
+        (package.name, package.version)
+        for package in session.execution_contract.runtime_packages
+    ) == (
+        ("session-runtime", "0.9.0"),
+        ("session-runtime", "1.0.0"),
+    )
+    recheck_evaluation_session(session)
+
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (primary,),
+    )
+    with pytest.raises(RuntimeError, match="changed"):
+        recheck_evaluation_session(session)
 
 
 @pytest.mark.parametrize("kind", ("support", "capstone"))

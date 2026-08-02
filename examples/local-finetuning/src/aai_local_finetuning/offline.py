@@ -11,11 +11,15 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .data.manifests import DatasetIntegrityError, require_valid_manifest
 from .settings import PROJECT_ROOT, ProjectSettings, sha256_file
-from .training import capture_execution_contract, execution_contract_sha256
+from .training import (
+    RuntimePackageEvidence,
+    capture_execution_contract,
+    execution_contract_sha256,
+)
 
 OFFLINE_ENVIRONMENT = {
     "HF_HUB_OFFLINE": "1",
@@ -49,7 +53,7 @@ class FlightManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["2.0.0"] = "2.0.0"
+    schema_version: Literal["3.0.0"] = "3.0.0"
     python: str
     platform: str
     project_lock_sha256: str
@@ -57,7 +61,7 @@ class FlightManifest(BaseModel):
     dataset_csv_sha256: str
     model_revision: str
     model_weight_sha256: str
-    packages: dict[str, str]
+    packages: tuple[RuntimePackageEvidence, ...] = Field(min_length=1)
     source_files: dict[str, str]
     source_files_sha256: str
     runtime_packages_sha256: str
@@ -230,9 +234,6 @@ def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
         for path in sorted(settings.processed_dir.rglob("*"))
         if path.is_file()
     }
-    packages = {
-        package.name: package.version for package in execution_contract.runtime_packages
-    }
     source_files = {
         source.path: source.sha256 for source in execution_contract.source_files
     }
@@ -247,7 +248,7 @@ def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
         if path.is_file()
     }
     return FlightManifest(
-        schema_version="2.0.0",
+        schema_version="3.0.0",
         python=platform.python_version(),
         platform=f"{platform.system()}-{platform.machine()}",
         project_lock_sha256=sha256_file(PROJECT_ROOT / "uv.lock"),
@@ -257,7 +258,7 @@ def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
         model_weight_sha256=sha256_file(
             settings.model_dir / settings.model.primary_weight
         ),
-        packages=packages,
+        packages=execution_contract.runtime_packages,
         source_files=source_files,
         source_files_sha256=execution_contract.source_files_sha256,
         runtime_packages_sha256=execution_contract.runtime_packages_sha256,

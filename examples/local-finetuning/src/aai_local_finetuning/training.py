@@ -145,10 +145,8 @@ class ExecutionContract(BaseModel):
         package_keys = tuple(
             (item.name, item.version) for item in self.runtime_packages
         )
-        if package_keys != tuple(sorted(package_keys)) or len(
-            {name for name, _version in package_keys}
-        ) != len(package_keys):
-            raise ValueError("runtime_packages must have unique names in sorted order")
+        if package_keys != tuple(sorted(package_keys)):
+            raise ValueError("runtime_packages must be in canonical sorted order")
         if self.source_files_sha256 != _evidence_sequence_sha256(self.source_files):
             raise ValueError("source_files_sha256 does not match source_files")
         if self.runtime_packages_sha256 != _evidence_sequence_sha256(
@@ -258,6 +256,13 @@ class _CapturedDirectory:
     inode: int
     modified_ns: int
     changed_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeDistribution:
+    evidence: RuntimePackageEvidence
+    metadata_path: Path
+    install_root: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -1347,18 +1352,10 @@ def _capture_governed_source_files() -> tuple[_CapturedFile, ...]:
 
 
 def _capture_runtime_packages() -> tuple[RuntimePackageEvidence, ...]:
-    packages: dict[str, RuntimePackageEvidence] = {}
-    for distribution in importlib.metadata.distributions():
-        package = _runtime_package_evidence(distribution)
-        name = package.name
-        if name in packages:
-            raise RuntimeError(
-                f"installed runtime contains duplicate distribution metadata: {name}"
-            )
-        packages[name] = package
-    if not packages:
+    distributions = _runtime_distribution_inventory()
+    if not distributions:
         raise RuntimeError("installed runtime package set is empty")
-    return tuple(packages[name] for name in sorted(packages))
+    return tuple(item.evidence for item in distributions)
 
 
 def _capture_runtime_package_state(
@@ -1367,27 +1364,20 @@ def _capture_runtime_package_state(
 ) -> tuple[tuple[_CapturedFile, ...], tuple[_CapturedDirectory, ...]]:
     """Capture package metadata files and their installation-root identities."""
 
-    packages: dict[str, RuntimePackageEvidence] = {}
-    metadata_files: dict[str, _CapturedFile] = {}
+    distributions = _runtime_distribution_inventory()
+    packages = tuple(item.evidence for item in distributions)
+    metadata_files: list[_CapturedFile] = []
     roots: set[Path] = set()
-    for distribution in importlib.metadata.distributions():
-        package = _runtime_package_evidence(distribution)
-        if package.name in packages:
-            raise RuntimeError(
-                "installed runtime contains duplicate distribution metadata: "
-                f"{package.name}"
+    for index, distribution in enumerate(distributions):
+        metadata_files.append(
+            _capture_file(
+                distribution.metadata_path,
+                f"runtime-packages/{index:06d}-{distribution.evidence.name}/metadata",
             )
-        packages[package.name] = package
-        metadata_path = _distribution_metadata_path(distribution)
-        metadata_files[package.name] = _capture_file(
-            metadata_path,
-            f"runtime-packages/{package.name}/metadata",
         )
-        root = Path(distribution.locate_file("")).resolve(strict=True)
-        roots.add(root)
+        roots.add(distribution.install_root)
 
-    captured_packages = tuple(packages[name] for name in sorted(packages))
-    if captured_packages != expected_packages:
+    if packages != expected_packages:
         raise RuntimeError(
             "installed runtime package set changed while its identity was captured"
         )
@@ -1398,8 +1388,52 @@ def _capture_runtime_package_state(
     if not captured_roots:
         raise RuntimeError("installed runtime package roots are missing")
     return (
-        tuple(metadata_files[name] for name in sorted(metadata_files)),
+        tuple(metadata_files),
         captured_roots,
+    )
+
+
+def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
+    """Return distinct metadata installations in a deterministic order.
+
+    Provider libraries can temporarily add a vendored distribution root to
+    ``sys.path``. The same normalized project name can then legitimately appear
+    at multiple versions. Preserve each distinct metadata file in the portable
+    package multiset, while collapsing repeated discovery of the same physical
+    metadata path.
+    """
+
+    by_metadata_path: dict[Path, _RuntimeDistribution] = {}
+    for distribution in importlib.metadata.distributions():
+        evidence = _runtime_package_evidence(distribution)
+        metadata_path = _distribution_metadata_path(distribution)
+        if metadata_path.is_symlink():
+            raise ValueError(
+                f"runtime package metadata is a symbolic link: {metadata_path}"
+            )
+        resolved_metadata = metadata_path.resolve(strict=True)
+        install_root = Path(distribution.locate_file("")).resolve(strict=True)
+        captured = _RuntimeDistribution(
+            evidence=evidence,
+            metadata_path=resolved_metadata,
+            install_root=install_root,
+        )
+        existing = by_metadata_path.get(resolved_metadata)
+        if existing is not None and existing != captured:
+            raise RuntimeError(
+                "one runtime metadata path resolved to inconsistent distributions: "
+                f"{resolved_metadata}"
+            )
+        by_metadata_path[resolved_metadata] = captured
+    return tuple(
+        sorted(
+            by_metadata_path.values(),
+            key=lambda item: (
+                item.evidence.name,
+                item.evidence.version,
+                item.metadata_path.as_posix(),
+            ),
+        )
     )
 
 
