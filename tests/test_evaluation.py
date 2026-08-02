@@ -371,6 +371,31 @@ def test_judge_resolves_only_an_approved_databricks_deployment():
             },
             "placeholder",
         ),
+        # Serving endpoint names allow only alphanumerics, dashes, and
+        # underscores; anything else must fail here, not inside the later
+        # MLflow evaluation request after the doctor reported ready.
+        (
+            {
+                "judge-model": {
+                    "provider": "databricks",
+                    "deployment": "judge endpoint",
+                }
+            },
+            "endpoint name",
+        ),
+        (
+            {"judge-model": {"provider": "databricks", "deployment": "judge!"}},
+            "endpoint name",
+        ),
+        (
+            {
+                "judge-model": {
+                    "provider": "databricks",
+                    "deployment": "endpoints:/judge-ep",
+                }
+            },
+            "endpoint name",
+        ),
     ],
 )
 def test_judge_refuses_missing_or_ungoverned_configuration(models, match):

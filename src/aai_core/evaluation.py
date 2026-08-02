@@ -391,6 +391,19 @@ def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
             remediation=f"Replace providers.models.{logical_name}.deployment "
             "with the approved serving endpoint before running evaluation.",
         )
+    # Databricks serving endpoint names contain only alphanumerics, dashes,
+    # and underscores; anything else builds an endpoints:/ URI that fails
+    # only inside the later evaluation request, after the doctor has
+    # already reported the judge ready.
+    if not fullmatch(_NAME_COMPONENT, deployment.strip()):
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} deployment {deployment.strip()!r} "
+            "is not a valid serving endpoint name",
+            remediation="Serving endpoint names contain only alphanumeric "
+            f"characters, dashes, and underscores; set providers.models."
+            f"{logical_name}.deployment to the endpoint's exact name, not "
+            "a URI or display label.",
+        )
     return f"endpoints:/{deployment.strip()}"
 
 
