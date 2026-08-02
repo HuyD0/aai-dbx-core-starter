@@ -40,7 +40,19 @@ def test_example_configuration_is_portable_and_project_scoped():
     assert model["provider"] == "foundry"
     assert "/api/projects/" in model["endpoint"]
     assert model["deployment"].startswith("replace-")
+    assert document["platform"]["repository"] == (
+        "replace-with-owner/replace-with-repository"
+    )
     assert document.get("secrets") == {}
+
+
+def test_readme_documents_the_required_local_config_copy():
+    readme = (CURRICULUM / "README.md").read_text(encoding="utf-8")
+
+    assert (
+        "cp examples/foundry-curriculum/config/aai-platform.dev.example.yml "
+        "examples/foundry-curriculum/config/aai-platform.dev.yml"
+    ) in readme
 
 
 def test_session_loads_endpoint_only_from_selected_configuration(tmp_path):

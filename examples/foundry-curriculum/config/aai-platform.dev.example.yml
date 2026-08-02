@@ -7,7 +7,7 @@ platform:
   cost_center: learning
   data_classification: internal
   lifecycle: experimental
-  repository: HuyD0/aai-dbx-core-starter
+  repository: replace-with-owner/replace-with-repository
   release: dev
   tag_schema_version: "1"
   catalog: dbx_dev

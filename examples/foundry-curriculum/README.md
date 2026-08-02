@@ -29,11 +29,20 @@ foundry-curriculum/
 
 ## Configure it
 
-The local development file already contains the supplied Foundry **project**
-endpoint. It is ignored by Git because it is environment-specific. Complete
-the model deployment name before making a connected request:
+A clean checkout intentionally contains only the portable example. Before
+opening any notebook, copy it to the ignored local development path:
+
+```bash
+cp examples/foundry-curriculum/config/aai-platform.dev.example.yml examples/foundry-curriculum/config/aai-platform.dev.yml
+```
+
+Edit the new file so `platform.repository` names this clone as
+`<owner>/<repository>`. Disconnected exercises may keep the Foundry endpoint
+and deployment placeholders. Replace both before making a connected request:
 
 ```yaml
+platform:
+  repository: <owner>/<repository>
 providers:
   models:
     foundry-chat:
