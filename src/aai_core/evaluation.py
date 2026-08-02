@@ -1,8 +1,17 @@
-"""Small release-gate contracts over native MLflow GenAI evaluation results."""
+"""Small release-gate contracts and thin helpers over native MLflow GenAI
+evaluation results.
+
+The contracts (:class:`GatePolicy`, :class:`GateResult`) apply deterministic
+policy to a native result without wrapping or mutating it. The helpers stay
+equally thin: they resolve the approved judge endpoint, compose the native
+``mlflow.genai.evaluate()`` call with the gate, persist gate evidence on the
+active run, and manage governed evaluation datasets. None of them owns an
+MLflow run or mirrors native parameters.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from math import isfinite
 from numbers import Real
@@ -12,6 +21,7 @@ from pydantic import Field, field_serializer, field_validator, model_validator
 
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.exceptions import AaiCoreError
+from aai_core.providers.types import ProviderConfigurationError
 
 
 class MetricDirection(StrEnum):
@@ -207,3 +217,151 @@ def _extract_metrics(result: Any) -> dict[str, float]:
         if isfinite(numeric):
             metrics[str(name)] = numeric
     return metrics
+
+
+def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
+    """Resolve an approved logical judge into MLflow's model URI.
+
+    Judges run through a Databricks serving endpoint so authentication,
+    gateway policy, and cost controls stay platform-owned. A Foundry model
+    must first be exposed through a governed Databricks external-model
+    endpoint.
+    """
+
+    models = getattr(settings, "models", {})
+    config = models.get(logical_name) if isinstance(models, Mapping) else None
+    if not isinstance(config, Mapping):
+        raise ProviderConfigurationError(
+            f"aai-platform.yml has no {logical_name!r} model entry",
+            remediation=f"Add providers.models.{logical_name} with the "
+            "gateway-fronted Databricks serving endpoint approved for judges.",
+        )
+    if config.get("provider") != "databricks":
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} must use provider 'databricks'",
+            remediation="Route the judge through a Databricks serving "
+            "endpoint; for Foundry models, use an external-model endpoint.",
+        )
+    deployment = config.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} has no deployment",
+            remediation=f"Set providers.models.{logical_name}.deployment to "
+            "the approved serving endpoint name.",
+        )
+    return f"endpoints:/{deployment.strip()}"
+
+
+def log_gate_evidence(
+    gate: GateResult,
+    *,
+    mlflow_module: Any | None = None,
+) -> dict[str, str]:
+    """Persist gate metrics and the ``aai.gate_passed`` tag on the active run.
+
+    Call inside a governed run. Returns the tags it set.
+    """
+
+    mlflow = _mlflow(mlflow_module)
+    if gate.metrics:
+        mlflow.log_metrics(dict(gate.metrics))
+    tags = {"aai.gate_passed": str(gate.passed).lower()}
+    mlflow.set_tags(tags)
+    return tags
+
+
+def evaluate_with_gate(
+    *,
+    policy: GatePolicy,
+    baseline_metrics: Mapping[str, float] | None = None,
+    mlflow_module: Any | None = None,
+    **evaluate_options: Any,
+) -> tuple[Any, GateResult]:
+    """Run native ``mlflow.genai.evaluate()`` and apply the gate policy.
+
+    Every keyword in ``evaluate_options`` passes through to the native call
+    untouched, and the native result is returned by identity, so new MLflow
+    evaluation arguments never require an SDK change. Run governance stays
+    with :class:`~aai_core.experiments.ExperimentManager`; persisting the
+    evidence stays the explicit :func:`log_gate_evidence` call.
+    """
+
+    mlflow = _mlflow(mlflow_module)
+    native_result = mlflow.genai.evaluate(**evaluate_options)
+    gate = apply_gate(native_result, policy=policy, baseline_metrics=baseline_metrics)
+    return native_result, gate
+
+
+def get_or_create_evaluation_dataset(
+    *,
+    name: str,
+    catalog: str,
+    schema: str,
+    experiment_id: str,
+    records: Sequence[Mapping[str, Any]] | None = None,
+    mlflow_module: Any | None = None,
+) -> Any:
+    """Return the governed evaluation dataset, creating and merging as needed.
+
+    ``name`` is a logical dataset name; the catalog and schema qualify it.
+    The native dataset object is returned unchanged.
+    """
+
+    logical_name = name.strip()
+    if not logical_name or "." in logical_name:
+        raise ValueError(
+            "name must be a non-blank logical name without catalog or schema"
+        )
+    if not str(experiment_id).strip():
+        raise ValueError("experiment_id must not be blank")
+
+    mlflow = _mlflow(mlflow_module)
+    qualified_name = f"{catalog}.{schema}.{logical_name}"
+    try:
+        dataset = mlflow.genai.datasets.get_dataset(name=qualified_name)
+    except Exception as exc:
+        if not _is_missing_dataset(exc):
+            raise
+        # Databricks-managed EvaluationDatasets reject MLflow dataset tags.
+        # Governed context belongs on runs and UC securables instead.
+        dataset = mlflow.genai.datasets.create_dataset(
+            name=qualified_name,
+            experiment_id=experiment_id,
+        )
+
+    experiment_ids = {
+        str(associated) for associated in (dataset.experiment_ids or [])
+    }
+    if str(experiment_id) not in experiment_ids:
+        raise RuntimeError(
+            f"Unity Catalog dataset {qualified_name!r} is not associated with "
+            f"MLflow experiment {experiment_id!r}. Databricks does not "
+            "support adding experiment associations through this API; use a "
+            "new approved dataset name or ask the platform owner to repair it."
+        )
+    if records:
+        dataset.merge_records(list(records))
+    return dataset
+
+
+def _is_missing_dataset(error: Exception) -> bool:
+    error_code = str(getattr(error, "error_code", "")).upper()
+    message = str(error).upper()
+    return error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"} or any(
+        marker in message
+        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    )
+
+
+def _mlflow(module: Any | None) -> Any:
+    if module is not None:
+        return module
+    try:
+        import mlflow
+    except ImportError as error:
+        raise RuntimeError(
+            "Evaluation support requires the `genai` extra. From an aai-core "
+            "checkout run `make examples-install` and use `.venv/bin/python`; "
+            "in a consuming environment install `aai-core[genai]`."
+        ) from error
+    return mlflow
