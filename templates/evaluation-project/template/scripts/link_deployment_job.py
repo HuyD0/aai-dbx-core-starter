@@ -94,7 +94,7 @@ def _evaluation_run_id(model_name: str | None, model_version: str | None) -> str
             output_format="list",
         )
         return runs[0].info.run_id if runs else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - never fail the approval over a lookup
         return None
 
 
