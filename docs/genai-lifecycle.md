@@ -339,6 +339,7 @@ remaining exploration and teaching artifacts. See
 
 ## Current references
 
+- [LLMOps playbook](llmops-playbook.md)
 - [Cookbook relevance assessment](mlflow-cookbook-assessment.md)
 - [MLflow GenAI evaluation and monitoring](https://mlflow.org/docs/latest/genai/eval-monitor/)
 - [MLflow automatic evaluation](https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/)
