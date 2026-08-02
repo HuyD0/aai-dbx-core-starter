@@ -519,3 +519,26 @@ def test_traces_mode_scores_the_spans_the_rows_carry():
     assert "latency_seconds" in names
     assert "tool_call_correctness" not in names
     assert "carry no tool-call spans" in _excluded(plan, "tool_call_correctness")
+
+
+def test_a_plan_with_no_scorers_is_refused():
+    """ "Evaluated nothing" must never be a passing verdict.
+
+    An empty plan produces no metrics, an empty policy has nothing to fail
+    on, and the gate would pass a run that scored not one row.
+    """
+
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(expectation_keys=()),
+            _config(scorers={"remove": ["response_length_ok", "relevance"]}),
+            mode="answer-sheet",
+            judges_enabled=False,
+            judge_note="smoke runs code scorers only",
+        )
+
+    message = str(excinfo.value)
+    assert "would evaluate nothing" in message
+    # It names what was dropped, so the developer can act on it.
+    assert "response_length_ok" in message
+    assert "scorers.remove" in message

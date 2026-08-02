@@ -87,10 +87,21 @@ def load_dataset(
 
 
 def dataset_digest(rows: Sequence[Mapping[str, Any]]) -> str:
-    """Stable 16-hex digest of the canonical JSON form of the rows."""
+    """Stable 16-hex digest identifying the questions this dataset asks.
+
+    ``outputs`` are excluded deliberately. They are the answers under
+    test, not the dataset: ``attach_answer_sheet`` merges them in for
+    MLflow's benefit, so including them would give every re-recorded
+    answer sheet a new dataset identity — and a comparison against the
+    previous version would look like a comparison against different data,
+    which is precisely the thing it is not.
+    """
 
     canonical = json.dumps(
-        [_plain(row) for row in rows],
+        [
+            {key: _plain(value) for key, value in row.items() if key != "outputs"}
+            for row in rows
+        ],
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -314,8 +325,11 @@ def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
     the toolkit cannot prove is applicable is not auto-selected.
     """
 
+    subject: Any = _trace_document(trace)
+    if subject is None:
+        subject = _plain(trace)
     try:
-        payload = json.dumps(_plain(trace), default=str)
+        payload = json.dumps(subject, default=str)
     except (TypeError, ValueError):  # pragma: no cover - exotic trace objects
         payload = str(trace)
     upper = payload.upper()
@@ -359,22 +373,83 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
     )
 
 
-def _retriever_spans(trace: Any) -> list[Any]:
-    plain = _plain(trace)
+def _trace_document(trace: Any) -> Mapping[str, Any] | None:
+    """A trace as a plain mapping, whatever form it arrived in.
+
+    MLflow serialises a dataframe's ``trace`` column as a JSON string
+    (``search_traces`` has done so since 3.2) and hands back ``Trace``
+    objects elsewhere. Inspecting only mappings would leave the ordinary
+    case uncounted, and an uncounted retrieval fan-out silently falls back
+    to the assumed chunk count — which is how a budget stops being one.
+    """
+
+    if isinstance(trace, Mapping):
+        return trace
+    if isinstance(trace, (str, bytes)):
+        try:
+            loaded = json.loads(trace)
+        except (ValueError, TypeError):
+            return None
+        return loaded if isinstance(loaded, Mapping) else None
+    to_dict = getattr(trace, "to_dict", None)
+    if callable(to_dict):
+        try:
+            document = to_dict()
+        except Exception:  # pragma: no cover - exotic trace objects
+            return None
+        return document if isinstance(document, Mapping) else None
+    return None
+
+
+def _retriever_spans(trace: Any) -> list[Mapping[str, Any]]:
+    """Top-level retriever spans, mirroring what MLflow actually judges.
+
+    MLflow's ``_get_top_level_retrieval_spans`` skips a retriever span
+    nested under another retriever, so counting every one would overstate
+    the fan-out for a trace that retrieves inside a retriever.
+    """
+
+    document = _trace_document(trace)
     spans: Any = None
-    if isinstance(plain, Mapping):
-        data = plain.get("data")
+    if document is not None:
+        data = document.get("data")
         if isinstance(data, Mapping):
             spans = data.get("spans")
         if spans is None:
-            spans = plain.get("spans")
+            spans = document.get("spans")
     if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
         return []
+    by_id: dict[Any, Mapping[str, Any]] = {}
+    for span in spans:
+        if isinstance(span, Mapping):
+            identifier = span.get("span_id", span.get("spanId"))
+            if identifier is not None:
+                by_id[identifier] = span
     found = []
     for span in spans:
-        if isinstance(span, Mapping) and _is_retriever(span):
+        if (
+            isinstance(span, Mapping)
+            and _is_retriever(span)
+            and not _nested(span, by_id)
+        ):
             found.append(span)
     return found
+
+
+def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> bool:
+    """True when an ancestor of ``span`` is itself a retriever span."""
+
+    seen: set[Any] = set()
+    parent_id = span.get("parent_span_id", span.get("parentSpanId"))
+    while parent_id is not None and parent_id not in seen:
+        seen.add(parent_id)
+        parent = by_id.get(parent_id)
+        if parent is None:
+            return False
+        if _is_retriever(parent):
+            return True
+        parent_id = parent.get("parent_span_id", parent.get("parentSpanId"))
+    return False
 
 
 def _is_retriever(span: Mapping[str, Any]) -> bool:
@@ -403,6 +478,13 @@ def _chunk_count(span: Mapping[str, Any]) -> int:
     if isinstance(attributes, Mapping):
         candidates.append(attributes.get("mlflow.spanOutputs"))
     for candidate in candidates:
+        # A serialised span carries its outputs as a JSON string; MLflow's
+        # own extractor json.loads them before counting chunks.
+        if isinstance(candidate, (str, bytes)):
+            try:
+                candidate = json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
         if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
             return max(1, len(candidate))
     return 1

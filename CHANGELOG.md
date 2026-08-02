@@ -58,6 +58,23 @@ All notable changes to `aai-core` are documented here.
   configured. Trace coverage is per row, so a `trace: null` column or a
   partially traced dataset no longer selects the traces mode.
 
+  A comparison against a baseline that measured something else is refused
+  before any judge call: a changed dataset digest, scope, scorer version, or
+  judge model stops the run and asks for a new baseline, and
+  `--allow-baseline-drift` records the override in the results and the
+  evidence rather than removing the control. The dataset digest now covers
+  the questions a dataset asks, not the answers under test, so re-recording
+  an answer sheet no longer reads as a different dataset. A scorer that
+  raised on some rows fails the gate — MLflow reports those failures in its
+  result table rather than its metrics, so an aggregate over the surviving
+  rows would otherwise pass. Retrieval fan-out is counted from traces
+  serialized as JSON strings (what MLflow puts in a dataframe's `trace`
+  column) as well as from mappings and objects, and only from top-level
+  retriever spans, matching what MLflow actually judges. An evaluation plan
+  that selects no scorers is refused instead of recording a run that
+  evaluated nothing, and `--mode traces` on a dataset without a trace on
+  every row is an error rather than a warning.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

@@ -196,7 +196,9 @@ scorer's fan-out and the estimate multiplies by it — counted from the rows'
 own traces when they have them, and assumed when they do not (a live run has
 no traces until it runs). Set `budget.retrieved_chunks_per_row` to your
 retriever's `k` so the ceiling matches reality; the estimate says when it is
-guessing.
+guessing. Where the rows carry traces the count is exact, whether they arrive
+as objects, as dicts, or as the JSON strings MLflow puts in a dataframe's
+`trace` column.
 
 ## What the gate refuses
 
@@ -207,7 +209,23 @@ guessing.
    does not answer "what did you compare against", so it does not pass.
 3. **A thresholded metric that never appeared.** If you gate on correctness
    and the judge failed, the run did not produce the evidence — that fails
-   closed rather than passing by omission.
+   closed rather than passing by omission. A judge that raised on *some*
+   rows counts too: MLflow reports those in its result table rather than its
+   metrics, so an aggregate over the surviving rows would otherwise look
+   healthy.
+
+`compare` and `eval` refuse earlier still, before any judge call, when the
+recorded baseline measured something else. A delta is only evidence when both
+sides scored the same rows with the same scorers, so a changed dataset digest,
+a changed scope (full versus sample), a changed scorer version, or a changed
+judge model stops the run and asks you to re-establish the baseline. The
+number would still subtract cleanly; it just would not mean anything, which
+is worse than no comparison because it looks like one.
+
+`--allow-baseline-drift` proceeds anyway and records every reason in the
+results and the evidence pack — an override someone can see, rather than a
+control quietly removed. And a plan that selects no scorers at all is refused
+outright: "evaluated nothing" must never be a passing verdict.
 
 Exit codes are a stable CI contract:
 

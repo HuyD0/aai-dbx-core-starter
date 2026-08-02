@@ -10,6 +10,7 @@ from aai_core.agentkit.baseline import (
     BaselineRecord,
     BaselineScope,
     BaselineVersions,
+    comparability_failures,
     drift_warnings,
     load_baseline,
     select_baseline,
@@ -166,25 +167,77 @@ def test_unfetchable_run_is_a_baseline_error(tmp_path):
     assert "missing" in str(excinfo.value)
 
 
-def test_drift_warnings_flag_digest_and_scope():
+def test_a_matching_baseline_is_comparable():
     record = _record()
 
-    clean = drift_warnings(record, dataset=_dataset(), mode="full", rows=10)
-    assert clean == []
-
-    digest = drift_warnings(
-        record, dataset=_dataset(digest="other"), mode="full", rows=10
+    assert (
+        comparability_failures(record, dataset=_dataset(), mode="full", rows=10) == []
     )
-    assert any("different dataset version" in warning for warning in digest)
-
-    scope = drift_warnings(record, dataset=_dataset(), mode="sample", rows=5)
-    assert any("different row sets" in warning for warning in scope)
 
 
-def test_legacy_records_do_not_spam_drift_warnings(tmp_path):
+def test_a_changed_dataset_is_not_comparable():
+    """A delta across different rows subtracts cleanly and means nothing."""
+
+    failures = comparability_failures(
+        _record(), dataset=_dataset(digest="other"), mode="full", rows=10
+    )
+
+    assert any("the dataset changed" in failure for failure in failures)
+
+
+def test_a_changed_scope_is_not_comparable():
+    failures = comparability_failures(
+        _record(), dataset=_dataset(), mode="sample", rows=5
+    )
+
+    assert any("full/10 rows but this run scores sample/5" in f for f in failures)
+
+
+def test_a_changed_scorer_version_is_not_comparable():
+    """0.8 from v1 and 0.8 from v2 are not the same 0.8."""
+
+    failures = comparability_failures(
+        _record(),
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        scorers={"keyword_coverage": 2},
+    )
+
+    assert any("keyword_coverage is v2" in failure for failure in failures)
+    # A scorer the baseline never ran is not a mismatch; it simply has no
+    # baseline value, which the gate already handles.
+    assert (
+        comparability_failures(
+            _record(),
+            dataset=_dataset(),
+            mode="full",
+            rows=10,
+            scorers={"keyword_coverage": 1, "safety": 1},
+        )
+        == []
+    )
+
+
+def test_a_changed_judge_model_is_not_comparable():
+    failures = comparability_failures(
+        _record(),
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_model="endpoints:/other-judge",
+    )
+
+    assert any("the judge model changed" in failure for failure in failures)
+
+
+def test_legacy_records_cannot_be_checked_and_say_so(tmp_path):
+    """A baseline recorded before digests existed blocks nothing."""
+
     path = tmp_path / "baseline.json"
     path.write_text(json.dumps({"metrics": {"m": 1.0}}))
     record, _ = load_baseline(path)
 
-    warnings = drift_warnings(record, dataset=_dataset(), mode="sample", rows=5)
-    assert warnings == []
+    assert comparability_failures(record, dataset=_dataset(), mode="full", rows=0) == []
+    warnings = drift_warnings(record, dataset=_dataset(), mode="full", rows=0)
+    assert any("predates dataset digests" in warning for warning in warnings)

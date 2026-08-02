@@ -438,6 +438,20 @@ def select_scorers(
         entries.append(
             PlanEntry(spec, reason if note is None else f"{reason}; {note}", threshold)
         )
+    if not entries:
+        # A run that scored nothing produces no metrics, so an empty policy
+        # has nothing to fail on and the gate passes. "Evaluated nothing"
+        # must never be a passing verdict.
+        detail = "\n".join(f"  - {item.spec.name}: {item.reason}" for item in excluded)
+        raise ConfigError(
+            "no scorer applies to this dataset, so the run would evaluate "
+            "nothing:\n" + (detail or "  - the registry offered no candidates"),
+            remediation=(
+                "Add the expectations the scorers need to the dataset rows, "
+                "stop removing scorers in scorers.remove, or name the ones "
+                "to run in scorers.add."
+            ),
+        )
     return ScorerPlan(
         entries=tuple(entries),
         excluded=tuple(excluded),

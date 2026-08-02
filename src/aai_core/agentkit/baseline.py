@@ -172,6 +172,50 @@ def select_baseline(
     )
 
 
+def comparability_failures(
+    record: BaselineRecord,
+    *,
+    dataset: LoadedDataset,
+    mode: str,
+    rows: int,
+    scorers: Mapping[str, int] | None = None,
+    judge_model: str | None = None,
+) -> list[str]:
+    """Why this baseline cannot be the reference for this run.
+
+    A delta is only evidence when both sides measured the same rows with
+    the same scorers. Change the dataset, the scope, or a scorer version
+    and the number still subtracts cleanly while meaning nothing — which
+    is worse than no comparison, because it looks like one.
+
+    Everything here is checkable before the first judge call. Judge
+    *prompt* versions resolve during the run, so they stay warnings.
+    """
+
+    failures: list[str] = []
+    if record.dataset.digest not in {dataset.digest, _LEGACY_PLACEHOLDER}:
+        failures.append(
+            "the dataset changed since the baseline was recorded (digest "
+            f"{record.dataset.digest} -> {dataset.digest})"
+        )
+    if record.scope.rows and (record.scope.mode != mode or record.scope.rows != rows):
+        failures.append(
+            f"the baseline scored {record.scope.mode}/{record.scope.rows} "
+            f"rows but this run scores {mode}/{rows}"
+        )
+    for name, version in sorted(dict(scorers or {}).items()):
+        recorded = record.versions.scorers.get(name)
+        if recorded is not None and recorded != version:
+            failures.append(
+                f"scorer {name} is v{version} but the baseline used "
+                f"v{recorded}, so the two scores do not mean the same thing"
+            )
+    recorded_judge = record.versions.judge_model
+    if judge_model and recorded_judge and recorded_judge != judge_model:
+        failures.append(f"the judge model changed ({recorded_judge} -> {judge_model})")
+    return failures
+
+
 def drift_warnings(
     record: BaselineRecord,
     *,
@@ -179,20 +223,13 @@ def drift_warnings(
     mode: str,
     rows: int,
 ) -> list[str]:
-    """Loud, explicit warnings when the comparison is not apples-to-apples."""
+    """Non-blocking differences worth naming in the run's warnings."""
 
     warnings: list[str] = []
-    if record.dataset.digest not in {dataset.digest, _LEGACY_PLACEHOLDER}:
+    if record.dataset.digest == _LEGACY_PLACEHOLDER:
         warnings.append(
-            "baseline was recorded on a different dataset version (digest "
-            f"{record.dataset.digest} vs {dataset.digest}); deltas are not "
-            "apples-to-apples - consider re-establishing the baseline"
-        )
-    if record.scope.rows and (record.scope.mode != mode or record.scope.rows != rows):
-        warnings.append(
-            f"baseline scope was {record.scope.mode}/{record.scope.rows} "
-            f"rows but this run scores {mode}/{rows} rows; deltas compare "
-            "different row sets"
+            "the baseline predates dataset digests, so it cannot be checked "
+            "against this dataset; re-establish it to restore the check"
         )
     return warnings
 

@@ -11,9 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from aai_core.agentkit.baseline import load_baseline
+from aai_core.agentkit.baseline import load_baseline, write_baseline
 from aai_core.agentkit.config import ProjectContext
-from aai_core.agentkit.errors import BaselineMissingError, BudgetExceededError
+from aai_core.agentkit.errors import (
+    BaselineIncomparableError,
+    BaselineMissingError,
+    BudgetExceededError,
+)
 from aai_core.agentkit.gate import EXIT_PASS, EXIT_THRESHOLD_FAILED
 from aai_core.agentkit.results import load_latest_results
 from aai_core.agentkit.runner import (
@@ -536,7 +540,16 @@ def test_explicit_decision_is_recorded(tmp_path):
     assert fake.tags["aai.decision"] == "adopt"
 
 
-def test_dataset_drift_against_the_baseline_warns(tmp_path):
+def _edit_an_expectation(project):
+    path = project.root / "evals" / "data" / "golden_cases.json"
+    cases = json.loads(path.read_text())
+    cases[0]["expectations"]["expected_response"] = "a different expectation"
+    path.write_text(json.dumps(cases))
+
+
+def test_a_changed_dataset_refuses_the_comparison(tmp_path):
+    """A delta measured on different rows is not evidence of anything."""
+
     project = _project(tmp_path)
     run_scoring(
         project,
@@ -546,23 +559,116 @@ def test_dataset_drift_against_the_baseline_warns(tmp_path):
         assume_yes=True,
         mlflow_module=FakeMlflow(),
     )
-    cases = json.loads(
-        (project.root / "evals" / "data" / "golden_cases.json").read_text()
+    _edit_an_expectation(project)
+    mlflow = FakeMlflow()
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        run_scoring(
+            project,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert "the dataset changed" in str(excinfo.value)
+    assert "--establish-baseline" in str(excinfo.value)
+    # Refused before the run opened, so nothing was scored or spent.
+    assert mlflow.evaluate_calls == []
+
+
+def test_the_refusal_precedes_the_budget_and_the_prompt(tmp_path):
+    """Refusing after paying for judge calls would be worthless."""
+
+    project = _project(tmp_path)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
     )
-    cases[0]["expectations"]["expected_response"] = "a different expectation"
-    (project.root / "evals" / "data" / "golden_cases.json").write_text(
-        json.dumps(cases)
+    _edit_an_expectation(project)
+    asked = []
+
+    with pytest.raises(BaselineIncomparableError):
+        run_scoring(
+            project,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
+            mlflow_module=FakeMlflow(),
+        )
+
+    assert asked == []
+
+
+def test_allow_baseline_drift_proceeds_and_records_the_reason(tmp_path):
+    project = _project(tmp_path)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
     )
+    _edit_an_expectation(project)
 
     outcome, _ = run_scoring(
         project,
         judges_enabled=True,
         mode="answer-sheet",
         assume_yes=True,
+        allow_baseline_drift=True,
         mlflow_module=FakeMlflow(),
     )
 
-    assert any("different dataset version" in w for w in outcome.warnings)
+    assert any("--allow-baseline-drift" in w for w in outcome.warnings)
+    assert any("the dataset changed" in w for w in outcome.warnings)
+    # The override travels with the record, so the evidence shows it.
+    assert any("the dataset changed" in w for w in outcome.results.warnings)
+
+
+def test_a_changed_scorer_version_refuses_the_comparison(tmp_path):
+    """Two scores from different scorer versions are not comparable."""
+
+    project = _project(tmp_path)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+    baseline, _ = load_baseline(project.baseline_path)
+    bumped = baseline.model_copy(
+        update={
+            "versions": baseline.versions.model_copy(
+                update={
+                    "scorers": {
+                        **dict(baseline.versions.scorers),
+                        "keyword_coverage": 99,
+                    }
+                }
+            )
+        }
+    )
+    write_baseline(project.baseline_path, bumped)
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        run_scoring(
+            project,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=FakeMlflow(),
+        )
+
+    assert "keyword_coverage" in str(excinfo.value)
 
 
 def test_concurrency_env_is_set_without_clobbering_an_explicit_value():
@@ -876,3 +982,116 @@ def test_the_run_records_the_baseline_it_compared_against(tmp_path):
     baseline, _ = load_baseline(project.baseline_path)
     assert outcome.results.baseline_recorded_at == baseline.recorded_at
     assert outcome.results.baseline_dataset_digest == baseline.dataset.digest
+
+
+class _Frame:
+    """The pandas surface the error-count reader touches: columns + getitem."""
+
+    def __init__(self, columns):
+        self._columns = dict(columns)
+
+    @property
+    def columns(self):
+        return list(self._columns)
+
+    def __getitem__(self, key):
+        return self._columns[key]
+
+
+def test_partial_scorer_failures_fail_the_gate(tmp_path):
+    """A judge that raised on most rows must not pass on the survivors.
+
+    MLflow reports the exception in `result_df` as `<scorer>/error_message`
+    and leaves it out of `metrics` entirely, so the aggregate is computed
+    over the rows that happened to work.
+    """
+
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+    frame = _Frame(
+        {
+            "correctness/value": ["yes", None, None],
+            "correctness/error_message": [None, "endpoint 429", "endpoint 429"],
+            "keyword_coverage/error_message": [None, None, None],
+        }
+    )
+    mlflow._evaluate = lambda data=None, scorers=None, predict_fn=None: (
+        mlflow.evaluate_calls.append({"data": data, "predict_fn": predict_fn})
+        or SimpleNamespace(metrics=dict(JUDGED_METRICS), result_df=frame)
+    )
+    mlflow.genai = SimpleNamespace(
+        evaluate=mlflow._evaluate,
+        scorers=mlflow.genai.scorers,
+        make_judge=mlflow.genai.make_judge,
+    )
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=mlflow,
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert outcome.results.metrics["correctness/error_count"] == 2.0
+    assert outcome.results.metrics["keyword_coverage/error_count"] == 0.0
+    assert any(
+        failure["metric"] == "correctness/error_count"
+        for failure in outcome.results.gate_failures
+    )
+
+
+def test_a_clean_result_table_adds_no_failures(tmp_path):
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+    frame = _Frame({"correctness/error_message": [None, float("nan"), ""]})
+    mlflow._evaluate = lambda data=None, scorers=None, predict_fn=None: (
+        SimpleNamespace(metrics=dict(JUDGED_METRICS), result_df=frame)
+    )
+    mlflow.genai = SimpleNamespace(
+        evaluate=mlflow._evaluate,
+        scorers=mlflow.genai.scorers,
+        make_judge=mlflow.genai.make_judge,
+    )
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=mlflow,
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.metrics["correctness/error_count"] == 0.0
+
+
+def test_explicit_traces_mode_on_partial_coverage_is_refused(tmp_path):
+    from aai_core.agentkit.errors import ConfigError
+
+    _project(tmp_path)
+    mixed = list(TRACE_ROWS[:6]) + [
+        {
+            "inputs": {"question": f"question {index}"},
+            "expectations": {"expected_response": f"answer {index} about pensions"},
+        }
+        for index in range(6, 12)
+    ]
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(mixed))
+    project = ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+    mlflow = FakeMlflow()
+
+    with pytest.raises(ConfigError) as excinfo:
+        run_scoring(
+            project,
+            mode="traces",
+            establish_baseline=True,
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert "only some rows carry one" in str(excinfo.value)
+    assert mlflow.evaluate_calls == []

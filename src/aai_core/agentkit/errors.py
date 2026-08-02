@@ -41,6 +41,16 @@ class BaselineMissingError(AgentkitError):
     code = "aai_core.agentkit.baseline_missing"
 
 
+class BaselineIncomparableError(AgentkitError):
+    """The baseline exists but measured something else.
+
+    Same class of refusal as a missing baseline: there is nothing valid to
+    compare against, so nothing is scored.
+    """
+
+    code = "aai_core.agentkit.baseline_incomparable"
+
+
 class EvidenceMissingError(AgentkitError):
     code = "aai_core.agentkit.evidence_missing"
 

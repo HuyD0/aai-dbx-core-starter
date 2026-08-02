@@ -25,6 +25,7 @@ from aai_core.agentkit.baseline import (
     BaselineRecord,
     BaselineScope,
     BaselineVersions,
+    comparability_failures,
     drift_warnings,
     load_baseline,
     select_baseline,
@@ -46,7 +47,12 @@ from aai_core.agentkit.datasets import (
     smoke_sample,
     validate_dataset,
 )
-from aai_core.agentkit.errors import BaselineMissingError, ConfigError, missing_extra
+from aai_core.agentkit.errors import (
+    BaselineIncomparableError,
+    BaselineMissingError,
+    ConfigError,
+    missing_extra,
+)
 from aai_core.agentkit.gate import (
     EXIT_PASS,
     EXIT_THRESHOLD_FAILED,
@@ -127,6 +133,7 @@ def run_scoring(
     judges_enabled: bool = True,
     require_baseline: bool = True,
     establish_baseline: bool = False,
+    allow_baseline_drift: bool = False,
     decision: str | None = None,
     baseline_run_id: str | None = None,
     assume_yes: bool = False,
@@ -157,6 +164,23 @@ def run_scoring(
         agent or config.agent, root=project.root, settings=project.settings
     )
     resolved_mode = mode or _default_mode(target, dataset)
+    # Before the estimate and before any judge call: a traces run supplies
+    # no predict_fn, so a row without a trace has no answer to score at
+    # all. Choosing the mode by default already avoids this; asking for it
+    # explicitly must fail rather than spend.
+    if resolved_mode == "traces" and not dataset.shape.has_traces:
+        detail = (
+            "only some rows carry one"
+            if dataset.shape.partial_traces
+            else "none of the rows carry one"
+        )
+        raise ConfigError(
+            f"--mode traces needs a trace on every row, but {detail}",
+            remediation=(
+                "Give every row a trace, or run in live mode so the agent "
+                "produces one for each."
+            ),
+        )
     mode_warnings = _mode_warnings(resolved_mode, dataset, explicit=mode is not None)
     full_row_count = dataset.shape.row_count
     if rows_limit:
@@ -194,13 +218,9 @@ def run_scoring(
     if plan_only:
         return outcome, EXIT_PASS
 
-    enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
-    if cost.judge_calls and not assume_yes:
-        if confirm is None or not confirm("Proceed?"):
-            outcome.declined = True
-            outcome.messages.append("Cancelled - nothing was scored.")
-            return outcome, EXIT_PASS
-
+    # The baseline is settled BEFORE the budget check and the confirmation
+    # prompt. Discovering that the comparison was never valid after paying
+    # for the judge calls would make the refusal worthless.
     baseline: BaselineRecord | None = None
     warnings: list[str] = list(mode_warnings)
     if establish_baseline:
@@ -239,6 +259,24 @@ def run_scoring(
                     rows=dataset.shape.row_count,
                 )
             )
+            warnings.extend(
+                _enforce_comparability(
+                    baseline,
+                    dataset=dataset,
+                    mode="sample" if sampled else "full",
+                    rows=dataset.shape.row_count,
+                    plan=plan,
+                    judge_model=judge_model_uri,
+                    allow_drift=allow_baseline_drift,
+                )
+            )
+
+    enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
+    if cost.judge_calls and not assume_yes:
+        if confirm is None or not confirm("Proceed?"):
+            outcome.declined = True
+            outcome.messages.append("Cancelled - nothing was scored.")
+            return outcome, EXIT_PASS
 
     set_concurrency_env(config.concurrency, environ)
     # A code-scorer-only run over recorded answers needs nothing from
@@ -341,7 +379,9 @@ def run_scoring(
                     f"{name}={uri}" for name, uri in sorted(judge_prompts.items())
                 )
             gate = apply_gate(
-                native_result, policy=policy, baseline_metrics=baseline_metrics
+                _metrics_with_scorer_errors(native_result),
+                policy=policy,
+                baseline_metrics=baseline_metrics,
             )
             recorded_decision = _decision_value(decision, gate, establish_baseline)
             tags["aai.gate_passed"] = str(gate.passed).lower()
@@ -456,6 +496,91 @@ def submit_job(
             messages.append(f"command failed with exit code {code}")
             return code, messages
     return EXIT_PASS, messages
+
+
+def _enforce_comparability(
+    baseline: BaselineRecord,
+    *,
+    dataset: LoadedDataset,
+    mode: str,
+    rows: int,
+    plan: ScorerPlan,
+    judge_model: str | None,
+    allow_drift: bool,
+) -> list[str]:
+    """Refuse a baseline that measured something else — or record the override."""
+
+    failures = comparability_failures(
+        baseline,
+        dataset=dataset,
+        mode=mode,
+        rows=rows,
+        scorers={spec.name: spec.version for spec in plan.specs},
+        judge_model=judge_model,
+    )
+    if not failures:
+        return []
+    listed = "\n".join(f"  - {failure}" for failure in failures)
+    if allow_drift:
+        # Overriding is a decision someone made; the evidence has to say so.
+        return [
+            "compared against a baseline that is not directly comparable "
+            "(--allow-baseline-drift):\n" + listed
+        ]
+    raise BaselineIncomparableError(
+        "the recorded baseline cannot be compared against this run:\n" + listed,
+        remediation=(
+            "Re-record the baseline on the current dataset and scorers with "
+            "`agentkit compare --establish-baseline`, or pass "
+            "--allow-baseline-drift to compare anyway (the reason is "
+            "recorded in the results and the evidence)."
+        ),
+    )
+
+
+def _metrics_with_scorer_errors(native_result: Any) -> dict[str, float]:
+    """Native metrics plus a per-scorer count of failed invocations.
+
+    MLflow reports a scorer that raised in the result table as a
+    ``<scorer>/error_message`` cell and leaves it out of ``metrics``
+    entirely, so a judge that failed on nine rows out of ten still
+    produces a healthy-looking mean over the tenth. The gate engine
+    already refuses a run with ``<scorer>/error_count`` above zero
+    (``GatePolicy.fail_on_scorer_errors``) — it was never given the
+    counts. This is where they come from.
+    """
+
+    metrics = {
+        str(key): float(value)
+        for key, value in dict(getattr(native_result, "metrics", {}) or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    frame = getattr(native_result, "result_df", None)
+    if frame is None:
+        tables = getattr(native_result, "tables", None)
+        if isinstance(tables, Mapping):
+            frame = tables.get("eval_results")
+    columns = getattr(frame, "columns", None)
+    if columns is None:
+        return metrics
+    for column in list(columns):
+        name = str(column)
+        if not name.endswith("/error_message"):
+            continue
+        scorer = name.removesuffix("/error_message")
+        # Duck-typed rather than imported: pandas is MLflow's dependency,
+        # not the SDK's, and this path only runs with MLflow installed.
+        failures = sum(1 for value in frame[column] if _is_reported_error(value))
+        metrics[f"{scorer}/error_count"] = float(failures)
+    return metrics
+
+
+def _is_reported_error(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and value != value:  # NaN
+        return False
+    return bool(str(value).strip())
 
 
 def _default_mode(target: Any, dataset: LoadedDataset) -> str:

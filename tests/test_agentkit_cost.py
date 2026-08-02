@@ -200,3 +200,27 @@ def test_budget_ceiling_counts_the_fanout():
     # the pre-fanout count would have been 5 scorers x 3 rows = 15,
     # which is exactly the budget it now correctly refuses
     assert cost.judge_calls > len(plan.judge_specs) * cost.rows
+
+
+def test_serialized_traces_are_counted_like_mappings():
+    """MLflow serialises a dataframe's trace column as a JSON string.
+
+    Inspecting only mappings would leave the real chunk count uncounted and
+    silently fall back to the assumption, so `max_judge_calls` would
+    authorize a run well past its stated ceiling.
+    """
+
+    import json as json_module
+
+    plan = _rag_plan()
+    mapping_rows = _rag_rows(count=3, chunks=4)
+    serialized_rows = [
+        {**row, "trace": json_module.dumps(row["trace"])} for row in mapping_rows
+    ]
+
+    from_mapping = estimate(mapping_rows, plan)
+    from_string = estimate(serialized_rows, plan)
+
+    assert from_string.fanout_counted is True
+    assert dict(from_string.calls_by_scorer) == dict(from_mapping.calls_by_scorer)
+    assert dict(from_string.calls_by_scorer)["retrieval_relevance"] == 12

@@ -104,6 +104,15 @@ def _build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--full", action="store_true", help="score every row")
     compare.add_argument("--rows", type=int, default=None)
     compare.add_argument("--mode", choices=MODES, default=None)
+    compare.add_argument(
+        "--allow-baseline-drift",
+        action="store_true",
+        help=(
+            "compare against a baseline recorded on different rows, "
+            "scope, or scorer versions; the reason is recorded in the "
+            "results and the evidence"
+        ),
+    )
     compare.add_argument("--decision", choices=DECISIONS, default=None)
     compare.add_argument("--baseline-run", default=None)
     compare.set_defaults(handler=_cmd_compare)
@@ -139,6 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--decision", choices=DECISIONS, default=None)
     evaluate.add_argument("--baseline-run", default=None)
     evaluate.add_argument("--establish-baseline", action="store_true")
+    evaluate.add_argument("--allow-baseline-drift", action="store_true")
     evaluate.set_defaults(handler=_cmd_eval)
 
     gate = subcommands.add_parser(
@@ -448,6 +458,9 @@ def _score(
             judges_enabled=judges_enabled,
             require_baseline=require_baseline,
             establish_baseline=bool(getattr(arguments, "establish_baseline", False)),
+            allow_baseline_drift=bool(
+                getattr(arguments, "allow_baseline_drift", False)
+            ),
             decision=decision,
             baseline_run_id=baseline_run,
             assume_yes=assume_yes,
