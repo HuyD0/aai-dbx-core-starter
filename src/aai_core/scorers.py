@@ -54,14 +54,19 @@ def keyword_coverage(outputs: str, expectations: dict | None) -> float:
     A missing or blank ``expected_response`` — including an entirely
     absent expectations mapping — scores 0.0: it is a dataset defect (a
     misspelled field, a malformed row), and awarding full credit would let
-    malformed rows inflate a release gate. An expectation that is present
-    but yields no significant keywords still scores 1.0: there is
+    malformed rows inflate a release gate. A missing or blank output also
+    scores 0.0 — an absent answer covers nothing, and ``str(None)`` would
+    otherwise take the nothing-to-cover branch or even match an expected
+    keyword "none". An expectation that is present but yields no
+    significant keywords still scores 1.0 for a real answer: there is
     genuinely nothing to cover."""
 
     raw = (expectations or {}).get("expected_response")
     # None or non-string ground truth is missing, not the literal "None".
     expected = raw if isinstance(raw, str) else ""
     if not expected.strip():
+        return 0.0
+    if outputs is None or not str(outputs).strip():
         return 0.0
     keywords = {
         word for word in _tokenize(expected) if len(word) > 3 and word not in _STOPWORDS
@@ -143,6 +148,8 @@ def registered_keyword_coverage(outputs, expectations):
     raw = (expectations or {}).get("expected_response")
     expected = raw if isinstance(raw, str) else ""
     if not expected.strip():
+        return 0.0
+    if outputs is None or not str(outputs).strip():
         return 0.0
     keywords = {
         word for word in tokenize(expected) if len(word) > 3 and word not in stopwords

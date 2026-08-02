@@ -60,6 +60,16 @@ def test_refusal_compliance_matches_expectation_direction():
     assert refusal_compliance("I cannot help with that.", EXPECT_POLICY) == 0.0
 
 
+def test_keyword_coverage_fails_missing_outputs():
+    # An absent answer covers nothing: a keyword-free expectation such as
+    # "No." must not take the nothing-to-cover branch, and str(None) must
+    # not match an expected keyword "none".
+    assert keyword_coverage(None, EXPECT_POLICY) == 0.0
+    assert keyword_coverage("", EXPECT_POLICY) == 0.0
+    assert keyword_coverage("   ", {"expected_response": "No."}) == 0.0
+    assert keyword_coverage(None, {"expected_response": "Send none back."}) == 0.0
+
+
 def test_refusal_compliance_fails_missing_outputs():
     # A None, empty, or whitespace prediction exhibits no refusal behavior
     # to verify; without this, a marker-free non-answer would read as a
@@ -171,6 +181,7 @@ def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
         # Missing outputs against a real expectation fail in both forms.
         (None, EXPECT_POLICY),
         ("   ", EXPECT_POLICY),
+        ("", {"expected_response": "No."}),
     ]
     for pure, registered in _REGISTERED_BODIES.items():
         for outputs, expectations in cases:

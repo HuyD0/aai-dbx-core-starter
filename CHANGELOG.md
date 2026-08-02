@@ -73,10 +73,12 @@ All notable changes to `aai-core` are documented here.
   gates an unsafe compliant answer, and both reference-based scorers fail
   a missing, blank, null, or non-string expected response — or an
   entirely absent expectations mapping — outright in pure and registered
-  forms alike; `refusal_compliance` likewise fails a missing or blank
-  output, which exhibits no refusal behavior to verify and would
-  otherwise read as a compliant non-refusal. A dataset defect or absent
-  answer must never inflate a release gate. Template copies are unchanged until
+  forms alike; both likewise fail a missing or blank output — an absent
+  answer exhibits no refusal behavior to verify and covers no keywords,
+  while `str(None)` would otherwise read as a compliant non-refusal,
+  take the nothing-to-cover branch, or even match an expected keyword
+  "none". A dataset defect or absent answer must never inflate a
+  release gate. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with a required assessment `source_id` namespaced by source kind
