@@ -9,8 +9,12 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from aai_core.evaluation import judge_model_uri
 from aai_core.identity import identity_summary
+from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings
+
+_UNSET = {"", "unset"}
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,8 @@ def run_doctor(
             )
         )
 
+    checks.extend(_lifecycle_checks(settings))
+
     if check_cloud:
         try:
             from aai_core.identity import databricks_workspace_client
@@ -61,6 +67,42 @@ def run_doctor(
             checks.append(DoctorCheck("databricks", "pass", str(identity)))
         except Exception as error:
             checks.append(DoctorCheck("databricks", "fail", str(error)))
+    return checks
+
+
+def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
+    """Report lifecycle readiness; optional configuration skips, never fails."""
+
+    checks = [
+        DoctorCheck(
+            "lifecycle:experiment",
+            "pass",
+            settings.effective_experiment_name,
+        )
+    ]
+
+    catalog = str(settings.catalog).strip()
+    schema = str(settings.schema_name).strip()
+    if catalog.lower() in _UNSET or schema.lower() in _UNSET:
+        checks.append(
+            DoctorCheck(
+                "lifecycle:prompt-registry",
+                "skip",
+                "set platform.catalog and platform.schema to enable the "
+                "governed prompt registry and evaluation datasets",
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck("lifecycle:prompt-registry", "pass", f"{catalog}.{schema}")
+        )
+
+    try:
+        checks.append(
+            DoctorCheck("lifecycle:judge-model", "pass", judge_model_uri(settings))
+        )
+    except ProviderConfigurationError as error:
+        checks.append(DoctorCheck("lifecycle:judge-model", "skip", str(error)))
     return checks
 
 
