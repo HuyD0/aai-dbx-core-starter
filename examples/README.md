@@ -35,24 +35,6 @@ curriculum are synthetic. They are teaching data, not market data, and the
 assistant must summarize the supplied excerpt without making an investment
 recommendation.
 
-## Separate classical ML course
-
-[`local-classification/`](local-classification/README.md) is a standalone,
-zero-download sklearn and MLflow course. It is not another stage in the numbered
-GenAI curriculum below and has its own exact environment, local SQLite tracking
-store, tests, and ten-notebook path.
-
-Use it when you want to learn a conventional binary-classification lifecycle:
-problem and data contracts, time splits, leakage-safe Pipelines, imbalance-aware
-metrics, validation-only model/threshold selection, a frozen release test,
-registry aliases, inference, drift, and the move to Databricks. Start with:
-
-```bash
-make classification-install
-make classification-check
-make classification-notebook
-```
-
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or
@@ -362,6 +344,41 @@ prompt registry and least-privilege access. The evaluation example remains
 LLM-free; adding an approved judge is a later, calibrated change.
 
 Use `make examples-list` to see the runner's accepted names and modes.
+
+## Standalone sample projects
+
+The numbered 00–12 files above remain one contiguous lifecycle curriculum.
+Larger projects with their own dependency and data boundaries live in nested
+directories and are intentionally not added to that runner.
+
+### Classical classification
+
+[`local-classification/`](local-classification/README.md) is a standalone,
+zero-download sklearn and MLflow course. It has its own exact environment, local
+SQLite tracking store, tests, and ten-notebook path. It teaches problem and data
+contracts, time splits, leakage-safe Pipelines, imbalance-aware metrics,
+validation-only model/threshold selection, a frozen release test, registry
+aliases, inference, drift, and the move to Databricks. Start with:
+
+```bash
+make classification-install
+make classification-check
+make classification-notebook
+```
+
+### Offline Apple-silicon fine-tuning
+
+[`local-finetuning/`](local-finetuning/README.md) is an Apple-silicon,
+offline-first Bitext and MLX-LM study project. It prepares all third-party
+assets before travel, proves local execution with sockets blocked, compares
+deterministic and prompting baselines with a LoRA change, logs local MLflow
+evidence, and includes a deterministic application-readiness capstone. Start
+from the repository root:
+
+```bash
+make study-prepare-flight
+make study-offline-check
+```
 
 ## Where each example leads
 

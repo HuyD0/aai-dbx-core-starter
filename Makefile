@@ -22,6 +22,7 @@ APP_NAME ?= aai-platform-console-dev
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
+	study-prepare-flight study-offline-check study-lab notebook \
 	classification-install classification-prepare classification-train \
 	classification-doctor classification-reset classification-check \
 	classification-notebook classification-ui
@@ -80,6 +81,18 @@ local-ui: examples-install ## Serve the isolated local MLflow store at http://12
 	$(PYTHON) -m mlflow ui \
 		--backend-store-uri "$(LOCAL_MLFLOW_URI)" \
 		--default-artifact-root "$(LOCAL_MLFLOW_DIR)/mlruns"
+
+study-prepare-flight: ## Prepare the Apple-silicon fine-tuning project while online.
+	$(MAKE) -C examples/local-finetuning prepare-flight
+
+study-offline-check: ## Prove the prepared fine-tuning project is plane-ready.
+	$(MAKE) -C examples/local-finetuning flight-check
+
+study-lab: ## Run the fine-tuning project's deterministic offline study path.
+	$(MAKE) -C examples/local-finetuning study-smoke
+
+notebook: ## Open the offline fine-tuning notebook course.
+	$(MAKE) -C examples/local-finetuning notebook
 
 classification-install: check-uv ## Install the locked local classification course.
 	$(MAKE) -C examples/local-classification install
