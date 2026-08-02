@@ -14,7 +14,10 @@ from aai_local_finetuning.capstone import (
     load_capstone_records,
     render_capstone_mlx_dataset,
 )
-from aai_local_finetuning.evaluation import start_evaluation_session
+from aai_local_finetuning.evaluation import (
+    DeterministicInferenceConfig,
+    start_evaluation_session,
+)
 from aai_local_finetuning.settings import load_settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -126,6 +129,7 @@ def test_capstone_generation_is_portable_and_has_frozen_hashes(tmp_path):
         records,
         predictions,
         evaluation_session=evaluation_session,
+        inference_config=DeterministicInferenceConfig(method="deterministic-policy"),
     )
     assert report.aggregate.exact_review_rate == 1.0
 

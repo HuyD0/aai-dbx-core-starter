@@ -1102,6 +1102,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 import pandas as pd
 
                 from aai_local_finetuning.evaluation import (
+                    DeterministicInferenceConfig,
                     KeywordRuleBaseline,
                     MajorityBaseline,
                     evaluate_predictions,
@@ -1142,6 +1143,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 the report exists. This makes the report describe the code that actually
                 created the fitted predictor state, generated predictions, and scored them,
                 including a change that was later restored.
+
+                Each report also carries an **inference configuration**. These two
+                baselines declare `mode="deterministic"`, which is an important honest
+                claim: they used no checkpoint, prompt recipe, sampler, or token budget.
+                Model-free evidence should not become stale merely because an unrelated
+                model file changes.
                 """),
             code("""
                 baseline_reports = {
@@ -1150,12 +1157,18 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         majority.predict_many(splits.validation),
                         supported_intents=allowed_intents,
                         evaluation_session=baseline_evaluation_session,
+                        inference_config=DeterministicInferenceConfig(
+                            method="majority"
+                        ),
                     ),
                     "keyword-rule": evaluate_predictions(
                         splits.validation,
                         keyword.predict_many(splits.validation),
                         supported_intents=allowed_intents,
                         evaluation_session=baseline_evaluation_session,
+                        inference_config=DeterministicInferenceConfig(
+                            method="keyword-rule"
+                        ),
                     ),
                 }
                 recheck_evaluation_session(baseline_evaluation_session)
@@ -1327,6 +1340,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 import pandas as pd
 
                 from aai_local_finetuning.evaluation import (
+                    build_local_mlx_inference_config,
                     evaluate_predictions,
                     recheck_evaluation_session,
                     start_evaluation_session,
@@ -1388,9 +1402,16 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 coverage plus obvious contract failures here; a broad validation run is
                 required before locking a winner.
 
-                One evaluation session spans the prompt comparison. Capturing it before
-                model inference and rechecking it after scoring binds every report to the
-                same governed source and exact package set.
+                One model-aware evaluation session spans the prompt comparison. Capturing
+                it before model construction and rechecking it after scoring binds every
+                report to the same governed source, exact package set, pinned revision,
+                and verified model files—even if a file is changed and then restored.
+
+                The `LocalMLXInferenceConfig` is the behavioral half of that boundary. It
+                records the prompt recipe, demonstration count, adapter (none here), and
+                the complete decoding contract. `max_tokens=96` is not a harmless display
+                choice: changing it can change every prediction, so the same config object
+                supplies generation and is persisted in the report.
                 """,
                 "what-to-notice",
             ),
@@ -1412,17 +1433,26 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "small-probe macro F1 as an absolute quality estimate."
                     ),
                 }
-                prompt_evaluation_session = start_evaluation_session()
+                prompt_evaluation_session = start_evaluation_session(settings)
                 predictor = LocalMLXPredictor(settings.model_dir)
                 prompt_reports = {}
                 prompt_predictions = {}
                 for strategy in ("basic", "strong", "few_shot"):
+                    inference_config = build_local_mlx_inference_config(
+                        prompt_evaluation_session,
+                        method=strategy,
+                        prompt_recipe=strategy,
+                        max_tokens=96,
+                        few_shot_examples=(
+                            len(demonstrations) if strategy == "few_shot" else 0
+                        ),
+                    )
                     predictions = generate_support_predictions(
                         predictor,
                         validation_probe,
                         strategy=strategy,
                         train_records=splits.train,
-                        max_tokens=96,
+                        inference_config=inference_config,
                     )
                     prompt_predictions[strategy] = predictions
                     prompt_reports[strategy] = evaluate_predictions(
@@ -1430,12 +1460,71 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         predictions,
                         supported_intents=allowed_intents,
                         evaluation_session=prompt_evaluation_session,
+                        inference_config=inference_config,
                     )
                 recheck_evaluation_session(prompt_evaluation_session)
                 display(pd.DataFrame(
                     [report_row(name, report) for name, report in prompt_reports.items()]
                 ))
                 probe_context
+                """),
+            md(
+                """
+                ## Read the evidence contract instead of taking it on faith
+
+                The **evaluation session** and the **inference config** have different
+                jobs. The model-aware session brackets the operation: it snapshots the
+                governed code and packages plus the verified base-model files before
+                generation, then the recheck detects drift before evidence is accepted.
+                The inference config is the portable behavioral record stored inside the
+                report.
+
+                Read the fields below as a reproducibility checklist:
+
+                - `LOCAL_REVISION` records the pinned upstream revision, while hashes for
+                  every runtime file identify the actual local bytes. The combined
+                  `model_files_sha256` is a compact comparison key, not a replacement for
+                  the per-file evidence. Unexpected loader-visible files are rejected;
+                  otherwise a stray weight shard or chat template could alter inference
+                  without appearing in the contract.
+                - `greedy_argmax` means the highest-scoring next token is selected. An
+                  empty logits-processor list means no additional score transformation.
+                - `max_tokens` is the output budget. It can truncate an answer and change
+                  measured correctness, so it belongs in evidence rather than a loose UI
+                  setting.
+                - The cache/KV fields make MLX-LM defaults explicit. `None` here means no
+                  bounded or quantized KV cache; changing those controls is a new run.
+                - `adapter_manifest_sha256=None` records that this controlled path used the
+                  untouched base model. A LoRA report must instead name its verified
+                  training manifest.
+
+                Greedy decoding improves repeatability, but it is not magical proof of
+                identical results across changed model bytes, packages, or hardware. That
+                is why the course preserves all of these boundaries together.
+                """,
+                "concepts",
+            ),
+            code("""
+                strong_config = prompt_reports["strong"].inference_config
+                generation_contract = strong_config.generation.model_dump(mode="json")
+                display(pd.DataFrame(
+                    [
+                        {"field": field, "recorded_value": value}
+                        for field, value in generation_contract.items()
+                    ]
+                ))
+                {
+                    "prompt_recipe": strong_config.prompt_recipe,
+                    "few_shot_examples": strong_config.few_shot_examples,
+                    "model_revision": strong_config.base_model.model_revision,
+                    "verified_model_files": [
+                        item.path for item in strong_config.base_model.model_files
+                    ],
+                    "model_files_sha256": (
+                        strong_config.base_model.model_files_sha256
+                    ),
+                    "adapter_manifest_sha256": strong_config.adapter_manifest_sha256,
+                }
                 """),
             md(
                 """
@@ -1819,8 +1908,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 import pandas as pd
 
                 from aai_local_finetuning.evaluation import (
+                    DeterministicInferenceConfig,
+                    EvaluationReport,
                     KeywordRuleBaseline,
                     MajorityBaseline,
+                    build_local_mlx_inference_config,
                     evaluate_predictions,
                     format_error_analysis,
                     recheck_evaluation_session,
@@ -1912,7 +2004,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 meaningful transparent baseline.
                 """),
             code("""
-                frozen_evaluation_session = start_evaluation_session()
+                frozen_evaluation_session = start_evaluation_session(settings)
                 methods = {
                     "majority": MajorityBaseline.fit(splits.train).predict_many(
                         frozen_records
@@ -1927,6 +2019,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         predictions,
                         supported_intents=allowed_intents,
                         evaluation_session=frozen_evaluation_session,
+                        inference_config=DeterministicInferenceConfig(method=name),
                     )
                     for name, predictions in methods.items()
                 }
@@ -1948,12 +2041,19 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             code("""
                 predictor = LocalMLXPredictor(settings.model_dir)
                 for strategy in ("basic", "strong", "few_shot"):
+                    inference_config = build_local_mlx_inference_config(
+                        frozen_evaluation_session,
+                        method=strategy,
+                        prompt_recipe=strategy,
+                        max_tokens=96,
+                        few_shot_examples=(4 if strategy == "few_shot" else 0),
+                    )
                     predictions = generate_support_predictions(
                         predictor,
                         frozen_records,
                         strategy=strategy,
                         train_records=splits.train,
-                        max_tokens=96,
+                        inference_config=inference_config,
                     )
                     methods[strategy] = predictions
                     reports[strategy] = evaluate_predictions(
@@ -1961,6 +2061,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         predictions,
                         supported_intents=allowed_intents,
                         evaluation_session=frozen_evaluation_session,
+                        inference_config=inference_config,
                     )
                 recheck_evaluation_session(frozen_evaluation_session)
                 pd.DataFrame(
@@ -1981,9 +2082,15 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 prepared training-data file. It also binds the training-time source,
                 interpreter/platform, and exact package set. Every baseline and change
                 report separately records the evaluation-time execution-contract hash.
-                The evaluation session was captured before inference and remains open
-                through scoring and evidence persistence; its final recheck detects even
-                a source or package change that was restored before the write completed.
+                Its inference configuration records the exact base-model file inventory,
+                prompt recipe, greedy decoder defaults, output budget, and adapter
+                manifest. Unverified additions that a loader could consume—such as another
+                weight shard or chat template—are rejected. The evaluation session was
+                captured before model construction and remains open through scoring and
+                evidence persistence; its final recheck detects even a source, package, or
+                model-file change that was restored before the write completed. Training
+                lineage is added by reconstructing the strict report, so its paired-lineage
+                validator runs again before anything is written.
                 One shared adapter lock covers validation, prediction, scoring, report
                 writes, and the exact manifest copy. Training cannot replace the adapter
                 during any part of that evidence chain. Missing or stale evidence keeps
@@ -2024,7 +2131,18 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                     / "lora.yaml"
                                 ),
                             )
-                            lora_evaluation_session = start_evaluation_session()
+                            lora_evaluation_session = start_evaluation_session(settings)
+                            lora_inference_config = (
+                                build_local_mlx_inference_config(
+                                    lora_evaluation_session,
+                                    method="lora-change",
+                                    prompt_recipe="strong",
+                                    max_tokens=96,
+                                    adapter_manifest_sha256=(
+                                        adapter_snapshot.manifest_sha256
+                                    ),
+                                )
+                            )
                             lora_predictor = LocalMLXPredictor(
                                 settings.model_dir,
                                 adapter_path=settings.adapter_dir,
@@ -2034,23 +2152,26 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 frozen_records,
                                 strategy="strong",
                                 train_records=splits.train,
-                                max_tokens=96,
+                                inference_config=lora_inference_config,
                             )
                             recheck_training_snapshot(adapter_snapshot)
-                            reports["lora-change"] = evaluate_predictions(
+                            unbound_lora_report = evaluate_predictions(
                                 frozen_records,
                                 methods["lora-change"],
                                 supported_intents=allowed_intents,
                                 evaluation_session=lora_evaluation_session,
-                            ).model_copy(
-                                update={
+                                inference_config=lora_inference_config,
+                            )
+                            reports["lora-change"] = EvaluationReport.model_validate(
+                                unbound_lora_report.model_dump(mode="python")
+                                | {
                                     "training_manifest_sha256": (
                                         adapter_snapshot.manifest_sha256
                                     ),
                                     "training_execution_contract_sha256": (
                                         adapter_snapshot.manifest.execution_contract_sha256
                                     ),
-                                }
+                                },
                             )
                             write_predictions_jsonl(
                                 lora_prediction_path,
@@ -2208,8 +2329,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 from aai_local_finetuning.evaluation import (
                     BaselineEvaluation,
+                    LocalMLXInferenceConfig,
                     PromotionThresholds,
                     decide_lora_promotion,
+                    recheck_evaluation_session,
+                    start_evaluation_session,
                 )
                 from aai_local_finetuning.learning import load_report, load_support_splits
                 from aai_local_finetuning.offline import verify_flight_manifest
@@ -2222,8 +2346,6 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 from aai_local_finetuning.training import (
                     TrainingManifest,
                     TrainingManifestError,
-                    capture_execution_contract,
-                    execution_contract_sha256,
                     recheck_training_snapshot,
                     require_valid_training_snapshot,
                     shared_adapter_lock,
@@ -2265,7 +2387,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "planned_run_purpose": "promotion_assessment",
                     "required_lineage": [
                         "evaluation fingerprint",
-                        "model revision",
+                        "model revision and verified runtime-file hashes",
+                        "prompt recipe, demonstration count, and complete generation settings",
                         "adapter and configuration hashes",
                         "training and evaluation source/runtime contracts",
                         "locked thresholds",
@@ -2285,7 +2408,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 carry one evaluation-time source/runtime hash, all of those hashes must
                 agree, and that contract must still match the live interpreter, platform,
                 governed source, and exact package set. Partial reports, missing methods,
-                or any lineage mismatch force `inconclusive`.
+                or any lineage mismatch force `inconclusive`. Model reports must also
+                name the exact same verified checkpoint and generation controls. Prompt
+                recipes may differ because they are intended baseline changes, but at
+                least one untouched-model control must match the LoRA prompt recipe and
+                demonstration count. `max_tokens`, sampler, cache controls, and model
+                bytes may not differ in a fair LoRA comparison.
                 """,
                 "what-to-notice",
             ),
@@ -2338,9 +2466,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 of silently replacing prior evidence. A shared adapter lock covers report
                 loading, lineage validation, the promotion calculation, and the MLflow
                 decision artifact commit, so one assessment cannot mix adapter generations.
-                The cell recaptures the execution contract immediately after logging; a
-                concurrent source or package change makes the run fail instead of leaving
-                a successful-looking decision envelope.
+                A fresh model-aware decision session starts before reports are loaded and
+                remains live until logging finishes. It verifies the current checkpoint
+                revision and runtime files against every model-based report, and compares
+                the complete generation settings before a decision. A source, package, or
+                model file changed during this interval—even if restored—makes the run
+                fail instead of leaving a successful-looking decision envelope.
                 """,
                 "what-to-notice",
             ),
@@ -2353,9 +2484,22 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 fingerprints = set()
                 counts = set()
                 evaluation_contract_hashes = set()
+                inference_configs_comparable = False
                 complete_and_comparable = False
 
                 with shared_adapter_lock(settings.adapter_dir):
+                    decision_evaluation_session = start_evaluation_session(settings)
+                    current_execution_contract = (
+                        decision_evaluation_session.execution_contract
+                    )
+                    current_execution_sha256 = (
+                        decision_evaluation_session.execution_contract_sha256
+                    )
+                    current_base_model = (
+                        decision_evaluation_session.base_model_execution_contract
+                    )
+                    if current_base_model is None:
+                        raise RuntimeError("decision session did not capture the model")
                     try:
                         current_snapshot = require_valid_training_snapshot(
                             settings.adapter_dir,
@@ -2371,10 +2515,6 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             lineage_path.read_text(encoding="utf-8")
                         )
                         current_manifest_sha256 = current_snapshot.manifest_sha256
-                        current_execution_contract = capture_execution_contract()
-                        current_execution_sha256 = execution_contract_sha256(
-                            current_execution_contract
-                        )
                         lineage_matches = (
                             recorded_manifest == current_manifest
                             and sha256_file(lineage_path) == current_manifest_sha256
@@ -2397,6 +2537,54 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 report.evaluation_execution_contract_sha256
                                 for report in loaded_reports.values()
                             }
+                            model_configs = {
+                                method: report.inference_config
+                                for method, report in loaded_reports.items()
+                                if isinstance(
+                                    report.inference_config,
+                                    LocalMLXInferenceConfig,
+                                )
+                            }
+                            required_model_methods = {
+                                "basic",
+                                "strong",
+                                "few_shot",
+                                "lora-change",
+                            }
+                            generation_contracts = {
+                                config.generation.model_dump_json()
+                                for method, config in model_configs.items()
+                                if method in required_model_methods
+                            }
+                            lora_config = model_configs.get("lora-change")
+                            strong_config = model_configs.get("strong")
+                            inference_configs_comparable = (
+                                set(model_configs) >= required_model_methods
+                                and len(generation_contracts) == 1
+                                and all(
+                                    config.base_model == current_base_model
+                                    for config in model_configs.values()
+                                )
+                                and all(
+                                    config.adapter_manifest_sha256 is None
+                                    for method, config in model_configs.items()
+                                    if method != "lora-change"
+                                )
+                                and lora_config is not None
+                                and lora_config.adapter_manifest_sha256
+                                == current_manifest_sha256
+                                and strong_config is not None
+                                and lora_config.prompt_recipe
+                                == strong_config.prompt_recipe
+                                and lora_config.few_shot_examples
+                                == strong_config.few_shot_examples
+                                and current_manifest.model_path
+                                == current_base_model.model_path
+                                and current_manifest.model_revision
+                                == current_base_model.model_revision
+                                and current_manifest.model_files
+                                == current_base_model.model_files
+                            )
                             complete_and_comparable = (
                                 len(fingerprints) == 1
                                 and counts == {len(splits.test)}
@@ -2410,6 +2598,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                     "lora-change"
                                 ].training_execution_contract_sha256
                                 == current_manifest.execution_contract_sha256
+                                and inference_configs_comparable
                             )
                     except (OSError, ValueError, TrainingManifestError) as error:
                         report_status["lora-training-lineage"] = False
@@ -2419,6 +2608,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         recheck_training_snapshot(current_snapshot)
                         assessment = decide_lora_promotion(
                             change_name="bitext-structured-output-lora-v1",
+                            evaluation_session=decision_evaluation_session,
                             training_snapshot=current_snapshot,
                             change_report=loaded_reports["lora-change"],
                             baselines=[
@@ -2440,6 +2630,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 "report counts and evaluation fingerprints must match",
                                 "the LoRA report must match the current success manifest",
                                 "all reports must match the current source/runtime contract",
+                                "all model reports must match the current checkpoint",
+                                "model baselines and LoRA must share generation settings",
+                                "one untouched control must match the LoRA prompt and "
+                                "demonstration count",
                             ],
                             "available_reports": report_status,
                             "lineage_error": lineage_error,
@@ -2447,17 +2641,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                     if current_snapshot is not None:
                         recheck_training_snapshot(current_snapshot)
-                    decision_execution_contract = capture_execution_contract()
-                    decision_execution_sha256 = execution_contract_sha256(
-                        decision_execution_contract
-                    )
-                    if (
-                        complete_and_comparable
-                        and decision_execution_contract != current_execution_contract
-                    ):
-                        raise RuntimeError(
-                            "source/runtime changed before decision tracking"
-                        )
+                    recheck_evaluation_session(decision_evaluation_session)
                     with mlflow.start_run(
                         run_name="notebook-promotion-assessment"
                     ) as run:
@@ -2477,15 +2661,32 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             }
                         )
                         mlflow.log_dict(assessment, "decision/assessment.json")
+                        mlflow.log_dict(
+                            {
+                                name: report.inference_config.model_dump(mode="json")
+                                for name, report in loaded_reports.items()
+                            },
+                            "decision/inference-configs.json",
+                        )
                         mlflow.log_param(
                             "evaluation_execution_contract_sha256",
-                            decision_execution_sha256,
+                            current_execution_sha256,
                         )
                         mlflow.log_dict(
-                            decision_execution_contract.model_dump(mode="json"),
+                            current_execution_contract.model_dump(mode="json"),
                             "runtime/evaluation-execution-contract.json",
                         )
+                        mlflow.log_dict(
+                            current_base_model.model_dump(mode="json"),
+                            "runtime/base-model-execution-contract.json",
+                        )
                         if complete_and_comparable:
+                            mlflow.log_param(
+                                "max_tokens",
+                                loaded_reports[
+                                    "lora-change"
+                                ].inference_config.generation.max_tokens,
+                            )
                             mlflow.log_param(
                                 "evaluation_fingerprint",
                                 next(iter(fingerprints)),
@@ -2508,19 +2709,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 "lora-change"
                             ].flat_metrics().items():
                                 mlflow.log_metric(f"change.{name}", value)
-                        if (
-                            capture_execution_contract()
-                            != decision_execution_contract
-                        ):
-                            raise RuntimeError(
-                                "source/runtime changed while decision evidence "
-                                "was being committed"
-                            )
+                        recheck_evaluation_session(decision_evaluation_session)
                         if current_snapshot is not None:
                             recheck_training_snapshot(current_snapshot)
                         decision_run_id = run.info.run_id
                     if current_snapshot is not None:
                         recheck_training_snapshot(current_snapshot)
+                    recheck_evaluation_session(decision_evaluation_session)
                 {"decision_run_id": decision_run_id, "assessment": assessment}
                 """),
             md(
@@ -2823,6 +3018,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     load_capstone_records,
                 )
                 from aai_local_finetuning.evaluation import (
+                    DeterministicInferenceConfig,
+                    build_local_mlx_inference_config,
                     recheck_evaluation_session,
                     start_evaluation_session,
                 )
@@ -2844,6 +3041,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     validation_records,
                     deterministic_validation_predictions,
                     evaluation_session=deterministic_validation_session,
+                    inference_config=DeterministicInferenceConfig(
+                        method="deterministic-validation-policy"
+                    ),
                 )
                 recheck_evaluation_session(deterministic_validation_session)
                 deterministic_validation_report.aggregate.model_dump(mode="json")
@@ -2857,14 +3057,24 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 coverage; a claimed comparison must score locked methods on identical
                 records and fingerprints.
 
-                The session starts before model construction and inference, is supplied
-                to the evaluator, and is rechecked after the report. Its digest binds the
-                governed source and installed packages across that whole path.
+                The model-aware session starts before model construction and inference,
+                is supplied to the evaluator, and is rechecked after the report. It binds
+                governed source, installed packages, and the pinned checkpoint files
+                across that whole path. The `LocalMLXInferenceConfig` separately records
+                the prompt recipe and complete greedy decoding settings. Together they
+                form the evidence boundary, and the output budget comes from that persisted
+                config rather than a second loose number.
                 """),
             code(
                 """
                 probe_record = validation_records[0]
-                model_probe_session = start_evaluation_session()
+                model_probe_session = start_evaluation_session(settings)
+                model_probe_inference_config = build_local_mlx_inference_config(
+                    model_probe_session,
+                    method="validation-model-probe",
+                    prompt_recipe="capstone-compact-basic",
+                    max_tokens=160,
+                )
                 predictor = LocalMLXPredictor(settings.model_dir)
                 generated = predictor.generate(
                     [
@@ -2878,7 +3088,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             ),
                         },
                     ],
-                    max_tokens=160,
+                    max_tokens=model_probe_inference_config.generation.max_tokens,
                 )
                 model_prediction = CapstonePrediction(
                     example_id=probe_record.example_id,
@@ -2891,6 +3101,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     (probe_record,),
                     (model_prediction,),
                     evaluation_session=model_probe_session,
+                    inference_config=model_probe_inference_config,
                 )
                 recheck_evaluation_session(model_probe_session)
                 {
@@ -3022,9 +3233,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 test record so the two reports share a defensible scope. Leaving it off
                 produces **missing model evidence**, not permission to infer a winner.
 
-                One frozen evaluation session starts before either method predicts and
-                closes only after scoring. That makes a shared contract hash evidence of
-                unchanged source and packages—not merely a timestamp near the report.
+                One frozen model-aware evaluation session starts before either method
+                predicts and closes only after scoring. The deterministic report still
+                truthfully declares no model dependency; the optional model report carries
+                the verified checkpoint and decoding contract. Session rechecks make those
+                claims evidence of unchanged bytes—not merely timestamps near a report.
                 """,
                 "frozen-boundary",
                 "what-to-notice",
@@ -3033,7 +3246,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 verify_flight_manifest(settings)
                 test_records = load_capstone_records(source_dir / "test.jsonl")
-                frozen_evaluation_session = start_evaluation_session()
+                frozen_evaluation_session = start_evaluation_session(settings)
                 deterministic_predictions = deterministic_capstone_predictions(
                     test_records
                 )
@@ -3041,11 +3254,22 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     test_records,
                     deterministic_predictions,
                     evaluation_session=frozen_evaluation_session,
+                    inference_config=DeterministicInferenceConfig(
+                        method="deterministic-policy"
+                    ),
                 )
 
                 RUN_FROZEN_MODEL_COMPARISON = False
                 model_frozen_report = None
                 if RUN_FROZEN_MODEL_COMPARISON:
+                    frozen_model_inference_config = (
+                        build_local_mlx_inference_config(
+                            frozen_evaluation_session,
+                            method="untouched-model-basic",
+                            prompt_recipe="capstone-compact-basic",
+                            max_tokens=160,
+                        )
+                    )
                     frozen_predictor = LocalMLXPredictor(settings.model_dir)
                     model_predictions = []
                     for record in test_records:
@@ -3061,7 +3285,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                     ),
                                 },
                             ],
-                            max_tokens=160,
+                            max_tokens=(
+                                frozen_model_inference_config.generation.max_tokens
+                            ),
                         )
                         model_predictions.append(
                             CapstonePrediction(
@@ -3076,6 +3302,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         test_records,
                         tuple(model_predictions),
                         evaluation_session=frozen_evaluation_session,
+                        inference_config=frozen_model_inference_config,
                     )
 
                 recheck_evaluation_session(frozen_evaluation_session)

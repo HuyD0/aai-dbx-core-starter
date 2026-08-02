@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from aai_local_finetuning import training
 from aai_local_finetuning.data import DatasetIntegrityError
 from aai_local_finetuning.evaluation import (
+    DeterministicInferenceConfig,
     EvaluationRecord,
+    GenerationConfig,
+    LocalMLXInferenceConfig,
     Prediction,
     SupportOutput,
     evaluate_predictions,
@@ -22,6 +26,35 @@ from aai_local_finetuning.learning import (
     support_contract,
 )
 from aai_local_finetuning.modeling import LocalGeneration
+
+
+def _model_config(*, max_tokens: int, few_shot_examples: int):
+    files = (
+        training.TrainingFileEvidence(
+            path="LOCAL_REVISION",
+            sha256="a" * 64,
+            size_bytes=41,
+        ),
+        training.TrainingFileEvidence(
+            path="config.json",
+            sha256="b" * 64,
+            size_bytes=10,
+        ),
+    )
+    base_model = training.BaseModelExecutionContract(
+        repository="local/test-model",
+        model_path="models/test-model",
+        model_revision="c" * 40,
+        model_files=files,
+        model_files_sha256=training._evidence_sequence_sha256(files),
+    )
+    return LocalMLXInferenceConfig(
+        method="few-shot",
+        prompt_recipe="few_shot",
+        few_shot_examples=few_shot_examples,
+        generation=GenerationConfig(max_tokens=max_tokens),
+        base_model=base_model,
+    )
 
 
 def test_support_loader_fails_closed_before_reading_unverified_splits(
@@ -98,7 +131,7 @@ def test_generation_helper_returns_measured_strict_predictions():
         records,
         strategy="few_shot",
         train_records=train,
-        max_tokens=20,
+        inference_config=_model_config(max_tokens=20, few_shot_examples=3),
         few_shot_limit=3,
     )
 
@@ -136,6 +169,7 @@ def test_report_row_keeps_quality_and_performance_separate():
         (record,),
         (prediction,),
         evaluation_session=evaluation_session,
+        inference_config=DeterministicInferenceConfig(method="baseline"),
     )
 
     row = report_row("baseline", report)

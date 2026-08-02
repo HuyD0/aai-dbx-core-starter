@@ -21,6 +21,8 @@ from .models import (
     ErrorKind,
     EvaluationRecord,
     EvaluationReport,
+    InferenceConfig,
+    LocalMLXInferenceConfig,
     OutputQualityMetrics,
     PerformanceMetrics,
     Prediction,
@@ -77,8 +79,10 @@ class Evaluator:
         predictions: Sequence[Prediction],
         *,
         evaluation_session: EvaluationSession,
+        inference_config: InferenceConfig,
     ) -> EvaluationReport:
         recheck_evaluation_session(evaluation_session)
+        _require_session_model_contract(evaluation_session, inference_config)
         if not records:
             raise ValueError("records must not be empty")
         ordered_predictions = _align_predictions(records, predictions)
@@ -97,8 +101,10 @@ class Evaluator:
         classification = _classification_metrics(scored, supported_intents)
         output_quality = _output_quality_metrics(scored)
         recheck_evaluation_session(evaluation_session)
+        _require_session_model_contract(evaluation_session, inference_config)
         return EvaluationReport(
             total_examples=len(scored),
+            inference_config=inference_config,
             evaluation_fingerprint=_evaluation_fingerprint(records),
             evaluation_execution_contract_sha256=(
                 evaluation_session.execution_contract_sha256
@@ -193,6 +199,7 @@ def evaluate_predictions(
     predictions: Sequence[Prediction],
     *,
     evaluation_session: EvaluationSession,
+    inference_config: InferenceConfig,
     supported_intents: Sequence[str] | None = None,
     response_policy: ResponsePolicy | None = None,
     error_limit: int = 20,
@@ -203,7 +210,30 @@ def evaluate_predictions(
         supported_intents=supported_intents,
         response_policy=response_policy,
         error_limit=error_limit,
-    ).evaluate(records, predictions, evaluation_session=evaluation_session)
+    ).evaluate(
+        records,
+        predictions,
+        evaluation_session=evaluation_session,
+        inference_config=inference_config,
+    )
+
+
+def _require_session_model_contract(
+    evaluation_session: EvaluationSession,
+    inference_config: InferenceConfig,
+) -> None:
+    if not isinstance(inference_config, LocalMLXInferenceConfig):
+        return
+    captured = evaluation_session.base_model_execution_contract
+    if captured is None:
+        raise ValueError(
+            "local MLX inference evidence requires a model-aware evaluation session"
+        )
+    if inference_config.base_model != captured:
+        raise ValueError(
+            "inference configuration does not match the evaluation session's "
+            "base-model contract"
+        )
 
 
 def format_error_analysis(report: EvaluationReport) -> str:

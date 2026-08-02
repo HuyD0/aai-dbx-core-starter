@@ -232,6 +232,7 @@ def test_custom_configuration_requires_explicit_trusted_inputs(
         ("data_path", "trusted task data path"),
         ("model_revision", "model revision"),
         ("runtime_hash", "runtime SHA-256"),
+        ("loader_file", "unverified entries"),
     ),
 )
 def test_trusted_contract_is_checked_before_process_launch(
@@ -257,6 +258,11 @@ def test_trusted_contract_is_checked_before_process_launch(
         )
     elif changed_input == "model_revision":
         (inputs.model_dir / "LOCAL_REVISION").write_text("b" * 40 + "\n")
+    elif changed_input == "loader_file":
+        (inputs.model_dir / "chat_template.jinja").write_text(
+            "{{ messages }}\n",
+            encoding="utf-8",
+        )
     else:
         (inputs.model_dir / "model.safetensors").write_bytes(b"different-model")
 

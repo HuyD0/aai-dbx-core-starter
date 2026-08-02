@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ..training import BaseModelExecutionContract
 
 
 class StrictEvidenceModel(BaseModel):
@@ -17,6 +19,69 @@ class StrictEvidenceModel(BaseModel):
         frozen=True,
         allow_inf_nan=False,
     )
+
+
+class DeterministicInferenceConfig(StrictEvidenceModel):
+    """Evidence for a method that does not invoke a generative model."""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    mode: Literal["deterministic"] = "deterministic"
+    method: str = Field(min_length=1)
+
+    @field_validator("method")
+    @classmethod
+    def reject_noncanonical_method(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("inference method must not contain surrounding whitespace")
+        return value
+
+
+class GenerationConfig(StrictEvidenceModel):
+    """Complete fixed decoding contract for the supported MLX-LM path."""
+
+    max_tokens: int = Field(gt=0)
+    sampler: Literal["greedy_argmax"] = "greedy_argmax"
+    logits_processors: tuple[()] = ()
+    draft_model: Literal[False] = False
+    max_kv_size: None = None
+    prefill_step_size: Literal[2048] = 2048
+    kv_bits: None = None
+    kv_group_size: Literal[64] = 64
+    quantized_kv_start: Literal[0] = 0
+
+
+class LocalMLXInferenceConfig(StrictEvidenceModel):
+    """Exact local model identity and generation controls used for inference."""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    mode: Literal["local_mlx"] = "local_mlx"
+    method: str = Field(min_length=1)
+    prompt_recipe: str = Field(min_length=1)
+    few_shot_examples: int = Field(default=0, ge=0)
+    generation: GenerationConfig
+    base_model: BaseModelExecutionContract
+    adapter_manifest_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @field_validator("method", "prompt_recipe")
+    @classmethod
+    def reject_noncanonical_name(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError(
+                "inference method and prompt recipe must not contain "
+                "surrounding whitespace"
+            )
+        return value
+
+
+InferenceConfig = Annotated[
+    DeterministicInferenceConfig | LocalMLXInferenceConfig,
+    Field(discriminator="mode"),
+]
 
 
 class SupportOutput(StrictEvidenceModel):
@@ -154,6 +219,7 @@ class ErrorAnalysis(StrictEvidenceModel):
 
 class EvaluationReport(StrictEvidenceModel):
     total_examples: int = Field(ge=1)
+    inference_config: InferenceConfig
     evaluation_fingerprint: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
     )

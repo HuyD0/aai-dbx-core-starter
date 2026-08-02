@@ -9,11 +9,15 @@ from pydantic import Field
 
 from ..training import (
     ValidatedTrainingSnapshot,
-    capture_execution_contract,
-    execution_contract_sha256,
     recheck_training_snapshot,
 )
-from .models import EvaluationReport, StrictEvidenceModel
+from .models import (
+    EvaluationReport,
+    InferenceConfig,
+    LocalMLXInferenceConfig,
+    StrictEvidenceModel,
+)
+from .session import EvaluationSession, recheck_evaluation_session
 
 
 class PromotionDecision(StrEnum):
@@ -44,6 +48,7 @@ class PromotionThresholds(StrictEvidenceModel):
 
 class EvaluationSnapshot(StrictEvidenceModel):
     name: str = Field(min_length=1)
+    inference_config: InferenceConfig
     total_examples: int = Field(ge=1)
     evaluation_fingerprint: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
@@ -78,6 +83,7 @@ class ChangeEvidence(StrictEvidenceModel):
         max_length=64,
         pattern=r"^[0-9a-f]{64}$",
     )
+    inference_config: LocalMLXInferenceConfig
 
 
 class PromotionResult(StrictEvidenceModel):
@@ -103,20 +109,22 @@ class PromotionAssessment(StrictEvidenceModel):
 def decide_lora_promotion(
     *,
     change_name: str,
+    evaluation_session: EvaluationSession,
     training_snapshot: ValidatedTrainingSnapshot,
     change_report: EvaluationReport,
     baselines: tuple[BaselineEvaluation, ...] | list[BaselineEvaluation],
     thresholds: PromotionThresholds | None = None,
 ) -> PromotionAssessment:
-    """Adopt only when current source/runtime lineage and every gate remain valid."""
+    """Adopt only when model, decoding, runtime, and training evidence agree."""
 
     if not change_name.strip():
         raise ValueError("change_name must not be blank")
+    recheck_evaluation_session(evaluation_session)
+    current_base_model = evaluation_session.base_model_execution_contract
+    if current_base_model is None:
+        raise ValueError("LoRA promotion requires a model-aware evaluation session")
     validated_snapshot = recheck_training_snapshot(training_snapshot)
-    current_execution_contract = capture_execution_contract()
-    current_execution_contract_sha256 = execution_contract_sha256(
-        current_execution_contract
-    )
+    current_execution_contract_sha256 = evaluation_session.execution_contract_sha256
     training_manifest_sha256 = validated_snapshot.manifest_sha256
     training_execution_contract_sha256 = (
         validated_snapshot.manifest.execution_contract_sha256
@@ -132,6 +140,27 @@ def decide_lora_promotion(
         raise ValueError(
             "change report must carry the current training execution-contract SHA-256"
         )
+    if not isinstance(change_report.inference_config, LocalMLXInferenceConfig):
+        raise ValueError("change report must carry local MLX inference evidence")
+    change_inference = change_report.inference_config
+    if change_inference.adapter_manifest_sha256 != training_manifest_sha256:
+        raise ValueError(
+            "change inference configuration must carry the supplied training "
+            "manifest SHA-256"
+        )
+    if change_inference.base_model != current_base_model:
+        raise ValueError(
+            "change report base-model evidence must match the current verified model"
+        )
+    training_manifest = validated_snapshot.manifest
+    if (
+        training_manifest.model_path != current_base_model.model_path
+        or training_manifest.model_revision != current_base_model.model_revision
+        or training_manifest.model_files != current_base_model.model_files
+    ):
+        raise ValueError(
+            "training evidence and the current evaluation base model do not match"
+        )
     evaluated_reports = (change_report,) + tuple(
         baseline.report for baseline in baselines
     )
@@ -142,12 +171,21 @@ def decide_lora_promotion(
         raise ValueError(
             "every report must match the current evaluation source/runtime contract"
         )
+    model_baselines: list[BaselineEvaluation] = []
+    for baseline in baselines:
+        inference = baseline.report.inference_config
+        if not isinstance(inference, LocalMLXInferenceConfig):
+            continue
+        if inference.adapter_manifest_sha256 is not None:
+            raise ValueError("untouched-model baselines must not carry adapter lineage")
+        if inference.base_model != current_base_model:
+            raise ValueError(
+                "every model-based baseline must match the current verified model"
+            )
+        model_baselines.append(baseline)
 
     def finalize(assessment: PromotionAssessment) -> PromotionAssessment:
-        if capture_execution_contract() != current_execution_contract:
-            raise RuntimeError(
-                "evaluation source code or runtime package set changed during promotion"
-            )
+        recheck_evaluation_session(evaluation_session)
         recheck_training_snapshot(validated_snapshot)
         return assessment
 
@@ -163,6 +201,80 @@ def decide_lora_promotion(
         evaluated_change.unsupported_intent_rate
         <= policy.maximum_unsupported_intent_rate
     )
+    inference_reasons: list[str] = []
+    if not model_baselines:
+        inference_reasons.append(
+            "no untouched-model baseline carried comparable inference evidence"
+        )
+    elif any(
+        baseline.report.inference_config.generation != change_inference.generation
+        for baseline in model_baselines
+        if isinstance(baseline.report.inference_config, LocalMLXInferenceConfig)
+    ):
+        inference_reasons.append(
+            "model-based baselines and the change used different generation settings"
+        )
+    if not any(
+        isinstance(baseline.report.inference_config, LocalMLXInferenceConfig)
+        and baseline.report.inference_config.prompt_recipe
+        == change_inference.prompt_recipe
+        and baseline.report.inference_config.few_shot_examples
+        == change_inference.few_shot_examples
+        for baseline in model_baselines
+    ):
+        inference_reasons.append(
+            "no untouched-model baseline used the change's prompt recipe and "
+            "few-shot count"
+        )
+
+    if inference_reasons:
+        meaningful_for_snapshot = [
+            baseline for baseline in baselines if baseline.meaningful
+        ]
+        strongest_for_snapshot = (
+            min(
+                meaningful_for_snapshot,
+                key=lambda baseline: (
+                    -baseline.report.classification.macro_f1,
+                    baseline.name,
+                ),
+            )
+            if meaningful_for_snapshot
+            else None
+        )
+        evaluated_change = _snapshot(change_name, change_report)
+        return finalize(
+            PromotionAssessment(
+                baseline=(
+                    _snapshot(
+                        strongest_for_snapshot.name,
+                        strongest_for_snapshot.report,
+                    )
+                    if strongest_for_snapshot is not None
+                    else None
+                ),
+                change=ChangeEvidence(
+                    name=change_name,
+                    training_manifest_sha256=training_manifest_sha256,
+                    training_execution_contract_sha256=(
+                        training_execution_contract_sha256
+                    ),
+                    evaluation_execution_contract_sha256=(
+                        current_execution_contract_sha256
+                    ),
+                    inference_config=change_inference,
+                ),
+                result=PromotionResult(
+                    evaluated_change=evaluated_change,
+                    comparable=False,
+                    passes_schema_threshold=schema_pass,
+                    passes_policy_threshold=policy_pass,
+                    passes_unsupported_intent_threshold=unsupported_pass,
+                    reasons=tuple(inference_reasons),
+                ),
+                decision=PromotionDecision.INCONCLUSIVE,
+            )
+        )
     meaningful = [baseline for baseline in baselines if baseline.meaningful]
     if not meaningful:
         reasons = ["no meaningful baseline evaluation was supplied"]
@@ -184,6 +296,7 @@ def decide_lora_promotion(
                     evaluation_execution_contract_sha256=(
                         current_execution_contract_sha256
                     ),
+                    inference_config=change_inference,
                 ),
                 result=PromotionResult(
                     evaluated_change=evaluated_change,
@@ -224,6 +337,7 @@ def decide_lora_promotion(
                     evaluation_execution_contract_sha256=(
                         current_execution_contract_sha256
                     ),
+                    inference_config=change_inference,
                 ),
                 result=PromotionResult(
                     evaluated_change=evaluated_change,
@@ -280,6 +394,7 @@ def decide_lora_promotion(
                 evaluation_execution_contract_sha256=(
                     current_execution_contract_sha256
                 ),
+                inference_config=change_inference,
             ),
             result=PromotionResult(
                 evaluated_change=evaluated_change,
@@ -303,6 +418,7 @@ def decide_lora_promotion(
 def _snapshot(name: str, report: EvaluationReport) -> EvaluationSnapshot:
     return EvaluationSnapshot(
         name=name,
+        inference_config=report.inference_config,
         total_examples=report.total_examples,
         evaluation_fingerprint=report.evaluation_fingerprint,
         evaluation_execution_contract_sha256=(

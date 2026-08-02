@@ -15,6 +15,34 @@ from aai_local_finetuning import cli, training
 @pytest.mark.parametrize(
     ("command", "arguments"),
     (
+        (
+            cli._cmd_evaluate,
+            Namespace(limit=None, max_tokens=0, methods="all", track=False),
+        ),
+        (
+            cli._cmd_capstone_evaluate,
+            Namespace(limit=None, max_tokens=-1, methods="all"),
+        ),
+    ),
+)
+def test_model_evaluation_requires_a_positive_generation_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    command: object,
+    arguments: Namespace,
+) -> None:
+    def unexpected_work(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid decoding settings reached evaluation work")
+
+    monkeypatch.setattr(cli, "_require_prepared_split_integrity", unexpected_work)
+    monkeypatch.setattr(cli, "_require_current_flight_preparation", unexpected_work)
+
+    with pytest.raises(cli.StudyCommandError, match="--max-tokens must be positive"):
+        command(arguments, SimpleNamespace())  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    (
         (cli._cmd_baselines, Namespace(track=False)),
         (cli._cmd_train, Namespace(iterations=1)),
         (
@@ -94,25 +122,24 @@ def test_promotion_capable_commands_stop_when_flight_source_evidence_is_stale(
         command(arguments, Settings())  # type: ignore[operator]
 
 
-@pytest.mark.parametrize("failure", ("execution", "snapshot"))
+@pytest.mark.parametrize("failure", ("session", "snapshot"))
 def test_support_promotion_file_is_removed_when_post_write_recheck_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    expected_digest = "a" * 64
     assessment = SimpleNamespace(
-        change=SimpleNamespace(evaluation_execution_contract_sha256=expected_digest),
         model_dump_json=lambda **_kwargs: "{}",
     )
     snapshot = object()
+    session = object()
     decision_path = tmp_path / "promotion.json"
-    monkeypatch.setattr(cli, "capture_execution_contract", lambda: object())
-    monkeypatch.setattr(
-        cli,
-        "execution_contract_sha256",
-        lambda _contract: "b" * 64 if failure == "execution" else expected_digest,
-    )
+
+    def recheck_session(_session: object) -> None:
+        if failure == "session":
+            raise RuntimeError("model session changed after decision")
+
+    monkeypatch.setattr(cli, "recheck_evaluation_session", recheck_session)
 
     def recheck(_snapshot: object) -> None:
         if failure == "snapshot":
@@ -121,31 +148,33 @@ def test_support_promotion_file_is_removed_when_post_write_recheck_fails(
     monkeypatch.setattr(cli, "recheck_training_snapshot", recheck)
 
     with pytest.raises(
-        (cli.StudyCommandError, cli.TrainingManifestError),
+        (RuntimeError, cli.StudyCommandError, cli.TrainingManifestError),
         match="changed|package set",
     ):
         cli._write_support_promotion(
             decision_path,
             assessment,  # type: ignore[arg-type]
             snapshot,  # type: ignore[arg-type]
+            (session,),  # type: ignore[arg-type]
         )
 
     assert not decision_path.exists()
 
 
-@pytest.mark.parametrize("failure", ("execution", "snapshot"))
+@pytest.mark.parametrize("failure", ("session", "snapshot"))
 def test_capstone_decision_file_is_removed_when_post_write_recheck_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    expected_contract = object()
+    decision_session = object()
     decision_path = tmp_path / "decision.json"
-    monkeypatch.setattr(
-        cli,
-        "capture_execution_contract",
-        lambda: object() if failure == "execution" else expected_contract,
-    )
+
+    def recheck_session(_session: object) -> None:
+        if failure == "session":
+            raise RuntimeError("model session changed after decision")
+
+    monkeypatch.setattr(cli, "recheck_evaluation_session", recheck_session)
 
     def recheck(_snapshot: object) -> None:
         if failure == "snapshot":
@@ -154,13 +183,13 @@ def test_capstone_decision_file_is_removed_when_post_write_recheck_fails(
     monkeypatch.setattr(cli, "recheck_training_snapshot", recheck)
 
     with pytest.raises(
-        (cli.StudyCommandError, cli.TrainingManifestError),
+        (RuntimeError, cli.StudyCommandError, cli.TrainingManifestError),
         match="changed|package set",
     ):
         cli._write_capstone_decision(
             decision_path,
             {"decision": "reject"},
-            expected_contract,  # type: ignore[arg-type]
+            decision_session,  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
         )
 
@@ -299,6 +328,12 @@ def test_support_evaluation_rejects_adapter_change_after_inference(
     monkeypatch.setattr(cli, "_intent_categories", lambda _records: (["intent"], {}))
     monkeypatch.setattr(cli, "_baseline_reports", lambda *_args, **_kw: {})
     monkeypatch.setattr(cli, "LocalMLXPredictor", lambda *_args, **_kw: object())
+    monkeypatch.setattr(cli, "start_evaluation_session", lambda *_args: object())
+    monkeypatch.setattr(
+        cli,
+        "build_local_mlx_inference_config",
+        lambda *_args, **_kwargs: object(),
+    )
     monkeypatch.setattr(cli, "_model_predictions", lambda *_args, **_kw: ())
     monkeypatch.setattr(cli, "shared_adapter_lock", lambda _path: cli.nullcontext())
 
@@ -336,6 +371,12 @@ def test_capstone_evaluation_rejects_adapter_change_after_inference(
     monkeypatch.setattr(cli, "_require_trained_adapter", lambda *_args, **_kw: snapshot)
     monkeypatch.setattr(cli, "load_capstone_records", lambda _path: [object()])
     monkeypatch.setattr(cli, "LocalMLXPredictor", lambda *_args, **_kw: object())
+    monkeypatch.setattr(cli, "start_evaluation_session", lambda *_args: object())
+    monkeypatch.setattr(
+        cli,
+        "build_local_mlx_inference_config",
+        lambda *_args, **_kwargs: object(),
+    )
     monkeypatch.setattr(cli, "_capstone_model_predictions", lambda *_args, **_kw: ())
     monkeypatch.setattr(cli, "shared_adapter_lock", lambda _path: cli.nullcontext())
 

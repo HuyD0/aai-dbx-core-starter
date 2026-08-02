@@ -17,17 +17,31 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
-from .settings import PROJECT_ROOT, load_settings
+from .settings import PROJECT_ROOT, ProjectSettings, load_settings
 
 TRAINING_MANIFEST_NAME = "training-manifest.json"
 _MODEL_REVISION_FILE = "LOCAL_REVISION"
+_MODEL_NON_RUNTIME_FILES = frozenset(
+    {
+        ".DS_Store",
+        ".gitattributes",
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "NOTICE",
+        "NOTICE.md",
+        "NOTICE.txt",
+        "README.md",
+    }
+)
+_MODEL_NON_RUNTIME_DIRECTORIES = frozenset({".cache"})
 _SOURCE_PACKAGE_PATH = PurePosixPath("src/aai_local_finetuning")
 _NOTEBOOK_SOURCE_PATHS = (
     PurePosixPath("scripts/notebook_pedagogy.py"),
@@ -156,6 +170,35 @@ class ExecutionContract(BaseModel):
         return self
 
 
+class BaseModelExecutionContract(BaseModel):
+    """Portable identity for the exact local base-model runtime."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    repository: str = Field(min_length=1)
+    model_path: str = Field(min_length=1)
+    model_revision: str = Field(pattern=_REVISION_PATTERN)
+    model_files: tuple[TrainingFileEvidence, ...] = Field(min_length=2)
+    model_files_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _require_canonical_contract(self) -> BaseModelExecutionContract:
+        if self.repository != self.repository.strip():
+            raise ValueError("base-model repository must not contain outer whitespace")
+        _require_safe_relative_path(self.model_path, "base-model path")
+        paths = tuple(item.path for item in self.model_files)
+        if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+            raise ValueError("model_files must have unique paths in sorted order")
+        if _MODEL_REVISION_FILE not in paths:
+            raise ValueError(f"model_files must include {_MODEL_REVISION_FILE}")
+        if any(PurePosixPath(path).name != path for path in paths):
+            raise ValueError("base-model runtime files must be top-level filenames")
+        if self.model_files_sha256 != _evidence_sequence_sha256(self.model_files):
+            raise ValueError("model_files_sha256 does not match model_files")
+        return self
+
+
 class TrainingManifest(BaseModel):
     """Immutable binding between adapter bytes and effective training inputs."""
 
@@ -277,9 +320,20 @@ class ExecutionSnapshot:
 
     execution_contract: ExecutionContract
     execution_contract_sha256: str
-    _source_files: tuple[_CapturedFile, ...]
-    _runtime_package_metadata: tuple[_CapturedFile, ...]
-    _runtime_package_roots: tuple[_CapturedDirectory, ...]
+    _source_files: tuple[_CapturedFile, ...] = field(repr=False)
+    _runtime_package_metadata: tuple[_CapturedFile, ...] = field(repr=False)
+    _runtime_package_roots: tuple[_CapturedDirectory, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class BaseModelSnapshot:
+    """Portable model evidence plus transient local identities for rechecking."""
+
+    execution_contract: BaseModelExecutionContract
+    execution_contract_sha256: str
+    _model_path: Path = field(repr=False)
+    _model_directory: _CapturedDirectory = field(repr=False)
+    _model_files: tuple[_CapturedFile, ...] = field(repr=False)
 
 
 _CapturedExecutionContract = tuple[tuple[_CapturedFile, ...], ExecutionContract]
@@ -298,6 +352,7 @@ class _TrainingPlan:
     expected_inputs: TrainingInputContract
     expected_inputs_sha256: str
     model_path: Path
+    model_directory: _CapturedDirectory
     model_files: tuple[_CapturedFile, ...]
     data_path: Path
     data_files: tuple[_CapturedFile, ...]
@@ -957,10 +1012,20 @@ def _build_training_plan(
             "training configuration data must exactly match the trusted task data path"
         )
 
+    model_directory_before = _capture_directory_identity(
+        model_path,
+        label="base-model directory",
+    )
     model_files = _capture_model_files(
         model_path,
         expected_inputs=contract,
     )
+    model_directory_after = _capture_directory_identity(
+        model_path,
+        label="base-model directory",
+    )
+    if model_directory_after != model_directory_before:
+        raise RuntimeError("base-model directory changed while it was captured")
     data_files = _capture_directory_files(data_path, "training data")
     _require_dataset_files(data_files)
     source_files, execution_contract = _capture_execution_contract()
@@ -1002,6 +1067,7 @@ def _build_training_plan(
         expected_inputs=contract,
         expected_inputs_sha256=_model_sha256(contract),
         model_path=model_path,
+        model_directory=model_directory_before,
         model_files=model_files,
         data_path=data_path,
         data_files=data_files,
@@ -1045,22 +1111,38 @@ def _capture_model_files(
     *,
     expected_inputs: TrainingInputContract,
 ) -> tuple[_CapturedFile, ...]:
+    return _capture_verified_model_files(
+        model_path,
+        model_revision=expected_inputs.model_revision,
+        model_runtime_files=expected_inputs.model_runtime_files,
+    )
+
+
+def _capture_verified_model_files(
+    model_path: Path,
+    *,
+    model_revision: str,
+    model_runtime_files: tuple[ExpectedFileHash, ...],
+) -> tuple[_CapturedFile, ...]:
+    """Capture only independently verified files used by the local runtime."""
+
     if not model_path.is_dir() or model_path.is_symlink():
         raise FileNotFoundError(f"model directory is missing: {model_path}")
     expected_paths = tuple(
         sorted(
             {
-                *(item.path for item in expected_inputs.model_runtime_files),
+                *(item.path for item in model_runtime_files),
                 _MODEL_REVISION_FILE,
             }
         )
     )
+    _require_verified_model_directory_surface(model_path, expected_paths)
     model_files = tuple(
         _capture_file(model_path / relative_path, relative_path)
         for relative_path in expected_paths
     )
     evidence = _evidence_by_path(model_files)
-    for expected in expected_inputs.model_runtime_files:
+    for expected in model_runtime_files:
         captured = evidence.get(expected.path)
         if captured is None:
             raise FileNotFoundError(
@@ -1083,11 +1165,42 @@ def _capture_model_files(
         actual_revision = revision_bytes.decode("utf-8").strip()
     except UnicodeDecodeError as error:
         raise ValueError("model revision file must be UTF-8") from error
-    if actual_revision != expected_inputs.model_revision:
+    if actual_revision != model_revision:
         raise ValueError("model revision does not match the trusted expectation")
     if hashlib.sha256(revision_bytes).hexdigest() != revision.evidence.sha256:
         raise RuntimeError("model revision file changed while it was captured")
     return model_files
+
+
+def _require_verified_model_directory_surface(
+    model_path: Path,
+    expected_runtime_paths: tuple[str, ...],
+) -> None:
+    """Reject unverified entries that a local model/tokenizer loader could consume."""
+
+    expected = set(expected_runtime_paths)
+    unexpected: list[str] = []
+    for entry in model_path.iterdir():
+        if entry.name in expected:
+            continue
+        if (
+            entry.name in _MODEL_NON_RUNTIME_FILES
+            and entry.is_file()
+            and not entry.is_symlink()
+        ):
+            continue
+        if (
+            entry.name in _MODEL_NON_RUNTIME_DIRECTORIES
+            and entry.is_dir()
+            and not entry.is_symlink()
+        ):
+            continue
+        unexpected.append(entry.name)
+    if unexpected:
+        raise ValueError(
+            "base-model directory contains unverified entries: "
+            + ", ".join(sorted(unexpected))
+        )
 
 
 def _require_dataset_files(data_files: tuple[_CapturedFile, ...]) -> None:
@@ -1222,13 +1335,25 @@ def _require_unchanged_training_inputs(plan: _TrainingPlan) -> None:
     if current_config != plan.config_file:
         raise RuntimeError("training configuration changed while MLX-LM was running")
     try:
+        current_model_directory_before = _capture_directory_identity(
+            plan.model_path,
+            label="base-model directory",
+        )
         current_model = _capture_model_files(
             plan.model_path,
             expected_inputs=plan.expected_inputs,
         )
+        current_model_directory_after = _capture_directory_identity(
+            plan.model_path,
+            label="base-model directory",
+        )
     except (OSError, RuntimeError, ValueError) as error:
         raise RuntimeError("model files changed while MLX-LM was running") from error
-    if current_model != plan.model_files:
+    if (
+        current_model_directory_before != plan.model_directory
+        or current_model_directory_after != current_model_directory_before
+        or current_model != plan.model_files
+    ):
         raise RuntimeError("model files changed while MLX-LM was running")
     try:
         current_data = _capture_directory_files(plan.data_path, "training data")
@@ -1321,6 +1446,105 @@ def recheck_execution_snapshot(snapshot: ExecutionSnapshot) -> ExecutionSnapshot
 
 def execution_contract_sha256(contract: ExecutionContract) -> str:
     """Hash a validated execution contract using canonical portable JSON."""
+
+    return _model_sha256(contract)
+
+
+def capture_base_model_snapshot(
+    settings: ProjectSettings,
+) -> BaseModelSnapshot:
+    """Verify and capture the pinned files used by local model execution."""
+
+    model_directory = settings.model.directory
+    _require_safe_relative_path(model_directory, "base-model path")
+    configured_path = PROJECT_ROOT / model_directory
+    if configured_path.is_symlink():
+        raise ValueError(f"base-model directory is a symbolic link: {configured_path}")
+    model_path = _project_path(model_directory, "base-model path")
+    expected_files = tuple(
+        ExpectedFileHash(path=path, sha256=digest)
+        for path, digest in sorted(settings.model.verified_runtime_files.items())
+    )
+    directory_before = _capture_directory_identity(
+        model_path,
+        label="base-model directory",
+    )
+    model_files = _capture_verified_model_files(
+        model_path,
+        model_revision=settings.model.revision,
+        model_runtime_files=expected_files,
+    )
+    directory_after = _capture_directory_identity(
+        model_path,
+        label="base-model directory",
+    )
+    if directory_after != directory_before:
+        raise RuntimeError("base-model directory changed while it was captured")
+    file_evidence = tuple(item.evidence for item in model_files)
+    contract = BaseModelExecutionContract(
+        repository=settings.model.repo,
+        model_path=model_directory,
+        model_revision=settings.model.revision,
+        model_files=file_evidence,
+        model_files_sha256=_evidence_sequence_sha256(file_evidence),
+    )
+    return BaseModelSnapshot(
+        execution_contract=contract,
+        execution_contract_sha256=base_model_execution_contract_sha256(contract),
+        _model_path=model_path,
+        _model_directory=directory_before,
+        _model_files=model_files,
+    )
+
+
+def recheck_base_model_snapshot(snapshot: BaseModelSnapshot) -> BaseModelSnapshot:
+    """Fail if the verified model directory, revision, or runtime files drifted."""
+
+    captured_digest = base_model_execution_contract_sha256(snapshot.execution_contract)
+    if captured_digest != snapshot.execution_contract_sha256:
+        raise RuntimeError("captured base-model snapshot is internally inconsistent")
+    expected_files = tuple(
+        ExpectedFileHash(path=item.path, sha256=item.sha256)
+        for item in snapshot.execution_contract.model_files
+        if item.path != _MODEL_REVISION_FILE
+    )
+    try:
+        current_directory = _capture_directory_identity(
+            snapshot._model_path,
+            label="base-model directory",
+        )
+        current_files = _capture_verified_model_files(
+            snapshot._model_path,
+            model_revision=snapshot.execution_contract.model_revision,
+            model_runtime_files=expected_files,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(
+            "base-model revision or runtime files changed during the operation"
+        ) from error
+    current_evidence = tuple(item.evidence for item in current_files)
+    current_contract = BaseModelExecutionContract(
+        repository=snapshot.execution_contract.repository,
+        model_path=snapshot.execution_contract.model_path,
+        model_revision=snapshot.execution_contract.model_revision,
+        model_files=current_evidence,
+        model_files_sha256=_evidence_sequence_sha256(current_evidence),
+    )
+    if (
+        current_directory != snapshot._model_directory
+        or current_files != snapshot._model_files
+        or current_contract != snapshot.execution_contract
+    ):
+        raise RuntimeError(
+            "base-model revision or runtime files changed during the operation"
+        )
+    return snapshot
+
+
+def base_model_execution_contract_sha256(
+    contract: BaseModelExecutionContract,
+) -> str:
+    """Hash portable base-model evidence using canonical JSON."""
 
     return _model_sha256(contract)
 
@@ -1469,12 +1693,16 @@ def _distribution_metadata_path(
     return Path(distribution.locate_file(candidates[0]))
 
 
-def _capture_directory_identity(path: Path) -> _CapturedDirectory:
+def _capture_directory_identity(
+    path: Path,
+    *,
+    label: str = "runtime package root",
+) -> _CapturedDirectory:
     if path.is_symlink():
-        raise ValueError(f"runtime package root is a symbolic link: {path}")
+        raise ValueError(f"{label} is a symbolic link: {path}")
     details = path.stat()
     if not stat.S_ISDIR(details.st_mode):
-        raise ValueError(f"runtime package root is not a directory: {path}")
+        raise ValueError(f"{label} is not a directory: {path}")
     return _CapturedDirectory(
         path=path,
         device=details.st_dev,

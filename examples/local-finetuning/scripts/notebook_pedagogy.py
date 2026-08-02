@@ -304,7 +304,7 @@ PRIMERS: dict[int, Primer] = {
             ),
             (
                 "frozen test set",
-                "a held-out split whose examples and results are not used to design the same candidate change",
+                "a held-out split whose examples and results are not used to design the same evaluated change",
             ),
             (
                 "manifest",
@@ -574,7 +574,7 @@ PRIMERS: dict[int, Primer] = {
             "**Run a smoke train first.** Prove parsing, batching, checkpoint paths, validation, and artifact capture "
             "with a few iterations before committing time and battery to a full run.",
             "**Save adapters separately and immutably.** Use run-specific paths and never overwrite the canonical "
-            "candidate from an exploratory notebook cell.",
+            "canonical adapter from an exploratory notebook cell.",
             "**Track training and validation evidence.** Log losses, steps, effective batch configuration, duration, "
             "memory context, and checkpoints; then use task evaluation for the actual decision.",
             "**Name quantized methods precisely.** In MLX-LM, training a quantized model uses its QLoRA path; do not "
@@ -658,7 +658,7 @@ PRIMERS: dict[int, Primer] = {
             "lead to an inconclusive decision rather than an overstated win.",
         ),
         mistakes=(
-            "**Fixing the candidate after seeing test errors and rerunning the same test.** This optimizes to the exam.",
+            "**Fixing the change after seeing test errors and rerunning the same test.** This optimizes to the exam.",
             "**Letting one average hide failures.** Macro/weighted metrics and slice tables answer different questions.",
             "**Interpreting perfect performance on a tiny slice as certainty.** Always display the denominator and limitations.",
             "**Quoting resource numbers without scope.** Peak RSS is not GPU peak memory, and timings from different "
@@ -725,8 +725,8 @@ PRIMERS: dict[int, Primer] = {
         practices=(
             "**Log inputs as lineage, not only filenames.** Record dataset source, schema/profile where appropriate, "
             "digest, split manifest, and evaluation fingerprint.",
-            "**Keep run roles explicit.** Separate smoke, baseline, candidate, frozen evaluation, and remediation runs so "
-            "partial evidence cannot masquerade as final evidence.",
+            "**Keep run roles explicit.** Separate smoke runs, baseline runs, change experiments, frozen evaluations, and "
+            "remediation runs so partial evidence cannot masquerade as final evidence.",
             "**Predeclare multi-dimensional gates.** Require quality improvement while protecting schema validity, "
             "policy compliance, and operational limits; do not optimize one metric at all costs.",
             "**Separate practical significance from statistical uncertainty.** Declare a minimum useful gain, and "

@@ -16,6 +16,7 @@ from .data import require_valid_manifest
 from .evaluation import (
     EvaluationRecord,
     EvaluationReport,
+    LocalMLXInferenceConfig,
     Prediction,
     load_records_jsonl,
 )
@@ -133,21 +134,25 @@ def generate_support_predictions(
     *,
     strategy: PromptStrategy,
     train_records: Sequence[EvaluationRecord],
-    max_tokens: int = 96,
+    inference_config: LocalMLXInferenceConfig,
     few_shot_limit: int = 4,
 ) -> tuple[Prediction, ...]:
     """Generate measured predictions while keeping prompt evidence train-derived."""
 
     if not records:
         raise ValueError("records must not be empty")
-    if max_tokens < 1:
-        raise ValueError("max_tokens must be positive")
     allowed_intents, category_by_intent = support_contract(train_records)
     demonstrations = (
         select_few_shots(train_records, limit=few_shot_limit)
         if strategy == "few_shot"
         else None
     )
+    if inference_config.prompt_recipe != strategy:
+        raise ValueError(
+            "inference prompt recipe does not match the requested strategy"
+        )
+    if inference_config.few_shot_examples != len(demonstrations or ()):
+        raise ValueError("inference few-shot count does not match the rendered prompt")
     predictions = []
     for record in records:
         messages = build_messages(
@@ -157,7 +162,10 @@ def generate_support_predictions(
             category_by_intent=category_by_intent,
             few_shot=demonstrations,
         )
-        generated = predictor.generate(messages, max_tokens=max_tokens)
+        generated = predictor.generate(
+            messages,
+            max_tokens=inference_config.generation.max_tokens,
+        )
         predictions.append(
             Prediction(
                 example_id=record.example_id,

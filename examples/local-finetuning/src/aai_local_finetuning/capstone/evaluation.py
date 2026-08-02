@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import Field, ValidationError, model_validator
 
+from ..evaluation.models import InferenceConfig, LocalMLXInferenceConfig
 from ..evaluation.session import (
     EvaluationSession,
     recheck_evaluation_session,
@@ -108,6 +109,7 @@ class CapstoneErrorAnalysis(StrictFrozenModel):
 
 class CapstoneEvaluationReport(StrictFrozenModel):
     total_examples: int = Field(ge=1)
+    inference_config: InferenceConfig
     evaluation_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     evaluation_execution_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     training_manifest_sha256: str | None = Field(
@@ -330,9 +332,11 @@ def evaluate_capstone_predictions(
     predictions: Sequence[CapstonePrediction],
     *,
     evaluation_session: EvaluationSession,
+    inference_config: InferenceConfig,
     error_limit: int = 20,
 ) -> CapstoneEvaluationReport:
     recheck_evaluation_session(evaluation_session)
+    _require_session_model_contract(evaluation_session, inference_config)
     if not records:
         raise ValueError("records must not be empty")
     if error_limit < 0:
@@ -349,8 +353,10 @@ def evaluate_capstone_predictions(
             by_slice_items[slice_name].append(item)
     errors = [item for item in scored if item.issues]
     recheck_evaluation_session(evaluation_session)
+    _require_session_model_contract(evaluation_session, inference_config)
     return CapstoneEvaluationReport(
         total_examples=len(scored),
+        inference_config=inference_config,
         evaluation_fingerprint=_fingerprint(records),
         evaluation_execution_contract_sha256=(
             evaluation_session.execution_contract_sha256
@@ -386,6 +392,24 @@ def evaluate_capstone_predictions(
             truncated=len(errors) > error_limit,
         ),
     )
+
+
+def _require_session_model_contract(
+    evaluation_session: EvaluationSession,
+    inference_config: InferenceConfig,
+) -> None:
+    if not isinstance(inference_config, LocalMLXInferenceConfig):
+        return
+    captured = evaluation_session.base_model_execution_contract
+    if captured is None:
+        raise ValueError(
+            "local MLX inference evidence requires a model-aware evaluation session"
+        )
+    if inference_config.base_model != captured:
+        raise ValueError(
+            "inference configuration does not match the evaluation session's "
+            "base-model contract"
+        )
 
 
 def _score(record: CapstoneRecord, prediction: CapstonePrediction) -> _Scored:

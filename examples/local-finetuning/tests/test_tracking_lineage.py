@@ -7,7 +7,11 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-from aai_local_finetuning import tracking
+from aai_local_finetuning import tracking, training
+from aai_local_finetuning.evaluation import (
+    GenerationConfig,
+    LocalMLXInferenceConfig,
+)
 
 
 def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
@@ -44,6 +48,33 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     )
     evaluation_contract = SimpleNamespace(
         model_dump=lambda **_kwargs: {"schema_version": "1.0.0"}
+    )
+    model_files = (
+        training.TrainingFileEvidence(
+            path="LOCAL_REVISION", sha256="5" * 64, size_bytes=41
+        ),
+        training.TrainingFileEvidence(
+            path="config.json", sha256="6" * 64, size_bytes=10
+        ),
+    )
+    base_model = training.BaseModelExecutionContract(
+        repository="local/model",
+        model_path="models/local",
+        model_revision="f" * 40,
+        model_files=model_files,
+        model_files_sha256=training._evidence_sequence_sha256(model_files),
+    )
+    inference_config = LocalMLXInferenceConfig(
+        method="lora-change",
+        prompt_recipe="strong",
+        generation=GenerationConfig(max_tokens=37),
+        base_model=base_model,
+        adapter_manifest_sha256=digest,
+    )
+    evaluation_session = SimpleNamespace(
+        execution_contract=evaluation_contract,
+        execution_contract_sha256=evaluation_contract_digest,
+        base_model_execution_contract=base_model,
     )
     snapshot = SimpleNamespace(
         adapter_path=adapter_dir,
@@ -96,16 +127,7 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
     monkeypatch.setattr(tracking, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(tracking, "configure_local_mlflow", lambda _settings: None)
-    monkeypatch.setattr(
-        tracking,
-        "capture_execution_contract",
-        lambda: evaluation_contract,
-    )
-    monkeypatch.setattr(
-        tracking,
-        "execution_contract_sha256",
-        lambda _contract: evaluation_contract_digest,
-    )
+    monkeypatch.setattr(tracking, "recheck_evaluation_session", lambda _session: None)
     monkeypatch.setattr(tracking, "recheck_training_snapshot", lambda _snapshot: None)
     monkeypatch.setattr(
         tracking,
@@ -123,11 +145,13 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
             "evaluation_execution_contract_sha256": evaluation_contract_digest,
             "training_manifest_sha256": digest,
             "training_execution_contract_sha256": training_contract_digest,
+            "inference_config": inference_config.model_dump(mode="json"),
         },
         records=({"example_id": "one"},),
         manifest_path=dataset_manifest,
         prediction_path=predictions,
         model_based=True,
+        evaluation_session=evaluation_session,  # type: ignore[arg-type]
         training_snapshot=snapshot,  # type: ignore[arg-type]
     )
 
@@ -146,6 +170,9 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     assert parameters["training_execution_contract_sha256"] == (
         training_contract_digest
     )
+    assert parameters["max_tokens"] == 37
+    assert parameters["model_files_sha256"] == base_model.model_files_sha256
     assert "runtime/evaluation-execution-contract.json" in logged_dicts
+    assert "evaluation/inference-config.json" in logged_dicts
     assert "change/training-execution-contract.json" in logged_dicts
     assert not any(name == "latest.json" for name, _ in artifacts)

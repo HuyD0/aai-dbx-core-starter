@@ -40,14 +40,18 @@ from .data import (
 )
 from .evaluation import (
     BaselineEvaluation,
+    DeterministicInferenceConfig,
     EvaluationRecord,
     EvaluationReport,
     EvaluationSession,
     Evaluator,
+    InferenceConfig,
     KeywordRuleBaseline,
+    LocalMLXInferenceConfig,
     MajorityBaseline,
     Prediction,
     PromotionAssessment,
+    build_local_mlx_inference_config,
     decide_lora_promotion,
     format_error_analysis,
     load_records_jsonl,
@@ -70,12 +74,9 @@ from .offline import (
 from .settings import PROJECT_ROOT, ProjectSettings, load_settings
 from .training import (
     TRAINING_MANIFEST_NAME,
-    ExecutionContract,
     TrainingManifestError,
     ValidatedTrainingSnapshot,
-    capture_execution_contract,
     exclusive_adapter_lock,
-    execution_contract_sha256,
     recheck_training_snapshot,
     require_valid_training_snapshot,
     run_lora,
@@ -237,21 +238,15 @@ def _write_support_promotion(
     path: Path,
     assessment: PromotionAssessment,
     training_snapshot: ValidatedTrainingSnapshot,
+    evaluation_sessions: Sequence[EvaluationSession],
 ) -> None:
-    """Commit a decision only while runtime and adapter evidence remain current."""
+    """Commit only while every inference-wide and adapter snapshot stays current."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(assessment.model_dump_json(indent=2) + "\n", encoding="utf-8")
     try:
-        execution_is_current = (
-            execution_contract_sha256(capture_execution_contract())
-            == assessment.change.evaluation_execution_contract_sha256
-        )
-        if not execution_is_current:
-            raise StudyCommandError(
-                "evaluation source code or runtime package set changed while "
-                "promotion evidence was being committed"
-            )
+        for evaluation_session in evaluation_sessions:
+            recheck_evaluation_session(evaluation_session)
         recheck_training_snapshot(training_snapshot)
     except BaseException:
         path.unlink(missing_ok=True)
@@ -261,19 +256,18 @@ def _write_support_promotion(
 def _write_capstone_decision(
     path: Path,
     payload: dict[str, Any],
-    execution_contract: ExecutionContract,
+    decision_session: EvaluationSession,
     training_snapshot: ValidatedTrainingSnapshot | None,
+    evaluation_sessions: Sequence[EvaluationSession] = (),
 ) -> None:
-    """Commit capstone evidence only while runtime and adapter remain current."""
+    """Commit only while capstone inference and adapter snapshots remain current."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     try:
-        if capture_execution_contract() != execution_contract:
-            raise StudyCommandError(
-                "evaluation source code or runtime package set changed while "
-                "capstone decision evidence was being committed"
-            )
+        recheck_evaluation_session(decision_session)
+        for evaluation_session in evaluation_sessions:
+            recheck_evaluation_session(evaluation_session)
         if training_snapshot is not None:
             recheck_training_snapshot(training_snapshot)
     except BaseException:
@@ -288,6 +282,7 @@ def _track_report(
     role: str,
     records: Sequence[EvaluationRecord],
     report: EvaluationReport,
+    evaluation_session: EvaluationSession,
     training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> str:
     from .tracking import log_evaluation
@@ -305,6 +300,7 @@ def _track_report(
             PROJECT_ROOT / "artifacts" / "evaluation" / f"{name}-predictions.jsonl"
         ),
         model_based=name not in {"majority", "keyword-rule"},
+        evaluation_session=evaluation_session,
         training_snapshot=training_snapshot,
     )
 
@@ -316,6 +312,7 @@ def _score_predictions(
     predictions: Sequence[Prediction],
     supported_intents: Sequence[str],
     evaluation_session: EvaluationSession,
+    inference_config: InferenceConfig,
     training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> EvaluationReport:
     _invalidate_support_evidence(name)
@@ -323,10 +320,12 @@ def _score_predictions(
         records,
         predictions,
         evaluation_session=evaluation_session,
+        inference_config=inference_config,
     )
     if training_snapshot is not None:
-        report = report.model_copy(
-            update={
+        report = EvaluationReport.model_validate(
+            report.model_dump(mode="python")
+            | {
                 "training_manifest_sha256": training_snapshot.manifest_sha256,
                 "training_execution_contract_sha256": (
                     training_snapshot.manifest.execution_contract_sha256
@@ -377,6 +376,7 @@ def _baseline_reports(
             predictions=predictions,
             supported_intents=supported,
             evaluation_session=evaluation_session,
+            inference_config=DeterministicInferenceConfig(method=name),
         )
         reports[name] = report
         if track:
@@ -386,6 +386,7 @@ def _baseline_reports(
                 role="baseline",
                 records=evaluation_records,
                 report=report,
+                evaluation_session=evaluation_session,
             )
             print(f"  local MLflow run: {run_id}")
         print(
@@ -436,10 +437,16 @@ def _model_predictions(
     *,
     strategy: PromptStrategy,
     train: Sequence[EvaluationRecord],
-    max_tokens: int,
+    inference_config: LocalMLXInferenceConfig,
 ) -> tuple[Prediction, ...]:
     intents, categories = _intent_categories(train)
     shots = _few_shot_examples(train) if strategy == "few_shot" else None
+    if inference_config.prompt_recipe != strategy:
+        raise ValueError(
+            "inference prompt recipe does not match the requested strategy"
+        )
+    if inference_config.few_shot_examples != len(shots or ()):
+        raise ValueError("inference few-shot count does not match the rendered prompt")
     predictions: list[Prediction] = []
     for index, record in enumerate(records, start=1):
         messages = build_messages(
@@ -449,7 +456,10 @@ def _model_predictions(
             category_by_intent=categories,
             few_shot=shots,
         )
-        generated = predictor.generate(messages, max_tokens=max_tokens)
+        generated = predictor.generate(
+            messages,
+            max_tokens=inference_config.generation.max_tokens,
+        )
         predictions.append(
             Prediction(
                 example_id=record.example_id,
@@ -551,6 +561,7 @@ def _generate_capstone() -> None:
         records=test_records,
         predictions=policy_predictions,
         evaluation_session=policy_session,
+        inference_config=DeterministicInferenceConfig(method="deterministic-policy"),
     )
     hybrid_session = start_evaluation_session()
     hybrid_predictions = tuple(
@@ -570,6 +581,7 @@ def _generate_capstone() -> None:
         records=test_records,
         predictions=hybrid_predictions,
         evaluation_session=hybrid_session,
+        inference_config=DeterministicInferenceConfig(method="hybrid-policy-text"),
     )
     if policy_report.aggregate.exact_review_rate != 1.0:
         raise StudyCommandError("deterministic capstone policy failed its own ceiling")
@@ -632,6 +644,7 @@ def _score_capstone_predictions(
     records: Sequence[CapstoneRecord],
     predictions: Sequence[CapstonePrediction],
     evaluation_session: EvaluationSession,
+    inference_config: InferenceConfig,
     training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> CapstoneEvaluationReport:
     _invalidate_capstone_evidence(name)
@@ -639,10 +652,12 @@ def _score_capstone_predictions(
         records,
         predictions,
         evaluation_session=evaluation_session,
+        inference_config=inference_config,
     )
     if training_snapshot is not None:
-        report = report.model_copy(
-            update={
+        report = CapstoneEvaluationReport.model_validate(
+            report.model_dump(mode="python")
+            | {
                 "training_manifest_sha256": training_snapshot.manifest_sha256,
                 "training_execution_contract_sha256": (
                     training_snapshot.manifest.execution_contract_sha256
@@ -664,6 +679,81 @@ def _score_capstone_predictions(
         report_path.unlink(missing_ok=True)
         raise
     return report
+
+
+def _capstone_inference_comparability_reasons(
+    *,
+    reports: dict[str, CapstoneEvaluationReport],
+    lora_report: CapstoneEvaluationReport,
+    decision_session: EvaluationSession,
+    training_snapshot: ValidatedTrainingSnapshot,
+) -> tuple[str, ...]:
+    """Return fair-comparison gaps; reject stale or contradictory lineage."""
+
+    current_model = decision_session.base_model_execution_contract
+    if current_model is None:
+        raise StudyCommandError(
+            "capstone model promotion requires a model-aware decision session"
+        )
+    manifest = training_snapshot.manifest
+    if (
+        manifest.model_path != current_model.model_path
+        or manifest.model_revision != current_model.model_revision
+        or manifest.model_files != current_model.model_files
+    ):
+        raise StudyCommandError(
+            "capstone training evidence and current base-model files do not match"
+        )
+    lora_inference = lora_report.inference_config
+    if not isinstance(lora_inference, LocalMLXInferenceConfig):
+        return ("the LoRA report lacks local model inference evidence",)
+    if lora_inference.base_model != current_model:
+        raise StudyCommandError(
+            "capstone LoRA report does not match the current base-model files"
+        )
+    if lora_inference.adapter_manifest_sha256 != training_snapshot.manifest_sha256:
+        raise StudyCommandError(
+            "capstone LoRA inference does not match its training manifest"
+        )
+
+    reasons: list[str] = []
+    baseline_configs: dict[str, LocalMLXInferenceConfig] = {}
+    for name in ("basic", "strong", "few-shot"):
+        config = reports[name].inference_config
+        if not isinstance(config, LocalMLXInferenceConfig):
+            reasons.append(f"{name} lacks local model inference evidence")
+            continue
+        if config.method != name:
+            reasons.append(f"{name} report carries a different inference method")
+        if config.adapter_manifest_sha256 is not None:
+            raise StudyCommandError(
+                f"capstone untouched-model baseline {name} carries adapter lineage"
+            )
+        if config.base_model != current_model:
+            raise StudyCommandError(
+                f"capstone baseline {name} does not match current base-model files"
+            )
+        baseline_configs[name] = config
+
+    if baseline_configs and any(
+        config.generation != lora_inference.generation
+        for config in baseline_configs.values()
+    ):
+        reasons.append(
+            "capstone untouched-model baselines and LoRA used different "
+            "generation settings"
+        )
+    basic = baseline_configs.get("basic")
+    if (
+        basic is None
+        or basic.prompt_recipe != lora_inference.prompt_recipe
+        or basic.few_shot_examples != lora_inference.few_shot_examples
+    ):
+        reasons.append(
+            "capstone LoRA lacks an untouched-model control with the same prompt "
+            "recipe and few-shot count"
+        )
+    return tuple(reasons)
 
 
 def _capstone_shots(
@@ -740,15 +830,21 @@ def _capstone_model_predictions(
     *,
     strategy: str,
     train: Sequence[CapstoneRecord],
-    max_tokens: int,
+    inference_config: LocalMLXInferenceConfig,
     display_name: str | None = None,
 ) -> tuple[CapstonePrediction, ...]:
-    shots = _capstone_shots(train)
+    shots = _capstone_shots(train) if strategy == "few-shot" else []
+    if inference_config.prompt_recipe != strategy:
+        raise ValueError(
+            "inference prompt recipe does not match the requested strategy"
+        )
+    if inference_config.few_shot_examples != len(shots):
+        raise ValueError("inference few-shot count does not match the rendered prompt")
     predictions: list[CapstonePrediction] = []
     for index, record in enumerate(records, start=1):
         generated = predictor.generate(
             _capstone_messages(record, strategy=strategy, shots=shots),
-            max_tokens=max_tokens,
+            max_tokens=inference_config.generation.max_tokens,
         )
         predictions.append(
             CapstonePrediction(
@@ -767,7 +863,13 @@ def _capstone_model_predictions(
 def _capstone_hybrid_predictions(
     predictor: LocalMLXPredictor,
     records: Sequence[CapstoneRecord],
+    *,
+    inference_config: LocalMLXInferenceConfig,
 ) -> tuple[tuple[CapstonePrediction, ...], list[dict[str, Any]]]:
+    if inference_config.prompt_recipe != "hybrid_explanation":
+        raise ValueError("hybrid inference must use the hybrid explanation recipe")
+    if inference_config.few_shot_examples != 0:
+        raise ValueError("hybrid explanation inference does not use few-shot examples")
     cache: dict[tuple[str, ...], str] = {}
     evidence: list[dict[str, Any]] = []
     predictions: list[CapstonePrediction] = []
@@ -808,7 +910,10 @@ def _capstone_hybrid_predictions(
                         ),
                     },
                 ]
-                generated = predictor.generate(messages, max_tokens=80)
+                generated = predictor.generate(
+                    messages,
+                    max_tokens=inference_config.generation.max_tokens,
+                )
                 cache[key] = generated.text.strip()
                 generated_latency += generated.latency_ms
                 generated_tokens += generated.output_tokens
@@ -946,6 +1051,8 @@ def _cmd_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
 
 
 def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    if args.max_tokens < 1:
+        raise StudyCommandError("--max-tokens must be positive")
     requested = {"basic", "strong", "few-shot", "lora"}
     if args.methods != "all":
         requested = set(args.methods.split(","))
@@ -981,22 +1088,32 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     deterministic = _baseline_reports(settings, records=records, track=args.track)
 
     reports: dict[str, EvaluationReport] = dict(deterministic)
+    base_session: EvaluationSession | None = None
     base_methods = [
         name for name in ("basic", "strong", "few-shot") if name in requested
     ]
     if base_methods:
         for name in base_methods:
             _invalidate_support_evidence(name)
-        base_session = start_evaluation_session()
+        base_session = start_evaluation_session(settings)
         predictor = LocalMLXPredictor(settings.model_dir)
         for name in base_methods:
             strategy: PromptStrategy = "few_shot" if name == "few-shot" else name  # type: ignore[assignment]
+            inference_config = build_local_mlx_inference_config(
+                base_session,
+                method=name,
+                prompt_recipe=strategy,
+                max_tokens=args.max_tokens,
+                few_shot_examples=(
+                    len(_few_shot_examples(train)) if strategy == "few_shot" else 0
+                ),
+            )
             predictions = _model_predictions(
                 predictor,
                 records,
                 strategy=strategy,
                 train=train,
-                max_tokens=args.max_tokens,
+                inference_config=inference_config,
             )
             report = _score_predictions(
                 name=name,
@@ -1004,6 +1121,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 predictions=predictions,
                 supported_intents=supported,
                 evaluation_session=base_session,
+                inference_config=inference_config,
             )
             reports[name] = report
             if args.track:
@@ -1013,6 +1131,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                     role="baseline",
                     records=records,
                     report=report,
+                    evaluation_session=base_session,
                 )
                 print(f"  local MLflow run: {run_id}")
             print(
@@ -1021,6 +1140,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
             )
 
     lora_report: EvaluationReport | None = None
+    lora_session: EvaluationSession | None = None
     lora_context = (
         shared_adapter_lock(settings.adapter_dir)
         if lora_snapshot is not None
@@ -1028,7 +1148,14 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     )
     with lora_context:
         if "lora" in requested and lora_snapshot is not None:
-            lora_session = start_evaluation_session()
+            lora_session = start_evaluation_session(settings)
+            lora_inference_config = build_local_mlx_inference_config(
+                lora_session,
+                method="lora-change",
+                prompt_recipe="strong",
+                max_tokens=args.max_tokens,
+                adapter_manifest_sha256=lora_snapshot.manifest_sha256,
+            )
             recheck_training_snapshot(lora_snapshot)
             predictor = LocalMLXPredictor(
                 settings.model_dir,
@@ -1039,7 +1166,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 records,
                 strategy="strong",
                 train=train,
-                max_tokens=args.max_tokens,
+                inference_config=lora_inference_config,
             )
             recheck_training_snapshot(lora_snapshot)
             lora_report = _score_predictions(
@@ -1048,6 +1175,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 predictions=predictions,
                 supported_intents=supported,
                 evaluation_session=lora_session,
+                inference_config=lora_inference_config,
                 training_snapshot=lora_snapshot,
             )
             reports["lora-change"] = lora_report
@@ -1058,6 +1186,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                     role="change",
                     records=records,
                     report=lora_report,
+                    evaluation_session=lora_session,
                     training_snapshot=lora_snapshot,
                 )
                 print(f"  local MLflow run: {run_id}")
@@ -1073,6 +1202,12 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
             and lora_report is not None
             and lora_snapshot is not None
         ):
+            if base_session is None or lora_session is None:
+                raise StudyCommandError(
+                    "complete promotion evidence requires retained model sessions"
+                )
+            recheck_evaluation_session(base_session)
+            recheck_evaluation_session(lora_session)
             recheck_training_snapshot(lora_snapshot)
             baselines = [
                 BaselineEvaluation(
@@ -1083,8 +1218,10 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 for name, report in reports.items()
                 if name != "lora-change"
             ]
+            promotion_session = start_evaluation_session(settings)
             assessment = decide_lora_promotion(
                 change_name="bitext-lora-v1",
+                evaluation_session=promotion_session,
                 training_snapshot=lora_snapshot,
                 change_report=lora_report,
                 baselines=baselines,
@@ -1093,6 +1230,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 promotion_path,
                 assessment,
                 lora_snapshot,
+                (base_session, lora_session, promotion_session),
             )
             print(f"Decision: {assessment.decision.value}")
         elif lora_report is not None:
@@ -1129,6 +1267,8 @@ def _cmd_capstone_train(args: argparse.Namespace, settings: ProjectSettings) -> 
 def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     if args.limit is not None and args.limit < 1:
         raise StudyCommandError("--limit must be positive")
+    if args.max_tokens < 1:
+        raise StudyCommandError("--max-tokens must be positive")
     allowed = {"policy", "basic", "strong", "few-shot", "lora", "hybrid"}
     requested = allowed if args.methods == "all" else set(args.methods.split(","))
     unknown = requested - allowed
@@ -1185,6 +1325,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         predictions: Sequence[CapstonePrediction],
         *,
         evaluation_session: EvaluationSession,
+        inference_config: InferenceConfig,
         training_snapshot: ValidatedTrainingSnapshot | None = None,
     ) -> CapstoneEvaluationReport:
         report = _score_capstone_predictions(
@@ -1192,6 +1333,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             records=records,
             predictions=predictions,
             evaluation_session=evaluation_session,
+            inference_config=inference_config,
             training_snapshot=training_snapshot,
         )
         reports[name] = report
@@ -1209,10 +1351,13 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             "deterministic-policy",
             deterministic_capstone_predictions(records),
             evaluation_session=policy_session,
+            inference_config=DeterministicInferenceConfig(
+                method="deterministic-policy"
+            ),
         )
 
     needs_base = bool(requested & {"basic", "strong", "few-shot", "hybrid"})
-    base_session = start_evaluation_session() if needs_base else None
+    base_session = start_evaluation_session(settings) if needs_base else None
     base_predictor = LocalMLXPredictor(settings.model_dir) if needs_base else None
     for method in ("basic", "strong", "few-shot"):
         if (
@@ -1220,6 +1365,15 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             and base_predictor is not None
             and base_session is not None
         ):
+            inference_config = build_local_mlx_inference_config(
+                base_session,
+                method=method,
+                prompt_recipe=method,
+                max_tokens=args.max_tokens,
+                few_shot_examples=(
+                    len(_capstone_shots(train)) if method == "few-shot" else 0
+                ),
+            )
             score(
                 method,
                 _capstone_model_predictions(
@@ -1227,9 +1381,10 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                     records,
                     strategy=method,
                     train=train,
-                    max_tokens=args.max_tokens,
+                    inference_config=inference_config,
                 ),
                 evaluation_session=base_session,
+                inference_config=inference_config,
             )
 
     if (
@@ -1237,9 +1392,16 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         and base_predictor is not None
         and base_session is not None
     ):
+        hybrid_inference_config = build_local_mlx_inference_config(
+            base_session,
+            method="hybrid",
+            prompt_recipe="hybrid_explanation",
+            max_tokens=80,
+        )
         predictions, explanation_evidence = _capstone_hybrid_predictions(
             base_predictor,
             records,
+            inference_config=hybrid_inference_config,
         )
         hybrid_evidence_path.write_text(
             json.dumps(explanation_evidence, indent=2) + "\n",
@@ -1250,6 +1412,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                 "hybrid",
                 predictions,
                 evaluation_session=base_session,
+                inference_config=hybrid_inference_config,
             )
         except BaseException:
             hybrid_evidence_path.unlink(missing_ok=True)
@@ -1260,6 +1423,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         )
 
     lora_report: CapstoneEvaluationReport | None = None
+    lora_session: EvaluationSession | None = None
     lora_context = (
         shared_adapter_lock(settings.capstone_adapter_dir)
         if lora_snapshot is not None
@@ -1267,7 +1431,14 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
     )
     with lora_context:
         if "lora" in requested and lora_snapshot is not None:
-            lora_session = start_evaluation_session()
+            lora_session = start_evaluation_session(settings)
+            lora_inference_config = build_local_mlx_inference_config(
+                lora_session,
+                method="capstone-lora-change",
+                prompt_recipe="basic",
+                max_tokens=args.max_tokens,
+                adapter_manifest_sha256=lora_snapshot.manifest_sha256,
+            )
             recheck_training_snapshot(lora_snapshot)
             predictor = LocalMLXPredictor(
                 settings.model_dir,
@@ -1278,7 +1449,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                 records,
                 strategy="basic",
                 train=train,
-                max_tokens=args.max_tokens,
+                inference_config=lora_inference_config,
                 display_name="lora",
             )
             recheck_training_snapshot(lora_snapshot)
@@ -1286,6 +1457,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                 "capstone-lora-change",
                 lora_predictions,
                 evaluation_session=lora_session,
+                inference_config=lora_inference_config,
                 training_snapshot=lora_snapshot,
             )
 
@@ -1296,21 +1468,41 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             and required_baselines <= requested
             and len(records) == 150
         )
-        decision_execution_contract = capture_execution_contract()
-        decision_execution_contract_sha256 = execution_contract_sha256(
-            decision_execution_contract
+        retained_model_sessions = tuple(
+            session for session in (base_session, lora_session) if session is not None
         )
-        if complete and lora_report is not None and lora_snapshot is not None:
-            recheck_training_snapshot(lora_snapshot)
-            if any(
-                report.evaluation_execution_contract_sha256
-                != decision_execution_contract_sha256
-                for report in reports.values()
+        for retained_session in retained_model_sessions:
+            recheck_evaluation_session(retained_session)
+        has_model_reports = any(
+            isinstance(report.inference_config, LocalMLXInferenceConfig)
+            for report in reports.values()
+        )
+        decision_session = start_evaluation_session(
+            settings if has_model_reports or lora_snapshot is not None else None
+        )
+        decision_execution_contract_sha256 = decision_session.execution_contract_sha256
+        if any(
+            report.evaluation_execution_contract_sha256
+            != decision_execution_contract_sha256
+            for report in reports.values()
+        ):
+            raise StudyCommandError(
+                "capstone reports do not match the current evaluation "
+                "source/runtime contract"
+            )
+        current_decision_model = decision_session.base_model_execution_contract
+        for name, report in reports.items():
+            inference = report.inference_config
+            if isinstance(inference, LocalMLXInferenceConfig) and (
+                current_decision_model is None
+                or inference.base_model != current_decision_model
             ):
                 raise StudyCommandError(
-                    "capstone reports do not match the current evaluation "
-                    "source/runtime contract"
+                    f"capstone report {name} does not match current base-model files"
                 )
+        inference_reasons: tuple[str, ...] = ()
+        if complete and lora_report is not None and lora_snapshot is not None:
+            recheck_training_snapshot(lora_snapshot)
             if (
                 lora_report.training_execution_contract_sha256
                 != lora_snapshot.manifest.execution_contract_sha256
@@ -1319,6 +1511,12 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                     "capstone LoRA report does not match the current training "
                     "source/runtime contract"
                 )
+            inference_reasons = _capstone_inference_comparability_reasons(
+                reports=reports,
+                lora_report=lora_report,
+                decision_session=decision_session,
+                training_snapshot=lora_snapshot,
+            )
             strongest_name = max(
                 required_baselines,
                 key=lambda name: (
@@ -1336,20 +1534,29 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                 and lora_report.aggregate.status_accuracy
                 >= strongest.aggregate.status_accuracy
             )
-            decision = (
-                "adopt" if change_score > baseline_score and passed_gates else "reject"
-            )
-            reason = (
-                "the compact LoRA change beat the strongest untouched-model baseline "
-                "and passed the absolute gates"
-                if decision == "adopt"
-                else "the compact LoRA change did not beat the strongest complete "
-                "untouched-model evidence and every absolute gate"
-            )
+            if inference_reasons:
+                decision = "inconclusive"
+                reason = "; ".join(inference_reasons)
+            else:
+                decision = (
+                    "adopt"
+                    if change_score > baseline_score and passed_gates
+                    else "reject"
+                )
+                reason = (
+                    "the compact LoRA change beat the strongest untouched-model "
+                    "baseline and passed the absolute gates"
+                    if decision == "adopt"
+                    else "the compact LoRA change did not beat the strongest complete "
+                    "untouched-model evidence and every absolute gate"
+                )
             payload: dict[str, Any] = {
                 "baseline": {
                     "name": strongest_name,
                     "exact_review_rate": baseline_score,
+                    "inference_config": strongest.inference_config.model_dump(
+                        mode="json"
+                    ),
                     "evaluation_execution_contract_sha256": (
                         decision_execution_contract_sha256
                     ),
@@ -1357,6 +1564,9 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                 "change": {
                     "name": "capstone-lora-v1",
                     "exact_review_rate": change_score,
+                    "inference_config": lora_report.inference_config.model_dump(
+                        mode="json"
+                    ),
                     "training_manifest_sha256": lora_snapshot.manifest_sha256,
                     "training_execution_contract_sha256": (
                         lora_snapshot.manifest.execution_contract_sha256
@@ -1365,7 +1575,11 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                         decision_execution_contract_sha256
                     ),
                 },
-                "result": {"passed_absolute_gates": passed_gates, "reason": reason},
+                "result": {
+                    "inference_configs_comparable": not inference_reasons,
+                    "passed_absolute_gates": passed_gates,
+                    "reason": reason,
+                },
                 "decision": decision,
             }
         else:
@@ -1386,15 +1600,25 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                     "evaluation_execution_contract_sha256": (
                         decision_execution_contract_sha256
                     ),
+                    "inference_config": (
+                        lora_report.inference_config.model_dump(mode="json")
+                        if lora_report is not None
+                        else None
+                    ),
                 },
                 "result": {
+                    "inference_configs_comparable": False,
                     "reason": (
                         "full frozen LoRA and basic/strong/few-shot evidence "
                         "is required"
-                    )
+                    ),
                 },
                 "decision": "inconclusive",
             }
+        payload["evaluated_inference_configs"] = {
+            name: report.inference_config.model_dump(mode="json")
+            for name, report in sorted(reports.items())
+        }
         payload["architecture_boundary"] = (
             "Deterministic checks remain authoritative; a model may only supply "
             "bounded normalization or explanation wording."
@@ -1402,8 +1626,9 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         _write_capstone_decision(
             decision_path,
             payload,
-            decision_execution_contract,
+            decision_session,
             lora_snapshot,
+            retained_model_sessions,
         )
         print(f"Capstone model-change decision: {payload['decision']}")
 

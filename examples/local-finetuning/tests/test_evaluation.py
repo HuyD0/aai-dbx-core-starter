@@ -10,10 +10,13 @@ from pydantic import ValidationError
 from aai_local_finetuning import training
 from aai_local_finetuning.evaluation import (
     BaselineEvaluation,
+    DeterministicInferenceConfig,
     EvaluationDataError,
     EvaluationRecord,
     Evaluator,
+    GenerationConfig,
     KeywordRuleBaseline,
+    LocalMLXInferenceConfig,
     MajorityBaseline,
     Prediction,
     PromotionDecision,
@@ -40,6 +43,46 @@ def test_default_promotion_contract_requires_a_minimum_useful_gain():
     assert thresholds.minimum_macro_f1_gain == 0.01
 
 
+def _deterministic_config(method: str) -> DeterministicInferenceConfig:
+    return DeterministicInferenceConfig(method=method)
+
+
+def _base_model_contract() -> training.BaseModelExecutionContract:
+    files = (
+        training.TrainingFileEvidence(
+            path="LOCAL_REVISION", sha256="1" * 64, size_bytes=41
+        ),
+        training.TrainingFileEvidence(
+            path="config.json", sha256="2" * 64, size_bytes=10
+        ),
+    )
+    return training.BaseModelExecutionContract(
+        repository="local/test-model",
+        model_path="models/test-model",
+        model_revision="3" * 40,
+        model_files=files,
+        model_files_sha256=training._evidence_sequence_sha256(files),
+    )
+
+
+def _model_config(
+    method: str,
+    base_model: training.BaseModelExecutionContract,
+    *,
+    adapter_manifest_sha256: str | None = None,
+    max_tokens: int = 37,
+    few_shot_examples: int = 0,
+) -> LocalMLXInferenceConfig:
+    return LocalMLXInferenceConfig(
+        method=method,
+        prompt_recipe="strong",
+        few_shot_examples=few_shot_examples,
+        generation=GenerationConfig(max_tokens=max_tokens),
+        base_model=base_model,
+        adapter_manifest_sha256=adapter_manifest_sha256,
+    )
+
+
 @pytest.mark.parametrize("mutation", ("source", "package"))
 def test_evaluator_rejects_source_or_package_change_while_scoring(
     monkeypatch: pytest.MonkeyPatch,
@@ -62,6 +105,7 @@ def test_evaluator_rejects_source_or_package_change_while_scoring(
             [record],
             _perfect_predictions([record]),
             evaluation_session=session,  # type: ignore[arg-type]
+            inference_config=_deterministic_config("unit-test-drift"),
         )
 
 
@@ -267,11 +311,13 @@ def test_train_only_deterministic_baselines_are_useful() -> None:
         test,
         majority_predictions,
         evaluation_session=evaluation_session,
+        inference_config=_deterministic_config("majority"),
     )
     keyword_report = evaluate_predictions(
         test,
         keyword_predictions,
         evaluation_session=evaluation_session,
+        inference_config=_deterministic_config("keyword-rule"),
     )
     assert majority_report.classification.intent_accuracy == 0.5
     assert keyword_report.classification.intent_accuracy == 1.0
@@ -355,9 +401,11 @@ def test_evaluator_tracks_structure_policy_performance_and_slices(
         records,
         predictions,
         evaluation_session=start_evaluation_session(),
+        inference_config=_deterministic_config("metrics-fixture"),
     )
 
     assert report.classification.intent_accuracy == pytest.approx(0.25)
+    assert report.inference_config == _deterministic_config("metrics-fixture")
     assert report.classification.macro_precision == pytest.approx(0.5)
     assert report.classification.macro_recall == pytest.approx(0.25)
     assert report.classification.macro_f1 == pytest.approx(1 / 3)
@@ -404,14 +452,7 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         records,
         _perfect_predictions(records),
         evaluation_session=evaluation_session,
-    )
-    lined_perfect_report = perfect_report.model_copy(
-        update={
-            "training_manifest_sha256": "a" * 64,
-            "training_execution_contract_sha256": (
-                perfect_report.evaluation_execution_contract_sha256
-            ),
-        }
+        inference_config=_deterministic_config("perfect-fixture"),
     )
     weak_predictions = (
         _prediction(records[0], records[0].target),
@@ -421,14 +462,26 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         records,
         weak_predictions,
         evaluation_session=evaluation_session,
+        inference_config=_deterministic_config("weak-fixture"),
+    )
+    base_model = _base_model_contract()
+    strong_report = weak_report.model_copy(
+        update={"inference_config": _model_config("strong", base_model)}
     )
     baselines = [
         BaselineEvaluation(name="majority", report=perfect_report, meaningful=False),
         BaselineEvaluation(name="keyword-rule", report=weak_report, meaningful=True),
+        BaselineEvaluation(name="strong", report=strong_report, meaningful=True),
     ]
     monkeypatch.setattr(
-        "aai_local_finetuning.evaluation.promotion.recheck_training_snapshot",
+        promotion_module,
+        "recheck_training_snapshot",
         lambda snapshot: snapshot,
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "recheck_evaluation_session",
+        lambda session: session,
     )
 
     def snapshot(digest: str):
@@ -437,14 +490,38 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
             manifest=SimpleNamespace(
                 execution_contract_sha256=(
                     perfect_report.evaluation_execution_contract_sha256
-                )
+                ),
+                model_path=base_model.model_path,
+                model_revision=base_model.model_revision,
+                model_files=base_model.model_files,
             ),
         )
 
+    def change_report(report, digest: str):
+        return report.model_copy(
+            update={
+                "inference_config": _model_config(
+                    "lora-change",
+                    base_model,
+                    adapter_manifest_sha256=digest,
+                ),
+                "training_manifest_sha256": digest,
+                "training_execution_contract_sha256": (
+                    report.evaluation_execution_contract_sha256
+                ),
+            }
+        )
+
+    promotion_session = SimpleNamespace(
+        execution_contract_sha256=(perfect_report.evaluation_execution_contract_sha256),
+        base_model_execution_contract=base_model,
+    )
+
     adopted = decide_lora_promotion(
         change_name="support-lora-v1",
+        evaluation_session=promotion_session,  # type: ignore[arg-type]
         training_snapshot=snapshot("a" * 64),
-        change_report=lined_perfect_report,
+        change_report=change_report(perfect_report, "a" * 64),
         baselines=baselines,
         thresholds=PromotionThresholds(
             minimum_schema_validity_rate=1.0,
@@ -462,22 +539,20 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         == perfect_report.evaluation_execution_contract_sha256
     )
     assert adopted.result.beats_strongest_meaningful_baseline is True
+    assert adopted.change.inference_config.generation.max_tokens == 37
 
-    lined_tied_report = perfect_report.model_copy(
-        update={
-            "training_manifest_sha256": "b" * 64,
-            "training_execution_contract_sha256": (
-                perfect_report.evaluation_execution_contract_sha256
-            ),
-        }
-    )
     tied = decide_lora_promotion(
         change_name="support-lora-v2",
+        evaluation_session=promotion_session,  # type: ignore[arg-type]
         training_snapshot=snapshot("b" * 64),
-        change_report=lined_tied_report,
+        change_report=change_report(perfect_report, "b" * 64),
         baselines=[
             BaselineEvaluation(
-                name="strong-prompt", report=perfect_report, meaningful=True
+                name="strong",
+                report=perfect_report.model_copy(
+                    update={"inference_config": _model_config("strong", base_model)}
+                ),
+                meaningful=True,
             )
         ],
     )
@@ -499,39 +574,27 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         records,
         unsafe_predictions,
         evaluation_session=evaluation_session,
-    )
-    lined_unsafe_report = unsafe_report.model_copy(
-        update={
-            "training_manifest_sha256": "c" * 64,
-            "training_execution_contract_sha256": (
-                unsafe_report.evaluation_execution_contract_sha256
-            ),
-        }
+        inference_config=_deterministic_config("unsafe-fixture"),
     )
     rejected = decide_lora_promotion(
         change_name="support-lora-unsafe",
+        evaluation_session=promotion_session,  # type: ignore[arg-type]
         training_snapshot=snapshot("c" * 64),
-        change_report=lined_unsafe_report,
+        change_report=change_report(unsafe_report, "c" * 64),
         baselines=baselines,
         thresholds=PromotionThresholds(minimum_policy_compliance_rate=1.0),
     )
     assert rejected.decision is PromotionDecision.REJECT
     assert rejected.result.passes_policy_threshold is False
 
-    lined_inconclusive_report = perfect_report.model_copy(
-        update={
-            "training_manifest_sha256": "d" * 64,
-            "training_execution_contract_sha256": (
-                perfect_report.evaluation_execution_contract_sha256
-            ),
-        }
-    )
     inconclusive = decide_lora_promotion(
         change_name="support-lora-no-baseline",
+        evaluation_session=promotion_session,  # type: ignore[arg-type]
         training_snapshot=snapshot("d" * 64),
-        change_report=lined_inconclusive_report,
+        change_report=change_report(perfect_report, "d" * 64),
         baselines=[
-            BaselineEvaluation(name="majority", report=weak_report, meaningful=False)
+            BaselineEvaluation(name="majority", report=weak_report, meaningful=False),
+            BaselineEvaluation(name="strong", report=strong_report, meaningful=False),
         ],
     )
     assert inconclusive.decision is PromotionDecision.INCONCLUSIVE
@@ -540,10 +603,165 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
     with pytest.raises(ValueError, match="must carry the supplied"):
         decide_lora_promotion(
             change_name="support-lora-mismatched-lineage",
+            evaluation_session=promotion_session,  # type: ignore[arg-type]
             training_snapshot=snapshot("e" * 64),
-            change_report=lined_perfect_report,
+            change_report=change_report(perfect_report, "a" * 64),
             baselines=baselines,
         )
+
+
+def test_promotion_is_inconclusive_when_generation_budgets_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = [
+        _record("one", "forgot password", "recover_password", "account"),
+        _record("two", "cash at atm", "cash_withdrawal", "cash"),
+    ]
+    scoring_session = start_evaluation_session()
+    report = evaluate_predictions(
+        records,
+        _perfect_predictions(records),
+        evaluation_session=scoring_session,
+        inference_config=_deterministic_config("fixture"),
+    )
+    base_model = _base_model_contract()
+    training_digest = "9" * 64
+    change = report.model_copy(
+        update={
+            "inference_config": _model_config(
+                "lora-change",
+                base_model,
+                adapter_manifest_sha256=training_digest,
+                max_tokens=37,
+            ),
+            "training_manifest_sha256": training_digest,
+            "training_execution_contract_sha256": (
+                report.evaluation_execution_contract_sha256
+            ),
+        }
+    )
+    baseline = report.model_copy(
+        update={
+            "inference_config": _model_config(
+                "strong",
+                base_model,
+                max_tokens=38,
+            )
+        }
+    )
+    snapshot = SimpleNamespace(
+        manifest_sha256=training_digest,
+        manifest=SimpleNamespace(
+            execution_contract_sha256=report.evaluation_execution_contract_sha256,
+            model_path=base_model.model_path,
+            model_revision=base_model.model_revision,
+            model_files=base_model.model_files,
+        ),
+    )
+    promotion_session = SimpleNamespace(
+        execution_contract_sha256=report.evaluation_execution_contract_sha256,
+        base_model_execution_contract=base_model,
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "recheck_evaluation_session",
+        lambda session: session,
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "recheck_training_snapshot",
+        lambda value: value,
+    )
+
+    assessment = decide_lora_promotion(
+        change_name="support-lora-budget-mismatch",
+        evaluation_session=promotion_session,  # type: ignore[arg-type]
+        training_snapshot=snapshot,  # type: ignore[arg-type]
+        change_report=change,
+        baselines=[BaselineEvaluation(name="strong", report=baseline)],
+    )
+
+    assert assessment.decision is PromotionDecision.INCONCLUSIVE
+    assert assessment.result.comparable is False
+    assert "different generation settings" in " ".join(assessment.result.reasons)
+    assert assessment.change.inference_config.generation.max_tokens == 37
+    assert assessment.baseline is not None
+    assert assessment.baseline.inference_config.generation.max_tokens == 38
+
+
+def test_promotion_is_inconclusive_when_control_few_shot_counts_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = [
+        _record("one", "forgot password", "recover_password", "account"),
+        _record("two", "cash at atm", "cash_withdrawal", "cash"),
+    ]
+    scoring_session = start_evaluation_session()
+    report = evaluate_predictions(
+        records,
+        _perfect_predictions(records),
+        evaluation_session=scoring_session,
+        inference_config=_deterministic_config("fixture"),
+    )
+    base_model = _base_model_contract()
+    training_digest = "8" * 64
+    change = report.model_copy(
+        update={
+            "inference_config": _model_config(
+                "lora-change",
+                base_model,
+                adapter_manifest_sha256=training_digest,
+            ),
+            "training_manifest_sha256": training_digest,
+            "training_execution_contract_sha256": (
+                report.evaluation_execution_contract_sha256
+            ),
+        }
+    )
+    baseline = report.model_copy(
+        update={
+            "inference_config": _model_config(
+                "strong",
+                base_model,
+                few_shot_examples=1,
+            )
+        }
+    )
+    snapshot = SimpleNamespace(
+        manifest_sha256=training_digest,
+        manifest=SimpleNamespace(
+            execution_contract_sha256=report.evaluation_execution_contract_sha256,
+            model_path=base_model.model_path,
+            model_revision=base_model.model_revision,
+            model_files=base_model.model_files,
+        ),
+    )
+    promotion_session = SimpleNamespace(
+        execution_contract_sha256=report.evaluation_execution_contract_sha256,
+        base_model_execution_contract=base_model,
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "recheck_evaluation_session",
+        lambda session: session,
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "recheck_training_snapshot",
+        lambda value: value,
+    )
+
+    assessment = decide_lora_promotion(
+        change_name="support-lora-shot-mismatch",
+        evaluation_session=promotion_session,  # type: ignore[arg-type]
+        training_snapshot=snapshot,  # type: ignore[arg-type]
+        change_report=change,
+        baselines=[BaselineEvaluation(name="strong", report=baseline)],
+    )
+
+    assert assessment.decision is PromotionDecision.INCONCLUSIVE
+    assert assessment.result.comparable is False
+    assert "few-shot count" in " ".join(assessment.result.reasons)
 
 
 @pytest.mark.parametrize("mutation", ("source", "package"))
@@ -559,38 +777,57 @@ def test_promotion_rejects_reports_after_source_or_package_drift(
         records,
         _perfect_predictions(records),
         evaluation_session=start_evaluation_session(),
+        inference_config=_deterministic_config("promotion-drift-fixture"),
     )
     training_digest = report.evaluation_execution_contract_sha256
+    base_model = _base_model_contract()
     change_report = report.model_copy(
         update={
+            "inference_config": _model_config(
+                "lora-change",
+                base_model,
+                adapter_manifest_sha256="a" * 64,
+            ),
             "training_manifest_sha256": "a" * 64,
             "training_execution_contract_sha256": training_digest,
         }
     )
+    baseline_report = report.model_copy(
+        update={"inference_config": _model_config("strong", base_model)}
+    )
     snapshot = SimpleNamespace(
         manifest_sha256="a" * 64,
-        manifest=SimpleNamespace(execution_contract_sha256=training_digest),
+        manifest=SimpleNamespace(
+            execution_contract_sha256=training_digest,
+            model_path=base_model.model_path,
+            model_revision=base_model.model_revision,
+            model_files=base_model.model_files,
+        ),
     )
     monkeypatch.setattr(
         promotion_module,
         "recheck_training_snapshot",
         lambda value: value,
     )
-    changed = _mutated_execution_contract(
-        training.capture_execution_contract(), mutation
-    )
     monkeypatch.setattr(
         promotion_module,
-        "capture_execution_contract",
-        lambda: changed,
+        "recheck_evaluation_session",
+        lambda _session: (_ for _ in ()).throw(
+            RuntimeError(f"{mutation} changed during promotion")
+        ),
+    )
+    promotion_session = SimpleNamespace(
+        execution_contract_sha256=training_digest,
+        base_model_execution_contract=base_model,
     )
 
-    with pytest.raises(ValueError, match="current evaluation source/runtime"):
+    with pytest.raises(RuntimeError, match="changed during promotion"):
         decide_lora_promotion(
             change_name="support-lora-drifted",
+            evaluation_session=promotion_session,  # type: ignore[arg-type]
             training_snapshot=snapshot,  # type: ignore[arg-type]
             change_report=change_report,
-            baselines=[BaselineEvaluation(name="strong", report=report)],
+            baselines=[BaselineEvaluation(name="strong", report=baseline_report)],
         )
 
 
@@ -609,4 +846,5 @@ def test_evaluator_rejects_misaligned_prediction_identifiers() -> None:
             [record],
             [prediction],
             evaluation_session=start_evaluation_session(),
+            inference_config=_deterministic_config("misalignment-fixture"),
         )

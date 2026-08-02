@@ -373,6 +373,19 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
     )
     assert '"support": [' in sources["04_deterministic_baselines.ipynb"]
     assert "Absent supported intents score zero" in sources["05_prompt_baselines.ipynb"]
+    for fragment in (
+        "Read the evidence contract instead of taking it on faith",
+        "verified_model_files",
+        "greedy_argmax",
+        "adapter_manifest_sha256",
+    ):
+        assert fragment in sources["05_prompt_baselines.ipynb"]
+    for deprecated_phrase in (
+        "candidate change",
+        "canonical candidate",
+        "baseline, candidate",
+    ):
+        assert all(deprecated_phrase not in source for source in sources.values())
     assert (
         "QLoRA (LoRA over a 4-bit base in MLX-LM)"
         in sources["06_lora_finetuning.ipynb"]
@@ -424,16 +437,20 @@ def test_prediction_notebooks_bind_inference_scoring_and_persistence_to_sessions
         for path, notebook in _notebooks()
     }
     expected_sessions = {
-        "04_deterministic_baselines.ipynb": {"baseline_evaluation_session"},
-        "05_prompt_baselines.ipynb": {"prompt_evaluation_session"},
+        "04_deterministic_baselines.ipynb": {
+            "baseline_evaluation_session": "start_evaluation_session()",
+        },
+        "05_prompt_baselines.ipynb": {
+            "prompt_evaluation_session": "start_evaluation_session(settings)",
+        },
         "07_frozen_evaluation.ipynb": {
-            "frozen_evaluation_session",
-            "lora_evaluation_session",
+            "frozen_evaluation_session": "start_evaluation_session(settings)",
+            "lora_evaluation_session": "start_evaluation_session(settings)",
         },
         "10_capstone_model_vs_hybrid.ipynb": {
-            "deterministic_validation_session",
-            "model_probe_session",
-            "frozen_evaluation_session",
+            "deterministic_validation_session": "start_evaluation_session()",
+            "model_probe_session": "start_evaluation_session(settings)",
+            "frozen_evaluation_session": "start_evaluation_session(settings)",
         },
     }
     inference_markers = {
@@ -466,16 +483,16 @@ def test_prediction_notebooks_bind_inference_scoring_and_persistence_to_sessions
         ),
     }
 
-    for notebook_name, session_names in expected_sessions.items():
+    for notebook_name, session_starts in expected_sessions.items():
         code_sources = code_by_notebook[notebook_name]
         source = "\n".join(code_sources)
         arguments = _evaluation_session_arguments(code_sources)
 
         assert arguments, notebook_name
-        assert set(arguments) == session_names, notebook_name
-        assert source.count("start_evaluation_session()") == len(session_names)
-        for session_name in session_names:
-            start = source.index(f"{session_name} = start_evaluation_session()")
+        assert set(arguments) == set(session_starts), notebook_name
+        assert source.count("start_evaluation_session(") == len(session_starts)
+        for session_name, start_call in session_starts.items():
+            start = source.index(f"{session_name} = {start_call}")
             first_scoring = source.index(f"evaluation_session={session_name}", start)
             final_recheck = source.rindex(f"recheck_evaluation_session({session_name})")
             assert start < first_scoring < final_recheck, (
@@ -501,10 +518,10 @@ def test_prediction_notebooks_bind_inference_scoring_and_persistence_to_sessions
         "splits = load_support_splits(settings)"
     )
     assert first_invalidation < notebook_07_source.index(
-        "frozen_evaluation_session = start_evaluation_session()"
+        "frozen_evaluation_session = start_evaluation_session(settings)"
     )
     assert first_invalidation < notebook_07_source.index(
-        "lora_evaluation_session = start_evaluation_session()"
+        "lora_evaluation_session = start_evaluation_session(settings)"
     )
     persistence_cell = next(
         source
@@ -518,6 +535,21 @@ def test_prediction_notebooks_bind_inference_scoring_and_persistence_to_sessions
         "recheck_evaluation_session(lora_evaluation_session)"
     )
     assert "incomplete_path.unlink(missing_ok=True)" in persistence_cell
+
+    notebook_08_source = "\n".join(code_by_notebook["08_mlflow_and_promotion.ipynb"])
+    decision_start = notebook_08_source.index(
+        "decision_evaluation_session = start_evaluation_session(settings)"
+    )
+    first_report_load = notebook_08_source.index("load_report(", decision_start)
+    promotion_decision = notebook_08_source.index(
+        "decide_lora_promotion(", first_report_load
+    )
+    final_decision_recheck = notebook_08_source.rindex(
+        "recheck_evaluation_session(decision_evaluation_session)"
+    )
+    assert (
+        decision_start < first_report_load < promotion_decision < final_decision_recheck
+    )
 
 
 def test_adapter_evidence_lifecycle_stays_inside_notebook_shared_locks():
