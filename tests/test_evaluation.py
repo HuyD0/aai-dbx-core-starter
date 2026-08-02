@@ -518,6 +518,25 @@ def test_dataset_helper_creates_without_unsupported_tags():
     assert result.merged_records is None
 
 
+def test_dataset_helper_refuses_placeholder_experiment_ids():
+    # An unconfigured id is in-type but unusable: it must fail before the
+    # registry lookup, never reach create_dataset(), and never surface as
+    # an association mismatch the reader would misread as a real one.
+    for placeholder in ("unset", "replace-with-experiment", "<experiment-id>", "  "):
+        datasets = FakeDatasetApi(
+            get_error=RuntimeError("RESOURCE_DOES_NOT_EXIST: dataset not found")
+        )
+        with pytest.raises(ValueError, match="experiment_id"):
+            get_or_create_evaluation_dataset(
+                name="regression_v1",
+                catalog="main",
+                schema="default",
+                experiment_id=placeholder,
+                mlflow_module=_dataset_mlflow(datasets),
+            )
+        assert datasets.create_arguments is None
+
+
 def test_dataset_helper_normalizes_the_experiment_id():
     # The id is both sent to create_dataset() and compared against backend
     # ids, which come back normalized: an untrimmed value must not reach

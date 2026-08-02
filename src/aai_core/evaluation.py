@@ -489,8 +489,11 @@ def get_or_create_evaluation_dataset(
     # normalized, so untrimmed input would fail in the cloud or falsely
     # report the dataset as associated with the wrong experiment.
     experiment_id = str(experiment_id).strip()
-    if not experiment_id:
-        raise ValueError("experiment_id must not be blank")
+    if not experiment_id or _is_placeholder(experiment_id):
+        raise ValueError(
+            "experiment_id must be the real MLflow experiment id the dataset "
+            f"belongs to, not a setup placeholder; got {experiment_id!r}"
+        )
     catalog = _dataset_qualifier("catalog", catalog)
     schema = _dataset_qualifier("schema", schema)
 

@@ -136,6 +136,35 @@ def test_log_feedback_namespace_must_match_the_source_kind():
     assert captured["source"].source_id == "code:response_length_ok"
 
 
+def test_log_feedback_normalizes_forwarded_identifiers():
+    # These reach MLflow: an untrimmed trace id addresses a different or
+    # invalid trace, and an untrimmed name records feedback under a label
+    # traces_with_feedback will never match.
+    captured: dict = {}
+
+    log_feedback(
+        trace_id="  trace-1 ",
+        name=" correct\n",
+        value=False,
+        source_id="group:domain-reviewers",
+        span_id=" span-7 ",
+        mlflow_module=_fake_mlflow(captured),
+    )
+
+    assert captured["trace_id"] == "trace-1"
+    assert captured["name"] == "correct"
+    assert captured["span_id"] == "span-7"
+    with pytest.raises(ValueError, match="span_id"):
+        log_feedback(
+            trace_id="trace-1",
+            name="correct",
+            value=False,
+            source_id="group:domain-reviewers",
+            span_id="   ",
+            mlflow_module=_fake_mlflow({}),
+        )
+
+
 def test_log_feedback_refuses_blank_identifiers():
     with pytest.raises(ValueError, match="trace_id"):
         log_feedback(

@@ -62,9 +62,10 @@ All notable changes to `aai-core` are documented here.
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder, dotted, or
   invalid-character catalog/schema qualifiers and logical dataset names
-  instead of querying the registry; the experiment id is normalized
-  before the first request, so an untrimmed value can neither reach the
-  cloud call nor misreport an association the backend reports normalized.
+  instead of querying the registry; the experiment id is normalized and
+  placeholder-checked before the first request, so neither an untrimmed
+  nor an unconfigured value can reach the cloud call or misreport an
+  association the backend reports normalized.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
   dependency-free `registered_*` bodies (logic inlined, equivalence
@@ -89,7 +90,10 @@ All notable changes to `aai-core` are documented here.
   with a required assessment `source_id` namespaced by source kind
   (`group:` for human review, `judge:`/`code:` for automated scorers) so
   no governed feedback lands without provenance and no personal identity —
-  username, employee id, or email — can pass as provenance, and `traces_with_feedback()`
+  username, employee id, or email — can pass as provenance; the trace id,
+  assessment name, and span id are normalized before the native request,
+  so an untrimmed id cannot address the wrong trace and an untrimmed name
+  cannot record feedback under a label later lookups miss. Plus `traces_with_feedback()`
   for curating reviewed production traces into the governed regression
   dataset, counting only valid feedback assessments — expectations,
   invalidated (overridden) entries, and errored scorer feedback never

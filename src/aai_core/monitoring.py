@@ -62,10 +62,20 @@ def log_feedback(
     addresses are personal identities and are rejected.
     """
 
-    if not str(trace_id).strip():
+    # Normalize before building the native request: these identifiers are
+    # forwarded to MLflow, and an untrimmed trace id addresses a different
+    # (or no) trace while an untrimmed name records feedback under a label
+    # that later lookups will not match.
+    trace_id = str(trace_id).strip()
+    if not trace_id:
         raise ValueError("trace_id must not be blank")
-    if not str(name).strip():
+    name = str(name).strip()
+    if not name:
         raise ValueError("name must not be blank")
+    if span_id is not None:
+        span_id = str(span_id).strip()
+        if not span_id:
+            raise ValueError("span_id must not be blank when provided")
     if not isinstance(source_kind, FeedbackSourceKind):
         source_kind = FeedbackSourceKind(str(source_kind).strip().lower())
     if not str(source_id).strip():
