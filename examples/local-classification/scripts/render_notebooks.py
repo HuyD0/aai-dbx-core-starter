@@ -509,13 +509,13 @@ Open the run in `make mlflow-ui`, then continue to
             "code",
             common_imports(
                 "from aai_local_classification.learning import short_digest\n"
-                "from aai_local_classification.workflow import run_candidate_selection"
+                "from aai_local_classification.workflow import get_or_run_candidate_selection"
             ),
         ),
         (
             "code",
             """
-selection = run_candidate_selection(settings, root)
+selection = get_or_run_candidate_selection(settings, root)
 comparison = pd.DataFrame(
     [
         {
@@ -594,26 +594,16 @@ Next: **06_model_selection_and_threshold.ipynb**.
                 "from aai_local_classification.contracts import SplitName\n"
                 "from aai_local_classification.data import load_split\n"
                 "from aai_local_classification.evaluation import evaluate_probabilities\n"
-                "from aai_local_classification.learning import state_exists\n"
                 "from aai_local_classification.modeling import feature_frame\n"
-                "from aai_local_classification.policy import selection_policy_sha256\n"
                 "from aai_local_classification.tracking import configure_mlflow\n"
-                "from aai_local_classification.workflow import ensure_prepared, load_selection, run_candidate_selection"
+                "from aai_local_classification.workflow import get_or_run_candidate_selection"
             ),
         ),
         (
             "code",
             """
 paths = configure_mlflow(settings, root)
-manifest = ensure_prepared(settings, root)
-if not state_exists("selection.json"):
-    run_candidate_selection(settings, root)
-selection = load_selection(root)
-if (
-    selection.dataset_sha256 != manifest.dataset_sha256
-    or selection.selection_policy_sha256 != selection_policy_sha256(settings)
-):
-    selection = run_candidate_selection(settings, root)
+selection = get_or_run_candidate_selection(settings, root)
 selected = next(item for item in selection.candidates if item.run_id == selection.selected_run_id)
 model = mlflow.sklearn.load_model(selection.selected_model_uri)
 validation = load_split(settings, SplitName.VALIDATION, paths.data_root)
@@ -718,17 +708,14 @@ new release claim.
         (
             "code",
             common_imports(
-                "from aai_local_classification.learning import short_digest, state_exists\n"
-                "from aai_local_classification.workflow import run_candidate_selection, run_frozen_test_gate"
+                "from aai_local_classification.learning import short_digest\n"
+                "from aai_local_classification.workflow import get_or_run_candidate_selection, run_frozen_test_gate"
             ),
         ),
         (
             "code",
             """
-if not state_exists("selection.json"):
-    selection = run_candidate_selection(settings, root)
-else:
-    selection = None
+selection = get_or_run_candidate_selection(settings, root)
 decision = run_frozen_test_gate(settings, root, selection)
 pd.Series(
     {
@@ -814,20 +801,16 @@ Next: **08_registry_and_inference.ipynb**.
                 "from aai_local_classification.contracts import SplitName\n"
                 "from aai_local_classification.data import load_split\n"
                 "from aai_local_classification.inference import load_champion\n"
-                "from aai_local_classification.learning import state_exists\n"
                 "from aai_local_classification.tracking import local_paths\n"
-                "from aai_local_classification.workflow import ensure_prepared, load_decision, promote_if_approved, run_candidate_selection, run_frozen_test_gate"
+                "from aai_local_classification.workflow import ensure_prepared, get_or_run_candidate_selection, promote_if_approved, run_frozen_test_gate"
             ),
         ),
         (
             "code",
             """
-if not state_exists("decision.json"):
-    selected = run_candidate_selection(settings, root)
-    decision = run_frozen_test_gate(settings, root, selected)
-else:
-    decision = load_decision(root)
-promotion = promote_if_approved(settings, decision, root)
+selected = get_or_run_candidate_selection(settings, root)
+decision = run_frozen_test_gate(settings, root, selected)
+promotion = promote_if_approved(settings, decision, root, selected)
 promotion
 """,
         ),
@@ -899,19 +882,17 @@ Next: **09_monitoring_and_databricks.ipynb**.
                 "from aai_local_classification.contracts import SplitName\n"
                 "from aai_local_classification.data import load_split\n"
                 "from aai_local_classification.inference import load_champion\n"
-                "from aai_local_classification.learning import state_exists\n"
                 "from aai_local_classification.monitoring import compare_batches, shifted_batch\n"
                 "from aai_local_classification.tracking import local_paths\n"
-                "from aai_local_classification.workflow import ensure_prepared, promote_if_approved, run_candidate_selection, run_frozen_test_gate"
+                "from aai_local_classification.workflow import ensure_prepared, get_or_run_candidate_selection, promote_if_approved, run_frozen_test_gate"
             ),
         ),
         (
             "code",
             """
-if not state_exists("promotion.json"):
-    selected = run_candidate_selection(settings, root)
-    decision = run_frozen_test_gate(settings, root, selected)
-    promote_if_approved(settings, decision, root, selected)
+selected = get_or_run_candidate_selection(settings, root)
+decision = run_frozen_test_gate(settings, root, selected)
+promote_if_approved(settings, decision, root, selected)
 paths = local_paths(root)
 ensure_prepared(settings, root)
 reference = load_split(settings, SplitName.VALIDATION, paths.data_root)

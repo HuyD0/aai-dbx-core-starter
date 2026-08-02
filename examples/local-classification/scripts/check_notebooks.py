@@ -12,6 +12,28 @@ PROJECT = Path(__file__).resolve().parents[1]
 NOTEBOOKS = PROJECT / "notebooks"
 
 
+def execute(notebook: Path, output: Path, environment: dict[str, str]) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jupyter",
+            "nbconvert",
+            "--execute",
+            "--to",
+            "notebook",
+            "--ExecutePreprocessor.timeout=240",
+            "--ExecutePreprocessor.kernel_name=aai-local-classification",
+            f"--output-dir={output}",
+            str(notebook),
+        ],
+        cwd=PROJECT,
+        env=environment,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
 def main() -> int:
     subprocess.run(
         [sys.executable, "scripts/render_notebooks.py", "--check"],
@@ -29,26 +51,11 @@ def main() -> int:
         environment["AAI_CLASSIFICATION_PROJECT_ROOT"] = str(temporary / "state")
         environment["JUPYTER_PATH"] = str(PROJECT / ".venv" / "share" / "jupyter")
         for notebook in notebooks:
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "jupyter",
-                    "nbconvert",
-                    "--execute",
-                    "--to",
-                    "notebook",
-                    "--ExecutePreprocessor.timeout=240",
-                    "--ExecutePreprocessor.kernel_name=aai-local-classification",
-                    f"--output-dir={output}",
-                    str(notebook),
-                ],
-                cwd=PROJECT,
-                env=environment,
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
+            execute(notebook, output, environment)
             print(f"Executed {notebook.name}")
+        for index in (5, 7):
+            execute(notebooks[index], output, environment)
+            print(f"Re-executed {notebooks[index].name}")
     return 0
 
 

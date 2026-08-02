@@ -40,7 +40,9 @@ make mlflow-ui
 ```
 
 Open <http://127.0.0.1:5000>. The server binds only to localhost and uses the
-ignored `.aai/mlflow/mlflow.db` SQLite database. Stop it with `Ctrl-C`.
+ignored `.aai/course-v1/.aai/mlflow/mlflow.db` SQLite database. The supported
+course commands share this versioned workspace so stale evidence from an older
+course revision cannot corrupt a notebook run. Stop the server with `Ctrl-C`.
 
 ## What you learn
 
