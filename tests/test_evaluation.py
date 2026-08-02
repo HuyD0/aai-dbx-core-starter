@@ -220,6 +220,18 @@ def test_gate_result_refuses_failures_inconsistent_with_its_policy():
     assert GateResult(metrics={"quality": 0.0}).passed
 
 
+def test_gate_result_refuses_non_finite_evidence_values():
+    with pytest.raises(ValidationError, match="finite"):
+        GateResult(metrics={"quality": float("nan")})
+    with pytest.raises(ValidationError, match="finite"):
+        GateResult(metrics={"quality": float("inf")})
+    with pytest.raises(ValidationError, match="finite"):
+        GateResult(
+            metrics={"quality": 0.9},
+            baseline_metrics={"quality": float("nan")},
+        )
+
+
 def test_gate_result_with_regression_rule_round_trips_with_its_baseline():
     policy = GatePolicy(
         rules=(

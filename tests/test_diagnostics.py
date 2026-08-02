@@ -52,6 +52,19 @@ def test_doctor_reports_lifecycle_readiness_as_skips_not_failures(tmp_path):
     assert all(c.status in {"pass", "skip", "info"} for c in lifecycle_checks)
 
 
+def test_doctor_treats_every_placeholder_qualifier_as_unconfigured(tmp_path):
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  catalog: ChangeMe\n  schema: todo\n",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+
+
 def test_doctor_passes_lifecycle_checks_when_configured(tmp_path):
     config = tmp_path / "aai-platform.yml"
     config.write_text(

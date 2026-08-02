@@ -97,7 +97,16 @@ class GateResult(ContractModel):
     def freeze_metrics(
         cls, value: Mapping[str, float] | None
     ) -> Mapping[str, float] | None:
-        return None if value is None else freeze_value(value)
+        if value is None:
+            return None
+        for name, metric in value.items():
+            # NaN compares false against every threshold, so a non-finite
+            # value would silently pass policy recomputation.
+            if not isfinite(metric):
+                raise ValueError(
+                    f"gate evidence metric {name!r} must be a finite number"
+                )
+        return freeze_value(value)
 
     @field_serializer("metrics", "baseline_metrics")
     def serialize_metrics(

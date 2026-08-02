@@ -9,12 +9,10 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from aai_core.evaluation import judge_model_uri
+from aai_core.evaluation import _QUALIFIER_PLACEHOLDERS, judge_model_uri
 from aai_core.identity import identity_summary
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings
-
-_UNSET = {"", "unset"}
 
 
 @dataclass(frozen=True)
@@ -81,9 +79,16 @@ def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
         )
     ]
 
+    # Same placeholder vocabulary the dataset helper rejects, so the doctor
+    # never reports ready what the connected workflow will refuse.
     catalog = str(settings.catalog).strip()
     schema = str(settings.schema_name).strip()
-    if catalog.lower() in _UNSET or schema.lower() in _UNSET:
+    if (
+        not catalog
+        or not schema
+        or catalog.lower() in _QUALIFIER_PLACEHOLDERS
+        or schema.lower() in _QUALIFIER_PLACEHOLDERS
+    ):
         checks.append(
             DoctorCheck(
                 "lifecycle:prompt-registry",
