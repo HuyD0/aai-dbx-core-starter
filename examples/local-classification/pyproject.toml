@@ -47,8 +47,10 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/notebook_content.py" = ["E501"]
 "scripts/render_notebooks.py" = ["E501"]
-"notebooks/*.ipynb" = ["E501", "I001"]
+# Each lesson intentionally runs a preflight check before later import cells.
+"notebooks/*.ipynb" = ["E402", "E501", "I001"]
 
 [tool.black]
 target-version = ["py311", "py312"]

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from aai_local_classification.contracts import PromotionDecision
+from aai_local_classification.data import generate_subscription_data
 from aai_local_classification.evaluation import (
     evaluate_probabilities,
     maximum_recall_gap,
@@ -14,6 +15,7 @@ from aai_local_classification.evaluation import (
 )
 from aai_local_classification.modeling import (
     build_candidate,
+    build_preprocessor,
     candidate_specs,
     feature_frame,
 )
@@ -95,7 +97,7 @@ def test_pipeline_handles_missing_and_unseen_categories(settings):
             "plan_tier": ["pro", "plus", "plus", "basic", "basic", "basic"],
             "signup_channel": [
                 "paid_search",
-                None,
+                np.nan,
                 "partner",
                 "organic",
                 "organic",
@@ -114,6 +116,26 @@ def test_pipeline_handles_missing_and_unseen_categories(settings):
     probabilities = model.predict_proba(future)
     assert probabilities.shape == (1, 2)
     assert np.isclose(probabilities.sum(), 1.0)
+
+
+def test_generated_missing_category_is_imputed_before_encoding(settings):
+    generated = generate_subscription_data(settings)
+    preprocessor = build_preprocessor(settings).fit(feature_frame(generated, settings))
+    categorical = preprocessor.named_transformers_["categorical"]
+    categories = categorical.named_steps["one_hot"].categories_
+    encoded_values = [value for values in categories for value in values]
+    feature_names = set(preprocessor.get_feature_names_out())
+
+    assert generated["signup_channel"].isna().any()
+    assert not any(pd.isna(value) for value in encoded_values)
+    assert (
+        not {
+            "signup_channel_None",
+            "signup_channel_nan",
+            "signup_channel_<NA>",
+        }
+        & feature_names
+    )
 
 
 def test_slice_gap_and_gate_are_explicit(settings):
