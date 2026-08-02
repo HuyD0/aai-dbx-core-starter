@@ -10,7 +10,7 @@ import shutil
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,16 @@ from .offline import (
     write_flight_manifest,
 )
 from .settings import PROJECT_ROOT, ProjectSettings, load_settings
-from .training import run_lora
+from .training import (
+    TRAINING_MANIFEST_NAME,
+    TrainingManifestError,
+    ValidatedTrainingSnapshot,
+    exclusive_adapter_lock,
+    recheck_training_snapshot,
+    require_valid_training_snapshot,
+    run_lora,
+    shared_adapter_lock,
+)
 
 
 class StudyCommandError(RuntimeError):
@@ -133,6 +142,34 @@ def _require_prepared_split_integrity(processed_dir: Path) -> None:
         ) from error
 
 
+def _require_trained_adapter(
+    adapter_dir: Path,
+    *,
+    config_path: Path,
+    train_command: str,
+) -> ValidatedTrainingSnapshot:
+    """Reject adapter bytes without matching successful-training evidence."""
+
+    try:
+        return require_valid_training_snapshot(
+            adapter_dir,
+            config_path=config_path,
+        )
+    except (TrainingManifestError, OSError, ValueError) as error:
+        raise StudyCommandError(
+            "LoRA adapter training evidence is missing, stale, or mismatched; "
+            f"rerun `{train_command}` before evaluation:\n{error}"
+        ) from error
+
+
+def _adapter_evidence_present(adapter_dir: Path) -> bool:
+    evidence_paths = (
+        adapter_dir / "adapters.safetensors",
+        adapter_dir / TRAINING_MANIFEST_NAME,
+    )
+    return any(path.exists() or path.is_symlink() for path in evidence_paths)
+
+
 def _write_evaluation(
     *,
     name: str,
@@ -155,6 +192,7 @@ def _track_report(
     role: str,
     records: Sequence[EvaluationRecord],
     report: EvaluationReport,
+    training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> str:
     from .tracking import log_evaluation
 
@@ -171,6 +209,7 @@ def _track_report(
             PROJECT_ROOT / "artifacts" / "evaluation" / f"{name}-predictions.jsonl"
         ),
         model_based=name not in {"majority", "keyword-rule"},
+        training_snapshot=training_snapshot,
     )
 
 
@@ -180,10 +219,15 @@ def _score_predictions(
     records: Sequence[EvaluationRecord],
     predictions: Sequence[Prediction],
     supported_intents: Sequence[str],
+    training_manifest_sha256: str | None = None,
 ) -> EvaluationReport:
     report = Evaluator(supported_intents=supported_intents).evaluate(
         records, predictions
     )
+    if training_manifest_sha256 is not None:
+        report = report.model_copy(
+            update={"training_manifest_sha256": training_manifest_sha256}
+        )
     _write_evaluation(
         name=name,
         records=records,
@@ -689,17 +733,22 @@ def _cmd_baselines(args: argparse.Namespace, settings: ProjectSettings) -> None:
 def _cmd_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
     _require_prepared_split_integrity(settings.processed_dir)
     require_assets(settings)
-    evidence = run_lora(iterations=args.iterations)
+    smoke_adapter = (
+        settings.adapter_dir.with_name(f"{settings.adapter_dir.name}-smoke")
+        if args.iterations is not None
+        else None
+    )
+    evidence = run_lora(
+        iterations=args.iterations,
+        adapter_path=smoke_adapter,
+        log_name="support-smoke" if smoke_adapter is not None else "latest",
+    )
     print(evidence.model_dump_json(indent=2))
 
 
 def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     _require_prepared_split_integrity(settings.processed_dir)
     require_assets(settings)
-    train, _, test = _load_splits(settings)
-    records = _balanced_subset(test, args.limit)
-    supported, _ = _intent_categories(train)
-    deterministic = _baseline_reports(settings, records=records, track=args.track)
 
     requested = {"basic", "strong", "few-shot", "lora"}
     if args.methods != "all":
@@ -707,6 +756,26 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
         unknown = requested.difference({"basic", "strong", "few-shot", "lora"})
         if unknown:
             raise StudyCommandError("unknown evaluation methods: " + ", ".join(unknown))
+
+    promotion_path = PROJECT_ROOT / "artifacts" / "evaluation" / "promotion.json"
+    if "lora" in requested:
+        promotion_path.unlink(missing_ok=True)
+
+    lora_snapshot: ValidatedTrainingSnapshot | None = None
+    if "lora" in requested:
+        if _adapter_evidence_present(settings.adapter_dir):
+            lora_snapshot = _require_trained_adapter(
+                settings.adapter_dir,
+                config_path=PROJECT_ROOT / "configs" / "training" / "lora.yaml",
+                train_command="make train",
+            )
+        else:
+            print("LoRA adapter is absent; run `make train` before LoRA evaluation.")
+
+    train, _, test = _load_splits(settings)
+    records = _balanced_subset(test, args.limit)
+    supported, _ = _intent_categories(train)
+    deterministic = _baseline_reports(settings, records=records, track=args.track)
 
     reports: dict[str, EvaluationReport] = dict(deterministic)
     base_methods = [
@@ -745,11 +814,14 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
             )
 
     lora_report: EvaluationReport | None = None
-    if "lora" in requested:
-        adapter_weights = settings.adapter_dir / "adapters.safetensors"
-        if not adapter_weights.is_file():
-            print("LoRA adapter is absent; run `make train` before LoRA evaluation.")
-        else:
+    lora_context = (
+        shared_adapter_lock(settings.adapter_dir)
+        if lora_snapshot is not None
+        else nullcontext()
+    )
+    with lora_context:
+        if "lora" in requested and lora_snapshot is not None:
+            recheck_training_snapshot(lora_snapshot)
             predictor = LocalMLXPredictor(
                 settings.model_dir,
                 adapter_path=settings.adapter_dir,
@@ -761,11 +833,13 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 train=train,
                 max_tokens=args.max_tokens,
             )
+            recheck_training_snapshot(lora_snapshot)
             lora_report = _score_predictions(
                 name="lora-change",
                 records=records,
                 predictions=predictions,
                 supported_intents=supported,
+                training_manifest_sha256=lora_snapshot.manifest_sha256,
             )
             reports["lora-change"] = lora_report
             if args.track:
@@ -775,39 +849,48 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                     role="change",
                     records=records,
                     report=lora_report,
+                    training_snapshot=lora_snapshot,
                 )
                 print(f"  local MLflow run: {run_id}")
             print(format_error_analysis(lora_report))
 
-    complete_promotion_evidence = (
-        lora_report is not None
-        and args.limit is None
-        and requested == {"basic", "strong", "few-shot", "lora"}
-    )
-    if complete_promotion_evidence and lora_report is not None:
-        baselines = [
-            BaselineEvaluation(
-                name=name,
-                report=report,
-                meaningful=name != "majority",
+        complete_promotion_evidence = (
+            lora_report is not None
+            and args.limit is None
+            and requested == {"basic", "strong", "few-shot", "lora"}
+        )
+        if (
+            complete_promotion_evidence
+            and lora_report is not None
+            and lora_snapshot is not None
+        ):
+            recheck_training_snapshot(lora_snapshot)
+            baselines = [
+                BaselineEvaluation(
+                    name=name,
+                    report=report,
+                    meaningful=name != "majority",
+                )
+                for name, report in reports.items()
+                if name != "lora-change"
+            ]
+            assessment = decide_lora_promotion(
+                change_name="bitext-lora-v1",
+                training_manifest_sha256=lora_snapshot.manifest_sha256,
+                change_report=lora_report,
+                baselines=baselines,
             )
-            for name, report in reports.items()
-            if name != "lora-change"
-        ]
-        assessment = decide_lora_promotion(
-            change_name="bitext-lora-v1",
-            change_report=lora_report,
-            baselines=baselines,
-        )
-        path = PROJECT_ROOT / "artifacts" / "evaluation" / "promotion.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(assessment.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        print(f"Decision: {assessment.decision.value}")
-    elif lora_report is not None:
-        print(
-            "Decision: inconclusive (partial or debug evaluation is report-only; "
-            "run the full frozen set with all methods for promotion evidence)"
-        )
+            promotion_path.parent.mkdir(parents=True, exist_ok=True)
+            promotion_path.write_text(
+                assessment.model_dump_json(indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(f"Decision: {assessment.decision.value}")
+        elif lora_report is not None:
+            print(
+                "Decision: inconclusive (partial or debug evaluation is report-only; "
+                "run the full frozen set with all methods for promotion evidence)"
+            )
 
 
 def _cmd_capstone(_args: argparse.Namespace, _settings: ProjectSettings) -> None:
@@ -817,23 +900,26 @@ def _cmd_capstone(_args: argparse.Namespace, _settings: ProjectSettings) -> None
 def _cmd_capstone_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
     require_assets(settings)
     _generate_capstone()
+    smoke_adapter = (
+        settings.capstone_adapter_dir.with_name(
+            f"{settings.capstone_adapter_dir.name}-smoke"
+        )
+        if args.iterations is not None
+        else None
+    )
     evidence = run_lora(
         iterations=args.iterations,
         config_path=PROJECT_ROOT / "configs" / "training" / "capstone-lora.yaml",
-        log_name="capstone-latest",
+        adapter_path=smoke_adapter,
+        log_name="capstone-smoke" if smoke_adapter is not None else "capstone-latest",
     )
     print(evidence.model_dump_json(indent=2))
 
 
 def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     require_assets(settings)
-    _generate_capstone()
-    source = PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1"
-    train = load_capstone_records(source / "train.jsonl")
-    all_test = load_capstone_records(source / "test.jsonl")
     if args.limit is not None and args.limit < 1:
         raise StudyCommandError("--limit must be positive")
-    records = all_test if args.limit is None else all_test[: args.limit]
     allowed = {"policy", "basic", "strong", "few-shot", "lora", "hybrid"}
     requested = allowed if args.methods == "all" else set(args.methods.split(","))
     unknown = requested - allowed
@@ -842,13 +928,44 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             "unknown capstone methods: " + ", ".join(sorted(unknown))
         )
 
+    decision_path = PROJECT_ROOT / "artifacts" / "capstone-evaluation" / "decision.json"
+    if "lora" in requested:
+        decision_path.unlink(missing_ok=True)
+
+    _generate_capstone()
+    lora_snapshot: ValidatedTrainingSnapshot | None = None
+    if "lora" in requested:
+        if _adapter_evidence_present(settings.capstone_adapter_dir):
+            lora_snapshot = _require_trained_adapter(
+                settings.capstone_adapter_dir,
+                config_path=(
+                    PROJECT_ROOT / "configs" / "training" / "capstone-lora.yaml"
+                ),
+                train_command="make capstone-train",
+            )
+        else:
+            print(
+                "Capstone LoRA adapter is absent; " "run `make capstone-train` first."
+            )
+
+    source = PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1"
+    train = load_capstone_records(source / "train.jsonl")
+    all_test = load_capstone_records(source / "test.jsonl")
+    records = all_test if args.limit is None else all_test[: args.limit]
+
     reports: dict[str, CapstoneEvaluationReport] = {}
 
     def score(
         name: str,
         predictions: Sequence[CapstonePrediction],
+        *,
+        training_manifest_sha256: str | None = None,
     ) -> CapstoneEvaluationReport:
         report = evaluate_capstone_predictions(records, predictions)
+        if training_manifest_sha256 is not None:
+            report = report.model_copy(
+                update={"training_manifest_sha256": training_manifest_sha256}
+            )
         _write_capstone_evaluation(name, records, predictions, report)
         reports[name] = report
         print(
@@ -899,106 +1016,186 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         )
 
     lora_report: CapstoneEvaluationReport | None = None
-    if "lora" in requested:
-        adapter = settings.capstone_adapter_dir / "adapters.safetensors"
-        if not adapter.is_file():
-            print("Capstone LoRA adapter is absent; run `make capstone-train` first.")
-        else:
+    lora_context = (
+        shared_adapter_lock(settings.capstone_adapter_dir)
+        if lora_snapshot is not None
+        else nullcontext()
+    )
+    with lora_context:
+        if "lora" in requested and lora_snapshot is not None:
+            recheck_training_snapshot(lora_snapshot)
             predictor = LocalMLXPredictor(
                 settings.model_dir,
-                adapter_path=adapter.parent,
+                adapter_path=settings.capstone_adapter_dir,
             )
+            lora_predictions = _capstone_model_predictions(
+                predictor,
+                records,
+                strategy="basic",
+                train=train,
+                max_tokens=args.max_tokens,
+                display_name="lora",
+            )
+            recheck_training_snapshot(lora_snapshot)
             lora_report = score(
                 "capstone-lora-change",
-                _capstone_model_predictions(
-                    predictor,
-                    records,
-                    strategy="basic",
-                    train=train,
-                    max_tokens=args.max_tokens,
-                    display_name="lora",
-                ),
+                lora_predictions,
+                training_manifest_sha256=lora_snapshot.manifest_sha256,
             )
 
-    decision_path = PROJECT_ROOT / "artifacts" / "capstone-evaluation" / "decision.json"
-    required_baselines = {"basic", "strong", "few-shot"}
-    complete = (
-        lora_report is not None
-        and args.limit is None
-        and required_baselines <= requested
-        and len(records) == 150
-    )
-    if complete and lora_report is not None:
-        strongest_name = max(
-            required_baselines,
-            key=lambda name: (
-                reports[name].aggregate.exact_review_rate,
-                reports[name].aggregate.check_result_accuracy,
-                name,
-            ),
+        required_baselines = {"basic", "strong", "few-shot"}
+        complete = (
+            lora_report is not None
+            and args.limit is None
+            and required_baselines <= requested
+            and len(records) == 150
         )
-        strongest = reports[strongest_name]
-        change_score = lora_report.aggregate.exact_review_rate
-        baseline_score = strongest.aggregate.exact_review_rate
-        passed_gates = (
-            lora_report.aggregate.schema_validity_rate >= 0.98
-            and lora_report.aggregate.extra_check_rate == 0.0
-            and lora_report.aggregate.status_accuracy
-            >= strongest.aggregate.status_accuracy
+        if complete and lora_report is not None and lora_snapshot is not None:
+            recheck_training_snapshot(lora_snapshot)
+            strongest_name = max(
+                required_baselines,
+                key=lambda name: (
+                    reports[name].aggregate.exact_review_rate,
+                    reports[name].aggregate.check_result_accuracy,
+                    name,
+                ),
+            )
+            strongest = reports[strongest_name]
+            change_score = lora_report.aggregate.exact_review_rate
+            baseline_score = strongest.aggregate.exact_review_rate
+            passed_gates = (
+                lora_report.aggregate.schema_validity_rate >= 0.98
+                and lora_report.aggregate.extra_check_rate == 0.0
+                and lora_report.aggregate.status_accuracy
+                >= strongest.aggregate.status_accuracy
+            )
+            decision = (
+                "adopt" if change_score > baseline_score and passed_gates else "reject"
+            )
+            reason = (
+                "the compact LoRA change beat the strongest untouched-model baseline "
+                "and passed the absolute gates"
+                if decision == "adopt"
+                else "the compact LoRA change did not beat the strongest complete "
+                "untouched-model evidence and every absolute gate"
+            )
+            payload: dict[str, Any] = {
+                "baseline": {
+                    "name": strongest_name,
+                    "exact_review_rate": baseline_score,
+                },
+                "change": {
+                    "name": "capstone-lora-v1",
+                    "exact_review_rate": change_score,
+                    "training_manifest_sha256": lora_snapshot.manifest_sha256,
+                },
+                "result": {"passed_absolute_gates": passed_gates, "reason": reason},
+                "decision": decision,
+            }
+        else:
+            payload = {
+                "baseline": None,
+                "change": {
+                    "name": "capstone-lora-v1",
+                    "training_manifest_sha256": (
+                        lora_snapshot.manifest_sha256
+                        if lora_snapshot is not None
+                        else None
+                    ),
+                },
+                "result": {
+                    "reason": (
+                        "full frozen LoRA and basic/strong/few-shot evidence "
+                        "is required"
+                    )
+                },
+                "decision": "inconclusive",
+            }
+        payload["architecture_boundary"] = (
+            "Deterministic checks remain authoritative; a model may only supply "
+            "bounded normalization or explanation wording."
         )
-        decision = (
-            "adopt" if change_score > baseline_score and passed_gates else "reject"
+        decision_path.write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
         )
-        reason = (
-            "the compact LoRA change beat the strongest untouched-model baseline "
-            "and passed the absolute gates"
-            if decision == "adopt"
-            else "the compact LoRA change did not beat the strongest complete "
-            "untouched-model evidence and every absolute gate"
-        )
-        payload: dict[str, Any] = {
-            "baseline": {
-                "name": strongest_name,
-                "exact_review_rate": baseline_score,
-            },
-            "change": {
-                "name": "capstone-lora-v1",
-                "exact_review_rate": change_score,
-            },
-            "result": {"passed_absolute_gates": passed_gates, "reason": reason},
-            "decision": decision,
-        }
-    else:
-        payload = {
-            "baseline": None,
-            "change": {"name": "capstone-lora-v1"},
-            "result": {
-                "reason": (
-                    "full frozen LoRA and basic/strong/few-shot evidence is required"
+        print(f"Capstone model-change decision: {payload['decision']}")
+
+
+def _remove_generated_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _clean_artifacts_preserving_adapter_locks() -> bool:
+    """Remove generated artifacts without ever unlinking stable lock inodes."""
+
+    artifacts = PROJECT_ROOT / "artifacts"
+    if not artifacts.exists():
+        return False
+    if artifacts.is_symlink() or not artifacts.is_dir():
+        raise StudyCommandError("generated artifacts path must be a real directory")
+
+    removed = False
+    adapter_root = artifacts / "adapters"
+    for child in tuple(artifacts.iterdir()):
+        if child == adapter_root and child.is_dir() and not child.is_symlink():
+            for adapter_child in tuple(child.iterdir()):
+                persistent_lock = (
+                    adapter_child.name.startswith(".")
+                    and adapter_child.name.endswith(".lock")
+                    and adapter_child.is_file()
+                    and not adapter_child.is_symlink()
                 )
-            },
-            "decision": "inconclusive",
-        }
-    payload["architecture_boundary"] = (
-        "Deterministic checks remain authoritative; a model may only supply "
-        "bounded normalization or explanation wording."
+                if persistent_lock:
+                    continue
+                _remove_generated_path(adapter_child)
+                removed = True
+            continue
+        _remove_generated_path(child)
+        removed = True
+    return removed
+
+
+def _clean_study_adapter_targets(settings: ProjectSettings) -> tuple[Path, ...]:
+    """Return every adapter directory created by a supported CLI workflow."""
+
+    candidates = (
+        settings.adapter_dir,
+        settings.adapter_dir.with_name(f"{settings.adapter_dir.name}-smoke"),
+        settings.capstone_adapter_dir,
+        settings.capstone_adapter_dir.with_name(
+            f"{settings.capstone_adapter_dir.name}-smoke"
+        ),
+        settings.preflight_adapter_dir,
     )
-    decision_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(f"Capstone model-change decision: {payload['decision']}")
+    resolved = {candidate.resolve() for candidate in candidates}
+    return tuple(sorted(resolved, key=lambda path: path.as_posix()))
 
 
 def _cmd_clean_study(_args: argparse.Namespace, settings: ProjectSettings) -> None:
-    targets = (
-        settings.processed_dir,
-        PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1",
-        PROJECT_ROOT / "data" / "processed" / "capstone-mlx-v1",
-        PROJECT_ROOT / "artifacts",
-        PROJECT_ROOT / ".aai",
-    )
-    for target in targets:
-        if target.exists():
-            shutil.rmtree(target)
-            print(f"Removed generated output: {target.relative_to(PROJECT_ROOT)}")
+    with ExitStack() as adapter_locks:
+        for adapter_target in _clean_study_adapter_targets(settings):
+            adapter_locks.enter_context(exclusive_adapter_lock(adapter_target))
+        targets = (
+            settings.processed_dir,
+            PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1",
+            PROJECT_ROOT / "data" / "processed" / "capstone-mlx-v1",
+        )
+        for target in targets:
+            if target.exists() or target.is_symlink():
+                _remove_generated_path(target)
+                print(
+                    "Removed generated output: " f"{target.relative_to(PROJECT_ROOT)}"
+                )
+        if _clean_artifacts_preserving_adapter_locks():
+            print("Removed generated output: artifacts")
+        tracking_root = PROJECT_ROOT / ".aai"
+        if tracking_root.exists() or tracking_root.is_symlink():
+            _remove_generated_path(tracking_root)
+            print("Removed generated output: .aai")
     print("Raw downloads, the local model, and the locked environment were retained.")
 
 

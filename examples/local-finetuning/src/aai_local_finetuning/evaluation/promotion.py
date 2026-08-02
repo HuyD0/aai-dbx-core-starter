@@ -52,6 +52,11 @@ class EvaluationSnapshot(StrictEvidenceModel):
 class ChangeEvidence(StrictEvidenceModel):
     name: str = Field(min_length=1)
     method: Literal["lora_fine_tune"] = "lora_fine_tune"
+    training_manifest_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
 
 class PromotionResult(StrictEvidenceModel):
@@ -77,6 +82,7 @@ class PromotionAssessment(StrictEvidenceModel):
 def decide_lora_promotion(
     *,
     change_name: str,
+    training_manifest_sha256: str,
     change_report: EvaluationReport,
     baselines: tuple[BaselineEvaluation, ...] | list[BaselineEvaluation],
     thresholds: PromotionThresholds | None = None,
@@ -85,6 +91,10 @@ def decide_lora_promotion(
 
     if not change_name.strip():
         raise ValueError("change_name must not be blank")
+    if change_report.training_manifest_sha256 != training_manifest_sha256:
+        raise ValueError(
+            "change report must carry the supplied training manifest SHA-256"
+        )
     policy = thresholds or PromotionThresholds()
     evaluated_change = _snapshot(change_name, change_report)
     schema_pass = (
@@ -108,7 +118,10 @@ def decide_lora_promotion(
             reasons.append("change exceeded the unsupported-intent threshold")
         return PromotionAssessment(
             baseline=None,
-            change=ChangeEvidence(name=change_name),
+            change=ChangeEvidence(
+                name=change_name,
+                training_manifest_sha256=training_manifest_sha256,
+            ),
             result=PromotionResult(
                 evaluated_change=evaluated_change,
                 comparable=False,
@@ -137,7 +150,10 @@ def decide_lora_promotion(
     if not comparable:
         return PromotionAssessment(
             baseline=baseline_snapshot,
-            change=ChangeEvidence(name=change_name),
+            change=ChangeEvidence(
+                name=change_name,
+                training_manifest_sha256=training_manifest_sha256,
+            ),
             result=PromotionResult(
                 evaluated_change=evaluated_change,
                 comparable=False,
@@ -184,7 +200,10 @@ def decide_lora_promotion(
         )
     return PromotionAssessment(
         baseline=baseline_snapshot,
-        change=ChangeEvidence(name=change_name),
+        change=ChangeEvidence(
+            name=change_name,
+            training_manifest_sha256=training_manifest_sha256,
+        ),
         result=PromotionResult(
             evaluated_change=evaluated_change,
             macro_f1_gain=gain,

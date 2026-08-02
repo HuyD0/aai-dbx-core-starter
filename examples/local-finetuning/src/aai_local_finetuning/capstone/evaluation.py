@@ -105,6 +105,10 @@ class CapstoneErrorAnalysis(StrictFrozenModel):
 class CapstoneEvaluationReport(StrictFrozenModel):
     total_examples: int = Field(ge=1)
     evaluation_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    training_manifest_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     aggregate: CapstoneScoreMetrics
     by_slice: dict[str, CapstoneScoreMetrics]
     performance: CapstonePerformance

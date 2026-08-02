@@ -6,6 +6,7 @@ import hashlib
 import json
 import random
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,65 @@ _SEEN_FAILURE_COMBINATIONS: tuple[tuple[str, ...], ...] = (
 )
 
 
+@dataclass(frozen=True)
+class _ScenarioProfile:
+    """A plausible application context assigned to exactly one data split."""
+
+    owner: str
+    business_domain: str
+    workload_shape: str
+
+
+@dataclass(frozen=True)
+class _ScenarioSignature:
+    """A primary policy scenario paired with its split-owned context."""
+
+    primary_slice: str
+    profile: _ScenarioProfile
+    variant: int
+
+
+# Application names are unique record identifiers, not a leakage boundary.  These
+# context pairs make the scenario itself split-specific without exposing a literal
+# train/validation/test marker to the model.  Both values are policy-neutral beyond
+# their required presence.  There is one profile per complete slice cycle so a
+# split never repeats a normalized scenario merely to reach its requested count.
+_SCENARIO_PROFILES: dict[DatasetSplit, tuple[_ScenarioProfile, ...]] = {
+    DatasetSplit.TRAIN: (
+        _ScenarioProfile("commerce-ai", "commerce", "scheduled-batch"),
+        _ScenarioProfile("logistics-ai", "logistics", "event-driven"),
+        _ScenarioProfile("identity-ai", "identity", "request-response"),
+        _ScenarioProfile("support-ai", "customer-support", "streaming"),
+        _ScenarioProfile("finance-ai", "finance-operations", "document-processing"),
+        _ScenarioProfile("supply-ai", "supply-chain", "retrieval"),
+        _ScenarioProfile("claims-ai", "claims", "classification"),
+        _ScenarioProfile("workplace-ai", "workplace-services", "summarization"),
+        _ScenarioProfile("procurement-ai", "procurement", "routing"),
+        _ScenarioProfile("research-ai", "research-operations", "forecasting"),
+        _ScenarioProfile("compliance-ai", "compliance-operations", "reconciliation"),
+        _ScenarioProfile("forecasting-ai", "demand-forecasting", "optimization"),
+        _ScenarioProfile("knowledge-ai", "knowledge-management", "anomaly-detection"),
+        _ScenarioProfile("scheduling-ai", "workforce-scheduling", "extraction"),
+        _ScenarioProfile("quality-ai", "quality-assurance", "recommendation"),
+        _ScenarioProfile("facilities-ai", "facilities-operations", "triage"),
+    ),
+    DatasetSplit.VALIDATION: (
+        _ScenarioProfile("billing-ai", "billing", "conversational"),
+        _ScenarioProfile("fulfillment-ai", "fulfillment", "workflow-assistance"),
+        _ScenarioProfile("trust-ai", "trust-safety", "search-ranking"),
+        _ScenarioProfile("catalog-ai", "product-catalog", "form-processing"),
+    ),
+    DatasetSplit.TEST: (
+        _ScenarioProfile("returns-ai", "returns", "queue-prioritization"),
+        _ScenarioProfile("fraud-ai", "fraud-operations", "report-generation"),
+        _ScenarioProfile("travel-ai", "travel-operations", "alert-enrichment"),
+        _ScenarioProfile("health-ai", "health-operations", "case-assignment"),
+        _ScenarioProfile("field-ai", "field-services", "policy-explanation"),
+        _ScenarioProfile("service-desk-ai", "service-desk", "data-normalization"),
+    ),
+}
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
@@ -85,12 +145,15 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _base_manifest(split: DatasetSplit, ordinal: int) -> dict[str, Any]:
+def _base_manifest(
+    ordinal: int,
+    profile: _ScenarioProfile,
+) -> dict[str, Any]:
     return {
         "schema_version": "1.0.0",
-        "application_name": f"readiness-study-{split.value}-{ordinal:04d}",
-        "owner": "platform-ai",
-        "business_domain": "customer-operations",
+        "application_name": f"{profile.business_domain}-readiness-{ordinal:04d}",
+        "owner": profile.owner,
+        "business_domain": profile.business_domain,
         "lifecycle": "production",
         "model_revision": "tiny-instruct@sha256:1f2e3d4c5b6a",
         "model_revision_pinned": True,
@@ -109,7 +172,8 @@ def _base_manifest(split: DatasetSplit, ordinal: int) -> dict[str, Any]:
         "external_registry_lookup_required": False,
         "human_risk_judgment_required": False,
         "description": (
-            "A synthetic application used only for the offline readiness capstone."
+            f"A synthetic {profile.workload_shape} application used only for the "
+            "offline readiness capstone."
         ),
         "declared_controls": ["change-review", "regression-gate"],
     }
@@ -185,8 +249,10 @@ def _apply_slice(
         manifest["data_classifications"] = []
     elif slice_name == "missing_approvals":
         manifest["required_approvals_complete"] = False
-    elif slice_name in {"one_critical_failure", "known_high_findings"}:
-        manifest["known_high_severity_findings"] = 1 + variant % 4
+    elif slice_name == "one_critical_failure":
+        manifest["known_high_severity_findings"] = 1
+    elif slice_name == "known_high_findings":
+        manifest["known_high_severity_findings"] = 2 + variant % 4
     elif slice_name == "multiple_interacting_failures":
         fields = _SEEN_FAILURE_COMBINATIONS[variant % len(_SEEN_FAILURE_COMBINATIONS)]
         for field in fields:
@@ -201,9 +267,14 @@ def _apply_slice(
         manifest["lifecycle"] = "candidate"
     elif slice_name == "minimal_manifest":
         application_name = manifest["application_name"]
+        description = manifest["description"]
         manifest.clear()
         manifest.update(
-            {"schema_version": "1.0.0", "application_name": application_name}
+            {
+                "schema_version": "1.0.0",
+                "application_name": application_name,
+                "description": description,
+            }
         )
     elif slice_name == "unexpected_nulls":
         for field in (
@@ -237,11 +308,30 @@ def _apply_slice(
     return tuple(slices)
 
 
-def _slice_schedule(split: DatasetSplit, count: int, rng: random.Random) -> list[str]:
+def _scenario_schedule(
+    split: DatasetSplit,
+    count: int,
+    rng: random.Random,
+    *,
+    seed: int,
+) -> list[_ScenarioSignature]:
+    """Partition policy scenarios into split-owned contexts before shuffling."""
+
     eligible = list(ALL_GENERATION_SLICES)
     if split is not DatasetSplit.TEST:
         eligible.remove("unseen_combinations_of_known_failures")
-    schedule = [eligible[index % len(eligible)] for index in range(count)]
+        # This sparse edge case retains only a policy-neutral workload shape;
+        # it remains frozen-test-only rather than teaching the sparse template.
+        eligible.remove("minimal_manifest")
+    profiles = _SCENARIO_PROFILES[split]
+    schedule = [
+        _ScenarioSignature(
+            primary_slice=eligible[index % len(eligible)],
+            profile=profiles[(index // len(eligible)) % len(profiles)],
+            variant=seed + index,
+        )
+        for index in range(count)
+    ]
     rng.shuffle(schedule)
     return schedule
 
@@ -260,16 +350,16 @@ def build_records(
         DatasetSplit.TEST: 37,
     }[split]
     rng = random.Random(seed + split_offset)
-    schedule = _slice_schedule(split, count, rng)
+    schedule = _scenario_schedule(split, count, rng, seed=seed)
     engine = ReadinessPolicyEngine(as_of=DEFAULT_AS_OF)
     records: list[CapstoneRecord] = []
-    for ordinal, slice_name in enumerate(schedule):
-        manifest = _base_manifest(split, ordinal)
+    for ordinal, signature in enumerate(schedule):
+        manifest = _base_manifest(ordinal, signature.profile)
         slices = _apply_slice(
             manifest,
-            slice_name,
+            signature.primary_slice,
             split=split,
-            variant=ordinal + seed,
+            variant=signature.variant,
         )
         identity_material = {
             "dataset_version": DATASET_VERSION,
@@ -354,7 +444,7 @@ def generate_capstone_dataset(
         dataset_version=DATASET_VERSION,
         policy_version=POLICY_VERSION,
         seed=seed,
-        strategy="controlled_policy_slices",
+        strategy="group_partitioned_controlled_policy_slices",
         frozen_test=True,
         artifacts=tuple(artifacts),
         dataset_sha256=_sha256("\n".join(content_hashes).encode()),

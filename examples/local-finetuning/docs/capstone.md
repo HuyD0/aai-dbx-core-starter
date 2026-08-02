@@ -129,6 +129,12 @@ unknown fields, invalid lifecycle, long and minimal manifests, unexpected
 nulls, and unseen combinations of known failures. It also covers every policy,
 external, and human-review rule.
 
+Application-context families are assigned to one split before slice variants
+are expanded. Removing the record-specific application name therefore leaves
+no duplicate manifest in another split. This group-style partition matters:
+randomly naming otherwise identical synthetic rows would make a frozen test
+look independent while mostly measuring memorization.
+
 Each expected output comes from the exact policy engine. No LLM creates labels.
 Any language variation added later must be validated back against those
 immutable results and reviewed before it becomes training data.

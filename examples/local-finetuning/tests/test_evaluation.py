@@ -317,6 +317,9 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
         _record("two", "cash at atm", "cash_withdrawal", "cash"),
     ]
     perfect_report = evaluate_predictions(records, _perfect_predictions(records))
+    lined_perfect_report = perfect_report.model_copy(
+        update={"training_manifest_sha256": "a" * 64}
+    )
     weak_predictions = (
         _prediction(records[0], records[0].target),
         _prediction(records[1], records[0].target),
@@ -329,7 +332,8 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
 
     adopted = decide_lora_promotion(
         change_name="support-lora-v1",
-        change_report=perfect_report,
+        training_manifest_sha256="a" * 64,
+        change_report=lined_perfect_report,
         baselines=baselines,
         thresholds=PromotionThresholds(
             minimum_schema_validity_rate=1.0,
@@ -341,11 +345,16 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
     assert adopted.baseline is not None
     assert adopted.baseline.name == "keyword-rule"
     assert adopted.change.method == "lora_fine_tune"
+    assert adopted.change.training_manifest_sha256 == "a" * 64
     assert adopted.result.beats_strongest_meaningful_baseline is True
 
+    lined_tied_report = perfect_report.model_copy(
+        update={"training_manifest_sha256": "b" * 64}
+    )
     tied = decide_lora_promotion(
         change_name="support-lora-v2",
-        change_report=perfect_report,
+        training_manifest_sha256="b" * 64,
+        change_report=lined_tied_report,
         baselines=[
             BaselineEvaluation(
                 name="strong-prompt", report=perfect_report, meaningful=True
@@ -367,24 +376,40 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
         _prediction(records[1], records[1].target),
     )
     unsafe_report = evaluate_predictions(records, unsafe_predictions)
+    lined_unsafe_report = unsafe_report.model_copy(
+        update={"training_manifest_sha256": "c" * 64}
+    )
     rejected = decide_lora_promotion(
         change_name="support-lora-unsafe",
-        change_report=unsafe_report,
+        training_manifest_sha256="c" * 64,
+        change_report=lined_unsafe_report,
         baselines=baselines,
         thresholds=PromotionThresholds(minimum_policy_compliance_rate=1.0),
     )
     assert rejected.decision is PromotionDecision.REJECT
     assert rejected.result.passes_policy_threshold is False
 
+    lined_inconclusive_report = perfect_report.model_copy(
+        update={"training_manifest_sha256": "d" * 64}
+    )
     inconclusive = decide_lora_promotion(
         change_name="support-lora-no-baseline",
-        change_report=perfect_report,
+        training_manifest_sha256="d" * 64,
+        change_report=lined_inconclusive_report,
         baselines=[
             BaselineEvaluation(name="majority", report=weak_report, meaningful=False)
         ],
     )
     assert inconclusive.decision is PromotionDecision.INCONCLUSIVE
     assert inconclusive.baseline is None
+
+    with pytest.raises(ValueError, match="must carry the supplied"):
+        decide_lora_promotion(
+            change_name="support-lora-mismatched-lineage",
+            training_manifest_sha256="e" * 64,
+            change_report=lined_perfect_report,
+            baselines=baselines,
+        )
 
 
 def test_evaluator_rejects_misaligned_prediction_identifiers() -> None:

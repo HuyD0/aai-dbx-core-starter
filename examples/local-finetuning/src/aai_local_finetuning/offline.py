@@ -170,12 +170,15 @@ def asset_checks(settings: ProjectSettings) -> list[AssetCheck]:
     )
     for name in ("train.jsonl", "valid.jsonl", "test.jsonl", "manifest.json"):
         path = settings.processed_dir / name
+        present = path.is_file()
         checks.append(
             AssetCheck(
                 name=f"processed {name}",
                 path=str(path),
-                ready=path.is_file() and path.stat().st_size > 0,
-                detail="present" if path.is_file() else "missing",
+                ready=present,
+                detail=(
+                    "present; content verification follows" if present else "missing"
+                ),
             )
         )
     checks.append(prepared_dataset_check(settings.processed_dir))

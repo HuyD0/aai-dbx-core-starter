@@ -148,6 +148,16 @@ schema, unsupported-label, and response-policy gates. Evaluation uses the
 repository vocabulary `baseline -> change -> result -> decision`; decisions
 are `adopt`, `reject`, or `inconclusive`.
 
+A completed training process is not sufficient evidence by itself. The
+canonical adapter is eligible only when its success manifest matches the exact
+base-model revision and runtime files, every training-data file, the effective
+configuration, and both adapter outputs. Evaluation carries that same manifest
+fingerprint into its report, tracking run, and decision. A failed retrain or a
+mid-evaluation adapter change therefore fails closed instead of reusing stale
+weights under the same change name. A per-adapter shared/exclusive lock keeps
+training publication and evaluation from overlapping, and tracked change runs
+retain both the adapter weights and `adapter_config.json` needed to reload them.
+
 ## Project map
 
 ```text

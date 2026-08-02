@@ -157,6 +157,12 @@ class EvaluationReport(StrictEvidenceModel):
     evaluation_fingerprint: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
     )
+    training_manifest_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     supported_intents: tuple[str, ...] = Field(min_length=1)
     classification: ClassificationMetrics
     output_quality: OutputQualityMetrics

@@ -13,7 +13,10 @@ few-shot prompt. These are separate baseline runs—not informal prompt tweaks
 made after looking at frozen test failures.
 
 Run a short MLX-LM check, train the LoRA change, and evaluate all methods with
-the framework-neutral scorer. Required measures:
+the framework-neutral scorer. Treat the successful-training manifest as an
+immutable lineage handle: it binds the expected model, exact training files,
+effective configuration, and adapter outputs, and the same fingerprint must
+survive inference, tracking, and the decision. Required measures:
 
 - intent accuracy, macro precision/recall/F1, weighted F1, and per-intent F1;
 - category and escalation accuracy;

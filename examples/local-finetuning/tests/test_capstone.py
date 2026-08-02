@@ -178,6 +178,7 @@ def test_generator_is_byte_deterministic_and_writes_exact_counts(tmp_path) -> No
         (DatasetSplit.VALIDATION, VALIDATION_COUNT),
         (DatasetSplit.TEST, TEST_COUNT),
     ]
+    assert first_manifest.strategy == "group_partitioned_controlled_policy_slices"
     for filename in (
         "train.jsonl",
         "validation.jsonl",
@@ -203,6 +204,18 @@ def test_frozen_test_has_all_required_balanced_slices_and_held_out_combinations(
         and any(item.startswith("held_out_failure:") for item in record.metadata.slices)
         for record in test_records
     )
+    minimal_manifests = [
+        record.manifest
+        for record in test_records
+        if record.metadata.slices[0] == "minimal_manifest"
+    ]
+    assert all(
+        set(manifest) == {"schema_version", "application_name", "description"}
+        for manifest in minimal_manifests
+    )
+    assert len({manifest["description"] for manifest in minimal_manifests}) == len(
+        minimal_manifests
+    )
     for split, count in (
         (DatasetSplit.TRAIN, TRAIN_COUNT),
         (DatasetSplit.VALIDATION, VALIDATION_COUNT),
@@ -213,10 +226,64 @@ def test_frozen_test_has_all_required_balanced_slices_and_held_out_combinations(
         )
 
 
+@pytest.mark.parametrize("seed", (42, 71))
+def test_normalized_scenarios_and_context_combinations_do_not_cross_splits(
+    seed: int,
+) -> None:
+    records_by_split = {
+        split: build_records(split, count, seed=seed)
+        for split, count in (
+            (DatasetSplit.TRAIN, TRAIN_COUNT),
+            (DatasetSplit.VALIDATION, VALIDATION_COUNT),
+            (DatasetSplit.TEST, TEST_COUNT),
+        )
+    }
+
+    normalized_by_split: dict[DatasetSplit, set[str]] = {}
+    contexts_by_split: dict[DatasetSplit, set[tuple[object, object]]] = {}
+    for split, records in records_by_split.items():
+        normalized_records = []
+        contexts = set()
+        for record in records:
+            manifest = dict(record.manifest)
+            application_name_tokens = set(manifest["application_name"].split("-"))
+            assert application_name_tokens.isdisjoint(
+                {candidate.value for candidate in DatasetSplit}
+            )
+            manifest.pop("application_name")
+            normalized_records.append(
+                json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+            contexts.add((manifest.get("owner"), manifest.get("business_domain")))
+        normalized = set(normalized_records)
+        assert len(normalized) == len(normalized_records)
+        normalized_by_split[split] = normalized
+        contexts_by_split[split] = contexts
+
+    split_pairs = (
+        (DatasetSplit.TRAIN, DatasetSplit.VALIDATION),
+        (DatasetSplit.TRAIN, DatasetSplit.TEST),
+        (DatasetSplit.VALIDATION, DatasetSplit.TEST),
+    )
+    for left, right in split_pairs:
+        assert normalized_by_split[left].isdisjoint(normalized_by_split[right])
+        assert contexts_by_split[left].isdisjoint(contexts_by_split[right])
+
+
 def test_every_expected_output_comes_from_policy_engine() -> None:
     engine = ReadinessPolicyEngine()
-    for record in build_records(DatasetSplit.TEST, TEST_COUNT):
-        assert record.expected_output == engine.review(record.manifest)
+    for split, count in (
+        (DatasetSplit.TRAIN, TRAIN_COUNT),
+        (DatasetSplit.VALIDATION, VALIDATION_COUNT),
+        (DatasetSplit.TEST, TEST_COUNT),
+    ):
+        for record in build_records(split, count):
+            assert record.expected_output == engine.review(record.manifest)
 
 
 def test_generated_json_round_trips_through_versioned_schema(tmp_path) -> None:

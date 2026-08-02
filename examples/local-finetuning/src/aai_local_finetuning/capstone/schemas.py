@@ -177,7 +177,7 @@ class SplitManifest(StrictFrozenModel):
     dataset_version: Literal["1.0.0"]
     policy_version: Literal["1.0.0"]
     seed: int
-    strategy: Literal["controlled_policy_slices"]
+    strategy: Literal["group_partitioned_controlled_policy_slices"]
     frozen_test: Literal[True]
     artifacts: tuple[SplitArtifact, ...]
     dataset_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")

@@ -1637,7 +1637,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 healthy and you have enough time and battery. Immediately before MLX-LM
                 starts, the cell rechecks the content-addressed preparation manifest. A
                 split that changed since preparation fails closed instead of becoming an
-                unrecorded training-data change.
+                unrecorded training-data change. The run also pins the expected base-model
+                revision and every required model and dataset file—not merely paths from
+                the YAML. Training writes into a fresh staging directory; only a zero-exit
+                run with valid adapter outputs and durable evidence is published, with
+                `training-manifest.json` acting as the success token. An exclusive
+                per-adapter lock serializes training and publication, so two terminals
+                cannot splice different generations together.
                 """,
                 "exercise",
             ),
@@ -1798,6 +1804,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 )
                 from aai_local_finetuning.modeling import LocalMLXPredictor
                 from aai_local_finetuning.settings import PROJECT_ROOT, load_settings
+                from aai_local_finetuning.training import (
+                    TrainingManifestError,
+                    recheck_training_snapshot,
+                    require_valid_training_snapshot,
+                    shared_adapter_lock,
+                )
 
                 settings = load_settings()
                 splits = load_support_splits(settings)
@@ -1874,47 +1886,40 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 )
                 """),
             md("""
-                ## Add the LoRA change when its adapter exists
-
-                The canonical adapter is separate from notebook smoke adapters. Absence
-                is evidence that the complete change has not been trained, so the later
-                decision must remain inconclusive.
-                """),
-            code("""
-                adapter_weights = settings.adapter_dir / "adapters.safetensors"
-                if adapter_weights.is_file():
-                    lora_predictor = LocalMLXPredictor(
-                        settings.model_dir, adapter_path=settings.adapter_dir
-                    )
-                    methods["lora-change"] = generate_support_predictions(
-                        lora_predictor,
-                        frozen_records,
-                        strategy="strong",
-                        train_records=splits.train,
-                        max_tokens=96,
-                    )
-                    reports["lora-change"] = evaluate_predictions(
-                        frozen_records,
-                        methods["lora-change"],
-                        supported_intents=allowed_intents,
-                    )
-                else:
-                    print("Canonical LoRA adapter absent; change evidence is incomplete.")
-                pd.DataFrame(
-                    [report_row(name, report) for name, report in reports.items()]
-                )
-                """),
-            md("""
-                ## Persist notebook evidence separately
+                ## Add the LoRA change and persist its evidence atomically
 
                 Notebook probes never overwrite official evaluation artifacts. Filenames
                 include `partial` unless all frozen examples were scored. Reports carry
                 the evaluation fingerprint used to prove comparability later.
+
+                The canonical adapter is separate from notebook smoke adapters. A weight
+                file alone is not training lineage: the success manifest must also match
+                the current adapter bytes, adapter configuration, full training YAML,
+                effective settings, expected base-model revision and files, and every
+                prepared training-data file. One shared adapter lock now covers validation,
+                prediction, scoring, report writes, and the exact manifest copy. Training
+                cannot replace the adapter during any part of that evidence chain. Missing
+                or stale evidence keeps the later decision inconclusive.
                 """),
             code("""
                 evidence_dir = PROJECT_ROOT / "artifacts" / "notebook" / "evaluation"
                 evidence_dir.mkdir(parents=True, exist_ok=True)
                 scope = "full" if len(frozen_records) == FULL_FROZEN_COUNT else "partial"
+                lineage_copy = (
+                    evidence_dir
+                    / f"{scope}-lora-change-training-manifest.json"
+                )
+                lora_prediction_path = (
+                    evidence_dir / f"{scope}-lora-change-predictions.jsonl"
+                )
+                lora_report_path = evidence_dir / f"{scope}-lora-change-report.json"
+                for stale_path in (
+                    lineage_copy,
+                    lora_prediction_path,
+                    lora_report_path,
+                ):
+                    stale_path.unlink(missing_ok=True)
+
                 for name, report in reports.items():
                     write_predictions_jsonl(
                         evidence_dir / f"{scope}-{name}-predictions.jsonl",
@@ -1924,6 +1929,73 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         evidence_dir / f"{scope}-{name}-report.json",
                         report,
                     )
+
+                adapter_weights = settings.adapter_dir / "adapters.safetensors"
+                adapter_snapshot = None
+                if adapter_weights.is_file():
+                    try:
+                        with shared_adapter_lock(settings.adapter_dir):
+                            adapter_snapshot = require_valid_training_snapshot(
+                                settings.adapter_dir,
+                                config_path=(
+                                    PROJECT_ROOT
+                                    / "configs"
+                                    / "training"
+                                    / "lora.yaml"
+                                ),
+                            )
+                            lora_predictor = LocalMLXPredictor(
+                                settings.model_dir,
+                                adapter_path=settings.adapter_dir,
+                            )
+                            methods["lora-change"] = generate_support_predictions(
+                                lora_predictor,
+                                frozen_records,
+                                strategy="strong",
+                                train_records=splits.train,
+                                max_tokens=96,
+                            )
+                            recheck_training_snapshot(adapter_snapshot)
+                            reports["lora-change"] = evaluate_predictions(
+                                frozen_records,
+                                methods["lora-change"],
+                                supported_intents=allowed_intents,
+                            ).model_copy(
+                                update={
+                                    "training_manifest_sha256": (
+                                        adapter_snapshot.manifest_sha256
+                                    )
+                                }
+                            )
+                            write_predictions_jsonl(
+                                lora_prediction_path,
+                                methods["lora-change"],
+                            )
+                            write_report_json(
+                                lora_report_path,
+                                reports["lora-change"],
+                            )
+                            lineage_copy.write_bytes(
+                                adapter_snapshot.raw_manifest_bytes
+                            )
+                            recheck_training_snapshot(adapter_snapshot)
+                    except (OSError, ValueError, TrainingManifestError) as error:
+                        adapter_snapshot = None
+                        methods.pop("lora-change", None)
+                        reports.pop("lora-change", None)
+                        for incomplete_path in (
+                            lineage_copy,
+                            lora_prediction_path,
+                            lora_report_path,
+                        ):
+                            incomplete_path.unlink(missing_ok=True)
+                        print(f"Canonical LoRA adapter ignored: {error}")
+                else:
+                    print("Canonical LoRA adapter absent; change evidence is incomplete.")
+
+                display(pd.DataFrame(
+                    [report_row(name, report) for name, report in reports.items()]
+                ))
                 sorted(path.name for path in evidence_dir.glob(f"{scope}-*"))
                 """),
             md(
@@ -2039,8 +2111,19 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     decide_lora_promotion,
                 )
                 from aai_local_finetuning.learning import load_report, load_support_splits
-                from aai_local_finetuning.settings import PROJECT_ROOT, load_settings
+                from aai_local_finetuning.settings import (
+                    PROJECT_ROOT,
+                    load_settings,
+                    sha256_file,
+                )
                 from aai_local_finetuning.tracking import configure_local_mlflow
+                from aai_local_finetuning.training import (
+                    TrainingManifest,
+                    TrainingManifestError,
+                    recheck_training_snapshot,
+                    require_valid_training_snapshot,
+                    shared_adapter_lock,
+                )
 
                 settings = load_settings()
                 configure_local_mlflow(settings)
@@ -2091,8 +2174,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ## Inventory full notebook reports
 
                 Promotion requires all meaningful baselines and the LoRA change on the
-                complete frozen set with identical fingerprints. Partial reports, missing
-                methods, or mismatched fingerprints force `inconclusive`.
+                complete frozen set with identical evaluation fingerprints. The LoRA
+                report must also carry the same training-manifest fingerprint that was
+                validated before inference and is still current now. Partial reports,
+                missing methods, or either kind of mismatch force `inconclusive`.
                 """,
                 "what-to-notice",
             ),
@@ -2114,6 +2199,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 report_status = {
                     method: path.is_file() for method, path in report_paths.items()
                 }
+                lineage_path = report_dir / "full-lora-change-training-manifest.json"
                 report_status
                 """),
             md(
@@ -2132,51 +2218,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             ),
             code("""
                 thresholds = PromotionThresholds()
-                if all(report_status.values()):
-                    loaded_reports = {
-                        method: load_report(path)
-                        for method, path in report_paths.items()
-                    }
-                    fingerprints = {
-                        report.evaluation_fingerprint
-                        for report in loaded_reports.values()
-                    }
-                    counts = {
-                        report.total_examples for report in loaded_reports.values()
-                    }
-                    complete_and_comparable = (
-                        len(fingerprints) == 1
-                        and counts == {len(splits.test)}
-                    )
-                else:
-                    loaded_reports = {}
-                    complete_and_comparable = False
-
-                if complete_and_comparable:
-                    assessment = decide_lora_promotion(
-                        change_name="bitext-structured-output-lora-v1",
-                        change_report=loaded_reports["lora-change"],
-                        baselines=[
-                            BaselineEvaluation(
-                                name=name,
-                                report=loaded_reports[name],
-                                meaningful=name != "majority",
-                            )
-                            for name in required_methods
-                            if name != "lora-change"
-                        ],
-                        thresholds=thresholds,
-                    ).model_dump(mode="json")
-                else:
-                    assessment = {
-                        "decision": "inconclusive",
-                        "reasons": [
-                            "all six methods must be scored on the complete frozen set",
-                            "report counts and evaluation fingerprints must match",
-                        ],
-                        "available_reports": report_status,
-                    }
-                assessment
+                thresholds.model_dump(mode="json")
                 """),
             md(
                 """
@@ -2185,36 +2227,134 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 Now the notebook writes one MLflow run whose purpose is explicit. The
                 assessment artifact is useful whether the decision is adopt, reject, or
                 inconclusive. Re-running creates a new attempt with a new run ID instead
-                of silently replacing prior evidence.
+                of silently replacing prior evidence. A shared adapter lock covers report
+                loading, lineage validation, the promotion calculation, and the MLflow
+                decision artifact commit, so one assessment cannot mix adapter generations.
                 """,
                 "what-to-notice",
             ),
             code("""
-                with mlflow.start_run(run_name="notebook-promotion-assessment") as run:
-                    mlflow.set_tags(
-                        {
-                            "run_purpose": "promotion_assessment",
-                            "execution_mode": "offline_local",
-                            "decision": str(assessment["decision"]),
-                        }
-                    )
-                    mlflow.log_params(
-                        {
-                            f"threshold.{name}": value
-                            for name, value in thresholds.model_dump(mode="json").items()
-                        }
-                    )
-                    mlflow.log_dict(assessment, "decision/assessment.json")
-                    if complete_and_comparable:
-                        mlflow.log_param(
-                            "evaluation_fingerprint",
-                            next(iter(fingerprints)),
+                lineage_matches = False
+                lineage_error = None
+                current_snapshot = None
+                current_manifest_sha256 = None
+                loaded_reports = {}
+                fingerprints = set()
+                counts = set()
+                complete_and_comparable = False
+
+                with shared_adapter_lock(settings.adapter_dir):
+                    try:
+                        current_snapshot = require_valid_training_snapshot(
+                            settings.adapter_dir,
+                            config_path=(
+                                PROJECT_ROOT
+                                / "configs"
+                                / "training"
+                                / "lora.yaml"
+                            ),
                         )
-                        for name, value in loaded_reports[
-                            "lora-change"
-                        ].flat_metrics().items():
-                            mlflow.log_metric(f"change.{name}", value)
-                    decision_run_id = run.info.run_id
+                        current_manifest = current_snapshot.manifest
+                        recorded_manifest = TrainingManifest.model_validate_json(
+                            lineage_path.read_text(encoding="utf-8")
+                        )
+                        current_manifest_sha256 = current_snapshot.manifest_sha256
+                        lineage_matches = (
+                            recorded_manifest == current_manifest
+                            and sha256_file(lineage_path) == current_manifest_sha256
+                        )
+                        report_status["lora-training-lineage"] = lineage_matches
+                        if all(report_status.values()):
+                            loaded_reports = {
+                                method: load_report(path)
+                                for method, path in report_paths.items()
+                            }
+                            fingerprints = {
+                                report.evaluation_fingerprint
+                                for report in loaded_reports.values()
+                            }
+                            counts = {
+                                report.total_examples
+                                for report in loaded_reports.values()
+                            }
+                            complete_and_comparable = (
+                                len(fingerprints) == 1
+                                and counts == {len(splits.test)}
+                                and loaded_reports[
+                                    "lora-change"
+                                ].training_manifest_sha256
+                                == current_manifest_sha256
+                            )
+                    except (OSError, ValueError, TrainingManifestError) as error:
+                        report_status["lora-training-lineage"] = False
+                        lineage_error = str(error)
+
+                    if complete_and_comparable:
+                        recheck_training_snapshot(current_snapshot)
+                        assessment = decide_lora_promotion(
+                            change_name="bitext-structured-output-lora-v1",
+                            training_manifest_sha256=current_manifest_sha256,
+                            change_report=loaded_reports["lora-change"],
+                            baselines=[
+                                BaselineEvaluation(
+                                    name=name,
+                                    report=loaded_reports[name],
+                                    meaningful=name != "majority",
+                                )
+                                for name in required_methods
+                                if name != "lora-change"
+                            ],
+                            thresholds=thresholds,
+                        ).model_dump(mode="json")
+                    else:
+                        assessment = {
+                            "decision": "inconclusive",
+                            "reasons": [
+                                "all six methods must be scored on the complete frozen set",
+                                "report counts and evaluation fingerprints must match",
+                                "the LoRA report must match the current success manifest",
+                            ],
+                            "available_reports": report_status,
+                            "lineage_error": lineage_error,
+                        }
+
+                    if current_snapshot is not None:
+                        recheck_training_snapshot(current_snapshot)
+                    with mlflow.start_run(
+                        run_name="notebook-promotion-assessment"
+                    ) as run:
+                        mlflow.set_tags(
+                            {
+                                "run_purpose": "promotion_assessment",
+                                "execution_mode": "offline_local",
+                                "decision": str(assessment["decision"]),
+                            }
+                        )
+                        mlflow.log_params(
+                            {
+                                f"threshold.{name}": value
+                                for name, value in thresholds.model_dump(
+                                    mode="json"
+                                ).items()
+                            }
+                        )
+                        mlflow.log_dict(assessment, "decision/assessment.json")
+                        if complete_and_comparable:
+                            mlflow.log_param(
+                                "evaluation_fingerprint",
+                                next(iter(fingerprints)),
+                            )
+                            mlflow.log_param(
+                                "training_manifest_sha256",
+                                current_manifest_sha256,
+                            )
+                            for name, value in loaded_reports[
+                                "lora-change"
+                            ].flat_metrics().items():
+                                mlflow.log_metric(f"change.{name}", value)
+                        decision_run_id = run.info.run_id
+                    if current_snapshot is not None:
+                        recheck_training_snapshot(current_snapshot)
                 {"decision_run_id": decision_run_id, "assessment": assessment}
                 """),
             md(
@@ -2341,8 +2481,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ## Generate reviewed combinations
 
                 A fixed seed creates controlled rule violations and interacting failures.
-                The frozen test includes required slices and unseen combinations of known
-                failures. Generation writes portable records and immutable hashes.
+                Application-context families are assigned to one split *before* variants
+                are expanded, so a new application name cannot disguise a duplicated
+                scenario across train and test. The frozen test includes required slices
+                and unseen combinations of known failures. Generation writes portable
+                records and immutable hashes.
                 """),
             code("""
                 source_dir = PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1"
@@ -2389,11 +2532,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """),
             md(
                 """
-                ## Lock the frozen contract without opening test rows
+                ## Lock the frozen contract without inspecting test rows
 
-                The generator commits the test count, file hash, ID hash, and required
-                slice vocabulary. We can inspect that contract without loading examples,
-                labels, or predictions. The deterministic engine is the *declared*
+                The portable-data renderer has already loaded and validated every split,
+                including the frozen test, so it can serialize the model-ready files and
+                bind their hashes. That mechanical validation is different from looking
+                at examples or labels: here we inspect only the committed count, hashes,
+                and required slice vocabulary. The deterministic engine is the *declared*
                 correctness ceiling for rules it fully determines; notebook 10 measures
                 that claim only after its model probe and optional training are finished.
                 """,
@@ -2406,7 +2551,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     if artifact.split.value == "test"
                 )
                 {
-                    "test_rows_loaded": False,
+                    "test_rows_inspected_or_displayed": False,
                     "frozen": split_manifest.frozen_test,
                     "record_count": test_artifact.record_count,
                     "sha256": test_artifact.sha256,
@@ -2646,8 +2791,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ## Optional capstone LoRA smoke
 
                 Keep this disabled for Run All. When enabled it writes a notebook-specific
-                adapter and leaves the canonical capstone change untouched. Falling loss
-                still does not beat the deterministic ceiling.
+                adapter and leaves the canonical capstone change untouched. Its success
+                evidence binds the expected base model and exact capstone training files;
+                a smoke adapter cannot qualify as the canonical change. Falling loss still
+                does not beat the deterministic ceiling.
                 """,
                 "exercise",
             ),

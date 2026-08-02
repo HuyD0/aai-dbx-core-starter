@@ -8,7 +8,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .settings import PROJECT_ROOT, ProjectSettings, sha256_file
+from .settings import PROJECT_ROOT, ProjectSettings
+from .training import (
+    TRAINING_MANIFEST_NAME,
+    ValidatedTrainingSnapshot,
+    recheck_training_snapshot,
+    shared_adapter_lock,
+)
 
 
 def _project_path(value: str) -> Path:
@@ -77,11 +83,25 @@ def log_evaluation(
     manifest_path: Path,
     prediction_path: Path,
     model_based: bool,
+    training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> str:
     """Log aggregate evidence, native dataset input, and detailed artifacts."""
 
     import mlflow
     import pandas as pd
+
+    if role == "change":
+        if training_snapshot is None:
+            raise ValueError("change tracking requires a validated training snapshot")
+        if report.get("training_manifest_sha256") != (
+            training_snapshot.manifest_sha256
+        ):
+            raise ValueError(
+                "change report and validated training snapshot lineage differ"
+            )
+        recheck_training_snapshot(training_snapshot)
+    elif training_snapshot is not None:
+        raise ValueError("only change tracking accepts training evidence")
 
     configure_local_mlflow(settings)
     rows = list(records)
@@ -120,24 +140,41 @@ def log_evaluation(
                 }
             )
         if role == "change":
-            adapter = settings.adapter_dir / "adapters.safetensors"
-            training_config = PROJECT_ROOT / "configs" / "training" / "lora.yaml"
-            if not adapter.is_file():
-                raise FileNotFoundError(f"missing evaluated LoRA adapter: {adapter}")
-            mlflow.log_params(
-                {
-                    "adapter_sha256": sha256_file(adapter),
-                    "training_config_sha256": sha256_file(training_config),
-                }
-            )
-            mlflow.log_artifact(str(adapter), artifact_path="change")
-            mlflow.log_artifact(str(training_config), artifact_path="change")
-            training_evidence = PROJECT_ROOT / "artifacts" / "training" / "latest.json"
-            if training_evidence.is_file():
-                mlflow.log_artifact(str(training_evidence), artifact_path="change")
+            assert training_snapshot is not None
+            with shared_adapter_lock(training_snapshot.adapter_path):
+                recheck_training_snapshot(training_snapshot)
+                adapter = training_snapshot.adapter_path / "adapters.safetensors"
+                adapter_config = training_snapshot.adapter_path / "adapter_config.json"
+                training_config = training_snapshot.config_path
+                training_manifest = (
+                    training_snapshot.adapter_path / TRAINING_MANIFEST_NAME
+                )
+                validated_manifest = training_snapshot.manifest
+                mlflow.log_params(
+                    {
+                        "adapter_sha256": validated_manifest.adapter_sha256,
+                        "adapter_config_sha256": (
+                            validated_manifest.adapter_config_sha256
+                        ),
+                        "training_config_sha256": (
+                            validated_manifest.source_config_sha256
+                        ),
+                        "effective_training_config_sha256": (
+                            validated_manifest.effective_config_sha256
+                        ),
+                        "training_manifest_sha256": (training_snapshot.manifest_sha256),
+                    }
+                )
+                mlflow.log_artifact(str(adapter), artifact_path="change")
+                mlflow.log_artifact(str(adapter_config), artifact_path="change")
+                mlflow.log_artifact(str(training_config), artifact_path="change")
+                mlflow.log_artifact(str(training_manifest), artifact_path="change")
+                recheck_training_snapshot(training_snapshot)
         mlflow.log_input(dataset, context="frozen_evaluation")
         mlflow.log_metrics({key: float(value) for key, value in metrics.items()})
         mlflow.log_artifact(str(manifest_path), artifact_path="dataset")
         mlflow.log_artifact(str(report_path), artifact_path="evaluation")
         mlflow.log_artifact(str(prediction_path), artifact_path="evaluation")
+        if training_snapshot is not None:
+            recheck_training_snapshot(training_snapshot)
         return run.info.run_id

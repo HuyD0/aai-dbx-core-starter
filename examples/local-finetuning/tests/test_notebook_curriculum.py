@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -37,6 +38,22 @@ def _notebooks() -> list[tuple[Path, dict]]:
 def _source(cell: dict) -> str:
     value = cell.get("source", [])
     return "".join(value) if isinstance(value, list) else str(value)
+
+
+def _shared_adapter_lock_region(source: str) -> str:
+    """Return the source governed by the cell's shared adapter lock."""
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        if any(
+            "shared_adapter_lock"
+            in (ast.get_source_segment(source, item.context_expr) or "")
+            for item in node.items
+        ):
+            return ast.get_source_segment(source, node) or ""
+    raise AssertionError("cell has no shared adapter lock")
 
 
 def test_notebook_sequence_and_prerequisites_are_contiguous():
@@ -329,8 +346,14 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
         in sources["06_lora_finetuning.ipynb"]
     )
     assert "observational,\nnot gating" in sources["07_frozen_evaluation.ipynb"]
+    assert "require_valid_training_snapshot" in sources["07_frozen_evaluation.ipynb"]
+    assert "recheck_training_snapshot" in sources["07_frozen_evaluation.ipynb"]
+    assert "shared_adapter_lock" in sources["07_frozen_evaluation.ipynb"]
+    assert "lora-change-training-manifest.json" in sources["07_frozen_evaluation.ipynb"]
     assert "macro-F1 gain ≥ 0.01" in sources["08_mlflow_and_promotion.ipynb"]
     assert "decision/assessment.json" in sources["08_mlflow_and_promotion.ipynb"]
+    assert "lineage_matches" in sources["08_mlflow_and_promotion.ipynb"]
+    assert "training_manifest_sha256" in sources["08_mlflow_and_promotion.ipynb"]
     assert '"state": "unknown"' in sources["11_design_the_next_project.ipynb"]
     for field in (
         "permitted_use",
@@ -339,6 +362,44 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
         "model_input_modality",
     ):
         assert f'"{field}",' in sources["11_design_the_next_project.ipynb"]
+
+
+def test_adapter_evidence_lifecycle_stays_inside_notebook_shared_locks():
+    sources = {
+        path.name: [
+            _source(cell) for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        for path, notebook in _notebooks()
+    }
+
+    evaluation_cell = next(
+        source
+        for source in sources["07_frozen_evaluation.ipynb"]
+        if "lora_prediction_path" in source
+    )
+    locked_evaluation = _shared_adapter_lock_region(evaluation_cell)
+    for fragment in (
+        "generate_support_predictions",
+        "evaluate_predictions",
+        "write_predictions_jsonl",
+        "write_report_json",
+        "lineage_copy.write_bytes",
+    ):
+        assert fragment in locked_evaluation
+
+    decision_cell = next(
+        source
+        for source in sources["08_mlflow_and_promotion.ipynb"]
+        if 'run_name="notebook-promotion-assessment"' in source
+    )
+    locked_decision = _shared_adapter_lock_region(decision_cell)
+    for fragment in (
+        "load_report",
+        "decide_lora_promotion",
+        "with mlflow.start_run",
+        'mlflow.log_dict(assessment, "decision/assessment.json")',
+    ):
+        assert fragment in locked_decision
 
 
 def test_capstone_training_precedes_its_frozen_boundary():
@@ -351,7 +412,7 @@ def test_capstone_training_precedes_its_frozen_boundary():
 
     notebook_09 = "\n".join(sources["09_capstone_policy_dataset.ipynb"])
     assert "test.jsonl" not in notebook_09
-    assert '"test_rows_loaded": False' in notebook_09
+    assert '"test_rows_inspected_or_displayed": False' in notebook_09
 
     notebook_10 = sources["10_capstone_model_vs_hybrid.ipynb"]
     training_index = next(
