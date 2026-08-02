@@ -199,6 +199,7 @@ def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
         change_id="prompt-v2",
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=GateResult(metrics={"citation_rate": 1.0}),
         prompt_digest=prompt_digest(TEMPLATE),
     )
 

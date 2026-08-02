@@ -71,15 +71,19 @@ class DecisionRecord(ContractModel):
 
     @model_validator(mode="after")
     def adopt_requires_passing_gate(self) -> Self:
-        if (
-            self.decision is Decision.ADOPT
-            and self.gate is not None
-            and not self.gate.passed
-        ):
-            raise ValueError(
-                "An adopt decision cannot cite a failing gate; record reject "
-                "or inconclusive, or attach the passing gate evidence"
-            )
+        if self.decision is Decision.ADOPT:
+            if self.gate is None:
+                raise ValueError(
+                    "An adopt decision requires gate evidence; attach the "
+                    "passing GateResult it was decided from, or record "
+                    "inconclusive"
+                )
+            if not self.gate.passed:
+                raise ValueError(
+                    "An adopt decision cannot cite a failing gate; record "
+                    "reject or inconclusive, or attach the passing gate "
+                    "evidence"
+                )
         return self
 
     def as_tags(self) -> dict[str, str]:

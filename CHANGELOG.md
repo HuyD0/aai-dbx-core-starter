@@ -8,8 +8,8 @@ All notable changes to `aai-core` are documented here.
   the platform's AI application lifecycle for application teams and the
   platform team, with a maturity checklist and an honest gap roadmap.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
-  vocabulary, the strict `DecisionRecord` contract (an adopt cannot cite a
-  failing gate; `decided_by` rejects personal emails), and `record_decision()`
+  vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
+  passing gate; `decided_by` rejects personal emails), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as

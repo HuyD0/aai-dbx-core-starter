@@ -182,6 +182,8 @@ EXAMPLES = {
             path="examples/14_platform_llm_operations.ipynb",
             description="Platform-team judge, gateway-tag, cost, and fleet loop",
             connected=True,
+            modules=("databricks.sdk", "mlflow"),
+            config_fields=("platform.catalog", "platform.schema"),
             interactive=True,
         ),
     )

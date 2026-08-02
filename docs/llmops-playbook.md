@@ -102,8 +102,8 @@ binds the evidence used to make it.
 
 Here: `src/aai_core/decisions.py` provides the `Decision` vocabulary
 (`adopt`, `reject`, `inconclusive`), the `DecisionRecord` contract binding
-baseline run, change run, gate result, and release digest — an `adopt` with
-a failing gate is rejected at the contract — and `record_decision`, which
+baseline run, change run, gate result, and release digest — an `adopt` must
+cite a passing gate, never a failing or absent one — and `record_decision`, which
 writes the decision as a governed MLflow run with searchable
 `aai.decision` tags and a `decision.json` artifact. Example:
 [13](../examples/13_decision_and_promotion_lifecycle.ipynb).

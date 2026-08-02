@@ -96,16 +96,20 @@ def test_decision_parses_the_documented_string_vocabulary():
         _record(decision="keep_baseline")
 
 
-def test_adopt_cannot_cite_a_failing_gate():
+def test_adopt_requires_passing_gate_evidence():
     failing = GateResult(
         metrics={"citation_rate": 0.4},
         failures=(GateFailure(metric="citation_rate", reason="0.4 below 1"),),
     )
 
-    with pytest.raises(ValidationError, match="adopt"):
+    with pytest.raises(ValidationError, match="failing gate"):
         _record(gate=failing)
+    with pytest.raises(ValidationError, match="requires gate evidence"):
+        _record(gate=None)
     rejected = _record(decision=Decision.REJECT, gate=failing)
     assert rejected.as_tags()["gate_passed"] == "false"
+    ungated_reject = _record(decision=Decision.INCONCLUSIVE, gate=None)
+    assert "gate_passed" not in ungated_reject.as_tags()
 
 
 def test_decided_by_refuses_personal_email_identity():
