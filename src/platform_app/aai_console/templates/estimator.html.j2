@@ -1,0 +1,550 @@
+{% extends "base.html.j2" %}
+{% block title %}Cost estimator — AI Platform Hub{% endblock %}
+
+{% macro instance_select(field, label_text, default) %}
+<label class="field">
+  <span>{{ label_text }}</span>
+  <select data-field="{{ field }}">
+    {% for item in instances %}
+    <option value="{{ item.name }}" {% if item.name == default %}selected{% endif %}>
+      {{ item.name }} · {{ item.vcpus }} vCPU · {{ item.memory_gb | usd(0) }} GB · {{ item.dbu_per_hour | usd(2) }} DBU/h
+    </option>
+    {% endfor %}
+  </select>
+</label>
+{% endmacro %}
+
+{% macro usage_block(kind, default_hours="") %}
+<div class="usage-block">
+  <div class="usage-modes" role="radiogroup" aria-label="How usage is entered">
+    <label><input type="radio" name="usage-{{ kind }}" value="hours" checked /> Hours per month</label>
+    <label><input type="radio" name="usage-{{ kind }}" value="runs" /> Runs × duration × days</label>
+  </div>
+  <div class="usage-fields" data-usage-mode="hours">
+    <label class="field">
+      <span>Hours / month</span>
+      <input type="number" min="0" step="any" data-usage="hours_per_month"
+             value="{{ default_hours }}" placeholder="720 ≈ always on" />
+    </label>
+  </div>
+  <div class="usage-fields" data-usage-mode="runs" hidden>
+    <label class="field">
+      <span>Runs / day</span>
+      <input type="number" min="1" step="1" data-usage="runs_per_day" placeholder="2" />
+    </label>
+    <label class="field">
+      <span>Minutes / run</span>
+      <input type="number" min="0" step="any" data-usage="avg_run_minutes" placeholder="45" />
+    </label>
+    <label class="field">
+      <span>Days / month</span>
+      <input type="number" min="1" max="31" step="1" data-usage="days_per_month" placeholder="22" />
+    </label>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro cluster_fields(kind) %}
+{{ instance_select("driver_instance", "Driver instance", "Standard_DS3_v2") }}
+{{ instance_select("worker_instance", "Worker instance", "Standard_DS3_v2") }}
+<label class="field">
+  <span>Workers</span>
+  <input type="number" min="0" max="1000" step="1" data-field="num_workers" value="2" />
+</label>
+<label class="field field--toggle">
+  <span>Photon</span>
+  <input type="checkbox" data-field="photon" />
+</label>
+<label class="field field--toggle">
+  <span>Spot workers</span>
+  <input type="checkbox" data-field="spot_workers" />
+</label>
+{% endmacro %}
+
+{% block main %}
+<header class="topbar">
+  <div class="topbar__title">
+    <h1>Cost estimator</h1>
+    <span class="topbar__sub">List-price planning before anything runs</span>
+  </div>
+</header>
+
+<div class="scroll">
+  <div class="hub-page">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">Plan</p>
+        <h2>Estimate monthly Databricks spend from public list prices</h2>
+        <p>
+          Compose the workloads a project will run — jobs, warehouses, pipelines,
+          model serving, foundation-model tokens — and see a transparent DBU and
+          infrastructure breakdown at Azure pay-as-you-go list prices.
+        </p>
+      </div>
+    </section>
+
+    <section class="notice notice--neutral" role="note">
+      <div class="notice__icon" aria-hidden="true">i</div>
+      <div>
+        <h3>Estimates, not observed billing</h3>
+        <p>
+          Figures use the bundled list-price snapshot as of
+          <strong>{{ pricing_as_of.isoformat() }}</strong> and are forward-looking
+          projections — not observed billing, and not a quote.
+        </p>
+        <p class="notice__meta">
+          Observed, governed cost telemetry stays on
+          <a href="/optimization">Cost optimization</a>, which activates only with
+          reviewed serving views. Unknown cost is never shown as zero — anything
+          the snapshot cannot price is reported as unpriceable.
+        </p>
+      </div>
+    </section>
+
+    {% if pricing_stale %}
+    <section class="notice notice--attention" role="status">
+      <div class="notice__icon" aria-hidden="true">!</div>
+      <div>
+        <h3>Pricing snapshot is more than 180 days old</h3>
+        <p>
+          List prices may have changed. Refresh the snapshot with
+          <code>python scripts/refresh_pricing_snapshot.py</code> and re-check the
+          hand-curated tables against the sources cited below.
+        </p>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="panel" aria-labelledby="est-builder-heading">
+      <div class="panel__head">
+        <div>
+          <h3 id="est-builder-heading">Add a workload</h3>
+          <p>Configure one workload at a time and add it to the estimate.</p>
+        </div>
+      </div>
+
+      <div class="filterbar est-settings">
+        <label class="field">
+          <span>Region</span>
+          <select id="est-region">
+            {% for region in regions %}
+            <option value="{{ region.id }}">{{ region.display }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>DBU discount %</span>
+          <input id="est-discount-dbu" type="number" min="0" max="100" step="any" value="0" />
+          <small>Cross-service; serving and foundation-model SKUs are excluded</small>
+        </label>
+        <label class="field">
+          <span>VM discount %</span>
+          <input id="est-discount-vm" type="number" min="0" max="100" step="any" value="0" />
+        </label>
+      </div>
+
+      <div class="filterbar est-picker">
+        <label class="field">
+          <span>Label</span>
+          <input id="est-label" type="text" maxlength="80" placeholder="nightly-etl" />
+        </label>
+        <label class="field">
+          <span>Workload</span>
+          <select id="est-kind">
+            {% for kind in kinds %}
+            <option value="{{ kind.value }}">{{ kind.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="filterbar__actions">
+          <button class="button" type="button" data-add-line>Add to estimate</button>
+        </div>
+      </div>
+
+      <fieldset class="est-kind" data-kind="jobs_classic">
+        <legend>Jobs compute (classic)</legend>
+        {{ cluster_fields("jobs_classic") }}
+        {{ usage_block("jobs_classic") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="jobs_serverless" hidden>
+        <legend>Jobs compute (serverless)</legend>
+        <label class="field">
+          <span>Estimated DBU / hour</span>
+          <input type="number" min="0" step="any" data-field="estimated_dbu_per_hour" placeholder="4" />
+          <small>Your estimate — serverless emission is workload-dependent</small>
+        </label>
+        <label class="field field--toggle">
+          <span>Performance mode</span>
+          <input type="checkbox" data-field="performance_mode" />
+        </label>
+        {{ usage_block("jobs_serverless") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="all_purpose_classic" hidden>
+        <legend>All-Purpose compute (classic)</legend>
+        {{ cluster_fields("all_purpose_classic") }}
+        {{ usage_block("all_purpose_classic") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="all_purpose_serverless" hidden>
+        <legend>All-Purpose compute (serverless)</legend>
+        <label class="field">
+          <span>Estimated DBU / hour</span>
+          <input type="number" min="0" step="any" data-field="estimated_dbu_per_hour" placeholder="2" />
+          <small>Your estimate — serverless emission is workload-dependent</small>
+        </label>
+        {{ usage_block("all_purpose_serverless") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="sql_warehouse" hidden>
+        <legend>SQL warehouse</legend>
+        <label class="field">
+          <span>Type</span>
+          <select data-field="warehouse_type">
+            <option value="serverless">Serverless</option>
+            <option value="pro">Pro</option>
+            <option value="classic">Classic</option>
+          </select>
+          <small>Classic and Pro add Azure VM cost on top of DBUs</small>
+        </label>
+        <label class="field">
+          <span>Size</span>
+          <select data-field="size">
+            {% for size in sql_sizes %}
+            <option value="{{ size }}" {% if size == "Small" %}selected{% endif %}>{{ size }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Max clusters</span>
+          <input type="number" min="1" max="40" step="1" data-field="clusters" value="1" />
+        </label>
+        {{ usage_block("sql_warehouse") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="dlt_classic" hidden>
+        <legend>Lakeflow / DLT pipeline (classic)</legend>
+        <label class="field">
+          <span>Edition</span>
+          <select data-field="edition">
+            <option value="core">Core</option>
+            <option value="pro">Pro</option>
+            <option value="advanced">Advanced</option>
+          </select>
+        </label>
+        {{ cluster_fields("dlt_classic") }}
+        {{ usage_block("dlt_classic") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="dlt_serverless" hidden>
+        <legend>Lakeflow / DLT pipeline (serverless)</legend>
+        <label class="field">
+          <span>Estimated DBU / hour</span>
+          <input type="number" min="0" step="any" data-field="estimated_dbu_per_hour" placeholder="4" />
+          <small>Your estimate — serverless emission is workload-dependent</small>
+        </label>
+        {{ usage_block("dlt_serverless") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="model_serving" hidden>
+        <legend>Model serving endpoint</legend>
+        <label class="field">
+          <span>Workload size</span>
+          <select data-field="size">
+            {% for size in serving_sizes %}
+            <option value="{{ size.key }}">{{ size.label }} · {{ size.dbu_per_hour | usd(2) }} DBU/h</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Scale-out units</span>
+          <input type="number" min="1" max="64" step="1" data-field="scale_out_units" value="1" />
+          <small>Provisioned concurrency units; 1 unless you scale out</small>
+        </label>
+        {{ usage_block("model_serving", default_hours="720") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="fmapi_tokens" hidden>
+        <legend>Foundation model — pay per token</legend>
+        <label class="field">
+          <span>Model</span>
+          <select data-field="model">
+            {% for model in fmapi_models %}
+            <option value="{{ model.key }}">{{ model.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Input tokens (millions / month)</span>
+          <input type="number" min="0" step="any" data-field="input_tokens_millions" placeholder="100" />
+        </label>
+        <label class="field">
+          <span>Output tokens (millions / month)</span>
+          <input type="number" min="0" step="any" data-field="output_tokens_millions" placeholder="20" />
+        </label>
+        <label class="field">
+          <span>Batch tokens (millions / month)</span>
+          <input type="number" min="0" step="any" data-field="batch_tokens_millions" />
+          <small>Only models with a published batch rate</small>
+        </label>
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="fmapi_provisioned" hidden>
+        <legend>Foundation model — provisioned throughput</legend>
+        <label class="field">
+          <span>Model</span>
+          <select data-field="model">
+            {% for model in fmapi_models %}
+            <option value="{{ model.key }}">{{ model.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Provisioned units</span>
+          <input type="number" min="1" max="16" step="1" data-field="provisioned_units" value="1" />
+        </label>
+        {{ usage_block("fmapi_provisioned", default_hours="720") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="vector_search" hidden>
+        <legend>Vector search</legend>
+        <label class="field">
+          <span>Endpoint type</span>
+          <select data-field="mode">
+            {% for mode in vector_modes %}
+            <option value="{{ mode.key }}">{{ mode.label }} · {{ mode.vectors_millions_per_unit }}M vectors / unit</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Vectors (millions)</span>
+          <input type="number" min="0" step="any" data-field="vectors_millions" placeholder="3" />
+        </label>
+        {{ usage_block("vector_search", default_hours="720") }}
+      </fieldset>
+
+      <fieldset class="est-kind" data-kind="custom_dbu" hidden>
+        <legend>Custom DBU workload</legend>
+        <label class="field">
+          <span>SKU name</span>
+          <input type="text" maxlength="80" data-field="sku_label" placeholder="Database Serverless" />
+        </label>
+        <label class="field">
+          <span>DBUs / month</span>
+          <input type="number" min="0" step="any" data-field="dbu_per_month" />
+          <small>Fill this, or DBU/hour plus usage hours — not both</small>
+        </label>
+        <label class="field">
+          <span>DBUs / hour</span>
+          <input type="number" min="0" step="any" data-field="dbu_per_hour" />
+        </label>
+        <label class="field">
+          <span>$ / DBU</span>
+          <input type="number" min="0" step="any" data-field="price_per_dbu" placeholder="0.50" />
+        </label>
+        <label class="field">
+          <span>Infrastructure $ / month</span>
+          <input type="number" min="0" step="any" data-field="infra_dollars_per_month" />
+        </label>
+        <label class="field field--toggle">
+          <span>Cross-service discount</span>
+          <input type="checkbox" data-field="discount_eligible" />
+          <small>Tick only if the SKU is eligible — serving-family meters are not</small>
+        </label>
+        {{ usage_block("custom_dbu") }}
+      </fieldset>
+    </section>
+
+    <section class="panel" aria-labelledby="est-result-heading">
+      <div class="panel__head">
+        <div>
+          <h3 id="est-result-heading">Estimate</h3>
+          <p>Line items are kept in this page and the share link — nothing is stored server-side.</p>
+        </div>
+        <div class="panel__actions">
+          <button class="button button--quiet" type="button" data-export-csv disabled>Download CSV</button>
+          <button class="button button--quiet" type="button" data-copy-link disabled>Copy share link</button>
+        </div>
+      </div>
+      <div class="notice notice--attention" id="estimator-problem" role="alert" hidden>
+        <div class="notice__icon" aria-hidden="true">!</div>
+        <div>
+          <h3>The estimate could not be updated</h3>
+          <p id="estimator-problem-detail"></p>
+        </div>
+      </div>
+      <div id="estimate-target" aria-live="polite">
+        <div class="empty-state">
+          <h3>No workloads in the estimate yet</h3>
+          <p>Configure a workload above and add it to see list-price totals.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="est-rates-heading">
+      <div class="panel__head">
+        <div>
+          <h3 id="est-rates-heading">Rates reference</h3>
+          <p>
+            The bundled snapshot, in full. Each table cites its public source and
+            capture date.
+          </p>
+        </div>
+      </div>
+
+      <details class="est-rates">
+        <summary>DBU prices by SKU and region ($/DBU)</summary>
+        <p class="est-source">
+          Source: <a href="{{ pricing_sources.dbu_prices.url }}" rel="noopener noreferrer">{{ pricing_sources.dbu_prices.url }}</a>
+          · as of {{ pricing_sources.dbu_prices.as_of.isoformat() }}
+        </p>
+        <div class="est-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">SKU</th>
+                {% for region in regions %}<th scope="col" class="est-num">{{ region.display }}</th>{% endfor %}
+                <th scope="col">Cross-service discount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in sku_rows %}
+              <tr>
+                <td>{{ row.label }}</td>
+                {% for region in regions %}
+                <td class="est-num">${{ row.prices[region.id] | usd(3) }}</td>
+                {% endfor %}
+                <td>{{ "Eligible" if row.cross_service_discount else "Excluded" }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <details class="est-rates">
+        <summary>Instance types (DBU emission and VM list rates)</summary>
+        <p class="est-source">
+          DBU rates: <a href="{{ pricing_sources.instances.url }}" rel="noopener noreferrer">{{ pricing_sources.instances.url }}</a>
+          · as of {{ pricing_sources.instances.as_of.isoformat() }}.
+          VM rates: <a href="{{ pricing_sources.vm_rates.url }}" rel="noopener noreferrer">{{ pricing_sources.vm_rates.url }}</a>
+          · as of {{ pricing_sources.vm_rates.as_of.isoformat() }} (shown for the first region; other regions differ).
+        </p>
+        <div class="est-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Instance</th>
+                <th scope="col">Family</th>
+                <th scope="col" class="est-num">vCPU</th>
+                <th scope="col" class="est-num">Memory GB</th>
+                <th scope="col" class="est-num">DBU / hour</th>
+                <th scope="col" class="est-num">On-demand $/h</th>
+                <th scope="col" class="est-num">Spot $/h</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in instances %}
+              <tr>
+                <td>{{ item.name }}</td>
+                <td>{{ item.family }}</td>
+                <td class="est-num">{{ item.vcpus }}</td>
+                <td class="est-num">{{ item.memory_gb | usd(0) }}</td>
+                <td class="est-num">{{ item.dbu_per_hour | usd(2) }}</td>
+                <td class="est-num">${{ item.on_demand | usd(4) }}</td>
+                <td class="est-num">{% if item.spot is not none %}${{ item.spot | usd(4) }}{% else %}—{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <details class="est-rates">
+        <summary>SQL warehouse sizes (DBU / hour)</summary>
+        <p class="est-source">
+          Source: <a href="{{ pricing_sources.sql_warehouses.url }}" rel="noopener noreferrer">{{ pricing_sources.sql_warehouses.url }}</a>
+          · as of {{ pricing_sources.sql_warehouses.as_of.isoformat() }}
+        </p>
+        <div class="est-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Size</th>
+                <th scope="col" class="est-num">Classic</th>
+                <th scope="col" class="est-num">Pro</th>
+                <th scope="col" class="est-num">Serverless</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for size in sql_sizes %}
+              <tr>
+                <td>{{ size }}</td>
+                <td class="est-num">{{ sql_dbu_per_hour["classic"][size] | usd(0) }}</td>
+                <td class="est-num">{{ sql_dbu_per_hour["pro"][size] | usd(0) }}</td>
+                <td class="est-num">{{ sql_dbu_per_hour["serverless"][size] | usd(0) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <details class="est-rates">
+        <summary>Model serving, foundation models, and vector search</summary>
+        <p class="est-source">
+          Serving: <a href="{{ pricing_sources.model_serving.url }}" rel="noopener noreferrer">{{ pricing_sources.model_serving.url }}</a>
+          · Foundation models: <a href="{{ pricing_sources.fmapi.url }}" rel="noopener noreferrer">{{ pricing_sources.fmapi.url }}</a>
+          · Vector search: <a href="{{ pricing_sources.vector_search.url }}" rel="noopener noreferrer">{{ pricing_sources.vector_search.url }}</a>
+          · as of {{ pricing_sources.fmapi.as_of.isoformat() }}
+        </p>
+        <div class="est-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Serving size</th>
+                <th scope="col" class="est-num">DBU / hour per unit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for size in serving_sizes %}
+              <tr><td>{{ size.label }}</td><td class="est-num">{{ size.dbu_per_hour | usd(2) }}</td></tr>
+              {% endfor %}
+              {% for mode in vector_modes %}
+              <tr>
+                <td>Vector search — {{ mode.label }} ({{ mode.vectors_millions_per_unit }}M vectors/unit)</td>
+                <td class="est-num">{{ mode.dbu_per_hour_per_unit | usd(2) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="est-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Foundation model</th>
+                <th scope="col" class="est-num">Input DBU / 1M tokens</th>
+                <th scope="col" class="est-num">Output DBU / 1M tokens</th>
+                <th scope="col" class="est-num">Provisioned DBU / hour</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for model in fmapi_models %}
+              <tr>
+                <td>{{ model.label }}</td>
+                <td class="est-num">{{ model.token_rates.get("input_token") | usd(3) if model.token_rates.get("input_token") is not none else "—" }}</td>
+                <td class="est-num">{{ model.token_rates.get("output_token") | usd(3) if model.token_rates.get("output_token") is not none else "—" }}</td>
+                <td class="est-num">{{ model.provisioned_dbu_per_hour | usd(2) if model.provisioned_dbu_per_hour is not none else "—" }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+  </div>
+</div>
+<script src="/static/estimator.js" type="module"></script>
+{% endblock %}
