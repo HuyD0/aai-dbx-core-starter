@@ -76,8 +76,10 @@ All notable changes to `aai-core` are documented here.
   prompt, template, or version can never promote another. `set_alias()`
   is unchanged. `PromptManager`
   fails locally on unconfigured or placeholder catalog/schema qualifiers
-  instead of querying the registry for names like `unset.unset.<name>`;
-  explicit `catalog.schema.name` qualification remains untouched.
+  instead of querying the registry for names like `unset.unset.<name>`,
+  and refuses blank or malformed logical names (`main.app.`) before any
+  registry call; explicit `catalog.schema.name` qualification remains
+  untouched.
   `is_missing_prompt_error()` is public so callers seeding a first version
   or first promotion can distinguish an absent prompt or alias from
   authentication, permission, and transient registry failures instead of

@@ -299,13 +299,18 @@ class PromptManager:
         )
 
     def qualify(self, name: str) -> str:
-        parts = name.split(".")
+        cleaned = str(name).strip()
+        parts = cleaned.split(".")
         if len(parts) == 1:
+            # Fail locally: a blank name would otherwise reach the registry
+            # as the malformed 'catalog.schema.'.
+            if not cleaned:
+                raise ValueError("Prompt names must not be blank")
             catalog = _registry_qualifier("catalog", self.catalog)
             schema = _registry_qualifier("schema", self.schema)
-            return f"{catalog}.{schema}.{name}"
-        if len(parts) == 3:
-            return name
+            return f"{catalog}.{schema}.{cleaned}"
+        if len(parts) == 3 and all(part.strip() for part in parts):
+            return cleaned
         raise ValueError("Prompt names must be unqualified or catalog.schema.name")
 
     def _client(self):

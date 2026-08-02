@@ -182,6 +182,23 @@ def test_manager_fails_locally_on_placeholder_qualifiers(catalog, schema):
     assert manager.qualify("main.app.earnings_summary") == "main.app.earnings_summary"
 
 
+def test_qualify_rejects_blank_and_malformed_names():
+    manager = PromptManager(
+        context=dev_settings().resource,
+        catalog="main",
+        schema="app",
+        # Malformed names must fail before any registry access.
+        mlflow_module=object(),
+    )
+
+    for bad in ("", "   ", "main.app.", "..", "a..c"):
+        with pytest.raises(ValueError):
+            manager.qualify(bad)
+    with pytest.raises(ValueError, match="blank"):
+        manager.ensure_version("  ", TEMPLATE, commit_message="Blank name")
+    assert manager.qualify("  earnings_summary  ") == "main.app.earnings_summary"
+
+
 def test_prompt_digest_is_stable_and_content_sensitive():
     assert prompt_digest(TEMPLATE) == prompt_digest(TEMPLATE)
     assert prompt_digest(TEMPLATE) != prompt_digest(TEMPLATE + " Cite {{source_id}}.")
