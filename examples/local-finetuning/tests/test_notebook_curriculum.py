@@ -56,6 +56,38 @@ def _shared_adapter_lock_region(source: str) -> str:
     raise AssertionError("cell has no shared adapter lock")
 
 
+def _evaluation_session_arguments(code_sources: list[str]) -> list[str]:
+    """Return the explicit session passed to each support/capstone evaluator."""
+
+    arguments = []
+    for source in code_sources:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr if isinstance(node.func, ast.Attribute) else ""
+            )
+            if function_name not in {
+                "evaluate_predictions",
+                "evaluate_capstone_predictions",
+            }:
+                continue
+            session_keyword = next(
+                (
+                    keyword
+                    for keyword in node.keywords
+                    if keyword.arg == "evaluation_session"
+                ),
+                None,
+            )
+            assert session_keyword is not None
+            arguments.append(ast.unparse(session_keyword.value))
+    return arguments
+
+
 def test_notebook_sequence_and_prerequisites_are_contiguous():
     notebooks = _notebooks()
 
@@ -384,6 +416,110 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
         assert f'"{field}",' in sources["11_design_the_next_project.ipynb"]
 
 
+def test_prediction_notebooks_bind_inference_scoring_and_persistence_to_sessions():
+    code_by_notebook = {
+        path.name: [
+            _source(cell) for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        for path, notebook in _notebooks()
+    }
+    expected_sessions = {
+        "04_deterministic_baselines.ipynb": {"baseline_evaluation_session"},
+        "05_prompt_baselines.ipynb": {"prompt_evaluation_session"},
+        "07_frozen_evaluation.ipynb": {
+            "frozen_evaluation_session",
+            "lora_evaluation_session",
+        },
+        "10_capstone_model_vs_hybrid.ipynb": {
+            "deterministic_validation_session",
+            "model_probe_session",
+            "frozen_evaluation_session",
+        },
+    }
+    inference_markers = {
+        ("04_deterministic_baselines.ipynb", "baseline_evaluation_session"): (
+            "majority = MajorityBaseline.fit(",
+            "keyword = KeywordRuleBaseline.fit(",
+            "majority.predict_many(",
+            "keyword.predict_many(",
+        ),
+        ("05_prompt_baselines.ipynb", "prompt_evaluation_session"): (
+            "predictions = generate_support_predictions(",
+        ),
+        ("07_frozen_evaluation.ipynb", "frozen_evaluation_session"): (
+            '"majority": MajorityBaseline.fit(splits.train).predict_many(',
+            "predictions = generate_support_predictions(",
+        ),
+        ("07_frozen_evaluation.ipynb", "lora_evaluation_session"): (
+            'methods["lora-change"] = generate_support_predictions(',
+        ),
+        ("10_capstone_model_vs_hybrid.ipynb", "deterministic_validation_session"): (
+            "deterministic_validation_predictions =",
+        ),
+        ("10_capstone_model_vs_hybrid.ipynb", "model_probe_session"): (
+            "generated = predictor.generate(",
+        ),
+        ("10_capstone_model_vs_hybrid.ipynb", "frozen_evaluation_session"): (
+            "deterministic_predictions = deterministic_capstone_predictions(",
+            "frozen_predictor = LocalMLXPredictor(",
+            "for record in test_records:",
+        ),
+    }
+
+    for notebook_name, session_names in expected_sessions.items():
+        code_sources = code_by_notebook[notebook_name]
+        source = "\n".join(code_sources)
+        arguments = _evaluation_session_arguments(code_sources)
+
+        assert arguments, notebook_name
+        assert set(arguments) == session_names, notebook_name
+        assert source.count("start_evaluation_session()") == len(session_names)
+        for session_name in session_names:
+            start = source.index(f"{session_name} = start_evaluation_session()")
+            first_scoring = source.index(f"evaluation_session={session_name}", start)
+            final_recheck = source.rindex(f"recheck_evaluation_session({session_name})")
+            assert start < first_scoring < final_recheck, (
+                notebook_name,
+                session_name,
+            )
+            for inference_marker in inference_markers[(notebook_name, session_name)]:
+                inference = source.index(inference_marker, start)
+                assert start < inference < final_recheck, (
+                    notebook_name,
+                    session_name,
+                    inference_marker,
+                )
+
+    notebook_07 = code_by_notebook["07_frozen_evaluation.ipynb"]
+    notebook_07_source = "\n".join(notebook_07)
+    first_invalidation = notebook_07_source.index("stale_path.unlink(missing_ok=True)")
+    assert first_invalidation < notebook_07_source.index("settings = load_settings()")
+    assert first_invalidation < notebook_07_source.index(
+        "verify_flight_manifest(settings)"
+    )
+    assert first_invalidation < notebook_07_source.index(
+        "splits = load_support_splits(settings)"
+    )
+    assert first_invalidation < notebook_07_source.index(
+        "frozen_evaluation_session = start_evaluation_session()"
+    )
+    assert first_invalidation < notebook_07_source.index(
+        "lora_evaluation_session = start_evaluation_session()"
+    )
+    persistence_cell = next(
+        source
+        for source in notebook_07
+        if "baseline_evidence_paths" in source and "write_report_json(" in source
+    )
+    assert persistence_cell.index("write_report_json(") < persistence_cell.index(
+        "recheck_evaluation_session(frozen_evaluation_session)"
+    )
+    assert persistence_cell.rindex("write_report_json(") < persistence_cell.index(
+        "recheck_evaluation_session(lora_evaluation_session)"
+    )
+    assert "incomplete_path.unlink(missing_ok=True)" in persistence_cell
+
+
 def test_adapter_evidence_lifecycle_stays_inside_notebook_shared_locks():
     sources = {
         path.name: [
@@ -395,7 +531,7 @@ def test_adapter_evidence_lifecycle_stays_inside_notebook_shared_locks():
     evaluation_cell = next(
         source
         for source in sources["07_frozen_evaluation.ipynb"]
-        if "lora_prediction_path" in source
+        if "lora_prediction_path" in source and "with shared_adapter_lock" in source
     )
     locked_evaluation = _shared_adapter_lock_region(evaluation_cell)
     for fragment in (

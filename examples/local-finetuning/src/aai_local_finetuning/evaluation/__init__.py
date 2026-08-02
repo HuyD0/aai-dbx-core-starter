@@ -37,6 +37,11 @@ from .promotion import (
     PromotionThresholds,
     decide_lora_promotion,
 )
+from .session import (
+    EvaluationSession,
+    recheck_evaluation_session,
+    start_evaluation_session,
+)
 
 __all__ = [
     "BaselineEvaluation",
@@ -50,6 +55,7 @@ __all__ = [
     "EvaluationRecord",
     "EvaluationReport",
     "EvaluationSnapshot",
+    "EvaluationSession",
     "Evaluator",
     "KeywordRuleBaseline",
     "MajorityBaseline",
@@ -71,6 +77,8 @@ __all__ = [
     "load_records_jsonl",
     "parse_portable_record",
     "parse_prediction",
+    "recheck_evaluation_session",
+    "start_evaluation_session",
     "write_predictions_jsonl",
     "write_records_jsonl",
     "write_report_json",

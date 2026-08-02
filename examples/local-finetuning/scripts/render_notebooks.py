@@ -1106,6 +1106,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     MajorityBaseline,
                     evaluate_predictions,
                     format_error_analysis,
+                    recheck_evaluation_session,
+                    start_evaluation_session,
                 )
                 from aai_local_finetuning.learning import (
                     load_support_splits,
@@ -1115,6 +1117,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 splits = load_support_splits(include_test=False)
                 allowed_intents, _ = support_contract(splits.train)
+                baseline_evaluation_session = start_evaluation_session()
                 majority = MajorityBaseline.fit(splits.train)
                 keyword = KeywordRuleBaseline.fit(splits.train)
                 """),
@@ -1132,6 +1135,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 One record can fail several layers, so error-kind counts can overlap and
                 must not be added together to infer a number of failed records.
+
+                An **evaluation session** is the integrity boundary around this work. It
+                records the governed source and exact installed packages before fitting or
+                inference, supplies that same contract to scoring, and is rechecked after
+                the report exists. This makes the report describe the code that actually
+                created the fitted predictor state, generated predictions, and scored them,
+                including a change that was later restored.
                 """),
             code("""
                 baseline_reports = {
@@ -1139,13 +1149,16 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         splits.validation,
                         majority.predict_many(splits.validation),
                         supported_intents=allowed_intents,
+                        evaluation_session=baseline_evaluation_session,
                     ),
                     "keyword-rule": evaluate_predictions(
                         splits.validation,
                         keyword.predict_many(splits.validation),
                         supported_intents=allowed_intents,
+                        evaluation_session=baseline_evaluation_session,
                     ),
                 }
+                recheck_evaluation_session(baseline_evaluation_session)
                 pd.DataFrame(
                     [report_row(name, report) for name, report in baseline_reports.items()]
                 )
@@ -1313,7 +1326,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             code("""
                 import pandas as pd
 
-                from aai_local_finetuning.evaluation import evaluate_predictions
+                from aai_local_finetuning.evaluation import (
+                    evaluate_predictions,
+                    recheck_evaluation_session,
+                    start_evaluation_session,
+                )
                 from aai_local_finetuning.learning import (
                     generate_support_predictions,
                     load_support_splits,
@@ -1370,6 +1387,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 the absolute value is deliberately not a prompt-quality claim. Use probe
                 coverage plus obvious contract failures here; a broad validation run is
                 required before locking a winner.
+
+                One evaluation session spans the prompt comparison. Capturing it before
+                model inference and rechecking it after scoring binds every report to the
+                same governed source and exact package set.
                 """,
                 "what-to-notice",
             ),
@@ -1391,6 +1412,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "small-probe macro F1 as an absolute quality estimate."
                     ),
                 }
+                prompt_evaluation_session = start_evaluation_session()
                 predictor = LocalMLXPredictor(settings.model_dir)
                 prompt_reports = {}
                 prompt_predictions = {}
@@ -1407,7 +1429,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         validation_probe,
                         predictions,
                         supported_intents=allowed_intents,
+                        evaluation_session=prompt_evaluation_session,
                     )
+                recheck_evaluation_session(prompt_evaluation_session)
                 display(pd.DataFrame(
                     [report_row(name, report) for name, report in prompt_reports.items()]
                 ))
@@ -1799,6 +1823,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     MajorityBaseline,
                     evaluate_predictions,
                     format_error_analysis,
+                    recheck_evaluation_session,
+                    start_evaluation_session,
                     write_predictions_jsonl,
                     write_report_json,
                 )
@@ -1818,12 +1844,55 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     shared_adapter_lock,
                 )
 
+                EVALUATION_LIMIT = 9  # Set to None for complete promotion evidence.
+                scope = "full" if EVALUATION_LIMIT is None else "partial"
+                evidence_dir = PROJECT_ROOT / "artifacts" / "notebook" / "evaluation"
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                lineage_copy = (
+                    evidence_dir
+                    / f"{scope}-lora-change-training-manifest.json"
+                )
+                lora_prediction_path = (
+                    evidence_dir / f"{scope}-lora-change-predictions.jsonl"
+                )
+                lora_report_path = evidence_dir / f"{scope}-lora-change-report.json"
+                persisted_method_names = (
+                    "majority",
+                    "keyword-rule",
+                    "basic",
+                    "strong",
+                    "few_shot",
+                )
+                baseline_evidence_paths = tuple(
+                    path
+                    for name in persisted_method_names
+                    for path in (
+                        evidence_dir / f"{scope}-{name}-predictions.jsonl",
+                        evidence_dir / f"{scope}-{name}-report.json",
+                    )
+                )
+                for stale_path in (
+                    *baseline_evidence_paths,
+                    lineage_copy,
+                    lora_prediction_path,
+                    lora_report_path,
+                ):
+                    stale_path.unlink(missing_ok=True)
+
                 settings = load_settings()
                 verify_flight_manifest(settings)
                 splits = load_support_splits(settings)
                 allowed_intents, _ = support_contract(splits.train)
                 FULL_FROZEN_COUNT = len(splits.test)
-                EVALUATION_LIMIT = 9  # Set to None for complete promotion evidence.
+                if EVALUATION_LIMIT is not None and (
+                    isinstance(EVALUATION_LIMIT, bool)
+                    or not isinstance(EVALUATION_LIMIT, int)
+                    or not 1 <= EVALUATION_LIMIT < FULL_FROZEN_COUNT
+                ):
+                    raise ValueError(
+                        "EVALUATION_LIMIT must be a positive partial count below "
+                        "the frozen-set size; use None for complete evidence"
+                    )
                 frozen_records = (
                     splits.test
                     if EVALUATION_LIMIT is None
@@ -1843,6 +1912,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 meaningful transparent baseline.
                 """),
             code("""
+                frozen_evaluation_session = start_evaluation_session()
                 methods = {
                     "majority": MajorityBaseline.fit(splits.train).predict_many(
                         frozen_records
@@ -1856,9 +1926,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         frozen_records,
                         predictions,
                         supported_intents=allowed_intents,
+                        evaluation_session=frozen_evaluation_session,
                     )
                     for name, predictions in methods.items()
                 }
+                recheck_evaluation_session(frozen_evaluation_session)
                 pd.DataFrame(
                     [report_row(name, report) for name, report in reports.items()]
                 )
@@ -1888,7 +1960,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         frozen_records,
                         predictions,
                         supported_intents=allowed_intents,
+                        evaluation_session=frozen_evaluation_session,
                     )
+                recheck_evaluation_session(frozen_evaluation_session)
                 pd.DataFrame(
                     [report_row(name, report) for name, report in reports.items()]
                 )
@@ -1907,39 +1981,34 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 prepared training-data file. It also binds the training-time source,
                 interpreter/platform, and exact package set. Every baseline and change
                 report separately records the evaluation-time execution-contract hash.
-                One shared adapter lock now covers validation, prediction, scoring, report
+                The evaluation session was captured before inference and remains open
+                through scoring and evidence persistence; its final recheck detects even
+                a source or package change that was restored before the write completed.
+                One shared adapter lock covers validation, prediction, scoring, report
                 writes, and the exact manifest copy. Training cannot replace the adapter
                 during any part of that evidence chain. Missing or stale evidence keeps
                 the later decision inconclusive.
+
+                Same-name notebook artifacts were invalidated before the first method was
+                fitted. If setup, prediction, or scoring fails, an older partial/full file
+                therefore cannot masquerade as evidence from this attempt.
                 """),
             code("""
-                evidence_dir = PROJECT_ROOT / "artifacts" / "notebook" / "evaluation"
-                evidence_dir.mkdir(parents=True, exist_ok=True)
-                scope = "full" if len(frozen_records) == FULL_FROZEN_COUNT else "partial"
-                lineage_copy = (
-                    evidence_dir
-                    / f"{scope}-lora-change-training-manifest.json"
-                )
-                lora_prediction_path = (
-                    evidence_dir / f"{scope}-lora-change-predictions.jsonl"
-                )
-                lora_report_path = evidence_dir / f"{scope}-lora-change-report.json"
-                for stale_path in (
-                    lineage_copy,
-                    lora_prediction_path,
-                    lora_report_path,
-                ):
-                    stale_path.unlink(missing_ok=True)
-
-                for name, report in reports.items():
-                    write_predictions_jsonl(
-                        evidence_dir / f"{scope}-{name}-predictions.jsonl",
-                        methods[name],
-                    )
-                    write_report_json(
-                        evidence_dir / f"{scope}-{name}-report.json",
-                        report,
-                    )
+                try:
+                    for name, report in reports.items():
+                        write_predictions_jsonl(
+                            evidence_dir / f"{scope}-{name}-predictions.jsonl",
+                            methods[name],
+                        )
+                        write_report_json(
+                            evidence_dir / f"{scope}-{name}-report.json",
+                            report,
+                        )
+                    recheck_evaluation_session(frozen_evaluation_session)
+                except (OSError, RuntimeError, ValueError):
+                    for incomplete_path in baseline_evidence_paths:
+                        incomplete_path.unlink(missing_ok=True)
+                    raise
 
                 adapter_weights = settings.adapter_dir / "adapters.safetensors"
                 adapter_snapshot = None
@@ -1955,6 +2024,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                     / "lora.yaml"
                                 ),
                             )
+                            lora_evaluation_session = start_evaluation_session()
                             lora_predictor = LocalMLXPredictor(
                                 settings.model_dir,
                                 adapter_path=settings.adapter_dir,
@@ -1971,6 +2041,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 frozen_records,
                                 methods["lora-change"],
                                 supported_intents=allowed_intents,
+                                evaluation_session=lora_evaluation_session,
                             ).model_copy(
                                 update={
                                     "training_manifest_sha256": (
@@ -1993,7 +2064,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 adapter_snapshot.raw_manifest_bytes
                             )
                             recheck_training_snapshot(adapter_snapshot)
-                    except (OSError, ValueError, TrainingManifestError) as error:
+                            recheck_evaluation_session(lora_evaluation_session)
+                    except (
+                        OSError,
+                        RuntimeError,
+                        ValueError,
+                        TrainingManifestError,
+                    ) as error:
                         adapter_snapshot = None
                         methods.pop("lora-change", None)
                         reports.pop("lora-change", None)
@@ -2745,6 +2822,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     evaluate_capstone_predictions,
                     load_capstone_records,
                 )
+                from aai_local_finetuning.evaluation import (
+                    recheck_evaluation_session,
+                    start_evaluation_session,
+                )
                 from aai_local_finetuning.modeling import LocalMLXPredictor
                 from aai_local_finetuning.offline import verify_flight_manifest
                 from aai_local_finetuning.settings import PROJECT_ROOT, load_settings
@@ -2755,10 +2836,16 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 validation_records = load_capstone_records(
                     source_dir / "validation.jsonl"
                 )
+                deterministic_validation_session = start_evaluation_session()
+                deterministic_validation_predictions = (
+                    deterministic_capstone_predictions(validation_records)
+                )
                 deterministic_validation_report = evaluate_capstone_predictions(
                     validation_records,
-                    deterministic_capstone_predictions(validation_records),
+                    deterministic_validation_predictions,
+                    evaluation_session=deterministic_validation_session,
                 )
+                recheck_evaluation_session(deterministic_validation_session)
                 deterministic_validation_report.aggregate.model_dump(mode="json")
                 """),
             md("""
@@ -2769,10 +2856,15 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 status and non-pass checks. One output has no useful uncertainty or slice
                 coverage; a claimed comparison must score locked methods on identical
                 records and fingerprints.
+
+                The session starts before model construction and inference, is supplied
+                to the evaluator, and is rechecked after the report. Its digest binds the
+                governed source and installed packages across that whole path.
                 """),
             code(
                 """
                 probe_record = validation_records[0]
+                model_probe_session = start_evaluation_session()
                 predictor = LocalMLXPredictor(settings.model_dir)
                 generated = predictor.generate(
                     [
@@ -2796,8 +2888,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     peak_memory_mb=generated.peak_memory_mb,
                 )
                 model_probe_report = evaluate_capstone_predictions(
-                    (probe_record,), (model_prediction,)
+                    (probe_record,),
+                    (model_prediction,),
+                    evaluation_session=model_probe_session,
                 )
+                recheck_evaluation_session(model_probe_session)
                 {
                     "output_preview": generated.text[:500],
                     "metrics": model_probe_report.aggregate.model_dump(mode="json"),
@@ -2926,30 +3021,35 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 base-model comparison is opt-in, but when enabled it uses every identical
                 test record so the two reports share a defensible scope. Leaving it off
                 produces **missing model evidence**, not permission to infer a winner.
+
+                One frozen evaluation session starts before either method predicts and
+                closes only after scoring. That makes a shared contract hash evidence of
+                unchanged source and packages—not merely a timestamp near the report.
                 """,
                 "frozen-boundary",
                 "what-to-notice",
             ),
             code(
                 """
-                from aai_local_finetuning.training import (
-                    capture_execution_contract,
-                    execution_contract_sha256,
-                )
-
                 verify_flight_manifest(settings)
                 test_records = load_capstone_records(source_dir / "test.jsonl")
+                frozen_evaluation_session = start_evaluation_session()
+                deterministic_predictions = deterministic_capstone_predictions(
+                    test_records
+                )
                 deterministic_report = evaluate_capstone_predictions(
                     test_records,
-                    deterministic_capstone_predictions(test_records),
+                    deterministic_predictions,
+                    evaluation_session=frozen_evaluation_session,
                 )
 
                 RUN_FROZEN_MODEL_COMPARISON = False
                 model_frozen_report = None
                 if RUN_FROZEN_MODEL_COMPARISON:
+                    frozen_predictor = LocalMLXPredictor(settings.model_dir)
                     model_predictions = []
                     for record in test_records:
-                        generated = predictor.generate(
+                        generated = frozen_predictor.generate(
                             [
                                 {"role": "system", "content": CAPSTONE_SYSTEM_PROMPT},
                                 {
@@ -2975,10 +3075,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     model_frozen_report = evaluate_capstone_predictions(
                         test_records,
                         tuple(model_predictions),
+                        evaluation_session=frozen_evaluation_session,
                     )
 
-                current_evaluation_contract_sha256 = execution_contract_sha256(
-                    capture_execution_contract()
+                recheck_evaluation_session(frozen_evaluation_session)
+                current_evaluation_contract_sha256 = (
+                    frozen_evaluation_session.execution_contract_sha256
                 )
                 report_execution_contracts = {
                     deterministic_report.evaluation_execution_contract_sha256,
@@ -3063,11 +3165,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     },
                 ]
                 verify_flight_manifest(settings)
-                if (
-                    execution_contract_sha256(capture_execution_contract())
-                    != frozen_comparison[
-                        "evaluation_execution_contract_sha256"
-                    ]
+                recheck_evaluation_session(frozen_evaluation_session)
+                if frozen_evaluation_session.execution_contract_sha256 != (
+                    frozen_comparison["evaluation_execution_contract_sha256"]
                 ):
                     raise RuntimeError(
                         "source/runtime changed after the capstone evidence was written"

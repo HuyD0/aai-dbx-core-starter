@@ -14,6 +14,7 @@ from aai_local_finetuning.capstone import (
     load_capstone_records,
     render_capstone_mlx_dataset,
 )
+from aai_local_finetuning.evaluation import start_evaluation_session
 from aai_local_finetuning.settings import load_settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,7 @@ def test_local_finetuning_project_has_isolated_locked_contract():
         "src/aai_local_finetuning/learning.py",
         "src/aai_local_finetuning/cli.py",
         "src/aai_local_finetuning/capstone/evaluation.py",
+        "src/aai_local_finetuning/evaluation/session.py",
     }
 
     missing = [relative for relative in expected if not (PROJECT / relative).is_file()]
@@ -118,9 +120,12 @@ def test_capstone_generation_is_portable_and_has_frozen_hashes(tmp_path):
     rendered = render_capstone_mlx_dataset(source, tmp_path / "mlx")
     assert rendered.splits["train"].record_count == 400
     records = load_capstone_records(source / "test.jsonl")
+    evaluation_session = start_evaluation_session()
+    predictions = deterministic_capstone_predictions(records)
     report = evaluate_capstone_predictions(
         records,
-        deterministic_capstone_predictions(records),
+        predictions,
+        evaluation_session=evaluation_session,
     )
     assert report.aggregate.exact_review_rate == 1.0
 

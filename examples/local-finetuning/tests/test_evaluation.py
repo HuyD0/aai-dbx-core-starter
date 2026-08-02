@@ -25,6 +25,7 @@ from aai_local_finetuning.evaluation import (
     load_predictions_jsonl,
     load_records_jsonl,
     parse_portable_record,
+    start_evaluation_session,
     write_predictions_jsonl,
     write_records_jsonl,
     write_report_json,
@@ -45,17 +46,23 @@ def test_evaluator_rejects_source_or_package_change_while_scoring(
     mutation: str,
 ) -> None:
     record = _record("one", "forgot password", "recover_password", "account")
-    original = training.capture_execution_contract()
-    changed = _mutated_execution_contract(original, mutation)
-    contracts = iter((original, changed))
-    monkeypatch.setattr(
-        evaluation_metrics,
-        "capture_execution_contract",
-        lambda: next(contracts),
-    )
+    session = SimpleNamespace(execution_contract_sha256="a" * 64)
+    checks = 0
 
-    with pytest.raises(RuntimeError, match="changed while scoring"):
-        evaluate_predictions([record], _perfect_predictions([record]))
+    def recheck(_session: object) -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise RuntimeError(f"{mutation} changed during the evaluation session")
+
+    monkeypatch.setattr(evaluation_metrics, "recheck_evaluation_session", recheck)
+
+    with pytest.raises(RuntimeError, match="changed during"):
+        evaluate_predictions(
+            [record],
+            _perfect_predictions([record]),
+            evaluation_session=session,  # type: ignore[arg-type]
+        )
 
 
 def _record(
@@ -255,8 +262,17 @@ def test_train_only_deterministic_baselines_are_useful() -> None:
         prediction.raw_text for prediction in keyword_predictions
     ]
 
-    majority_report = evaluate_predictions(test, majority_predictions)
-    keyword_report = evaluate_predictions(test, keyword_predictions)
+    evaluation_session = start_evaluation_session()
+    majority_report = evaluate_predictions(
+        test,
+        majority_predictions,
+        evaluation_session=evaluation_session,
+    )
+    keyword_report = evaluate_predictions(
+        test,
+        keyword_predictions,
+        evaluation_session=evaluation_session,
+    )
     assert majority_report.classification.intent_accuracy == 0.5
     assert keyword_report.classification.intent_accuracy == 1.0
     assert keyword_report.classification.macro_f1 > (
@@ -335,7 +351,11 @@ def test_evaluator_tracks_structure_policy_performance_and_slices(
     report = Evaluator(
         supported_intents=("recover_password", "cash_withdrawal"),
         error_limit=2,
-    ).evaluate(records, predictions)
+    ).evaluate(
+        records,
+        predictions,
+        evaluation_session=start_evaluation_session(),
+    )
 
     assert report.classification.intent_accuracy == pytest.approx(0.25)
     assert report.classification.macro_precision == pytest.approx(0.5)
@@ -379,7 +399,12 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         _record("one", "forgot password", "recover_password", "account"),
         _record("two", "cash at atm", "cash_withdrawal", "cash"),
     ]
-    perfect_report = evaluate_predictions(records, _perfect_predictions(records))
+    evaluation_session = start_evaluation_session()
+    perfect_report = evaluate_predictions(
+        records,
+        _perfect_predictions(records),
+        evaluation_session=evaluation_session,
+    )
     lined_perfect_report = perfect_report.model_copy(
         update={
             "training_manifest_sha256": "a" * 64,
@@ -392,7 +417,11 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         _prediction(records[0], records[0].target),
         _prediction(records[1], records[0].target),
     )
-    weak_report = evaluate_predictions(records, weak_predictions)
+    weak_report = evaluate_predictions(
+        records,
+        weak_predictions,
+        evaluation_session=evaluation_session,
+    )
     baselines = [
         BaselineEvaluation(name="majority", report=perfect_report, meaningful=False),
         BaselineEvaluation(name="keyword-rule", report=weak_report, meaningful=True),
@@ -466,7 +495,11 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
         ),
         _prediction(records[1], records[1].target),
     )
-    unsafe_report = evaluate_predictions(records, unsafe_predictions)
+    unsafe_report = evaluate_predictions(
+        records,
+        unsafe_predictions,
+        evaluation_session=evaluation_session,
+    )
     lined_unsafe_report = unsafe_report.model_copy(
         update={
             "training_manifest_sha256": "c" * 64,
@@ -522,7 +555,11 @@ def test_promotion_rejects_reports_after_source_or_package_drift(
         _record("one", "forgot password", "recover_password", "account"),
         _record("two", "cash at atm", "cash_withdrawal", "cash"),
     ]
-    report = evaluate_predictions(records, _perfect_predictions(records))
+    report = evaluate_predictions(
+        records,
+        _perfect_predictions(records),
+        evaluation_session=start_evaluation_session(),
+    )
     training_digest = report.evaluation_execution_contract_sha256
     change_report = report.model_copy(
         update={
@@ -568,4 +605,8 @@ def test_evaluator_rejects_misaligned_prediction_identifiers() -> None:
     )
 
     with pytest.raises(ValueError, match="identifiers do not match"):
-        evaluate_predictions([record], [prediction])
+        evaluate_predictions(
+            [record],
+            [prediction],
+            evaluation_session=start_evaluation_session(),
+        )

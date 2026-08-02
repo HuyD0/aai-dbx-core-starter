@@ -251,6 +251,32 @@ class _CapturedFile:
     changed_ns: int
 
 
+@dataclass(frozen=True, slots=True)
+class _CapturedDirectory:
+    path: Path
+    device: int
+    inode: int
+    modified_ns: int
+    changed_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionSnapshot:
+    """Transient source/runtime identity snapshot for a bounded operation.
+
+    The portable contract is safe to persist. File and directory identities stay
+    transient so source or installed-package metadata changed and restored during
+    an operation still invalidates it without leaking machine-specific paths or
+    inode data into evidence artifacts.
+    """
+
+    execution_contract: ExecutionContract
+    execution_contract_sha256: str
+    _source_files: tuple[_CapturedFile, ...]
+    _runtime_package_metadata: tuple[_CapturedFile, ...]
+    _runtime_package_roots: tuple[_CapturedDirectory, ...]
+
+
 _CapturedExecutionContract = tuple[tuple[_CapturedFile, ...], ExecutionContract]
 
 
@@ -1248,6 +1274,46 @@ def capture_execution_contract() -> ExecutionContract:
     return contract
 
 
+def capture_execution_snapshot() -> ExecutionSnapshot:
+    """Capture portable evidence plus transient identities for later rechecking."""
+
+    source_files, contract = _capture_execution_contract()
+    package_metadata, package_roots = _capture_runtime_package_state(
+        expected_packages=contract.runtime_packages
+    )
+    return ExecutionSnapshot(
+        execution_contract=contract,
+        execution_contract_sha256=execution_contract_sha256(contract),
+        _source_files=source_files,
+        _runtime_package_metadata=package_metadata,
+        _runtime_package_roots=package_roots,
+    )
+
+
+def recheck_execution_snapshot(snapshot: ExecutionSnapshot) -> ExecutionSnapshot:
+    """Fail when source/runtime identity changed, even if bytes were restored."""
+
+    try:
+        current = capture_execution_snapshot()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(
+            "source code or runtime package metadata changed during the operation"
+        ) from error
+    captured_digest = execution_contract_sha256(snapshot.execution_contract)
+    if captured_digest != snapshot.execution_contract_sha256:
+        raise RuntimeError("captured execution snapshot is internally inconsistent")
+    if (
+        current.execution_contract != snapshot.execution_contract
+        or current._source_files != snapshot._source_files
+        or current._runtime_package_metadata != snapshot._runtime_package_metadata
+        or current._runtime_package_roots != snapshot._runtime_package_roots
+    ):
+        raise RuntimeError(
+            "source code or runtime package metadata changed during the operation"
+        )
+    return snapshot
+
+
 def execution_contract_sha256(contract: ExecutionContract) -> str:
     """Hash a validated execution contract using canonical portable JSON."""
 
@@ -1283,12 +1349,8 @@ def _capture_governed_source_files() -> tuple[_CapturedFile, ...]:
 def _capture_runtime_packages() -> tuple[RuntimePackageEvidence, ...]:
     packages: dict[str, RuntimePackageEvidence] = {}
     for distribution in importlib.metadata.distributions():
-        raw_name = distribution.metadata.get("Name")
-        raw_version = distribution.version
-        if not raw_name or not raw_version:
-            raise RuntimeError("installed distribution metadata is incomplete")
-        name = re.sub(r"[-_.]+", "-", raw_name).lower()
-        package = RuntimePackageEvidence(name=name, version=raw_version)
+        package = _runtime_package_evidence(distribution)
+        name = package.name
         if name in packages:
             raise RuntimeError(
                 f"installed runtime contains duplicate distribution metadata: {name}"
@@ -1297,6 +1359,95 @@ def _capture_runtime_packages() -> tuple[RuntimePackageEvidence, ...]:
     if not packages:
         raise RuntimeError("installed runtime package set is empty")
     return tuple(packages[name] for name in sorted(packages))
+
+
+def _capture_runtime_package_state(
+    *,
+    expected_packages: tuple[RuntimePackageEvidence, ...],
+) -> tuple[tuple[_CapturedFile, ...], tuple[_CapturedDirectory, ...]]:
+    """Capture package metadata files and their installation-root identities."""
+
+    packages: dict[str, RuntimePackageEvidence] = {}
+    metadata_files: dict[str, _CapturedFile] = {}
+    roots: set[Path] = set()
+    for distribution in importlib.metadata.distributions():
+        package = _runtime_package_evidence(distribution)
+        if package.name in packages:
+            raise RuntimeError(
+                "installed runtime contains duplicate distribution metadata: "
+                f"{package.name}"
+            )
+        packages[package.name] = package
+        metadata_path = _distribution_metadata_path(distribution)
+        metadata_files[package.name] = _capture_file(
+            metadata_path,
+            f"runtime-packages/{package.name}/metadata",
+        )
+        root = Path(distribution.locate_file("")).resolve(strict=True)
+        roots.add(root)
+
+    captured_packages = tuple(packages[name] for name in sorted(packages))
+    if captured_packages != expected_packages:
+        raise RuntimeError(
+            "installed runtime package set changed while its identity was captured"
+        )
+    captured_roots = tuple(
+        _capture_directory_identity(path)
+        for path in sorted(roots, key=lambda item: item.as_posix())
+    )
+    if not captured_roots:
+        raise RuntimeError("installed runtime package roots are missing")
+    return (
+        tuple(metadata_files[name] for name in sorted(metadata_files)),
+        captured_roots,
+    )
+
+
+def _runtime_package_evidence(
+    distribution: importlib.metadata.Distribution,
+) -> RuntimePackageEvidence:
+    raw_name = distribution.metadata.get("Name")
+    raw_version = distribution.version
+    if not raw_name or not raw_version:
+        raise RuntimeError("installed distribution metadata is incomplete")
+    name = re.sub(r"[-_.]+", "-", raw_name).lower()
+    return RuntimePackageEvidence(name=name, version=raw_version)
+
+
+def _distribution_metadata_path(
+    distribution: importlib.metadata.Distribution,
+) -> Path:
+    candidates = [
+        item
+        for item in distribution.files or ()
+        if str(item)
+        .replace("\\", "/")
+        .endswith((".dist-info/METADATA", ".egg-info/PKG-INFO"))
+    ]
+    if candidates:
+        shallowest = min(len(item.parts) for item in candidates)
+        candidates = [item for item in candidates if len(item.parts) == shallowest]
+    if len(candidates) != 1:
+        name = distribution.metadata.get("Name") or "<unknown>"
+        raise RuntimeError(
+            f"installed distribution metadata file is not uniquely located: {name}"
+        )
+    return Path(distribution.locate_file(candidates[0]))
+
+
+def _capture_directory_identity(path: Path) -> _CapturedDirectory:
+    if path.is_symlink():
+        raise ValueError(f"runtime package root is a symbolic link: {path}")
+    details = path.stat()
+    if not stat.S_ISDIR(details.st_mode):
+        raise ValueError(f"runtime package root is not a directory: {path}")
+    return _CapturedDirectory(
+        path=path,
+        device=details.st_dev,
+        inode=details.st_ino,
+        modified_ns=details.st_mtime_ns,
+        changed_ns=details.st_ctime_ns,
+    )
 
 
 def _capture_directory_files(

@@ -13,7 +13,10 @@ from typing import Any
 
 from pydantic import Field, ValidationError, model_validator
 
-from ..training import capture_execution_contract, execution_contract_sha256
+from ..evaluation.session import (
+    EvaluationSession,
+    recheck_evaluation_session,
+)
 from .schemas import (
     CapstoneRecord,
     CheckOutcome,
@@ -326,9 +329,10 @@ def evaluate_capstone_predictions(
     records: Sequence[CapstoneRecord],
     predictions: Sequence[CapstonePrediction],
     *,
+    evaluation_session: EvaluationSession,
     error_limit: int = 20,
 ) -> CapstoneEvaluationReport:
-    execution_contract = capture_execution_contract()
+    recheck_evaluation_session(evaluation_session)
     if not records:
         raise ValueError("records must not be empty")
     if error_limit < 0:
@@ -344,15 +348,12 @@ def evaluate_capstone_predictions(
         for slice_name in item.record.metadata.slices:
             by_slice_items[slice_name].append(item)
     errors = [item for item in scored if item.issues]
-    if capture_execution_contract() != execution_contract:
-        raise RuntimeError(
-            "evaluation source code or runtime package set changed while scoring"
-        )
+    recheck_evaluation_session(evaluation_session)
     return CapstoneEvaluationReport(
         total_examples=len(scored),
         evaluation_fingerprint=_fingerprint(records),
         evaluation_execution_contract_sha256=(
-            execution_contract_sha256(execution_contract)
+            evaluation_session.execution_contract_sha256
         ),
         aggregate=aggregate,
         by_slice={

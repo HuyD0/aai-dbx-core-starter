@@ -42,6 +42,7 @@ from .evaluation import (
     BaselineEvaluation,
     EvaluationRecord,
     EvaluationReport,
+    EvaluationSession,
     Evaluator,
     KeywordRuleBaseline,
     MajorityBaseline,
@@ -50,6 +51,8 @@ from .evaluation import (
     decide_lora_promotion,
     format_error_analysis,
     load_records_jsonl,
+    recheck_evaluation_session,
+    start_evaluation_session,
     write_predictions_jsonl,
     write_report_json,
 )
@@ -187,6 +190,31 @@ def _adapter_evidence_present(adapter_dir: Path) -> bool:
     return any(path.exists() or path.is_symlink() for path in evidence_paths)
 
 
+def _support_evidence_paths(name: str) -> tuple[Path, Path]:
+    output_dir = PROJECT_ROOT / "artifacts" / "evaluation"
+    return (
+        output_dir / f"{name}-predictions.jsonl",
+        output_dir / f"{name}-report.json",
+    )
+
+
+def _invalidate_support_evidence(name: str) -> tuple[Path, Path]:
+    """Remove same-name evidence before a new persisted attempt starts."""
+
+    paths = _support_evidence_paths(name)
+    for path in paths:
+        path.unlink(missing_ok=True)
+    return paths
+
+
+def _invalidate_support_promotion() -> None:
+    """A new evaluation attempt makes any prior promotion decision stale."""
+
+    (PROJECT_ROOT / "artifacts" / "evaluation" / "promotion.json").unlink(
+        missing_ok=True
+    )
+
+
 def _write_evaluation(
     *,
     name: str,
@@ -194,11 +222,14 @@ def _write_evaluation(
     predictions: Sequence[Prediction],
     report: EvaluationReport,
 ) -> tuple[Path, Path]:
-    output_dir = PROJECT_ROOT / "artifacts" / "evaluation"
-    prediction_path = output_dir / f"{name}-predictions.jsonl"
-    report_path = output_dir / f"{name}-report.json"
-    write_predictions_jsonl(prediction_path, predictions)
-    write_report_json(report_path, report)
+    prediction_path, report_path = _invalidate_support_evidence(name)
+    try:
+        write_predictions_jsonl(prediction_path, predictions)
+        write_report_json(report_path, report)
+    except BaseException:
+        prediction_path.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
     return prediction_path, report_path
 
 
@@ -284,10 +315,14 @@ def _score_predictions(
     records: Sequence[EvaluationRecord],
     predictions: Sequence[Prediction],
     supported_intents: Sequence[str],
+    evaluation_session: EvaluationSession,
     training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> EvaluationReport:
+    _invalidate_support_evidence(name)
     report = Evaluator(supported_intents=supported_intents).evaluate(
-        records, predictions
+        records,
+        predictions,
+        evaluation_session=evaluation_session,
     )
     if training_snapshot is not None:
         report = report.model_copy(
@@ -298,12 +333,20 @@ def _score_predictions(
                 ),
             }
         )
-    _write_evaluation(
+    prediction_path, report_path = _write_evaluation(
         name=name,
         records=records,
         predictions=predictions,
         report=report,
     )
+    try:
+        recheck_evaluation_session(evaluation_session)
+        if training_snapshot is not None:
+            recheck_training_snapshot(training_snapshot)
+    except BaseException:
+        prediction_path.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
     return report
 
 
@@ -313,21 +356,27 @@ def _baseline_reports(
     records: Sequence[EvaluationRecord] | None = None,
     track: bool = False,
 ) -> dict[str, EvaluationReport]:
+    baseline_types = (
+        ("majority", MajorityBaseline),
+        ("keyword-rule", KeywordRuleBaseline),
+    )
+    _invalidate_support_promotion()
+    for name, _baseline_type in baseline_types:
+        _invalidate_support_evidence(name)
     train, _, test = _load_splits(settings)
     evaluation_records = list(records or test)
     supported = tuple(sorted({record.target.intent for record in train}))
-    methods = (
-        ("majority", MajorityBaseline.fit(train)),
-        ("keyword-rule", KeywordRuleBaseline.fit(train)),
-    )
     reports: dict[str, EvaluationReport] = {}
-    for name, method in methods:
+    for name, baseline_type in baseline_types:
+        evaluation_session = start_evaluation_session()
+        method = baseline_type.fit(train)
         predictions = method.predict_many(evaluation_records)
         report = _score_predictions(
             name=name,
             records=evaluation_records,
             predictions=predictions,
             supported_intents=supported,
+            evaluation_session=evaluation_session,
         )
         reports[name] = report
         if track:
@@ -495,11 +544,15 @@ def _generate_capstone() -> None:
         PROJECT_ROOT / "data" / "processed" / "capstone-mlx-v1",
     )
     test_records = load_capstone_records(output_dir / "test.jsonl")
+    policy_session = start_evaluation_session()
     policy_predictions = deterministic_capstone_predictions(test_records)
-    policy_report = evaluate_capstone_predictions(test_records, policy_predictions)
-    _write_capstone_evaluation(
-        "deterministic-policy", test_records, policy_predictions, policy_report
+    policy_report = _score_capstone_predictions(
+        name="deterministic-policy",
+        records=test_records,
+        predictions=policy_predictions,
+        evaluation_session=policy_session,
     )
+    hybrid_session = start_evaluation_session()
     hybrid_predictions = tuple(
         CapstonePrediction(
             example_id=record.example_id,
@@ -512,9 +565,11 @@ def _generate_capstone() -> None:
         )
         for record in test_records
     )
-    hybrid_report = evaluate_capstone_predictions(test_records, hybrid_predictions)
-    _write_capstone_evaluation(
-        "hybrid-policy-text", test_records, hybrid_predictions, hybrid_report
+    _score_capstone_predictions(
+        name="hybrid-policy-text",
+        records=test_records,
+        predictions=hybrid_predictions,
+        evaluation_session=hybrid_session,
     )
     if policy_report.aggregate.exact_review_rate != 1.0:
         raise StudyCommandError("deterministic capstone policy failed its own ceiling")
@@ -529,6 +584,23 @@ def _generate_capstone() -> None:
     print("Policy and deterministic-hybrid frozen-test ceiling: exact=1.000")
 
 
+def _capstone_evidence_paths(name: str) -> tuple[Path, Path]:
+    output = PROJECT_ROOT / "artifacts" / "capstone-evaluation"
+    return (
+        output / f"{name}-predictions.jsonl",
+        output / f"{name}-report.json",
+    )
+
+
+def _invalidate_capstone_evidence(name: str) -> tuple[Path, Path]:
+    """Remove same-name capstone evidence before a persisted attempt starts."""
+
+    paths = _capstone_evidence_paths(name)
+    for path in paths:
+        path.unlink(missing_ok=True)
+    return paths
+
+
 def _write_capstone_evaluation(
     name: str,
     records: Sequence[CapstoneRecord],
@@ -537,14 +609,61 @@ def _write_capstone_evaluation(
 ) -> tuple[Path, Path]:
     output = PROJECT_ROOT / "artifacts" / "capstone-evaluation"
     output.mkdir(parents=True, exist_ok=True)
-    prediction_path = output / f"{name}-predictions.jsonl"
-    report_path = output / f"{name}-report.json"
-    prediction_path.write_text(
-        "".join(prediction.model_dump_json() + "\n" for prediction in predictions),
-        encoding="utf-8",
-    )
-    report_path.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    prediction_path, report_path = _invalidate_capstone_evidence(name)
+    try:
+        prediction_path.write_text(
+            "".join(prediction.model_dump_json() + "\n" for prediction in predictions),
+            encoding="utf-8",
+        )
+        report_path.write_text(
+            report.model_dump_json(indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except BaseException:
+        prediction_path.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
     return prediction_path, report_path
+
+
+def _score_capstone_predictions(
+    *,
+    name: str,
+    records: Sequence[CapstoneRecord],
+    predictions: Sequence[CapstonePrediction],
+    evaluation_session: EvaluationSession,
+    training_snapshot: ValidatedTrainingSnapshot | None = None,
+) -> CapstoneEvaluationReport:
+    _invalidate_capstone_evidence(name)
+    report = evaluate_capstone_predictions(
+        records,
+        predictions,
+        evaluation_session=evaluation_session,
+    )
+    if training_snapshot is not None:
+        report = report.model_copy(
+            update={
+                "training_manifest_sha256": training_snapshot.manifest_sha256,
+                "training_execution_contract_sha256": (
+                    training_snapshot.manifest.execution_contract_sha256
+                ),
+            }
+        )
+    prediction_path, report_path = _write_capstone_evaluation(
+        name,
+        records,
+        predictions,
+        report,
+    )
+    try:
+        recheck_evaluation_session(evaluation_session)
+        if training_snapshot is not None:
+            recheck_training_snapshot(training_snapshot)
+    except BaseException:
+        prediction_path.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
+    return report
 
 
 def _capstone_shots(
@@ -727,6 +846,9 @@ def _capstone_hybrid_predictions(
 def _cmd_prepare_flight(_args: argparse.Namespace, settings: ProjectSettings) -> None:
     from .acquisition import acquire_bitext, acquire_model
 
+    _invalidate_support_promotion()
+    for name in ("majority", "keyword-rule"):
+        _invalidate_support_evidence(name)
     print("Acquiring and verifying pinned public study assets...")
     acquire_bitext(settings)
     acquire_model(settings)
@@ -783,6 +905,9 @@ def _cmd_flight_check(_args: argparse.Namespace, settings: ProjectSettings) -> N
 
 
 def _cmd_smoke(_args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _invalidate_support_promotion()
+    for name in ("majority", "keyword-rule"):
+        _invalidate_support_evidence(name)
     require_assets(settings)
     leakage = check_split_files(settings.processed_dir)
     assert_no_leakage(leakage)
@@ -796,6 +921,9 @@ def _cmd_prepare_data(_args: argparse.Namespace, settings: ProjectSettings) -> N
 
 
 def _cmd_baselines(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _invalidate_support_promotion()
+    for name in ("majority", "keyword-rule"):
+        _invalidate_support_evidence(name)
     _require_prepared_split_integrity(settings.processed_dir)
     _baseline_reports(settings, track=args.track)
 
@@ -818,10 +946,6 @@ def _cmd_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
 
 
 def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
-    _require_prepared_split_integrity(settings.processed_dir)
-    _require_current_flight_preparation(settings)
-    require_assets(settings)
-
     requested = {"basic", "strong", "few-shot", "lora"}
     if args.methods != "all":
         requested = set(args.methods.split(","))
@@ -830,8 +954,15 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
             raise StudyCommandError("unknown evaluation methods: " + ", ".join(unknown))
 
     promotion_path = PROJECT_ROOT / "artifacts" / "evaluation" / "promotion.json"
+    _invalidate_support_promotion()
+    for name in ("majority", "keyword-rule", *sorted(requested - {"lora"})):
+        _invalidate_support_evidence(name)
     if "lora" in requested:
-        promotion_path.unlink(missing_ok=True)
+        _invalidate_support_evidence("lora-change")
+
+    _require_prepared_split_integrity(settings.processed_dir)
+    _require_current_flight_preparation(settings)
+    require_assets(settings)
 
     lora_snapshot: ValidatedTrainingSnapshot | None = None
     if "lora" in requested:
@@ -854,6 +985,9 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
         name for name in ("basic", "strong", "few-shot") if name in requested
     ]
     if base_methods:
+        for name in base_methods:
+            _invalidate_support_evidence(name)
+        base_session = start_evaluation_session()
         predictor = LocalMLXPredictor(settings.model_dir)
         for name in base_methods:
             strategy: PromptStrategy = "few_shot" if name == "few-shot" else name  # type: ignore[assignment]
@@ -869,6 +1003,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 records=records,
                 predictions=predictions,
                 supported_intents=supported,
+                evaluation_session=base_session,
             )
             reports[name] = report
             if args.track:
@@ -893,6 +1028,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     )
     with lora_context:
         if "lora" in requested and lora_snapshot is not None:
+            lora_session = start_evaluation_session()
             recheck_training_snapshot(lora_snapshot)
             predictor = LocalMLXPredictor(
                 settings.model_dir,
@@ -911,6 +1047,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 records=records,
                 predictions=predictions,
                 supported_intents=supported,
+                evaluation_session=lora_session,
                 training_snapshot=lora_snapshot,
             )
             reports["lora-change"] = lora_report
@@ -990,8 +1127,6 @@ def _cmd_capstone_train(args: argparse.Namespace, settings: ProjectSettings) -> 
 
 
 def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
-    _require_current_flight_preparation(settings)
-    require_assets(settings)
     if args.limit is not None and args.limit < 1:
         raise StudyCommandError("--limit must be positive")
     allowed = {"policy", "basic", "strong", "few-shot", "lora", "hybrid"}
@@ -1003,9 +1138,25 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         )
 
     decision_path = PROJECT_ROOT / "artifacts" / "capstone-evaluation" / "decision.json"
-    if "lora" in requested:
-        decision_path.unlink(missing_ok=True)
+    artifact_names = {
+        "policy": "deterministic-policy",
+        "basic": "basic",
+        "strong": "strong",
+        "few-shot": "few-shot",
+        "lora": "capstone-lora-change",
+        "hybrid": "hybrid",
+    }
+    for method in sorted(requested):
+        _invalidate_capstone_evidence(artifact_names[method])
+    hybrid_evidence_path = (
+        PROJECT_ROOT / "artifacts" / "capstone-evaluation" / "hybrid-explanations.json"
+    )
+    if "hybrid" in requested:
+        hybrid_evidence_path.unlink(missing_ok=True)
+    decision_path.unlink(missing_ok=True)
 
+    _require_current_flight_preparation(settings)
+    require_assets(settings)
     _generate_capstone()
     lora_snapshot: ValidatedTrainingSnapshot | None = None
     if "lora" in requested:
@@ -1033,19 +1184,16 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         name: str,
         predictions: Sequence[CapstonePrediction],
         *,
+        evaluation_session: EvaluationSession,
         training_snapshot: ValidatedTrainingSnapshot | None = None,
     ) -> CapstoneEvaluationReport:
-        report = evaluate_capstone_predictions(records, predictions)
-        if training_snapshot is not None:
-            report = report.model_copy(
-                update={
-                    "training_manifest_sha256": training_snapshot.manifest_sha256,
-                    "training_execution_contract_sha256": (
-                        training_snapshot.manifest.execution_contract_sha256
-                    ),
-                }
-            )
-        _write_capstone_evaluation(name, records, predictions, report)
+        report = _score_capstone_predictions(
+            name=name,
+            records=records,
+            predictions=predictions,
+            evaluation_session=evaluation_session,
+            training_snapshot=training_snapshot,
+        )
         reports[name] = report
         print(
             f"{name}: exact={report.aggregate.exact_review_rate:.3f}, "
@@ -1056,12 +1204,22 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         return report
 
     if "policy" in requested:
-        score("deterministic-policy", deterministic_capstone_predictions(records))
+        policy_session = start_evaluation_session()
+        score(
+            "deterministic-policy",
+            deterministic_capstone_predictions(records),
+            evaluation_session=policy_session,
+        )
 
     needs_base = bool(requested & {"basic", "strong", "few-shot", "hybrid"})
+    base_session = start_evaluation_session() if needs_base else None
     base_predictor = LocalMLXPredictor(settings.model_dir) if needs_base else None
     for method in ("basic", "strong", "few-shot"):
-        if method in requested and base_predictor is not None:
+        if (
+            method in requested
+            and base_predictor is not None
+            and base_session is not None
+        ):
             score(
                 method,
                 _capstone_model_predictions(
@@ -1071,24 +1229,31 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                     train=train,
                     max_tokens=args.max_tokens,
                 ),
+                evaluation_session=base_session,
             )
 
-    if "hybrid" in requested and base_predictor is not None:
+    if (
+        "hybrid" in requested
+        and base_predictor is not None
+        and base_session is not None
+    ):
         predictions, explanation_evidence = _capstone_hybrid_predictions(
             base_predictor,
             records,
         )
-        score("hybrid", predictions)
-        evidence_path = (
-            PROJECT_ROOT
-            / "artifacts"
-            / "capstone-evaluation"
-            / "hybrid-explanations.json"
-        )
-        evidence_path.write_text(
+        hybrid_evidence_path.write_text(
             json.dumps(explanation_evidence, indent=2) + "\n",
             encoding="utf-8",
         )
+        try:
+            score(
+                "hybrid",
+                predictions,
+                evaluation_session=base_session,
+            )
+        except BaseException:
+            hybrid_evidence_path.unlink(missing_ok=True)
+            raise
         print(
             "Hybrid decisions remain deterministic; generated explanations are "
             "report-only evidence for human review."
@@ -1102,6 +1267,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
     )
     with lora_context:
         if "lora" in requested and lora_snapshot is not None:
+            lora_session = start_evaluation_session()
             recheck_training_snapshot(lora_snapshot)
             predictor = LocalMLXPredictor(
                 settings.model_dir,
@@ -1119,6 +1285,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             lora_report = score(
                 "capstone-lora-change",
                 lora_predictions,
+                evaluation_session=lora_session,
                 training_snapshot=lora_snapshot,
             )
 

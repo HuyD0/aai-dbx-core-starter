@@ -13,7 +13,6 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..training import capture_execution_contract, execution_contract_sha256
 from .models import (
     ClassificationMetrics,
     DistributionSummary,
@@ -29,6 +28,10 @@ from .models import (
     SupportOutput,
 )
 from .policy import ResponsePolicy
+from .session import (
+    EvaluationSession,
+    recheck_evaluation_session,
+)
 
 
 @dataclass(frozen=True)
@@ -72,8 +75,10 @@ class Evaluator:
         self,
         records: Sequence[EvaluationRecord],
         predictions: Sequence[Prediction],
+        *,
+        evaluation_session: EvaluationSession,
     ) -> EvaluationReport:
-        execution_contract = capture_execution_contract()
+        recheck_evaluation_session(evaluation_session)
         if not records:
             raise ValueError("records must not be empty")
         ordered_predictions = _align_predictions(records, predictions)
@@ -91,15 +96,12 @@ class Evaluator:
         )
         classification = _classification_metrics(scored, supported_intents)
         output_quality = _output_quality_metrics(scored)
-        if capture_execution_contract() != execution_contract:
-            raise RuntimeError(
-                "evaluation source code or runtime package set changed while scoring"
-            )
+        recheck_evaluation_session(evaluation_session)
         return EvaluationReport(
             total_examples=len(scored),
             evaluation_fingerprint=_evaluation_fingerprint(records),
             evaluation_execution_contract_sha256=(
-                execution_contract_sha256(execution_contract)
+                evaluation_session.execution_contract_sha256
             ),
             supported_intents=supported_intents,
             classification=classification,
@@ -190,17 +192,18 @@ def evaluate_predictions(
     records: Sequence[EvaluationRecord],
     predictions: Sequence[Prediction],
     *,
+    evaluation_session: EvaluationSession,
     supported_intents: Sequence[str] | None = None,
     response_policy: ResponsePolicy | None = None,
     error_limit: int = 20,
 ) -> EvaluationReport:
-    """Functional entry point for notebooks and small scripts."""
+    """Score predictions within an explicitly prestarted inference session."""
 
     return Evaluator(
         supported_intents=supported_intents,
         response_policy=response_policy,
         error_limit=error_limit,
-    ).evaluate(records, predictions)
+    ).evaluate(records, predictions, evaluation_session=evaluation_session)
 
 
 def format_error_analysis(report: EvaluationReport) -> str:

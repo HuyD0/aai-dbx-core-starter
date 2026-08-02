@@ -12,6 +12,7 @@ from aai_local_finetuning.evaluation import (
     Prediction,
     SupportOutput,
     evaluate_predictions,
+    start_evaluation_session,
 )
 from aai_local_finetuning.learning import (
     generate_support_predictions,
@@ -123,6 +124,7 @@ def test_support_contract_rejects_inconsistent_categories():
 
 def test_report_row_keeps_quality_and_performance_separate():
     record = _record(1, "intent-a")
+    evaluation_session = start_evaluation_session()
     prediction = Prediction(
         example_id=record.example_id,
         raw_text=record.target.model_dump_json(),
@@ -130,7 +132,11 @@ def test_report_row_keeps_quality_and_performance_separate():
         output_tokens=10,
         peak_memory_mb=20.0,
     )
-    report = evaluate_predictions((record,), (prediction,))
+    report = evaluate_predictions(
+        (record,),
+        (prediction,),
+        evaluation_session=evaluation_session,
+    )
 
     row = report_row("baseline", report)
 

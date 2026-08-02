@@ -18,6 +18,7 @@ from aai_local_finetuning.capstone import (
     load_capstone_records,
     render_capstone_mlx_dataset,
 )
+from aai_local_finetuning.evaluation import start_evaluation_session
 
 
 def test_compact_contract_contains_only_actionable_checks() -> None:
@@ -34,9 +35,14 @@ def test_compact_contract_contains_only_actionable_checks() -> None:
 
 def test_policy_ceiling_scores_perfectly_and_exposes_slices() -> None:
     records = build_records(DatasetSplit.TEST, 40)
+    evaluation_session = start_evaluation_session()
     predictions = deterministic_capstone_predictions(records)
 
-    report = evaluate_capstone_predictions(records, predictions)
+    report = evaluate_capstone_predictions(
+        records,
+        predictions,
+        evaluation_session=evaluation_session,
+    )
 
     assert report.total_examples == 40
     assert report.aggregate.json_parse_rate == 1.0
@@ -52,6 +58,7 @@ def test_policy_ceiling_scores_perfectly_and_exposes_slices() -> None:
 
 
 def test_evaluator_detects_invalid_missing_and_invented_checks() -> None:
+    evaluation_session = start_evaluation_session()
     records = list(build_records(DatasetSplit.TEST, 40))
     actionable = next(record for record in records if compact_expected(record).checks)
     ready = next(
@@ -77,7 +84,11 @@ def test_evaluator_detects_invalid_missing_and_invented_checks() -> None:
         _prediction(records[-1].example_id, "not-json"),
     )
 
-    report = evaluate_capstone_predictions(selected, predictions)
+    report = evaluate_capstone_predictions(
+        selected,
+        predictions,
+        evaluation_session=evaluation_session,
+    )
 
     assert report.aggregate.exact_review_rate < 1.0
     assert report.aggregate.missing_check_rate > 0.0
