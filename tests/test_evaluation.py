@@ -493,14 +493,23 @@ def test_dataset_helper_rejects_wrong_experiment_association():
 
 
 def test_dataset_helper_requires_a_logical_unqualified_name():
-    with pytest.raises(ValueError, match="logical name"):
-        get_or_create_evaluation_dataset(
-            name="main.default.regression_v1",
-            catalog="main",
-            schema="default",
-            experiment_id="experiment-1",
-            mlflow_module=_dataset_mlflow(FakeDatasetApi()),
-        )
+    # Placeholders and malformed identifiers are as unusable as qualified
+    # names; all must fail before any MLflow request.
+    for bad in (
+        "main.default.regression_v1",
+        "unset",
+        "replace-with-dataset",
+        "production regression",
+        "",
+    ):
+        with pytest.raises(ValueError, match="logical name"):
+            get_or_create_evaluation_dataset(
+                name=bad,
+                catalog="main",
+                schema="default",
+                experiment_id="experiment-1",
+                mlflow_module=_dataset_mlflow(FakeDatasetApi()),
+            )
 
 
 @pytest.mark.parametrize(

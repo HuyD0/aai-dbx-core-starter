@@ -115,6 +115,22 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
     assert record.as_tags()["prompt_version"] == "2"
 
 
+def test_run_ids_accept_only_bounded_opaque_identifiers():
+    # Free text and secrets must never reach governed tags through the
+    # run-id fields.
+    for field in ("baseline_run_id", "change_run_id"):
+        for bad in (
+            "Summarize {{excerpt}} politely.",
+            "user@example.com",
+            "run id with spaces",
+            "a" * 65,
+            "",
+        ):
+            with pytest.raises(ValidationError):
+                _record(**{field: bad})
+        assert getattr(_record(**{field: "0123456789abcdef" * 2}), field)
+
+
 def test_prompt_name_accepts_only_a_qualified_registry_name():
     # Typos, prompt text, and credential-like values must never enter the
     # governed aai.prompt_name tag.

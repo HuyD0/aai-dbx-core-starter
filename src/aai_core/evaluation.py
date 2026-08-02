@@ -450,9 +450,11 @@ def get_or_create_evaluation_dataset(
     """
 
     logical_name = name.strip()
-    if not logical_name or "." in logical_name:
+    if not fullmatch(_NAME_COMPONENT, logical_name) or _is_placeholder(logical_name):
         raise ValueError(
-            "name must be a non-blank logical name without catalog or schema"
+            "name must be a configured logical name without catalog or "
+            "schema (letters, digits, underscores, and hyphens); got "
+            f"{name!r}"
         )
     if not str(experiment_id).strip():
         raise ValueError("experiment_id must not be blank")

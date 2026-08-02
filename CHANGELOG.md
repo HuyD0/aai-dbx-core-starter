@@ -12,10 +12,11 @@ All notable changes to `aai-core` are documented here.
   passing, metrics-bearing gate whose recorded policy applied at least one
   release rule; `decided_by` rejects personal emails; `prompt_digest` and
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
-  content, or secrets cannot enter persisted tags; `prompt_name` accepts
-  only the qualified `catalog.schema.name` shape with no placeholder
-  components and, with `prompt_version`, binds the registry identity the
-  evidence was recorded for), and `record_decision()`
+  content, or secrets cannot enter persisted tags; run ids are bounded
+  opaque identifiers; `prompt_name` accepts only the qualified
+  `catalog.schema.name` shape with no placeholder components and, with
+  `prompt_version`, binds the registry identity the evidence was recorded
+  for), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
@@ -41,8 +42,8 @@ All notable changes to `aai-core` are documented here.
   `get_or_create_evaluation_dataset` promotes the governed dataset helper
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder, dotted, or
-  invalid-character catalog/schema qualifiers instead of querying the
-  registry.
+  invalid-character catalog/schema qualifiers and logical dataset names
+  instead of querying the registry.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
   dependency-free `registered_*` bodies (logic inlined, equivalence

@@ -42,8 +42,10 @@ class DecisionRecord(ContractModel):
     change_id: str = Field(min_length=1)
     change_summary: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
-    baseline_run_id: str | None = Field(default=None, min_length=1)
-    change_run_id: str | None = Field(default=None, min_length=1)
+    # Bounded opaque identifiers (MLflow run ids are 32-hex; fixtures and
+    # backends vary) so free text and secrets cannot enter governed tags.
+    baseline_run_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    change_run_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     gate: GateResult | None = None
     # The digest binds content; the qualified name and immutable version
     # bind registry identity, so evidence for one prompt can never promote
