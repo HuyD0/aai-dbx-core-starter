@@ -51,6 +51,7 @@ def test_gate_result_contains_only_immutable_release_evidence():
     assert gate.model_dump(mode="json") == {
         "metrics": {"quality/mean": 0.95},
         "failures": [],
+        "policy": GatePolicy().model_dump(mode="json"),
     }
 
 

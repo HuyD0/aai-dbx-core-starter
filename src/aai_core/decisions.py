@@ -90,6 +90,19 @@ class DecisionRecord(ContractModel):
                     "metrics; an empty gate result proves no evaluation "
                     "rule was applied"
                 )
+            policy = self.gate.policy
+            if policy is None:
+                raise ValueError(
+                    "An adopt decision requires gate evidence that records "
+                    "the applied release policy; produce the gate with "
+                    "apply_gate() so the policy travels with the result"
+                )
+            if not policy.rules and policy.minimum_cost_coverage is None:
+                raise ValueError(
+                    "An adopt decision requires gate evidence whose applied "
+                    "policy contains at least one release rule; a rule-free "
+                    "policy gates nothing"
+                )
         return self
 
     def as_tags(self) -> dict[str, str]:

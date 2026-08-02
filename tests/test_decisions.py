@@ -7,9 +7,25 @@ import pytest
 from pydantic import ValidationError
 
 from aai_core.decisions import Decision, DecisionRecord, record_decision
-from aai_core.evaluation import GateFailure, GateResult
+from aai_core.evaluation import (
+    GateFailure,
+    GatePolicy,
+    GateResult,
+    MetricDirection,
+    MetricRule,
+)
 from aai_core.experiments import ExperimentManager
 from aai_core.testing import dev_settings
+
+CITATION_POLICY = GatePolicy(
+    rules=(
+        MetricRule(
+            metric="citation_rate",
+            direction=MetricDirection.HIGHER,
+            required=1.0,
+        ),
+    )
+)
 
 
 class FakeMlflow:
@@ -55,7 +71,7 @@ def _record(**overrides):
         "rationale": "Citation rate reached 1.0 with no quality regression.",
         "baseline_run_id": "run-baseline",
         "change_run_id": "run-change",
-        "gate": GateResult(metrics={"citation_rate": 1.0}),
+        "gate": GateResult(metrics={"citation_rate": 1.0}, policy=CITATION_POLICY),
     }
     values.update(overrides)
     return DecisionRecord(**values)
@@ -79,7 +95,11 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
         "rationale": "Citation rate reached 1.0 with no quality regression.",
         "baseline_run_id": "run-baseline",
         "change_run_id": "run-change",
-        "gate": {"metrics": {"citation_rate": 1.0}, "failures": []},
+        "gate": {
+            "metrics": {"citation_rate": 1.0},
+            "failures": [],
+            "policy": CITATION_POLICY.model_dump(mode="json"),
+        },
         "prompt_digest": "a" * 64,
         "release_digest": "digest-1",
         "decided_by": "group:app-owners",
@@ -108,6 +128,10 @@ def test_adopt_requires_passing_gate_evidence():
         _record(gate=None)
     with pytest.raises(ValidationError, match="recorded metrics"):
         _record(gate=GateResult(metrics={}))
+    with pytest.raises(ValidationError, match="applied release policy"):
+        _record(gate=GateResult(metrics={"irrelevant": 1.0}))
+    with pytest.raises(ValidationError, match="release rule"):
+        _record(gate=GateResult(metrics={"irrelevant": 1.0}, policy=GatePolicy()))
     rejected = _record(decision=Decision.REJECT, gate=failing)
     assert rejected.as_tags()["gate_passed"] == "false"
     ungated_reject = _record(decision=Decision.INCONCLUSIVE, gate=None)

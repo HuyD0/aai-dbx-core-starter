@@ -5,11 +5,26 @@ from types import SimpleNamespace
 import pytest
 
 from aai_core.decisions import Decision, DecisionRecord
-from aai_core.evaluation import GateResult
+from aai_core.evaluation import GatePolicy, GateResult, MetricDirection, MetricRule
 from aai_core.prompts import PromptManager, PromptPromotionError, prompt_digest
 from aai_core.testing import dev_settings
 
 TEMPLATE = "Summarize only facts from {{earnings_excerpt}}."
+
+
+def _passing_gate():
+    return GateResult(
+        metrics={"citation_rate": 1.0},
+        policy=GatePolicy(
+            rules=(
+                MetricRule(
+                    metric="citation_rate",
+                    direction=MetricDirection.HIGHER,
+                    required=1.0,
+                ),
+            )
+        ),
+    )
 
 
 class _Page(list):
@@ -180,7 +195,7 @@ def test_promote_refuses_an_adopt_decision_without_a_content_binding():
         change_id="prompt-v2",
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
-        gate=GateResult(metrics={"citation_rate": 1.0}),
+        gate=_passing_gate(),
     )
 
     with pytest.raises(PromptPromotionError, match="not bound"):
@@ -199,7 +214,7 @@ def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
         change_id="prompt-v2",
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
-        gate=GateResult(metrics={"citation_rate": 1.0}),
+        gate=_passing_gate(),
         prompt_digest=prompt_digest(TEMPLATE),
     )
 
@@ -234,7 +249,7 @@ def test_promote_accepts_an_adopt_decision_bound_by_prompt_digest():
         change_id="prompt-v2",
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
-        gate=GateResult(metrics={"citation_rate": 1.0}),
+        gate=_passing_gate(),
         prompt_digest=prompt_digest(TEMPLATE),
     )
 

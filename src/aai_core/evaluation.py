@@ -77,10 +77,16 @@ class GateFailure(ContractModel):
 
 
 class GateResult(ContractModel):
-    """Immutable release-gate evidence; native evaluation results stay native."""
+    """Immutable release-gate evidence; native evaluation results stay native.
+
+    ``policy`` records exactly which rules produced this result, making the
+    evidence self-describing: an adopt decision is accepted only when the
+    recorded policy applied at least one release rule.
+    """
 
     metrics: Mapping[str, float]
     failures: tuple[GateFailure, ...] = ()
+    policy: GatePolicy | None = None
 
     @field_validator("metrics", mode="after")
     @classmethod
@@ -200,7 +206,7 @@ def apply_gate(
                 )
             )
 
-    return GateResult(metrics=metrics, failures=tuple(failures))
+    return GateResult(metrics=metrics, failures=tuple(failures), policy=policy)
 
 
 def _extract_metrics(result: Any) -> dict[str, float]:
@@ -314,6 +320,8 @@ def get_or_create_evaluation_dataset(
         )
     if not str(experiment_id).strip():
         raise ValueError("experiment_id must not be blank")
+    catalog = _dataset_qualifier("catalog", catalog)
+    schema = _dataset_qualifier("schema", schema)
 
     mlflow = _mlflow(mlflow_module)
     qualified_name = f"{catalog}.{schema}.{logical_name}"
@@ -340,6 +348,26 @@ def get_or_create_evaluation_dataset(
     if records:
         dataset.merge_records(list(records))
     return dataset
+
+
+_QUALIFIER_PLACEHOLDERS = {"unset", "unknown", "todo", "changeme"}
+
+
+def _dataset_qualifier(role: str, value: str) -> str:
+    """Fail locally on unconfigured qualifiers instead of querying the cloud."""
+
+    qualifier = str(value).strip()
+    if (
+        not qualifier
+        or "." in qualifier
+        or qualifier.lower() in (_QUALIFIER_PLACEHOLDERS)
+    ):
+        raise ValueError(
+            f"{role} must be a configured Unity Catalog qualifier; got "
+            f"{value!r}. Set platform.catalog and platform.schema in "
+            "aai-platform.yml before using governed evaluation datasets."
+        )
+    return qualifier
 
 
 def _is_missing_dataset(error: Exception) -> bool:

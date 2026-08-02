@@ -9,7 +9,8 @@ All notable changes to `aai-core` are documented here.
   platform team, with a maturity checklist and an honest gap roadmap.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
   vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
-  passing, metrics-bearing gate; `decided_by` rejects personal emails), and
+  passing, metrics-bearing gate whose recorded policy applied at least one
+  release rule; `decided_by` rejects personal emails), and
   `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
@@ -20,9 +21,12 @@ All notable changes to `aai-core` are documented here.
   `evaluate_with_gate` composes native `mlflow.genai.evaluate()` with
   `apply_gate()` through kwargs passthrough and returns the native result by
   identity — unlike the removed 0.2.0 `EvaluationSuite.run_tracked`, it owns
-  no run and mirrors no native parameters; `get_or_create_evaluation_dataset`
-  promotes the governed dataset helper from `examples/notebook_setup.py`,
-  which keeps its copy until the notebooks migrate.
+  no run and mirrors no native parameters; `GateResult` records the applied
+  `GatePolicy` so gate evidence is self-describing;
+  `get_or_create_evaluation_dataset` promotes the governed dataset helper
+  from `examples/notebook_setup.py` (which keeps its copy until the
+  notebooks migrate) and fails locally on placeholder catalog/schema
+  qualifiers instead of querying the registry.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
   dependency-free `registered_*` bodies (logic inlined, equivalence

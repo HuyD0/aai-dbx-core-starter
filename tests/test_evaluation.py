@@ -191,9 +191,11 @@ def test_gate_contracts_are_strict_frozen_and_serializable():
 
     with pytest.raises(ValidationError):
         policy.minimum_cost_coverage = 0.5
+    assert result.policy == policy
     assert result.model_dump(mode="json") == {
         "metrics": {"quality": 0.9},
         "failures": [],
+        "policy": policy.model_dump(mode="json"),
     }
 
 
@@ -327,3 +329,38 @@ def test_dataset_helper_requires_a_logical_unqualified_name():
             experiment_id="experiment-1",
             mlflow_module=_dataset_mlflow(FakeDatasetApi()),
         )
+
+
+@pytest.mark.parametrize(
+    ("catalog", "schema"),
+    [
+        ("unset", "default"),
+        ("main", "unset"),
+        (" ", "default"),
+        ("main", ""),
+        ("ChangeMe", "default"),
+        ("main", "todo"),
+    ],
+)
+def test_dataset_helper_fails_locally_on_placeholder_qualifiers(catalog, schema):
+    class RecordingApi(FakeDatasetApi):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def get_dataset(self, **kwargs):
+            self.calls += 1
+            return super().get_dataset(**kwargs)
+
+    registry = RecordingApi()
+
+    with pytest.raises(ValueError, match="platform.catalog"):
+        get_or_create_evaluation_dataset(
+            name="regression_v1",
+            catalog=catalog,
+            schema=schema,
+            experiment_id="experiment-1",
+            mlflow_module=_dataset_mlflow(registry),
+        )
+
+    assert registry.calls == 0
