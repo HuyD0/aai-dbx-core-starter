@@ -360,6 +360,19 @@ def _effective_experiment_issue(document: dict[str, Any]) -> str | None:
                 f"(current value: {explicit!r})."
             )
         return None
+    # _is_placeholder stringifies, so a numeric component would read as
+    # configured and only fail inside strict PlatformSettings at bootstrap.
+    non_string = [
+        f"platform.{field}"
+        for field in ("team", "project", "application")
+        if platform.get(field) is not None and not isinstance(platform.get(field), str)
+    ]
+    if non_string:
+        return (
+            "`platform.experiment_name` derives from "
+            + ", ".join(non_string)
+            + ", which must be strings in aai-platform.yml."
+        )
     unset_components = [
         f"platform.{field}"
         for field in ("team", "project", "application")

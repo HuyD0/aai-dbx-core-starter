@@ -446,6 +446,26 @@ platform:
         "(current value: None)."
     ]
 
+    # The derived path has the same exposure: a numeric component would
+    # read as configured and only fail at bootstrap.
+    config.write_text(
+        """
+platform:
+  experiment_name: unset
+  team: 123
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    derived = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert derived == [
+        "`platform.experiment_name` derives from platform.team, which "
+        "must be strings in aai-platform.yml."
+    ]
+
 
 def test_config_preflight_rejects_malformed_qualifiers(runner, tmp_path, monkeypatch):
     # The SDK helpers reject dotted or invalid-character qualifiers; the

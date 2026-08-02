@@ -212,7 +212,26 @@ def test_qualify_rejects_blank_and_malformed_names():
             manager.qualify(bad)
     with pytest.raises(ValueError, match="blank"):
         manager.ensure_version("  ", TEMPLATE, commit_message="Blank name")
+    # str() would make None the valid-looking component "None", so
+    # register()/load()/set_alias() would address a real, wrong prompt.
+    for wrong_type in (None, 123, ["earnings_summary"]):
+        with pytest.raises(TypeError, match="strings"):
+            manager.qualify(wrong_type)
     assert manager.qualify("  earnings_summary  ") == "main.app.earnings_summary"
+
+
+def test_registry_qualifiers_must_be_strings():
+    # A non-string catalog or schema would coerce into a valid-looking
+    # qualifier and address a real, wrong registry namespace.
+    for catalog, schema in ((None, "app"), (123, "app"), ("main", None)):
+        manager = PromptManager(
+            context=dev_settings().resource,
+            catalog=catalog,
+            schema=schema,
+            mlflow_module=object(),
+        )
+        with pytest.raises(TypeError, match="qualifier"):
+            manager.qualify("earnings_summary")
 
 
 def test_prompt_digest_is_stable_and_content_sensitive():

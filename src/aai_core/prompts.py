@@ -302,7 +302,12 @@ class PromptManager:
     def qualify(self, name: str) -> str:
         from aai_core.evaluation import _is_placeholder
 
-        cleaned = str(name).strip()
+        # str() would make None the component "None" and 123 the component
+        # "123", both valid-looking, so register()/load()/ensure_version()/
+        # set_alias() would address a real (wrong) prompt in the registry.
+        if not isinstance(name, str):
+            raise TypeError(f"Prompt names must be strings; got {type(name).__name__}")
+        cleaned = name.strip()
         parts = cleaned.split(".")
         if len(parts) == 1:
             # Fail locally: a blank name would otherwise reach the registry
@@ -369,7 +374,15 @@ def _registry_qualifier(role: str, value: str) -> str:
 
     from aai_core.evaluation import _is_placeholder
 
-    qualifier = str(value).strip()
+    # str() would make None the qualifier "None" and 123 the qualifier
+    # "123", both of which satisfy _NAME_COMPONENT and would address a
+    # real (wrong) registry namespace.
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{role} must be a string Unity Catalog qualifier; got "
+            f"{type(value).__name__}"
+        )
+    qualifier = value.strip()
     if not fullmatch(_NAME_COMPONENT, qualifier) or _is_placeholder(qualifier):
         raise ValueError(
             f"{role} must be a configured Unity Catalog qualifier; got "

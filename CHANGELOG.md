@@ -64,10 +64,14 @@ All notable changes to `aai-core` are documented here.
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder, dotted, or
   invalid-character catalog/schema qualifiers and logical dataset names
-  instead of querying the registry; the experiment id must be a string
-  and is normalized and placeholder-checked before the first request, so
-  no untrimmed, unconfigured, or `str(None)`-shaped value can reach the
-  cloud call or misreport an association the backend reports normalized.
+  instead of querying the registry. Every identifier crossing into the
+  registry — dataset name, catalog and schema qualifiers (in the dataset
+  helper and the prompt registry alike), prompt names, and the experiment
+  id — must be an actual string, since `str()` coercion turns `None` and
+  `123` into the valid-looking names `"None"` and `"123"` that would
+  address a real but unintended resource; the experiment id is also
+  normalized and placeholder-checked before the first request, so it
+  cannot misreport an association the backend reports normalized.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
   dependency-free `registered_*` bodies (logic inlined, equivalence

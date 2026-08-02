@@ -552,6 +552,22 @@ def test_dataset_helper_creates_without_unsupported_tags():
     assert result.merged_records is None
 
 
+def test_dataset_helper_requires_string_qualifiers():
+    # str(None) is "None" and str(123) is "123": both satisfy the
+    # identifier charset and would name a real but unintended securable.
+    for field, bad in (("catalog", None), ("catalog", 123), ("schema", None)):
+        arguments = {
+            "name": "regression_v1",
+            "catalog": "main",
+            "schema": "default",
+            "experiment_id": "experiment-1",
+            "mlflow_module": _dataset_mlflow(FakeDatasetApi()),
+        }
+        arguments[field] = bad
+        with pytest.raises(TypeError, match=field):
+            get_or_create_evaluation_dataset(**arguments)
+
+
 def test_dataset_helper_requires_a_string_experiment_id():
     # str(None) is the plausible-looking id "None", which would pass the
     # nonblank and placeholder checks and reach the registry.

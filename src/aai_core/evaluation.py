@@ -562,7 +562,15 @@ def _is_placeholder(value: str) -> bool:
 def _dataset_qualifier(role: str, value: str) -> str:
     """Fail locally on unconfigured qualifiers instead of querying the cloud."""
 
-    qualifier = str(value).strip()
+    # str() would make None the qualifier "None" and 123 the qualifier
+    # "123", both of which satisfy _NAME_COMPONENT and would name a real
+    # (wrong) securable in the registry.
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{role} must be a string Unity Catalog qualifier; got "
+            f"{type(value).__name__}"
+        )
+    qualifier = value.strip()
     if not fullmatch(_NAME_COMPONENT, qualifier) or _is_placeholder(qualifier):
         raise ValueError(
             f"{role} must be a configured Unity Catalog qualifier; got "
