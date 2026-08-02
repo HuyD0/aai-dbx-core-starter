@@ -503,13 +503,41 @@ def _dataset_qualifier(role: str, value: str) -> str:
     return qualifier
 
 
-def _is_missing_dataset(error: Exception) -> bool:
-    error_code = str(getattr(error, "error_code", "")).upper()
+# Structured codes that are authoritatively NOT absence: registries often
+# word a permission denial as "does not exist" to avoid disclosing
+# inaccessible resources, so these codes override message markers.
+_NON_MISSING_ERROR_CODES = {
+    "PERMISSION_DENIED",
+    "UNAUTHENTICATED",
+    "UNAUTHORIZED",
+    "TEMPORARILY_UNAVAILABLE",
+    "REQUEST_LIMIT_EXCEEDED",
+}
+
+
+def _is_missing_registry_error(error: Exception) -> bool:
+    """Shared absence test for registry errors (datasets and prompts alike).
+
+    Message markers are consulted only when no authoritative structured
+    code says otherwise; ``MlflowException`` defaults to ``INTERNAL_ERROR``
+    on message-only raises, so markers must survive non-authoritative
+    codes.
+    """
+
+    error_code = str(getattr(error, "error_code", "")).strip().upper()
+    if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
+        return True
+    if error_code in _NON_MISSING_ERROR_CODES:
+        return False
     message = str(error).upper()
-    return error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"} or any(
+    return any(
         marker in message
         for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
     )
+
+
+def _is_missing_dataset(error: Exception) -> bool:
+    return _is_missing_registry_error(error)
 
 
 def _mlflow(module: Any | None) -> Any:

@@ -300,18 +300,6 @@ def _registry_qualifier(role: str, value: str) -> str:
     return qualifier
 
 
-# Structured codes that are authoritatively NOT absence: registries often
-# word a permission denial as "does not exist" to avoid disclosing
-# inaccessible resources, so these codes override message markers.
-_NON_MISSING_ERROR_CODES = {
-    "PERMISSION_DENIED",
-    "UNAUTHENTICATED",
-    "UNAUTHORIZED",
-    "TEMPORARILY_UNAVAILABLE",
-    "REQUEST_LIMIT_EXCEEDED",
-}
-
-
 def is_missing_prompt_error(error: Exception) -> bool:
     """True only when a registry error means the prompt or alias is absent.
 
@@ -319,20 +307,12 @@ def is_missing_prompt_error(error: Exception) -> bool:
     False — even when their message says "does not exist", the common
     non-disclosure wording — so callers seeding a first version or first
     promotion can fall back on absence without swallowing real failures.
-    Message markers are consulted only when no authoritative structured
-    code says otherwise.
+    One shared predicate serves prompts and evaluation datasets alike.
     """
 
-    error_code = str(getattr(error, "error_code", "")).strip().upper()
-    if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
-        return True
-    if error_code in _NON_MISSING_ERROR_CODES:
-        return False
-    message = str(error).upper()
-    return any(
-        marker in message
-        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
-    )
+    from aai_core.evaluation import _is_missing_registry_error
+
+    return _is_missing_registry_error(error)
 
 
 def _prompt_tag_key(key: str) -> str:

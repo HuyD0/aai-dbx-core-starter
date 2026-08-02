@@ -387,6 +387,25 @@ def _dataset_mlflow(datasets):
     return SimpleNamespace(genai=SimpleNamespace(datasets=datasets))
 
 
+def test_dataset_helper_propagates_denials_worded_as_missing():
+    # A permission denial phrased as "does not exist" must propagate, not
+    # trigger the mutating create_dataset() call.
+    class DeniedError(Exception):
+        error_code = "PERMISSION_DENIED"
+
+    registry = FakeDatasetApi(get_error=DeniedError("dataset does not exist"))
+
+    with pytest.raises(DeniedError):
+        get_or_create_evaluation_dataset(
+            name="regression_v1",
+            catalog="main",
+            schema="default",
+            experiment_id="experiment-1",
+            mlflow_module=_dataset_mlflow(registry),
+        )
+    assert registry.create_arguments is None
+
+
 def test_dataset_helper_reuses_and_merges_the_existing_dataset():
     dataset = FakeEvaluationDataset(
         name="main.default.regression_v1",

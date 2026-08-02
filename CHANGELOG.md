@@ -73,7 +73,8 @@ All notable changes to `aai-core` are documented here.
   or first promotion can distinguish an absent prompt or alias from
   authentication, permission, and transient registry failures instead of
   catching broadly; structured non-missing codes override "does not
-  exist" message wording, the common non-disclosure phrasing. `promote()` verifies the target version through the
+  exist" message wording, the common non-disclosure phrasing, and the
+  same shared predicate guards the dataset helper's create path. `promote()` verifies the target version through the
   raw registry client, never the fluent lineage-linking load, so a
   rejected candidate is not attached to an active run, model, or trace.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
