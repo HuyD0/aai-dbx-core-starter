@@ -104,6 +104,23 @@
       "owner": "application",
       "note": "Supported through MLflow LangChain autologging; graph and state APIs are not wrapped by aai-core."
     },
+    "decision_records": {
+      "support": "preview",
+      "owner": "aai-core"
+    },
+    "deterministic_scorers": {
+      "support": "preview",
+      "owner": "aai-core"
+    },
+    "production_feedback_curation": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance",
+      "note": "Scorer sampling registration runs from a Databricks notebook; aai-core supplies judge resolution, feedback, and trace curation."
+    },
+    "prompt_promotion_gating": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance"
+    },
     "self_service_analytics": {
       "support": "preview",
       "owner": "template-owned",

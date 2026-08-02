@@ -35,6 +35,145 @@ def test_doctor_passes_on_valid_config_without_cloud(tmp_path):
     assert all("install aai-core[" in check.detail for check in skipped)
 
 
+def test_doctor_reports_lifecycle_readiness_as_skips_not_failures(tmp_path):
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(VALID_CONFIG, encoding="utf-8")
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:experiment"].status == "pass"
+    assert by_name["lifecycle:experiment"].detail.startswith("/Shared/")
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+    assert "platform.catalog" in by_name["lifecycle:prompt-registry"].detail
+    assert by_name["lifecycle:judge-model"].status == "skip"
+    assert "judge-model" in by_name["lifecycle:judge-model"].detail
+    lifecycle_checks = [c for c in checks if c.name.startswith("lifecycle:")]
+    assert all(c.status in {"pass", "skip", "info"} for c in lifecycle_checks)
+
+
+def test_doctor_treats_every_placeholder_qualifier_as_unconfigured(tmp_path):
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  catalog: ChangeMe\n  schema: todo\n",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+
+
+def test_doctor_treats_placeholder_experiment_names_as_unconfigured(tmp_path):
+    # An explicit placeholder passes straight through to the registry;
+    # only 'unset' derives the conventional /Shared/... name.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  experiment_name: replace-with-experiment\n",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:experiment"].status == "skip"
+    assert "platform.experiment_name" in by_name["lifecycle:experiment"].detail
+
+
+def test_doctor_treats_derived_names_with_placeholder_components_as_unconfigured(
+    tmp_path,
+):
+    # /Shared/unset-... is not a real experiment; the derived name is only
+    # as configured as the components it is built from.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG.replace("team: test-team", "team: unset"),
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:experiment"].status == "skip"
+    assert "platform.team" in by_name["lifecycle:experiment"].detail
+
+
+def test_doctor_treats_dotted_qualifiers_as_unconfigured(tmp_path):
+    # The SDK helpers reject dotted qualifiers; the doctor must not report
+    # ready what the connected workflow will refuse.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  catalog: main.extra\n  schema: app\n",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+
+    # Invalid identifier characters are just as unusable as dots.
+    config.write_text(
+        VALID_CONFIG + "  catalog: main catalog\n  schema: app\n",
+        encoding="utf-8",
+    )
+    checks = run_doctor(config_path=config)
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+
+
+def test_doctor_treats_replace_with_values_as_unconfigured(tmp_path):
+    # The example config ships replace-with-* values; the doctor must not
+    # report them as ready, and the judge must fail locally, not remotely.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + """
+  catalog: replace-with-catalog
+  schema: app
+
+providers:
+  models:
+    judge-model:
+      provider: databricks
+      deployment: replace-with-serving-endpoint
+""",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "skip"
+    assert by_name["lifecycle:judge-model"].status == "skip"
+    assert "placeholder" in by_name["lifecycle:judge-model"].detail
+
+
+def test_doctor_passes_lifecycle_checks_when_configured(tmp_path):
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + """
+  catalog: main
+  schema: app
+
+providers:
+  models:
+    judge-model:
+      provider: databricks
+      deployment: judge-ep
+""",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:prompt-registry"].status == "pass"
+    assert by_name["lifecycle:prompt-registry"].detail == "main.app"
+    assert by_name["lifecycle:judge-model"].status == "pass"
+    assert by_name["lifecycle:judge-model"].detail == "endpoints:/judge-ep"
+
+
 def test_doctor_cli_exit_codes_and_json_output(tmp_path, capsys):
     valid = tmp_path / "valid.yml"
     valid.write_text(VALID_CONFIG, encoding="utf-8")

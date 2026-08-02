@@ -350,7 +350,7 @@ def main() -> None:
         baseline_metrics=summary_baseline,
     )
     gate_passed = gate.passed
-    decision = "release_change" if gate_passed else "keep_baseline"
+    decision = "adopt" if gate_passed else "reject"
     release = "earnings-summary-prompt-v2" if gate_passed else "blocked"
 
     MlflowClient().set_tag(

@@ -316,7 +316,11 @@ cloud and identity resources are provisioned outside this repository.
 - [10 — Layered and calibrated judges](examples/10_layered_judges.ipynb)
 - [11 — Cost-quality trade-off](examples/11_cost_quality_tradeoff.ipynb)
 - [12 — Optional agent alignment and optimization](examples/12_agent_alignment_optimization.ipynb)
+- [13 — Decision records and gated promotion](examples/13_decision_and_promotion_lifecycle.ipynb)
+- [14 — Platform LLM operations](examples/14_platform_llm_operations.ipynb)
 - [Developer guide](docs/developer-guide.md)
+- [LLMOps playbook](docs/llmops-playbook.md) — industry LLMOps practice map
+  onto this platform, for application teams and the platform team
 - [Platform architecture](docs/platform-architecture.md)
 - [Secrets and identity](docs/secrets-and-identity.md)
 - [SDK versioning policy](docs/versioning.md)

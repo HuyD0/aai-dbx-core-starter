@@ -331,6 +331,12 @@ The repository examples implement this contract in order:
 13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
     training, and final held-out release evidence separate; it is disabled by
     default and cannot move a production alias.
+14. `13_decision_and_promotion_lifecycle.ipynb` ends the comparison in a
+    recorded adopt/reject decision bound to its gate evidence and shows the
+    production alias refusing to move without adopt-grade evidence.
+15. `14_platform_llm_operations.ipynb` walks the platform team's operating
+    loop: judge governance, gateway request tags, cost by tag, fleet
+    provenance, monitoring adoption, and rollback levers.
 
 The executable lifecycle scripts emit hypothesis, baseline, change, result,
 decision, and release. The advanced notebooks preserve that vocabulary while
@@ -339,6 +345,7 @@ remaining exploration and teaching artifacts. See
 
 ## Current references
 
+- [LLMOps playbook](llmops-playbook.md)
 - [Cookbook relevance assessment](mlflow-cookbook-assessment.md)
 - [MLflow GenAI evaluation and monitoring](https://mlflow.org/docs/latest/genai/eval-monitor/)
 - [MLflow automatic evaluation](https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/)
