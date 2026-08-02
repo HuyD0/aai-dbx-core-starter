@@ -23,7 +23,8 @@ APP_NAME ?= aai-platform-console-dev
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
 	classification-install classification-prepare classification-train \
-	classification-check classification-notebook classification-ui
+	classification-doctor classification-reset classification-check \
+	classification-notebook classification-ui
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -82,6 +83,12 @@ local-ui: examples-install ## Serve the isolated local MLflow store at http://12
 
 classification-install: check-uv ## Install the locked local classification course.
 	$(MAKE) -C examples/local-classification install
+
+classification-doctor: check-uv ## Verify the local classification course setup.
+	$(MAKE) -C examples/local-classification doctor
+
+classification-reset: ## Recoverably archive local classification course-v2 state.
+	$(MAKE) -C examples/local-classification course-reset
 
 classification-prepare: check-uv ## Generate and validate the synthetic classification data.
 	$(MAKE) -C examples/local-classification prepare

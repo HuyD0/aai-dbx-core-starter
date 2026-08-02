@@ -132,7 +132,10 @@ def generate_subscription_data(settings: ProjectSettings) -> pd.DataFrame:
     missing_usage = rng.random(len(data)) < 0.035
     missing_channel = rng.random(len(data)) < 0.015
     data.loc[missing_usage, "usage_hours_30d"] = np.nan
-    data.loc[missing_channel, "signup_channel"] = None
+    # SimpleImputer uses ``np.nan`` as its missing-value marker by default. Using
+    # Python ``None`` here would make OneHotEncoder learn a literal ``None``
+    # category instead of imputing these rows.
+    data.loc[missing_channel, "signup_channel"] = np.nan
     return data
 
 

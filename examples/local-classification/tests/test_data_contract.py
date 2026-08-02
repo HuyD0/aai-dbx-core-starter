@@ -7,10 +7,19 @@ import pytest
 from aai_local_classification.contracts import SplitName
 from aai_local_classification.data import (
     add_intentional_leakage,
+    generate_subscription_data,
     load_split,
     prepare_dataset,
     validate_feature_contract,
 )
+
+
+def test_generated_categorical_missing_values_are_real_nulls(settings):
+    data = generate_subscription_data(settings)
+    signup_channel = data["signup_channel"]
+
+    assert signup_channel.isna().any()
+    assert not {"None", "nan", "<NA>"} & set(signup_channel.dropna().astype(str))
 
 
 def test_generation_is_deterministic_and_test_labels_stay_sealed(settings, tmp_path):
