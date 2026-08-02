@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import warnings
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from aai_local_classification.settings import PROJECT_ROOT
 
 @dataclass(frozen=True)
 class LocalProjectPaths:
+    source_root: Path
     project_root: Path
     data_root: Path
     mlflow_root: Path
@@ -26,10 +28,16 @@ class LocalProjectPaths:
 
 
 def local_paths(project_root: Path | None = None) -> LocalProjectPaths:
-    root = (project_root or PROJECT_ROOT).resolve()
+    override = os.getenv("AAI_CLASSIFICATION_PROJECT_ROOT")
+    root = (
+        Path(override)
+        if project_root is None and override
+        else project_root or PROJECT_ROOT
+    ).resolve()
     mlflow_root = root / ".aai" / "mlflow"
     database = mlflow_root / "mlflow.db"
     return LocalProjectPaths(
+        source_root=PROJECT_ROOT,
         project_root=root,
         data_root=root / "data" / "processed",
         mlflow_root=mlflow_root,
@@ -99,7 +107,7 @@ def run_tags(
         "dataset_sha256": dataset_sha256,
         "data_classification": "synthetic",
         "execution_environment": "local",
-        **source_state(paths.project_root),
+        **source_state(paths.source_root),
     }
 
 
@@ -136,12 +144,11 @@ def log_dataset(
 
 
 def log_reproducibility_artifacts(paths: LocalProjectPaths) -> None:
-    for relative in (
-        Path("configs/project.yaml"),
-        Path("data/processed/manifest.json"),
-        Path("uv.lock"),
+    for artifact in (
+        paths.source_root / "configs" / "project.yaml",
+        paths.data_root / "manifest.json",
+        paths.source_root / "uv.lock",
     ):
-        artifact = paths.project_root / relative
         if artifact.is_file():
             mlflow.log_artifact(artifact, artifact_path="reproducibility")
 

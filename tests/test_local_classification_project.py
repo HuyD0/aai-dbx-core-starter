@@ -119,6 +119,10 @@ def test_root_exposes_course_commands_and_excludes_it_from_sdk_sdist():
     ):
         assert target in makefile
 
+    course_makefile = (PROJECT / "Makefile").read_text(encoding="utf-8")
+    assert 'AAI_CLASSIFICATION_PROJECT_ROOT="$(COURSE_ROOT)"' in course_makefile
+    assert "--no-browser" not in course_makefile
+
     with (ROOT / "pyproject.toml").open("rb") as stream:
         root_project = tomllib.load(stream)
     excluded = root_project["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]

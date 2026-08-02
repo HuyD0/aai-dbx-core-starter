@@ -6,14 +6,27 @@ import pytest
 from aai_local_classification.contracts import PromotionDecision, SplitName
 from aai_local_classification.data import load_split
 from aai_local_classification.inference import load_champion
+from aai_local_classification.settings import PROJECT_ROOT
 from aai_local_classification.tracking import local_paths
 from aai_local_classification.workflow import (
+    get_or_run_candidate_selection,
     load_decision,
     load_selection,
     promote_if_approved,
     run_frozen_test_gate,
     run_full_workflow,
 )
+
+
+def test_environment_selects_an_isolated_course_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("AAI_CLASSIFICATION_PROJECT_ROOT", str(tmp_path))
+
+    paths = local_paths()
+
+    assert paths.project_root == tmp_path.resolve()
+    assert paths.source_root == PROJECT_ROOT
+    assert paths.data_root == tmp_path.resolve() / "data" / "processed"
+    assert paths.state_root == tmp_path.resolve() / ".aai" / "state"
 
 
 def test_complete_local_mlflow_release_and_reload(settings, tmp_path):
@@ -53,6 +66,18 @@ def test_complete_local_mlflow_release_and_reload(settings, tmp_path):
         result["decision"]["threshold"]
     )
 
+    notebook_selection = get_or_run_candidate_selection(settings, tmp_path)
+    notebook_decision = run_frozen_test_gate(
+        settings,
+        tmp_path,
+        notebook_selection,
+    )
+    assert notebook_selection.selected_run_id == result["selection"]["selected_run_id"]
+    assert notebook_selection.selected_model_id == (
+        result["selection"]["selected_model_id"]
+    )
+    assert notebook_decision.test_run_id == result["decision"]["test_run_id"]
+
     repeated = run_full_workflow(settings, tmp_path)
     assert repeated["selection"]["selected_run_id"] == (
         result["selection"]["selected_run_id"]
@@ -67,6 +92,21 @@ def test_consumed_test_and_promotion_linkage_fail_closed(settings, tmp_path):
     run_full_workflow(settings, tmp_path)
     selection = load_selection(tmp_path)
     decision = load_decision(tmp_path)
+
+    selection_path = local_paths(tmp_path).state_root / "selection.json"
+    original_selection = selection_path.read_text(encoding="utf-8")
+    changed_selection_policy = settings.selection.model_copy(
+        update={
+            "simpler_model_tolerance": settings.selection.simpler_model_tolerance
+            + 0.001
+        }
+    )
+    changed_training_settings = settings.model_copy(
+        update={"selection": changed_selection_policy}
+    )
+    with pytest.raises(ValueError, match="cannot be replaced"):
+        get_or_run_candidate_selection(changed_training_settings, tmp_path)
+    assert selection_path.read_text(encoding="utf-8") == original_selection
 
     changed_gate = settings.promotion_gate.model_copy(
         update={"minimum_test_recall": 0.99}
