@@ -12,7 +12,7 @@ foundry-curriculum/
 ├── config/
 │   ├── .gitignore
 │   ├── aai-platform.dev.example.yml   portable, tracked example
-│   └── aai-platform.dev.yml           local endpoint config, ignored by Git
+│   └── aai-platform.dev.yml           local clone config, ignored by Git
 ├── data/
 │   └── evaluation_cases.jsonl         20 held-out starter cases
 ├── notebook_setup.py                  validation and keyless Responses helper
@@ -29,11 +29,25 @@ foundry-curriculum/
 
 ## Configure it
 
-The local development file already contains the supplied Foundry **project**
-endpoint. It is ignored by Git because it is environment-specific. Complete
-the model deployment name before making a connected request:
+In a fresh clone, create the ignored local configuration from the portable
+example before editing settings or opening a notebook. From the repository
+root, run:
+
+```bash
+cp examples/foundry-curriculum/config/aai-platform.dev.example.yml \
+  examples/foundry-curriculum/config/aai-platform.dev.yml
+```
+
+Edit `examples/foundry-curriculum/config/aai-platform.dev.yml`, not the tracked
+example. Set the clone's repository and approved catalog, then complete the
+Foundry **project** endpoint and model deployment before making a connected
+request:
 
 ```yaml
+platform:
+  repository: <owner>/<repository>
+  catalog: <approved catalog>
+
 providers:
   models:
     foundry-chat:

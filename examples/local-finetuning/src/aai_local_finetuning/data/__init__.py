@@ -10,7 +10,7 @@ from .leakage import (
     load_chat_jsonl,
 )
 from .manifests import sha256_file, verify_manifest
-from .pipeline import audit_dataset, prepare_dataset
+from .pipeline import audit_dataset, prepare_dataset, processing_source_sha256
 from .policies import (
     DIFFICULTY_POLICY_VERSION,
     ESCALATION_POLICY_VERSION,
@@ -72,6 +72,7 @@ __all__ = [
     "load_chat_jsonl",
     "parse_flags",
     "prepare_dataset",
+    "processing_source_sha256",
     "render_training_response",
     "sha256_file",
     "summarize_instruction_tokens",

@@ -205,12 +205,13 @@ def find_near_text_pairs(
     threshold: float = 0.9,
     excluded_group_keys: list[str] | None = None,
 ) -> tuple[TextSimilarityPair, ...]:
-    """Find likely near duplicates without an all-pairs comparison.
+    """Find likely near duplicates with an indexed fast path.
 
     Candidate generation combines rare-token indexing, SimHash bands, and stable
-    prefix/suffix buckets. Every candidate is confirmed with the public lexical
-    similarity function. Exact matches are returned; callers can exclude a known
-    exact/template group with ``excluded_group_keys``.
+    prefix/suffix buckets. Buckets over the candidate cap use exhaustive member
+    confirmation to preserve recall. Every candidate is confirmed with the public
+    lexical similarity function. Exact matches are returned; callers can exclude a
+    known exact/template group with ``excluded_group_keys``.
     """
 
     normalized = [canonical_text(text) for text in texts]
@@ -236,14 +237,20 @@ def find_near_text_pairs(
         )[:4]
 
         candidates: set[int] = set()
+        overflow_candidates: set[int] = set()
         for token in selected:
+            bucket = token_index[token]
             if frequencies[token] <= _MAX_INDEX_BUCKET:
-                candidates.update(token_index[token])
+                candidates.update(bucket)
+            else:
+                overflow_candidates.update(bucket)
         simhash = _simhash(tokens)
         for band in range(4):
             bucket = band_index[(band, (simhash >> (band * 16)) & 0xFFFF)]
             if len(bucket) <= _MAX_INDEX_BUCKET:
                 candidates.update(bucket)
+            else:
+                overflow_candidates.update(bucket)
         length_bucket = len(tokens) // 3
         prefix = tuple(tokens[:2])
         suffix = tuple(tokens[-2:])
@@ -251,8 +258,17 @@ def find_near_text_pairs(
         suffix_bucket = edge_index[("suffix", suffix, length_bucket)]
         if len(prefix_bucket) <= _MAX_INDEX_BUCKET:
             candidates.update(prefix_bucket)
+        else:
+            overflow_candidates.update(prefix_bucket)
         if len(suffix_bucket) <= _MAX_INDEX_BUCKET:
             candidates.update(suffix_bucket)
+        else:
+            overflow_candidates.update(suffix_bucket)
+
+        # Dropping an over-cap bucket loses recall exactly where a repeated phrase
+        # family is most likely. Exhaustively confirm those bucket members instead;
+        # the length and quick-ratio checks below still discard impossible matches.
+        candidates.update(overflow_candidates)
 
         for left_index in sorted(candidates):
             if excluded_group_keys is not None:

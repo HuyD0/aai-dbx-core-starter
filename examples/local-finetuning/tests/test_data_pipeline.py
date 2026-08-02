@@ -23,6 +23,7 @@ from aai_local_finetuning.data import (
     load_chat_jsonl,
     parse_flags,
     prepare_dataset,
+    processing_source_sha256,
     render_training_response,
     requires_escalation,
     verify_manifest,
@@ -87,6 +88,7 @@ def test_prepare_is_balanced_private_deterministic_and_manifested(
     assert "grouped" in first.manifest.split_strategy
     assert first.manifest.code_revision
     assert len(first.manifest.processing_source_sha256) == 64
+    assert first.manifest.processing_source_sha256 == processing_source_sha256()
     assert first.manifest.splits["test"].frozen
     assert not first.manifest.splits["train"].frozen
 

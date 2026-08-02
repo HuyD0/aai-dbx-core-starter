@@ -35,12 +35,29 @@ def _fake_context(config_path: Path):
 def test_example_configuration_is_portable_and_project_scoped():
     path = CURRICULUM / "config" / "aai-platform.dev.example.yml"
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    platform = document["platform"]
     model = document["providers"]["models"]["foundry-chat"]
 
+    assert platform["repository"] == "replace-with-owner/replace-with-repository"
+    assert platform["catalog"] == "replace-with-catalog"
     assert model["provider"] == "foundry"
     assert "/api/projects/" in model["endpoint"]
     assert model["deployment"].startswith("replace-")
     assert document.get("secrets") == {}
+
+
+def test_readme_copies_the_portable_example_before_opening_notebooks():
+    readme = (CURRICULUM / "README.md").read_text(encoding="utf-8")
+    copy_source = "examples/foundry-curriculum/config/aai-platform.dev.example.yml"
+    copy_target = "examples/foundry-curriculum/config/aai-platform.dev.yml"
+
+    assert f"cp {copy_source} \\\n  {copy_target}" in readme
+    assert f"Edit `{copy_target}`, not the tracked" in readme
+    assert readme.index(copy_source) < readme.index("Open the repository")
+
+    ignore = (CURRICULUM / "config" / ".gitignore").read_text(encoding="utf-8")
+    assert "aai-platform.*.yml" in ignore
+    assert "!aai-platform.*.example.yml" in ignore
 
 
 def test_session_loads_endpoint_only_from_selected_configuration(tmp_path):

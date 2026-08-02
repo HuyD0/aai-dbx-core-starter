@@ -620,8 +620,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 import json
 
                 from aai_local_finetuning.data import (
+                    PreparationConfig,
                     audit_dataset,
                     check_split_files,
+                    processing_source_sha256,
+                    sha256_file,
                     summarize_instruction_tokens,
                 )
                 from aai_local_finetuning.settings import load_settings
@@ -633,6 +636,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     raise FileNotFoundError(
                         "The immutable Bitext CSV is missing. Prepare this machine online."
                     )
+                manifest_path = processed_dir / "manifest.json"
+                quality_report_path = processed_dir / "quality_report.json"
                 """),
             md(
                 """
@@ -652,32 +657,94 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 The report contains counts and distributions, not raw samples. Exact
                 duplicates are measured after canonicalization. Near duplicates and
                 inferred templates are heuristic evidence and must be documented as such.
-                Expect this aggregate audit to take roughly one to several minutes on the
-                prepared laptop; the exact tokenizer pass is usually the slowest part.
+
+                **Modern evidence practice:** preparation computes this expensive audit
+                once and puts its bytes under the dataset manifest. A lesson should verify
+                and read that evidence by default rather than silently repeat minutes of
+                work. Recompute when the source, policy, or pipeline changes, then compare
+                the new evidence before replacing the approved artifact. Set the switch
+                below to `True` when you deliberately want that full local recomputation.
                 """,
                 "what-to-notice",
             ),
             code("""
-                audit = audit_dataset(raw_csv)
-                audit_payload = audit.model_dump(mode="json")
-                core_quality = {
-                    key: audit_payload[key]
-                    for key in (
-                        "source_records",
-                        "valid_records",
-                        "unique_records",
-                        "curated_records",
-                        "invalid_record_count",
-                        "missing_by_field",
-                        "exact_duplicate_count",
-                        "exact_duplicate_rate",
-                        "near_duplicate_pairs",
-                        "near_duplicate_clusters",
-                        "conflicting_group_count",
-                        "excluded_conflicting_records",
+                RECOMPUTE_FULL_AUDIT = False
+
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                processing_config = PreparationConfig.model_validate(
+                    manifest["processing"]
+                )
+                quality_evidence = manifest["artifacts"]["quality_report"]
+                source_evidence = next(
+                    item
+                    for item in manifest["raw_files"]
+                    if item["path"] == raw_csv.name
+                )
+                evidence_mismatches = []
+                if quality_report_path.stat().st_size != quality_evidence["size_bytes"]:
+                    evidence_mismatches.append("quality report size")
+                if sha256_file(quality_report_path) != quality_evidence["sha256"]:
+                    evidence_mismatches.append("quality report SHA-256")
+                if raw_csv.stat().st_size != source_evidence["size_bytes"]:
+                    evidence_mismatches.append("source size")
+                if sha256_file(raw_csv) != source_evidence["sha256"]:
+                    evidence_mismatches.append("source SHA-256")
+                processing_is_current = (
+                    processing_source_sha256()
+                    == manifest["processing_source_sha256"]
+                )
+                if not processing_is_current and not RECOMPUTE_FULL_AUDIT:
+                    evidence_mismatches.append("processing source SHA-256")
+                if evidence_mismatches:
+                    raise RuntimeError(
+                        "Prepared audit evidence is stale or damaged. Re-run flight "
+                        "preparation before studying. Failed checks: "
+                        + ", ".join(evidence_mismatches)
                     )
+
+                prepared_audit_payload = json.loads(
+                    quality_report_path.read_text(encoding="utf-8")
+                )
+                measured_fields = (
+                    "source_records",
+                    "valid_records",
+                    "unique_records",
+                    "curated_records",
+                    "invalid_record_count",
+                    "missing_by_field",
+                    "exact_duplicate_count",
+                    "exact_duplicate_rate",
+                    "near_duplicate_pairs",
+                    "near_duplicate_clusters",
+                    "conflicting_group_count",
+                    "excluded_conflicting_records",
+                )
+                if RECOMPUTE_FULL_AUDIT:
+                    audit_payload = audit_dataset(
+                        raw_csv,
+                        config=processing_config,
+                    ).model_dump(mode="json")
+                    audit_source = "recomputed now from immutable source bytes"
+                    changes_from_prepared = {
+                        key: {
+                            "prepared": prepared_audit_payload[key],
+                            "recomputed": audit_payload[key],
+                        }
+                        for key in measured_fields
+                        if audit_payload[key] != prepared_audit_payload[key]
+                    }
+                else:
+                    audit_payload = prepared_audit_payload
+                    audit_source = "prepared once and SHA-256 verified from the manifest"
+                    changes_from_prepared = {}
+                core_quality = {
+                    "evidence_source": audit_source,
+                    **{key: audit_payload[key] for key in measured_fields},
                 }
-                core_quality
+                {
+                    "quality": core_quality,
+                    "changes_from_prepared": changes_from_prepared,
+                }
                 """),
             md(
                 """
@@ -729,9 +796,6 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 easy to revisit whenever source bytes, processing, or split policy change.
                 """),
             code("""
-                manifest = json.loads(
-                    (processed_dir / "manifest.json").read_text(encoding="utf-8")
-                )
                 dataset_card_draft = {
                     "source": manifest["dataset"],
                     "fingerprint": manifest["dataset_fingerprint"],

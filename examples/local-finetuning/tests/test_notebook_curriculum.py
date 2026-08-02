@@ -296,6 +296,22 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
     assert "record funnel" in sources["02_dataset_exploration_and_validation.ipynb"]
     assert "declared coverage" in sources["02_dataset_exploration_and_validation.ipynb"]
     assert (
+        "RECOMPUTE_FULL_AUDIT = False"
+        in sources["02_dataset_exploration_and_validation.ipynb"]
+    )
+    assert (
+        "processing_source_sha256"
+        in sources["02_dataset_exploration_and_validation.ipynb"]
+    )
+    assert (
+        'PreparationConfig.model_validate(manifest["processing"])'
+        in sources["02_dataset_exploration_and_validation.ipynb"]
+    )
+    assert (
+        "Prepared audit evidence is stale or damaged"
+        in sources["02_dataset_exploration_and_validation.ipynb"]
+    )
+    assert (
         'manifest["processing"]["near_duplicate_threshold"]'
         in sources["03_leakage_safe_splits.ipynb"]
     )

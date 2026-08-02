@@ -121,7 +121,7 @@ def prepare_dataset(
         source_member=prepared.source_member,
         processing=settings,
         code_revision=_code_revision(),
-        processing_source_sha256=_processing_source_sha256(),
+        processing_source_sha256=processing_source_sha256(),
         processing_config_path=settings.processing_config_path,
         output_version=settings.output_version,
         split_strategy=settings.split_strategy,
@@ -297,7 +297,7 @@ def _code_revision() -> str:
     return f"{revision}+dirty" if dirty else revision
 
 
-def _processing_source_sha256() -> str:
+def processing_source_sha256() -> str:
     """Fingerprint every version-controlled data-pipeline module in this package."""
 
     digest = hashlib.sha256()
