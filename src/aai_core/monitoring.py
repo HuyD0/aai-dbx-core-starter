@@ -32,15 +32,17 @@ def log_feedback(
     value: Any,
     rationale: str | None = None,
     source_kind: FeedbackSourceKind | str = FeedbackSourceKind.HUMAN,
-    source_id: str | None = None,
+    source_id: str,
     metadata: Mapping[str, Any] | None = None,
     span_id: str | None = None,
     mlflow_module: Any | None = None,
 ) -> None:
     """Attach governed feedback to a trace through native ``mlflow.log_feedback``.
 
-    ``source_id`` identifies the reviewer or system and must be non-personal
-    (for example ``group:domain-reviewers``), never an email address.
+    ``source_id`` is required so no governed feedback can be recorded
+    without provenance: it identifies the reviewer group or scoring system
+    and must be non-personal (for example ``group:domain-reviewers``),
+    never an email address.
     """
 
     if not str(trace_id).strip():
@@ -49,7 +51,12 @@ def log_feedback(
         raise ValueError("name must not be blank")
     if not isinstance(source_kind, FeedbackSourceKind):
         source_kind = FeedbackSourceKind(str(source_kind).strip().lower())
-    if source_id is not None and "@" in source_id:
+    if not str(source_id).strip():
+        raise ValueError(
+            "source_id must not be blank: governed feedback always carries "
+            "a non-personal provenance identity such as 'group:domain-reviewers'"
+        )
+    if "@" in source_id:
         raise ValueError(
             "source_id must be a non-personal identity such as "
             "'group:domain-reviewers', never an email address"
@@ -90,9 +97,14 @@ def traces_with_feedback(
     ``trace.assessments``) are consulted as fallbacks with
     expectation-shaped and explicitly invalidated (``valid=False``) entries
     dropped, so neither ground-truth expectations nor obsolete feedback can
-    select a trace for the regression dataset. Traces are returned
-    unchanged so curation stays native, for example
-    ``dataset.merge_records(selected)`` after review.
+    select a trace for the regression dataset.
+
+    Traces are returned unchanged; convert them before merging, because
+    managed evaluation datasets accept record dictionaries or dataframes,
+    not native ``Trace`` objects. Build each record's ``inputs`` from the
+    trace request (plus any still-valid expectation assessments), then
+    ``dataset.merge_records(records)`` — lab 14's connected curation cell
+    is the reference implementation of that conversion.
     """
 
     selected = []

@@ -39,11 +39,14 @@ All notable changes to `aai-core` are documented here.
   ground-truth expectations exist. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
-  with an explicit non-personal assessment source, and
-  `traces_with_feedback()` for curating reviewed production traces into the
-  governed regression dataset, counting only valid feedback assessments —
-  expectations and invalidated (overridden) entries never select a trace.
-  Sampled-scorer registration remains a documented notebook step.
+  with a required, nonblank, non-personal assessment `source_id` so no
+  governed feedback lands without provenance, and `traces_with_feedback()`
+  for curating reviewed production traces into the governed regression
+  dataset, counting only valid feedback assessments — expectations and
+  invalidated (overridden) entries never select a trace; convert selected
+  traces to record dictionaries before `merge_records` (managed datasets
+  reject native traces). Sampled-scorer registration remains a documented
+  notebook step.
 - Added evidence-gated prompt promotion: `prompt_digest()`,
   `PromptManager.ensure_version()` registering idempotently by content
   digest across every registry page (promoted from the lifecycle examples),

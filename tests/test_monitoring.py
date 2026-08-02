@@ -55,6 +55,7 @@ def test_log_feedback_parses_the_source_kind_vocabulary():
         name="groundedness",
         value=0.5,
         source_kind=FeedbackSourceKind.LLM_JUDGE,
+        source_id="judge:groundedness-v1",
         mlflow_module=_fake_mlflow(captured),
     )
 
@@ -65,6 +66,7 @@ def test_log_feedback_parses_the_source_kind_vocabulary():
             name="groundedness",
             value=0.5,
             source_kind="vibes",
+            source_id="judge:groundedness-v1",
             mlflow_module=_fake_mlflow({}),
         )
 
@@ -86,6 +88,27 @@ def test_log_feedback_refuses_blank_identifiers():
             trace_id=" ",
             name="correct",
             value=True,
+            source_id="group:domain-reviewers",
+            mlflow_module=_fake_mlflow({}),
+        )
+
+
+def test_log_feedback_requires_a_provenance_source_id():
+    # Provenance is mandatory: omitting source_id is a signature error, and
+    # a blank value cannot slip past as an empty identity.
+    with pytest.raises(TypeError, match="source_id"):
+        log_feedback(
+            trace_id="trace-1",
+            name="correct",
+            value=True,
+            mlflow_module=_fake_mlflow({}),
+        )
+    with pytest.raises(ValueError, match="source_id must not be blank"):
+        log_feedback(
+            trace_id="trace-1",
+            name="correct",
+            value=True,
+            source_id="  ",
             mlflow_module=_fake_mlflow({}),
         )
 
