@@ -4,6 +4,51 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added `docs/llmops-playbook.md`, mapping industry LLMOps practice areas onto
+  the platform's AI application lifecycle for application teams and the
+  platform team, with a maturity checklist and an honest gap roadmap.
+- Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
+  vocabulary, the strict `DecisionRecord` contract (an adopt cannot cite a
+  failing gate; `decided_by` rejects personal emails), and `record_decision()`
+  writing the decision as a governed run with searchable `aai.decision` tags
+  and a `decision.json` artifact.
+- Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
+  the single resolver for the approved judge endpoint (it had been duplicated
+  across five template sites); `log_gate_evidence` standardizes the gate
+  metrics and `aai.gate_passed` tag templates were hand-writing;
+  `evaluate_with_gate` composes native `mlflow.genai.evaluate()` with
+  `apply_gate()` through kwargs passthrough and returns the native result by
+  identity — unlike the removed 0.2.0 `EvaluationSuite.run_tracked`, it owns
+  no run and mirrors no native parameters; `get_or_create_evaluation_dataset`
+  promotes the governed dataset helper from `examples/notebook_setup.py`,
+  which keeps its copy until the notebooks migrate.
+- Added `aai_core.scorers` with the deterministic code scorers shared by
+  gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter. Template
+  copies are unchanged until each template's next version.
+- Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
+  with an explicit non-personal assessment source, and
+  `traces_with_feedback()` for curating reviewed production traces into the
+  governed regression dataset. Sampled-scorer registration remains a
+  documented notebook step.
+- Added evidence-gated prompt promotion: `prompt_digest()`,
+  `PromptManager.ensure_version()` registering idempotently by content
+  digest (promoted from the lifecycle examples), and `PromptManager.promote()`
+  refusing to move a governed alias without a passing gate or an adopt
+  decision (`aai_core.prompts.promotion_blocked`). `set_alias()` is
+  unchanged.
+- Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
+  prompt-registry catalog/schema, judge-model resolution); optional
+  configuration reports skip with remediation, never fail.
+- Aligned the executable examples' release decision with the documented
+  vocabulary: `aai.decision` and `LIFECYCLE_RESULT` now record
+  `adopt`/`reject` instead of `release_change`/`keep_baseline`.
+- Extended the curriculum to 00–14 with two teaching notebooks:
+  `13_decision_and_promotion_lifecycle.ipynb` (score → gate → decision →
+  evidence-gated promotion on the credential-free default path) and
+  `14_platform_llm_operations.ipynb` (the platform team's operating loop:
+  judge governance, gateway request tags, cost by tag, fleet provenance,
+  monitoring adoption, and rollback levers).
+
 - Made `platform-identifiers.json` the only file a clone edits for environment
   identifiers. `scripts/sync_template_shared.py` now stamps the four
   platform-controlled defaults in every template schema and the identifier

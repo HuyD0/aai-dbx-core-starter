@@ -11,8 +11,9 @@ The public surface is:
 - The top-level exports in `aai_core.__all__` (snapshotted by
   `tests/test_public_api.py` — changing it is a deliberate act).
 - Documented classes/functions of the domain modules (`providers`, `secrets`,
-  `tags`, `tracing`, `experiments`, `prompts`, `evaluation`, `rag`, `agents`,
-  `deployment`, `testing`) that do not start with an underscore.
+  `tags`, `tracing`, `experiments`, `prompts`, `evaluation`, `decisions`,
+  `scorers`, `monitoring`, `rag`, `agents`, `deployment`, `testing`) that do
+  not start with an underscore.
 - The `aai-platform.yml` configuration schema and the `aai-core` CLI.
 
 Underscore-prefixed names, module internals, and anything imported from a
