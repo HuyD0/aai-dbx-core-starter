@@ -63,6 +63,10 @@ All notable changes to `aai-core` are documented here.
   fails locally on unconfigured or placeholder catalog/schema qualifiers
   instead of querying the registry for names like `unset.unset.<name>`;
   explicit `catalog.schema.name` qualification remains untouched.
+  `is_missing_prompt_error()` is public so callers seeding a first version
+  or first promotion can distinguish an absent prompt or alias from
+  authentication, permission, and transient registry failures instead of
+  catching broadly.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The

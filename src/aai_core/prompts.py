@@ -104,7 +104,7 @@ class PromptManager:
         try:
             prompt_exists = client.get_prompt(qualified) is not None
         except Exception as exc:
-            if not _is_missing_prompt(exc):
+            if not is_missing_prompt_error(exc):
                 raise
             # OSS returns None for a missing prompt; Unity Catalog raises
             # NOT_FOUND.
@@ -295,7 +295,14 @@ def _registry_qualifier(role: str, value: str) -> str:
     return qualifier
 
 
-def _is_missing_prompt(error: Exception) -> bool:
+def is_missing_prompt_error(error: Exception) -> bool:
+    """True only when a registry error means the prompt or alias is absent.
+
+    Authentication, permission, and transient registry failures return
+    False, so callers seeding a first version or first promotion can fall
+    back on absence without swallowing real failures.
+    """
+
     error_code = str(getattr(error, "error_code", "")).upper()
     message = str(error).upper()
     return error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"} or any(

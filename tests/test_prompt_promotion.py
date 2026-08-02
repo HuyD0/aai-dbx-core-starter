@@ -6,7 +6,12 @@ import pytest
 
 from aai_core.decisions import Decision, DecisionRecord
 from aai_core.evaluation import GatePolicy, GateResult, MetricDirection, MetricRule
-from aai_core.prompts import PromptManager, PromptPromotionError, prompt_digest
+from aai_core.prompts import (
+    PromptManager,
+    PromptPromotionError,
+    is_missing_prompt_error,
+    prompt_digest,
+)
 from aai_core.testing import dev_settings
 
 TEMPLATE = "Summarize only facts from {{earnings_excerpt}}."
@@ -99,6 +104,23 @@ def _manager(mlflow):
         schema="app",
         mlflow_module=mlflow,
     )
+
+
+def test_is_missing_prompt_error_recognizes_only_absence():
+    class RegistryError(Exception):
+        def __init__(self, message, error_code=""):
+            super().__init__(message)
+            self.error_code = error_code
+
+    assert is_missing_prompt_error(RegistryError("x", error_code="NOT_FOUND"))
+    assert is_missing_prompt_error(RegistryError("prompt does not exist"))
+    # Auth, permission, and transient failures are not absence: a caller
+    # seeding a first promotion must never swallow them.
+    assert not is_missing_prompt_error(
+        RegistryError("denied", error_code="PERMISSION_DENIED")
+    )
+    assert not is_missing_prompt_error(RegistryError("401 unauthorized"))
+    assert not is_missing_prompt_error(RegistryError("connection reset"))
 
 
 @pytest.mark.parametrize(
