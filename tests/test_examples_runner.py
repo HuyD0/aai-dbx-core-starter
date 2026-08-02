@@ -146,7 +146,7 @@ def test_prompt_change_only_adds_exact_source_citation(lifecycle_support):
     decision = lifecycle_support.release_decision(baseline_metrics, change_metrics)
     assert baseline_metrics["citation_rate"] == 0.0
     assert change_metrics["citation_rate"] == 1.0
-    assert decision["decision"] == "release_change"
+    assert decision["decision"] == "adopt"
     assert decision["release"] == "earnings-summary-prompt-v2"
     assert all(decision["checks"].values())
 
@@ -530,7 +530,7 @@ def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, r
     }
     assert payloads["first_evaluation"]["result"]["gate_passed"] is True
     assert all(payloads["first_evaluation"]["result"]["checks"].values())
-    assert payloads["first_evaluation"]["decision"] == "release_change"
+    assert payloads["first_evaluation"]["decision"] == "adopt"
     assert payloads["first_evaluation"]["release"] == "earnings-summary-prompt-v2"
     assert payloads["first_evaluation"]["baseline"]["name"] == (
         "baseline-earnings-summary-prompt-v1"
