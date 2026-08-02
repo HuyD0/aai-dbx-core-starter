@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .data import require_valid_manifest
 from .evaluation import (
     EvaluationRecord,
     EvaluationReport,
@@ -50,6 +51,7 @@ def load_support_splits(
     """Load development records and optionally cross the frozen-test boundary."""
 
     project = settings or load_settings()
+    require_valid_manifest(project.processed_dir)
     paths = {
         "train": project.processed_dir / "train.jsonl",
         "validation": project.processed_dir / "valid.jsonl",

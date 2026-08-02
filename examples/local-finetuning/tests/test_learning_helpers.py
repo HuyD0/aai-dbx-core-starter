@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+from aai_local_finetuning.data import DatasetIntegrityError
 from aai_local_finetuning.evaluation import (
     EvaluationRecord,
     Prediction,
@@ -10,11 +15,30 @@ from aai_local_finetuning.evaluation import (
 )
 from aai_local_finetuning.learning import (
     generate_support_predictions,
+    load_support_splits,
     report_row,
     select_few_shots,
     support_contract,
 )
 from aai_local_finetuning.modeling import LocalGeneration
+
+
+def test_support_loader_fails_closed_before_reading_unverified_splits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Settings:
+        processed_dir = Path("prepared")
+
+    def reject_manifest(_path: Path) -> None:
+        raise DatasetIntegrityError("frozen test hash mismatch")
+
+    monkeypatch.setattr(
+        "aai_local_finetuning.learning.require_valid_manifest",
+        reject_manifest,
+    )
+
+    with pytest.raises(DatasetIntegrityError, match="frozen test hash mismatch"):
+        load_support_splits(Settings())  # type: ignore[arg-type]
 
 
 def _record(ordinal: int, intent: str, category: str = "account") -> EvaluationRecord:

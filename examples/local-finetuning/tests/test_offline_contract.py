@@ -8,12 +8,14 @@ import socket
 
 import pytest
 
+from aai_local_finetuning.data import DatasetIntegrityError
 from aai_local_finetuning.modeling import build_messages
 from aai_local_finetuning.offline import (
     OFFLINE_ENVIRONMENT,
     OfflineAssetError,
     deny_network,
     enable_offline_environment,
+    prepared_dataset_check,
     prove_socket_denial,
 )
 from aai_local_finetuning.settings import PROJECT_ROOT, load_settings, sha256_file
@@ -58,6 +60,25 @@ def test_hash_helper_streams_known_file(tmp_path):
         sha256_file(path)
         == "c826edf35c08656aec51d506a1230b2952165170aa1eaac4aa0ff9b71425fdff"
     )
+
+
+def test_readiness_reports_prepared_dataset_hash_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    def reject_manifest(_path):
+        raise DatasetIntegrityError("test: SHA-256 mismatch")
+
+    monkeypatch.setattr(
+        "aai_local_finetuning.offline.require_valid_manifest",
+        reject_manifest,
+    )
+
+    check = prepared_dataset_check(tmp_path)
+
+    assert check.name == "processed dataset integrity"
+    assert not check.ready
+    assert "test: SHA-256 mismatch" in check.detail
 
 
 def test_prompt_levels_hold_output_contract_constant():

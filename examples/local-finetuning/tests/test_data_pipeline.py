@@ -13,6 +13,7 @@ from aai_local_finetuning.data import (
     ChatExample,
     ChatMessage,
     ChatMetadata,
+    DatasetIntegrityError,
     Difficulty,
     MessageRole,
     PreparationConfig,
@@ -25,6 +26,7 @@ from aai_local_finetuning.data import (
     prepare_dataset,
     processing_source_sha256,
     render_training_response,
+    require_valid_manifest,
     requires_escalation,
     verify_manifest,
 )
@@ -140,13 +142,17 @@ def test_prepare_is_balanced_private_deterministic_and_manifested(
 
     verification = verify_manifest(first.output_dir, source_path=source)
     assert verification.valid
-    first.train_path.write_text(
-        first.train_path.read_text(encoding="utf-8") + "{}\n",
-        encoding="utf-8",
-    )
+    frozen_test = first.test_path.read_text(encoding="utf-8")
+    tampered_test = frozen_test.replace("recover_password", "recover_passw0rd", 1)
+    assert tampered_test != frozen_test
+    assert len(tampered_test) == len(frozen_test)
+    first.test_path.write_text(tampered_test, encoding="utf-8")
     tampered = verify_manifest(first.output_dir)
     assert not tampered.valid
     assert any("SHA-256 mismatch" in mismatch for mismatch in tampered.mismatches)
+    with pytest.raises(DatasetIntegrityError) as integrity_error:
+        require_valid_manifest(first.output_dir)
+    assert "test: SHA-256 mismatch" in str(integrity_error.value)
 
 
 def test_zip_adapter_and_strict_header_validation(tmp_path: Path) -> None:

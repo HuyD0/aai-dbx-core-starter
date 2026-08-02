@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from .data.manifests import DatasetIntegrityError, require_valid_manifest
 from .settings import PROJECT_ROOT, ProjectSettings, sha256_file
 
 OFFLINE_ENVIRONMENT = {
@@ -114,6 +115,27 @@ def _check_hash(name: str, path: Path, expected: str) -> AssetCheck:
     )
 
 
+def prepared_dataset_check(processed_dir: Path) -> AssetCheck:
+    """Verify prepared artifacts, ordered split IDs, and content hashes."""
+
+    manifest_path = processed_dir / "manifest.json"
+    try:
+        verification = require_valid_manifest(processed_dir)
+    except DatasetIntegrityError as error:
+        return AssetCheck(
+            name="processed dataset integrity",
+            path=str(manifest_path),
+            ready=False,
+            detail=str(error).replace("\n", "; "),
+        )
+    return AssetCheck(
+        name="processed dataset integrity",
+        path=str(manifest_path),
+        ready=True,
+        detail=f"verified {verification.checked_files} content-addressed files",
+    )
+
+
 def asset_checks(settings: ProjectSettings) -> list[AssetCheck]:
     """Check every asset required for data work and local model execution."""
 
@@ -156,6 +178,7 @@ def asset_checks(settings: ProjectSettings) -> list[AssetCheck]:
                 detail="present" if path.is_file() else "missing",
             )
         )
+    checks.append(prepared_dataset_check(settings.processed_dir))
     preflight_weights = settings.preflight_adapter_dir / "adapters.safetensors"
     checks.append(
         AssetCheck(

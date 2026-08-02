@@ -9,7 +9,12 @@ from .leakage import (
     check_split_leakage,
     load_chat_jsonl,
 )
-from .manifests import sha256_file, verify_manifest
+from .manifests import (
+    DatasetIntegrityError,
+    require_valid_manifest,
+    sha256_file,
+    verify_manifest,
+)
 from .pipeline import audit_dataset, prepare_dataset, processing_source_sha256
 from .policies import (
     DIFFICULTY_POLICY_VERSION,
@@ -46,6 +51,7 @@ __all__ = [
     "ChatMessage",
     "ChatMetadata",
     "DatasetLeakageError",
+    "DatasetIntegrityError",
     "DatasetManifest",
     "DatasetProvenance",
     "Difficulty",
@@ -74,6 +80,7 @@ __all__ = [
     "prepare_dataset",
     "processing_source_sha256",
     "render_training_response",
+    "require_valid_manifest",
     "sha256_file",
     "summarize_instruction_tokens",
     "text_similarity",

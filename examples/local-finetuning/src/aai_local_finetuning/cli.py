@@ -31,10 +31,12 @@ from .capstone import (
     rule_catalog,
 )
 from .data import (
+    DatasetIntegrityError,
     PreparationConfig,
     assert_no_leakage,
     check_split_files,
     prepare_dataset,
+    require_valid_manifest,
 )
 from .evaluation import (
     BaselineEvaluation,
@@ -117,6 +119,18 @@ def _load_splits(
         load_records_jsonl(root / "valid.jsonl"),
         load_records_jsonl(root / "test.jsonl"),
     )
+
+
+def _require_prepared_split_integrity(processed_dir: Path) -> None:
+    """Fail before model work when prepared dataset evidence no longer matches."""
+
+    try:
+        require_valid_manifest(processed_dir)
+    except DatasetIntegrityError as error:
+        raise StudyCommandError(
+            "prepared dataset integrity check failed; rerun `make prepare-data`:\n"
+            f"{error}"
+        ) from error
 
 
 def _write_evaluation(
@@ -668,16 +682,19 @@ def _cmd_prepare_data(_args: argparse.Namespace, settings: ProjectSettings) -> N
 
 
 def _cmd_baselines(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _require_prepared_split_integrity(settings.processed_dir)
     _baseline_reports(settings, track=args.track)
 
 
 def _cmd_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _require_prepared_split_integrity(settings.processed_dir)
     require_assets(settings)
     evidence = run_lora(iterations=args.iterations)
     print(evidence.model_dump_json(indent=2))
 
 
 def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _require_prepared_split_integrity(settings.processed_dir)
     require_assets(settings)
     train, _, test = _load_splits(settings)
     records = _balanced_subset(test, args.limit)

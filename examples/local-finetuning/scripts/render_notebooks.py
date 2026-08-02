@@ -1634,12 +1634,16 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 iterations into a notebook-specific adapter directory. This never
                 overwrites the canonical `bitext-lora-v1` change. For the full configured
                 run, set `TRAINING_ITERATIONS = None` only after the smoke evidence looks
-                healthy and you have enough time and battery.
+                healthy and you have enough time and battery. Immediately before MLX-LM
+                starts, the cell rechecks the content-addressed preparation manifest. A
+                split that changed since preparation fails closed instead of becoming an
+                unrecorded training-data change.
                 """,
                 "exercise",
             ),
             code(
                 """
+                from aai_local_finetuning.data import require_valid_manifest
                 from aai_local_finetuning.training import run_lora
 
                 RUN_TRAINING = False
@@ -1648,6 +1652,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     PROJECT_ROOT / "artifacts" / "notebook" / "adapters" / "bitext-smoke"
                 )
                 if RUN_TRAINING:
+                    require_valid_manifest(
+                        PROJECT_ROOT / "data" / "processed" / "bitext-v1"
+                    )
                     training_evidence = run_lora(
                         iterations=TRAINING_ITERATIONS,
                         adapter_path=notebook_adapter,

@@ -10,6 +10,10 @@ from .leakage import load_chat_jsonl
 from .schemas import DatasetManifest, FileDigest, ManifestVerification
 
 
+class DatasetIntegrityError(RuntimeError):
+    """Raised when prepared data no longer matches its content manifest."""
+
+
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -111,3 +115,26 @@ def verify_manifest(
         checked_files=checked,
         mismatches=tuple(mismatches),
     )
+
+
+def require_valid_manifest(
+    manifest_or_directory: str | Path,
+    *,
+    source_path: str | Path | None = None,
+) -> ManifestVerification:
+    """Return verified evidence or fail closed with actionable mismatch details."""
+
+    try:
+        verification = verify_manifest(
+            manifest_or_directory,
+            source_path=source_path,
+        )
+    except (OSError, ValueError) as error:
+        raise DatasetIntegrityError(
+            "prepared dataset manifest could not be verified "
+            f"({type(error).__name__})"
+        ) from error
+    if verification.valid:
+        return verification
+    detail = "\n".join(f"- {mismatch}" for mismatch in verification.mismatches)
+    raise DatasetIntegrityError("prepared dataset integrity mismatch:\n" + detail)
