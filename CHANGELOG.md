@@ -74,9 +74,12 @@ All notable changes to `aai-core` are documented here.
   authentication, permission, and transient registry failures instead of
   catching broadly; structured non-missing codes override "does not
   exist" message wording, the common non-disclosure phrasing, and the
-  same shared predicate guards the dataset helper's create path. `promote()` verifies the target version through the
-  raw registry client, never the fluent lineage-linking load, so a
-  rejected change is not attached to an active run, model, or trace.
+  same shared predicate guards the dataset helper's create path.
+  `promote()` verifies the target version through `get_prompt_version()`,
+  the only fetch with no lineage side effects — every `load_prompt`
+  flavor, the client-level one included, links the loaded version to
+  active lineage — so a rejected change is never attached to an active
+  experiment, run, model, or trace.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The

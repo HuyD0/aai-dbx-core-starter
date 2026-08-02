@@ -55,7 +55,10 @@ class FakeClient:
             return self.owner.pages[index]
         return list(self.owner.versions)
 
-    def load_prompt(self, uri):
+    def get_prompt_version(self, name, version):
+        # Deliberately the only fetch the fake client offers: promote()
+        # must never use a linking load, client-level or fluent.
+        uri = f"prompts:/{name}/{version}"
         return SimpleNamespace(
             uri=uri, template=self.owner.genai.templates_by_uri.get(uri)
         )

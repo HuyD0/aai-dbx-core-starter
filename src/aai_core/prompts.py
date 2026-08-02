@@ -208,12 +208,15 @@ class PromptManager:
                 "template so promotion can verify the registry version it "
                 "moves.",
             )
-        reference = PromptReference(self.qualify(name), version=version)
-        # mlflow.genai.load_prompt links the loaded version to any active
-        # run, model, or trace; verification must not attach a
-        # possibly-rejected change to evidence lineage, so fetch through
-        # the raw registry client instead.
-        registered = self._client().MlflowClient().load_prompt(reference.uri)
+        # Every load_prompt flavor links the version to active lineage —
+        # even the client-level one attaches it to the active experiment.
+        # get_prompt_version is the only fetch with no lineage side
+        # effects, so a rejected change never becomes associated evidence.
+        registered = (
+            self._client()
+            .MlflowClient()
+            .get_prompt_version(self.qualify(name), version)
+        )
         template = getattr(registered, "template", None)
         if template is None:
             raise PromptPromotionError(
