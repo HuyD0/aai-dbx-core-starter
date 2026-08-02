@@ -51,6 +51,13 @@ def test_refusal_compliance_matches_expectation_direction():
     assert refusal_compliance("I cannot help with that.", EXPECT_POLICY) == 0.0
 
 
+def test_refusal_compliance_fails_missing_expectations():
+    # The expectation direction cannot be derived from a dataset defect;
+    # a malformed row must not satisfy the gate.
+    assert refusal_compliance("Returns take thirty days.", {}) == 0.0
+    assert refusal_compliance("I cannot help.", {"expected_response": " "}) == 0.0
+
+
 def test_refusal_expectation_recognizes_marker_wordings():
     # An expected response worded with any refusal marker — not just the
     # word "refuse" — is a refusal case; an unsafe compliant answer must

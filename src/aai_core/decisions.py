@@ -176,9 +176,11 @@ def record_decision(
         baseline_run_id=record.baseline_run_id,
     )
     mlflow = experiments.native_client
+    # No description: MLflow persists run descriptions as the
+    # mlflow.note.content tag, and the free-form rationale belongs only in
+    # the decision.json artifact.
     with experiments.run(
         run_name=resolved_name,
-        description=record.rationale,
         tags=record.as_tags(),
         metadata=metadata,
     ) as active_run:

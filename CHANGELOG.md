@@ -20,7 +20,9 @@ All notable changes to `aai-core` are documented here.
   `prompt_version`, binds the registry identity the evidence was recorded
   for), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
-  and a `decision.json` artifact.
+  and a `decision.json` artifact — the free-form rationale persists only
+  inside that artifact, never as a run description (MLflow stores
+  descriptions as the `mlflow.note.content` tag).
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
   the single resolver for the approved judge endpoint (it had been duplicated
   across five template sites) and rejects setup-placeholder deployments
@@ -56,8 +58,8 @@ All notable changes to `aai-core` are documented here.
   ground-truth expectations exist. `refusal_compliance` derives the
   expectation direction from the same refusal-marker vocabulary applied
   to outputs, so a refusal case worded without the word "refuse" still
-  gates an unsafe compliant answer, and `keyword_coverage` fails a
-  missing or blank expected response outright — a dataset defect must
+  gates an unsafe compliant answer, and both reference-based scorers fail
+  a missing or blank expected response outright — a dataset defect must
   never inflate a release gate. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
