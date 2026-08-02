@@ -133,6 +133,10 @@ class TargetSchemaMismatch(RuntimeError):
     """Raised when the target table still holds columns a release dropped."""
 
 
+class UnusableSourceKeys(RuntimeError):
+    """Raised when source keys cannot support restartable, idempotent landing."""
+
+
 # ---------------------------------------------------------------------------
 # 1. Declare — the spec is written before any results exist
 # ---------------------------------------------------------------------------
@@ -257,8 +261,26 @@ class BatchInferenceSpec(BaseModel):
         names = [field.name for field in self.fields]
         if len(set(names)) != len(names):
             raise ValueError("field names must be unique")
-        if self.target_table == self.source_table:
-            raise ValueError("target_table must differ from source_table")
+        # All three tables have different physical roles, and Spark
+        # identifiers are case-insensitive — so `Main.X.Y` and `main.x.y`
+        # are one table. Pointing two roles at it makes the target DDL
+        # operate on the source, or turns the metadata DDL into a no-op
+        # followed by a MERGE against an incompatible schema.
+        roles = {
+            "source_table": self.source_table,
+            "target_table": self.target_table,
+            "run_metadata_table": self.run_metadata_table,
+        }
+        seen_tables: dict[str, str] = {}
+        for role, table in roles.items():
+            key = table.casefold()
+            if key in seen_tables:
+                raise ValueError(
+                    f"{role} and {seen_tables[key]} both name {table!r} "
+                    "(table names are case-insensitive); each role needs its "
+                    "own table"
+                )
+            seen_tables[key] = role
         if self.use_tier == UseTier.CONSEQUENTIAL and not self.rollback_plan:
             raise ValueError(
                 "tier 1 (consequential) requires a documented rollback_plan"
@@ -346,10 +368,17 @@ class BatchInferenceSpec(BaseModel):
 
 
 class CostEstimate(BaseModel):
-    """Projected spend for the full run, computed from a small probe."""
+    """Projected spend for the full run, computed from a small probe.
+
+    ``release`` is what the estimate was measured for. A longer prompt, a
+    different model, or a repriced endpoint is a different budget, so an
+    estimate cannot be carried across releases — reusing one would let a
+    release clear the declared ceiling on another release's assumptions.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    release: ReleaseIdentity
     row_count: int = Field(ge=0)
     probe_row_count: int = Field(gt=0)
     mean_input_tokens_per_row: float = Field(ge=0.0)
@@ -400,6 +429,7 @@ def estimate_cost(
         / 1_000_000.0
     )
     return CostEstimate(
+        release=spec.release,
         row_count=row_count,
         probe_row_count=len(probe_input_tokens),
         mean_input_tokens_per_row=mean_in,
@@ -410,6 +440,39 @@ def estimate_cost(
         projected_cost_cad=projected,
         cost_ceiling_cad=spec.cost_ceiling_cad,
     )
+
+
+def null_key_count_sql(spec: BatchInferenceSpec) -> str:
+    """Count source rows whose key is null — run this before spending."""
+    return (
+        f"SELECT count(*) AS null_keys FROM {spec.source_table} "
+        f"WHERE {spec.key_column} IS NULL"
+    )
+
+
+def require_usable_source_keys(spec: BatchInferenceSpec, null_count: int) -> None:
+    """Refuse to run when any source key is null.
+
+    Every idempotence guarantee in this pipeline rests on key equality,
+    and ``NULL = NULL`` is not true. A null-keyed row therefore never
+    matches the restart anti-join — so it is re-inferred, and paid for, on
+    every run — and never matches the MERGE, so each run inserts another
+    copy of it. The restart guarantee does not degrade gracefully here; it
+    silently stops holding while appearing to work.
+
+    The check is deliberately a refusal rather than a filter. Skipping
+    those rows would quietly shrink coverage of the very table the gate
+    just certified; the key contract is broken and someone has to fix it
+    upstream.
+    """
+    if null_count:
+        raise UnusableSourceKeys(
+            f"{null_count} row(s) in {spec.source_table} have a null "
+            f"{spec.key_column}. Key equality drives both the restart "
+            "anti-join and the MERGE, so those rows would be re-inferred "
+            "and re-inserted on every run. Give them keys upstream, or "
+            "narrow the source to rows that have one."
+        )
 
 
 def require_within_ceiling(estimate: CostEstimate) -> CostEstimate:
@@ -588,11 +651,20 @@ def allocate_stratified_sample(
 
 
 class EvaluationRecord(BaseModel):
-    """One labelled sample row: gold values, model values, abstentions."""
+    """One labelled sample row: gold values, model values, abstentions.
+
+    ``release`` records which prompt, model, and spec revision actually
+    produced ``predicted``. It is set where the prediction is made, not
+    where it is scored: a score's release stamp is only as trustworthy as
+    the thing it was copied from, and taking it from the spec handed to
+    ``score_extraction`` would let v1 predictions certify themselves as v2
+    evidence.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     stratum: str
+    release: ReleaseIdentity
     gold: Mapping[str, str | int | float | None]
     predicted: Mapping[str, str | int | float | None]
     abstained: frozenset[str] = frozenset()
@@ -831,6 +903,22 @@ def score_extraction(
         raise ValueError("cannot score an empty sample")
     confidence = spec.confidence_level
     release = spec.release
+    # The records say which release produced them; the spec says which
+    # release is being gated. If they disagree, scoring would mint
+    # evidence that certifies itself — the one thing the release stamp on
+    # a score exists to prevent.
+    for record in records:
+        if record.release != release:
+            raise EvidenceMismatch(
+                f"a sample row in stratum {record.stratum!r} was produced by "
+                f"prompt {record.release.prompt_version} / model "
+                f"{record.release.model_version} (spec digest "
+                f"{record.release.spec_digest[:12]}…), but is being scored as "
+                f"prompt {release.prompt_version} / model "
+                f"{release.model_version} (spec digest "
+                f"{release.spec_digest[:12]}…). Re-run inference for the "
+                "release being gated."
+            )
     by_stratum: dict[str, list[EvaluationRecord]] = {}
     for record in records:
         by_stratum.setdefault(record.stratum, []).append(record)
@@ -1772,6 +1860,20 @@ def log_gate_evidence(
     this module stays importable without MLflow installed.
     """
     import mlflow
+
+    # The estimate is what authorised the spend, so it has to belong to
+    # the release being recorded. A longer prompt is a different budget.
+    if estimate.release != spec.release:
+        raise EvidenceMismatch(
+            f"the cost estimate was computed for prompt "
+            f"{estimate.release.prompt_version} / model "
+            f"{estimate.release.model_version} (spec digest "
+            f"{estimate.release.spec_digest[:12]}…), but this run is "
+            f"prompt {spec.release.prompt_version} / model "
+            f"{spec.release.model_version} (spec digest "
+            f"{spec.release.spec_digest[:12]}…). Re-estimate before "
+            "authorising the spend."
+        )
 
     mlflow.log_params(
         {

@@ -77,13 +77,21 @@ abstention path) then passes the same gate on the same terms.
    selects only unlanded rows, so a partial failure restarts by re-running
    the same statement.
 9. **Evidence belongs to the release that produced it, and must be
-   complete.** Scores carry a release stamp (spec digest, model version,
-   prompt version), the declared confidence level, and the sample's stratum
-   manifest; the gate refuses anything else. Re-using the last passing
-   evaluation for a changed prompt — "we tested this, it was fine" — is
-   exactly the shortcut this blocks, and so is quietly dropping the failing
-   stratum from the score list before gating. Re-scoring is arithmetic over
-   records you already hold, so the strict rule is cheap to satisfy.
+   complete.** The binding starts at the record: each `EvaluationRecord`
+   names the prompt, model, and spec revision that produced its
+   prediction, and `score_extraction` refuses to score it against a
+   different one. Taking the stamp from the spec at scoring time instead
+   would let v1 output certify itself as v2 evidence — the gate's release
+   check would then be reading a label the same call had just written.
+   Scores additionally carry the declared confidence level (checked on
+   every interval, not just the score) and the sample's stratum manifest,
+   so quietly dropping the failing stratum before gating fails too.
+   Re-scoring is arithmetic over records you already hold, so the strict
+   rule is cheap to satisfy.
+   The cost estimate is bound the same way: a longer prompt is a different
+   budget, and `log_gate_evidence` refuses an estimate measured for
+   another release rather than let one clear the ceiling on another's
+   assumptions.
 10. **A new release reprocesses the table.** The restart anti-join matches
     on the key *and* the full release identity — spec digest, model
     version, prompt version — and the write is a `MERGE`. Matching on the
@@ -116,6 +124,12 @@ abstention path) then passes the same gate on the same terms.
 
 Work through the spec first — most adaptation is spec, not code:
 
+- **A non-null key is a precondition, not a nicety.** Every idempotence
+  guarantee here rests on key equality, and `NULL = NULL` is not true, so a
+  null-keyed source row is re-inferred and re-inserted on every run while the
+  restart logic appears to work. `require_usable_source_keys` refuses rather
+  than filtering: skipping those rows would shrink coverage of the table the
+  gate just certified. Fix the keys upstream, or narrow the source view.
 - **Fields and tolerances.** Set `tolerable_error_rate` per field *with the
   consumers named in `consumed_by`*, not alone at a keyboard. Then check the
   feasibility number `min_labelled_rows_for_tolerance` prints: a 1% tolerance

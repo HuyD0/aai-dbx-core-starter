@@ -61,32 +61,37 @@ def make_spec(**overrides):
     return gbi.BatchInferenceSpec.model_validate(base)
 
 
+# Records must name the release that produced them. Tests build them with
+# this placeholder and `score()` re-stamps to the spec under test, so the
+# release-binding tests below stay the only place the stamp is meaningful.
+PLACEHOLDER_RELEASE = gbi.ReleaseIdentity(
+    spec_digest="placeholder", model_version="placeholder", prompt_version="placeholder"
+)
+
+
 def records_for(stratum, *, correct=0, wrong=0, abstained=0, hallucinated=0):
     """Single-field evaluation records with controlled outcome counts."""
+
+    def record(**kwargs):
+        return gbi.EvaluationRecord(
+            stratum=stratum, release=PLACEHOLDER_RELEASE, **kwargs
+        )
+
     rows = []
     for _ in range(correct):
-        rows.append(
-            gbi.EvaluationRecord(stratum=stratum, gold={"f": "v"}, predicted={"f": "v"})
-        )
+        rows.append(record(gold={"f": "v"}, predicted={"f": "v"}))
     for _ in range(wrong):
-        rows.append(
-            gbi.EvaluationRecord(stratum=stratum, gold={"f": "v"}, predicted={"f": "x"})
-        )
+        rows.append(record(gold={"f": "v"}, predicted={"f": "x"}))
     for _ in range(abstained):
         rows.append(
-            gbi.EvaluationRecord(
-                stratum=stratum,
+            record(
                 gold={"f": "v"},
                 predicted={"f": None},
                 abstained=frozenset({"f"}),
             )
         )
     for _ in range(hallucinated):
-        rows.append(
-            gbi.EvaluationRecord(
-                stratum=stratum, gold={"f": None}, predicted={"f": "made-up"}
-            )
-        )
+        rows.append(record(gold={"f": None}, predicted={"f": "made-up"}))
     return rows
 
 
@@ -126,7 +131,10 @@ def score(records, spec, population=None):
         for record in records:
             counts[record.stratum] = counts.get(record.stratum, 0) + 1
         population = counts
-    return gbi.score_extraction(records, spec, population)
+    stamped = [
+        record.model_copy(update={"release": spec.release}) for record in records
+    ]
+    return gbi.score_extraction(stamped, spec, population)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +353,10 @@ def test_weighted_estimate_is_not_the_raw_pool_of_a_stratified_sample():
 
 def test_weighted_estimate_needs_a_population_for_every_stratum():
     spec = one_field_spec(criticality="medium")
-    records = records_for("easy", correct=10) + records_for("hard", correct=10)
+    records = [
+        record.model_copy(update={"release": spec.release})
+        for record in records_for("easy", correct=10) + records_for("hard", correct=10)
+    ]
     with pytest.raises(ValueError, match="no population count"):
         gbi.score_extraction(records, spec, {"easy": 100})
     with pytest.raises(ValueError, match="not in the sample"):
@@ -470,6 +481,7 @@ def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
     records = [
         gbi.EvaluationRecord(
             stratum="standard",
+            release=PLACEHOLDER_RELEASE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )
@@ -481,6 +493,34 @@ def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
         gbi.evaluate_gate(spec, [s for s in scores if s.field != "account_id"])
     with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
         gbi.evaluate_gate(spec, [s for s in scores if s.stratum != gbi.WEIGHTED])
+
+
+def test_scoring_refuses_records_produced_by_a_different_release():
+    """The stamp has to come from where the prediction was made.
+
+    Taking it from the spec handed to `score_extraction` would let v1
+    output certify itself as v2 evidence, and the gate's release check —
+    which reads that same stamp — would wave it through.
+    """
+    spec_v1 = one_field_spec(criticality="high")
+    spec_v2 = spec_v1.model_copy(update={"prompt_version": "2.0.0"})
+    v1_records = [
+        record.model_copy(update={"release": spec_v1.release})
+        for record in records_for("standard", correct=200)
+    ]
+    population = {"standard": 200}
+
+    gbi.score_extraction(v1_records, spec_v1, population)  # its own release: fine
+    with pytest.raises(gbi.EvidenceMismatch, match="Re-run inference"):
+        gbi.score_extraction(v1_records, spec_v2, population)
+
+    # One stale row among fresh ones is caught too.
+    mixed = [
+        record.model_copy(update={"release": spec_v2.release}) for record in v1_records
+    ]
+    mixed[7] = mixed[7].model_copy(update={"release": spec_v1.release})
+    with pytest.raises(gbi.EvidenceMismatch):
+        gbi.score_extraction(mixed, spec_v2, population)
 
 
 def test_gate_refuses_intervals_computed_at_the_wrong_confidence():
@@ -532,6 +572,7 @@ def test_rejection_outranks_inconclusive_across_fields():
         records.append(
             gbi.EvaluationRecord(
                 stratum="s",
+                release=PLACEHOLDER_RELEASE,
                 gold={**row.gold, "g": "v"},
                 predicted={**row.predicted, "g": "v"},
             )
@@ -699,6 +740,60 @@ def test_cost_estimate_fails_before_execution_when_over_ceiling():
         cad_per_million_output_tokens=0.60,
     )
     assert gbi.require_within_ceiling(fine) is fine
+
+
+def test_cost_estimate_is_bound_to_the_release_it_measured(monkeypatch):
+    """A longer prompt is a different budget, so an estimate cannot be
+    carried from one release to the next."""
+    spec_v1 = one_field_spec()
+    spec_v2 = spec_v1.model_copy(update={"prompt_version": "2.0.0"})
+    estimate = gbi.estimate_cost(
+        spec_v1,
+        row_count=1000,
+        probe_input_tokens=[600],
+        probe_output_tokens=[120],
+        cad_per_million_input_tokens=0.20,
+        cad_per_million_output_tokens=0.60,
+    )
+    assert estimate.release == spec_v1.release
+
+    scores = score(records_for("standard", correct=200), spec_v2)
+    report = gbi.evaluate_gate(spec_v2, scores)
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    with pytest.raises(gbi.EvidenceMismatch, match="Re-estimate"):
+        gbi.log_gate_evidence(spec_v2, estimate, {"standard": 200}, scores, report)
+    # The mismatch is caught before anything is written.
+    assert not recorder.params
+
+
+def test_null_source_keys_are_refused_before_the_paid_query():
+    """`NULL = NULL` is never true, so a null-keyed row is re-inferred and
+    re-inserted on every run while the restart logic looks like it works."""
+    spec = make_spec()
+    assert gbi.null_key_count_sql(spec) == (
+        "SELECT count(*) AS null_keys FROM main.finance_docs.document_text "
+        "WHERE doc_id IS NULL"
+    )
+    gbi.require_usable_source_keys(spec, 0)  # the clean case proceeds
+    with pytest.raises(gbi.UnusableSourceKeys, match="3 row"):
+        gbi.require_usable_source_keys(spec, 3)
+
+
+def test_each_table_role_needs_its_own_table():
+    same = "main.finance_docs.one_table"
+    with pytest.raises(ValidationError, match="each role needs its own table"):
+        make_spec(source_table=same, target_table=same)
+    with pytest.raises(ValidationError, match="each role needs its own table"):
+        make_spec(target_table=same, run_metadata_table=same)
+    with pytest.raises(ValidationError, match="each role needs its own table"):
+        make_spec(source_table=same, run_metadata_table=same)
+    # Spark identifiers are case-insensitive, so these are one table too.
+    with pytest.raises(ValidationError, match="case-insensitive"):
+        make_spec(
+            source_table="main.finance_docs.docs",
+            target_table="MAIN.Finance_Docs.DOCS",
+        )
 
 
 def test_response_format_uses_only_supported_schema_features():
@@ -973,6 +1068,7 @@ def test_provenance_layers_are_generated():
     records = [
         gbi.EvaluationRecord(
             stratum="standard",
+            release=PLACEHOLDER_RELEASE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )

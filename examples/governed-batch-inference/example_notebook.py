@@ -285,6 +285,16 @@ spec_v1 = gbi.BatchInferenceSpec(
     abstain_threshold=0.70,
 )
 
+# The prompt is what `prompt_version: 1.0.0` names, so it is declared
+# with the spec rather than buried next to the call. Its length is also
+# an input to the cost estimate in stage 2 — a prompt edit is a new
+# release *and* a new budget.
+PROMPT_V1 = (
+    "Extract the following fields from the tax document below and answer "
+    "in the required JSON shape: issuer_name, tax_year, box_amount, "
+    "account_id. Use null for a field that is not present.\n\nDOCUMENT:\n"
+)
+
 spec_yaml = spec_v1.to_yaml()
 print(spec_yaml)
 print(f"spec digest: {spec_v1.spec_digest}")
@@ -325,6 +335,21 @@ for field in spec_v1.fields:
 # MAGIC out by row count and the endpoint's rate, that is the projected spend —
 # MAGIC compared against the declared ceiling **before** anything executes.
 # MAGIC
+# MAGIC Two things happen before the probe, both cheap and both refusals:
+# MAGIC
+# MAGIC - **Null source keys are rejected.** Everything restartable here rests
+# MAGIC   on key equality, and `NULL = NULL` is not true, so a null-keyed row
+# MAGIC   never matches the restart anti-join (it is re-inferred, and paid for,
+# MAGIC   every run) and never matches the MERGE (a fresh duplicate every run).
+# MAGIC   The guarantee does not degrade gracefully — it stops holding while
+# MAGIC   still looking like it works.
+# MAGIC - **The estimate is per release.** It carries the prompt, model, and
+# MAGIC   spec revision it was measured for, and the instruction tokens come
+# MAGIC   from the real prompt rather than a constant. Prompt v2 in stage 5 is
+# MAGIC   longer than v1, so it gets its own estimate and its own ceiling
+# MAGIC   check; carrying v1's number forward would authorise the run against
+# MAGIC   a cheaper release's assumptions.
+# MAGIC
 # MAGIC Two honesty notes:
 # MAGIC
 # MAGIC - `ai_query` does not return token usage, so the probe estimates input
@@ -337,33 +362,51 @@ for field in spec_v1.fields:
 
 # COMMAND ----------
 
-probe = spark.table(SOURCE_TABLE).limit(32).collect()
-probe_input_tokens = [
-    gbi.estimate_tokens_from_text(row.doc_text) + 220  # + instruction tokens
-    for row in probe
-]
-probe_output_tokens = [130] * len(probe)  # structured response, per schema
+# Pre-flight, before anything is paid for: every idempotence guarantee
+# here rests on key equality, and `NULL = NULL` is not true. A null-keyed
+# row would be re-inferred and re-inserted on every single run while the
+# restart logic appeared to work.
+null_keys = spark.sql(gbi.null_key_count_sql(spec_v1)).first().null_keys
+gbi.require_usable_source_keys(spec_v1, null_keys)
+print(f"source keys usable: {null_keys} null {spec_v1.key_column} values")
 
 CAD_PER_M_INPUT = 0.20  # placeholder — use your negotiated list price
 CAD_PER_M_OUTPUT = 0.60  # placeholder
 
+probe = spark.table(SOURCE_TABLE).limit(32).collect()
 row_count = spark.table(SOURCE_TABLE).count()
-estimate = gbi.estimate_cost(
-    spec_v1,
-    row_count=row_count,
-    probe_input_tokens=probe_input_tokens,
-    probe_output_tokens=probe_output_tokens,
-    cad_per_million_input_tokens=CAD_PER_M_INPUT,
-    cad_per_million_output_tokens=CAD_PER_M_OUTPUT,
-)
-gbi.require_within_ceiling(estimate)
+
+
+def estimate_for(spec, prompt: str) -> "gbi.CostEstimate":
+    """Cost of running *this* release over the whole table.
+
+    The instruction tokens come from the actual prompt, so a longer
+    prompt shows up as a larger budget instead of hiding behind a
+    constant. The returned estimate carries the release it was measured
+    for, and the gate refuses to log an estimate from a different one.
+    """
+    instruction_tokens = gbi.estimate_tokens_from_text(prompt)
+    return gbi.estimate_cost(
+        spec,
+        row_count=row_count,
+        probe_input_tokens=[
+            gbi.estimate_tokens_from_text(row.doc_text) + instruction_tokens
+            for row in probe
+        ],
+        probe_output_tokens=[130] * len(probe),  # structured response, per schema
+        cad_per_million_input_tokens=CAD_PER_M_INPUT,
+        cad_per_million_output_tokens=CAD_PER_M_OUTPUT,
+    )
+
+
+estimate_v1 = gbi.require_within_ceiling(estimate_for(spec_v1, PROMPT_V1))
 print(
-    f"{estimate.row_count:,} rows × "
-    f"(~{estimate.mean_input_tokens_per_row:.0f} in + "
-    f"~{estimate.mean_output_tokens_per_row:.0f} out tokens) × safety "
-    f"{estimate.safety_factor} → projected "
-    f"{estimate.projected_cost_cad:.2f} CAD ≤ ceiling "
-    f"{estimate.cost_ceiling_cad:.2f} CAD — approved to proceed"
+    f"{estimate_v1.row_count:,} rows × "
+    f"(~{estimate_v1.mean_input_tokens_per_row:.0f} in + "
+    f"~{estimate_v1.mean_output_tokens_per_row:.0f} out tokens) × safety "
+    f"{estimate_v1.safety_factor} → projected "
+    f"{estimate_v1.projected_cost_cad:.2f} CAD ≤ ceiling "
+    f"{estimate_v1.cost_ceiling_cad:.2f} CAD — approved to proceed"
 )
 
 # COMMAND ----------
@@ -371,13 +414,17 @@ print(
 # What the stop looks like: the same table pointed at a frontier-priced
 # endpoint blows through the ceiling, and the pipeline refuses to start.
 # That refusal — before the run — is the conversation you want to force.
+instruction_tokens = gbi.estimate_tokens_from_text(PROMPT_V1)
 try:
     gbi.require_within_ceiling(
         gbi.estimate_cost(
             spec_v1,
             row_count=row_count,
-            probe_input_tokens=probe_input_tokens,
-            probe_output_tokens=probe_output_tokens,
+            probe_input_tokens=[
+                gbi.estimate_tokens_from_text(row.doc_text) + instruction_tokens
+                for row in probe
+            ],
+            probe_output_tokens=[130] * len(probe),
             cad_per_million_input_tokens=7.00,  # frontier-class placeholder
             cad_per_million_output_tokens=21.00,
         )
@@ -556,11 +603,6 @@ HALLUCINATE = {
     ("2.0.0", "legacy_scan"): 0.01,
 }
 
-PROMPT_V1 = (
-    "Extract the following fields from the tax document below and answer "
-    "in the required JSON shape: issuer_name, tax_year, box_amount, "
-    "account_id. Use null for a field that is not present.\n\nDOCUMENT:\n"
-)
 PROMPT_V2 = (
     "Extract issuer_name, tax_year, box_amount, account_id from the tax "
     "document below, answering in the required JSON shape.\n"
@@ -677,6 +719,10 @@ def evaluation_records(version: str, prompt: str) -> list:
         records.append(
             gbi.EvaluationRecord(
                 stratum=row.layout,
+                # Stamped where the prediction was produced. Scoring
+                # verifies it against the spec being gated, so v1 output
+                # cannot be scored as v2 evidence.
+                release=spec.release,
                 gold=gold,
                 predicted=permitted,
                 abstained=abstained,
@@ -802,6 +848,7 @@ for row in naive_rows:
     naive_records.append(
         gbi.EvaluationRecord(
             stratum=row.layout,
+            release=spec_v1.release,
             gold=gold,
             predicted=predicted,
             abstained=frozenset(abstained),
@@ -850,7 +897,7 @@ mlflow.set_experiment("/Shared/governed-batch-inference-demo")
 
 report_v1 = gbi.evaluate_gate(spec_v1, scores_v1)
 with mlflow.start_run(run_name=f"{spec_v1.name}-prompt-1.0.0-gate"):
-    gbi.log_gate_evidence(spec_v1, estimate, allocation, scores_v1, report_v1)
+    gbi.log_gate_evidence(spec_v1, estimate_v1, allocation, scores_v1, report_v1)
 
 print(f"gate decision for prompt 1.0.0: {report_v1.decision.value}\n")
 for field_result in report_v1.fields:
@@ -901,13 +948,29 @@ spec_v2 = gbi.BatchInferenceSpec.from_yaml(
     spec_v1.to_yaml().replace("prompt_version: 1.0.0", "prompt_version: 2.0.0")
 )
 
+# A new release is a new budget. Prompt v2 carries the legacy-scan rules
+# and the abstention instruction, so it is materially longer than v1 —
+# that difference is multiplied by every row in the table. Re-estimating
+# is not ceremony: reusing v1's number would authorise this run against a
+# cheaper release's assumptions, and `log_gate_evidence` refuses an
+# estimate whose release does not match the spec.
+estimate_v2 = gbi.require_within_ceiling(estimate_for(spec_v2, PROMPT_V2))
+print(
+    f"prompt 1.0.0 projected {estimate_v1.projected_cost_cad:.2f} CAD "
+    f"(~{estimate_v1.mean_input_tokens_per_row:.0f} input tokens/row)\n"
+    f"prompt 2.0.0 projected {estimate_v2.projected_cost_cad:.2f} CAD "
+    f"(~{estimate_v2.mean_input_tokens_per_row:.0f} input tokens/row) — "
+    f"{estimate_v2.projected_cost_cad - estimate_v1.projected_cost_cad:+.2f} "
+    "CAD for the longer instruction, still inside the declared ceiling"
+)
+
 records_v2 = evaluation_records("2.0.0", PROMPT_V2)
 scores_v2 = gbi.score_extraction(records_v2, spec_v2, population)
 report_v2 = gbi.evaluate_gate(spec_v2, scores_v2)
 
 gate_run = mlflow.start_run(run_name=f"{spec_v2.name}-prompt-2.0.0-gate")
 RUN_ID = gate_run.info.run_id  # provenance key for everything downstream
-gbi.log_gate_evidence(spec_v2, estimate, allocation, scores_v2, report_v2)
+gbi.log_gate_evidence(spec_v2, estimate_v2, allocation, scores_v2, report_v2)
 
 print(f"gate decision for prompt 2.0.0: {report_v2.decision.value}")
 display(
@@ -1225,7 +1288,7 @@ spark.sql(
         spec_v2,
         report_v2,
         run_id=RUN_ID,
-        projected_cost_cad=estimate.projected_cost_cad,
+        projected_cost_cad=estimate_v2.projected_cost_cad,
         target_table_version=int(target_version),
     )
 )
