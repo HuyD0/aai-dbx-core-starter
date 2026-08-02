@@ -115,11 +115,15 @@ function b64urlDecode(encoded) {
 }
 
 function syncHash() {
-  if (!state.lines.length) {
+  // Serialize the committed payload, never the draft: the URL (and anything
+  // copied from it mid-render) must always reproduce a server-confirmed
+  // estimate, exactly like the CSV export.
+  const parsed = JSON.parse(committed);
+  if (!parsed.lines.length) {
     history.replaceState(null, "", window.location.pathname);
     return;
   }
-  const encoded = b64urlEncode(JSON.stringify({ v: 1, ...state }));
+  const encoded = b64urlEncode(JSON.stringify({ v: 1, ...parsed }));
   history.replaceState(null, "", `${window.location.pathname}#e=${encoded}`);
 }
 
