@@ -164,7 +164,7 @@ def test_connected_call_rejects_placeholder_configuration(project_endpoint, depl
         setup.create_text_response(session, "hello", allow_network=True)
 
 
-def test_curriculum_has_eight_clean_compilable_notebooks():
+def test_curriculum_has_nine_clean_compilable_notebooks():
     notebooks = sorted((CURRICULUM / "notebooks").glob("*.ipynb"))
     assert [path.name for path in notebooks] == [
         "00_setup_and_architecture.ipynb",
@@ -175,6 +175,7 @@ def test_curriculum_has_eight_clean_compilable_notebooks():
         "05_evaluation_safety_and_red_team.ipynb",
         "06_observability_and_genaiops.ipynb",
         "07_capstone_release_gate.ipynb",
+        "08_agentops_release_gate.ipynb",
     ]
 
     for path in notebooks:
@@ -199,6 +200,74 @@ def test_curriculum_has_eight_clean_compilable_notebooks():
                 f"{path.name}:code-cell-{index}",
                 "exec",
             )
+
+
+def _notebook_source(name: str) -> str:
+    notebook = json.loads((CURRICULUM / "notebooks" / name).read_text(encoding="utf-8"))
+    return "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "04_agents_tools_and_mcp.ipynb",
+        "05_evaluation_safety_and_red_team.ipynb",
+        "06_observability_and_genaiops.ipynb",
+        "08_agentops_release_gate.ipynb",
+    ),
+)
+def test_taught_notebooks_narrate_every_result(name):
+    """A bare dict literal teaches nothing. Each executable result is framed by
+    prose that reads the output back and names one thing to change and re-run,
+    so a learner is never left inferring why the cell was written that way."""
+    notebook = json.loads((CURRICULUM / "notebooks" / name).read_text(encoding="utf-8"))
+    cells = notebook["cells"]
+    source = _notebook_source(name)
+
+    # A notebook must never end on a result nobody explains.
+    assert cells[-1]["cell_type"] == "markdown"
+
+    # Every code cell other than the shared loader is followed by narration,
+    # and each of those narrations reads the output back and names a mutation.
+    taught = [
+        cell
+        for cell in cells
+        if cell["cell_type"] == "code" and cell["id"] != "load-config"
+    ]
+    assert taught, f"{name}: nothing executable to narrate"
+    for index, cell in enumerate(cells):
+        if cell["cell_type"] != "code" or cell["id"] == "load-config":
+            continue
+        assert (
+            cells[index + 1]["cell_type"] == "markdown"
+        ), f"{name}: code cell {cell['id']!r} has no read-back cell"
+
+    assert source.count("### What you just saw") >= len(taught)
+    assert source.count("### Change this and re-run") >= len(taught)
+
+
+def test_release_gate_notebook_names_the_right_package_and_the_platform_rules():
+    """Two unrelated projects are called AgentOps, and `pip install agentops`
+    silently fetches the wrong one. The generated PR workflow also breaks three
+    of this repository's CI rules, so the notebook must teach the reconciliation
+    rather than hand a learner a workflow they must not commit here."""
+    source = _notebook_source("08_agentops_release_gate.ipynb")
+
+    assert "agentops-accelerator[foundry,agent]" in source
+    assert "docs.agentops.ai" in source
+
+    for rule in (
+        "credential-free-pull-requests",
+        "no-environment-on-credentialed-jobs",
+        "actions-pinned-to-commit-sha",
+    ):
+        assert rule in source
+
+    # The exit-code contract is the reason the gate can be trusted at all.
+    assert "do not merge" in source
+    # Framework choice must stay orthogonal to how the agent is gated.
+    assert "http-json" in source
+    assert "LangGraph" in source
 
 
 def test_evaluation_starter_has_twenty_cases_and_four_attacks():

@@ -24,8 +24,18 @@ foundry-curriculum/
     ├── 04_agents_tools_and_mcp.ipynb
     ├── 05_evaluation_safety_and_red_team.ipynb
     ├── 06_observability_and_genaiops.ipynb
-    └── 07_capstone_release_gate.ipynb
+    ├── 07_capstone_release_gate.ipynb
+    └── 08_agentops_release_gate.ipynb
 ```
+
+## How the notebooks teach
+
+Every executable cell is surrounded by prose in the same three-part shape:
+the concept and the failure it prevents, the cell, then a **What you just saw**
+read-back that names the one line carrying the lesson and a **Change this and
+re-run** mutation with its expected outcome. A test enforces that no code cell
+is left un-narrated. Run the mutations — several of them are designed to make a
+gate look healthier while measuring less, which is the point.
 
 ## Configure it
 
@@ -82,6 +92,23 @@ by default. The first connected call requires both:
 The switch is a learning guard, not a production control. Production access is
 enforced by Microsoft Entra identity, Foundry RBAC, tool authorization, network
 policy, evaluation gates, and deployment policy.
+
+## Notebook 08 and the AgentOps Accelerator
+
+Notebook 08 teaches release gating with the
+[AgentOps Accelerator](https://azure.github.io/agentops/). It runs entirely
+offline — nothing in this curriculum installs or invokes the CLI. Two notes if
+you go on to use it for real:
+
+- **Install `agentops-accelerator`, not `agentops`.** An unrelated third-party
+  product owns the shorter name on PyPI. The correct spec is
+  `agentops-accelerator[foundry,agent]`.
+- **Do not commit its generated workflows into this repository.** `agentops
+  workflow generate` emits a PR gate carrying `id-token: write` and
+  `azure/login` on a `pull_request` trigger, with an `environment:` on the
+  credentialed job — three violations of `AGENTS.md` §4. The notebook teaches
+  the reconciliation; a downstream project not under these rules can adopt the
+  generated form directly.
 
 ## Graduation rule
 
