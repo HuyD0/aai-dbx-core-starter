@@ -55,7 +55,9 @@ versions in the MLflow Prompt Registry with governed tags, loads by version
 or alias, and constrains aliases to `development`, `validation`, and
 `production`. `ensure_version` registers idempotently by content digest, and
 `promote` refuses to move an alias without a passing gate or an `adopt`
-decision. Examples: [03](../examples/03_first_prompt.py),
+decision bound to the target version's content digest — evidence gathered
+for one template can never promote another.
+Examples: [03](../examples/03_first_prompt.py),
 [13](../examples/13_decision_and_promotion_lifecycle.ipynb); doctrine:
 [prompt promotion](genai-lifecycle.md#prompt-promotion).
 

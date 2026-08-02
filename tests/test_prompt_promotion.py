@@ -27,9 +27,10 @@ class FakeClient:
 
 
 class FakeGenAI:
-    def __init__(self):
+    def __init__(self, templates_by_uri=None):
         self.registered = []
         self.alias = None
+        self.templates_by_uri = dict(templates_by_uri or {})
 
     def register_prompt(self, **kwargs):
         self.registered.append(kwargs)
@@ -37,17 +38,22 @@ class FakeGenAI:
             name=kwargs["name"], version=len(self.registered), kwargs=kwargs
         )
 
+    def load_prompt(self, uri, **kwargs):
+        return SimpleNamespace(uri=uri, template=self.templates_by_uri.get(uri))
+
     def set_prompt_alias(self, **kwargs):
         self.alias = kwargs
 
 
 class FakeMlflow:
-    def __init__(self, *, prompt=None, versions=(), get_error=None):
+    def __init__(
+        self, *, prompt=None, versions=(), get_error=None, templates_by_uri=None
+    ):
         self.prompt = prompt
         self.versions = list(versions)
         self.get_error = get_error
         self.searched_name = None
-        self.genai = FakeGenAI()
+        self.genai = FakeGenAI(templates_by_uri)
 
     def MlflowClient(self):
         return FakeClient(self)
@@ -131,13 +137,16 @@ def test_ensure_version_raises_on_unrelated_registry_errors():
         )
 
 
-def test_promote_moves_the_alias_on_a_passing_gate():
-    mlflow = FakeMlflow()
+def test_promote_moves_the_alias_on_a_passing_gate_bound_to_the_version():
+    mlflow = FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": TEMPLATE}
+    )
 
     _manager(mlflow).promote(
         "earnings_summary",
         version=2,
         evidence=GateResult(metrics={"citation_rate": 1.0}),
+        expected_digest=prompt_digest(TEMPLATE),
     )
 
     assert mlflow.genai.alias == {
@@ -145,6 +154,38 @@ def test_promote_moves_the_alias_on_a_passing_gate():
         "alias": "production",
         "version": 2,
     }
+
+
+def test_promote_refuses_evidence_not_bound_to_template_content():
+    mlflow = FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": TEMPLATE}
+    )
+
+    with pytest.raises(PromptPromotionError, match="not bound"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            evidence=GateResult(metrics={"citation_rate": 1.0}),
+        )
+
+    assert mlflow.genai.alias is None
+
+
+def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
+    changed = TEMPLATE + " Cite {{source_id}} exactly once."
+    mlflow = FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": changed}
+    )
+
+    with pytest.raises(PromptPromotionError, match="content digest"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            evidence=GateResult(metrics={"citation_rate": 1.0}),
+            expected_digest=prompt_digest(TEMPLATE),
+        )
+
+    assert mlflow.genai.alias is None
 
 
 def test_promote_refuses_a_failing_gate_and_names_the_metrics():
@@ -177,19 +218,45 @@ def test_promote_refuses_non_adopt_decisions(decision):
     assert mlflow.genai.alias is None
 
 
-def test_promote_accepts_an_adopt_decision():
-    mlflow = FakeMlflow()
+def test_promote_accepts_an_adopt_decision_bound_by_prompt_digest():
+    mlflow = FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": TEMPLATE}
+    )
     record = DecisionRecord(
         decision=Decision.ADOPT,
         change_id="prompt-v2",
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
         gate=GateResult(metrics={"citation_rate": 1.0}),
+        prompt_digest=prompt_digest(TEMPLATE),
     )
 
     _manager(mlflow).promote("earnings_summary", version=2, evidence=record)
 
     assert mlflow.genai.alias["alias"] == "production"
+
+
+def test_promote_refuses_conflicting_digest_bindings():
+    mlflow = FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": TEMPLATE}
+    )
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+
+    with pytest.raises(PromptPromotionError, match="disagrees"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            evidence=record,
+            expected_digest=prompt_digest(TEMPLATE + " Changed."),
+        )
+
+    assert mlflow.genai.alias is None
 
 
 def test_promote_rejects_unknown_evidence_types():

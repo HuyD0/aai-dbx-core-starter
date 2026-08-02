@@ -34,8 +34,11 @@ All notable changes to `aai-core` are documented here.
   `PromptManager.ensure_version()` registering idempotently by content
   digest (promoted from the lifecycle examples), and `PromptManager.promote()`
   refusing to move a governed alias without a passing gate or an adopt
-  decision (`aai_core.prompts.promotion_blocked`). `set_alias()` is
-  unchanged.
+  decision (`aai_core.prompts.promotion_blocked`). Promotion also verifies
+  the registry version's template content against the evidence's digest
+  (`DecisionRecord.prompt_digest` or an explicit `expected_digest`), so
+  evidence gathered for one template can never promote another version.
+  `set_alias()` is unchanged.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail.

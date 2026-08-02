@@ -62,7 +62,11 @@ def _record(**overrides):
 
 
 def test_decision_record_is_a_strict_frozen_serializable_contract():
-    record = _record(release_digest="digest-1", decided_by="group:app-owners")
+    record = _record(
+        prompt_digest="a" * 64,
+        release_digest="digest-1",
+        decided_by="group:app-owners",
+    )
 
     with pytest.raises(ValidationError):
         DecisionRecord(**{**record.model_dump(), "verdict": "extra"})
@@ -76,10 +80,12 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
         "baseline_run_id": "run-baseline",
         "change_run_id": "run-change",
         "gate": {"metrics": {"citation_rate": 1.0}, "failures": []},
+        "prompt_digest": "a" * 64,
         "release_digest": "digest-1",
         "decided_by": "group:app-owners",
         "schema_version": "1",
     }
+    assert record.as_tags()["prompt_digest"] == "a" * 64
 
 
 def test_decision_parses_the_documented_string_vocabulary():

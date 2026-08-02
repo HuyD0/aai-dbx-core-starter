@@ -45,6 +45,7 @@ class DecisionRecord(ContractModel):
     baseline_run_id: str | None = Field(default=None, min_length=1)
     change_run_id: str | None = Field(default=None, min_length=1)
     gate: GateResult | None = None
+    prompt_digest: str | None = Field(default=None, min_length=1)
     release_digest: str | None = Field(default=None, min_length=1)
     decided_by: str | None = Field(default=None, min_length=1)
     schema_version: Literal["1"] = "1"
@@ -89,6 +90,8 @@ class DecisionRecord(ContractModel):
             values["change_run_id"] = self.change_run_id
         if self.gate is not None:
             values["gate_passed"] = str(self.gate.passed).lower()
+        if self.prompt_digest:
+            values["prompt_digest"] = self.prompt_digest
         if self.release_digest:
             values["release_digest"] = self.release_digest
         return values

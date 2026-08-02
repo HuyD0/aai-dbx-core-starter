@@ -133,12 +133,18 @@ class PromptManager:
         version: int,
         evidence: Any,
         alias: str = "production",
+        expected_digest: str | None = None,
     ) -> None:
-        """Move a governed alias only on adopt-grade release evidence.
+        """Move a governed alias only on adopt-grade evidence bound to the
+        exact version being promoted.
 
         ``evidence`` is a passing :class:`~aai_core.evaluation.GateResult` or
-        an adopt :class:`~aai_core.decisions.DecisionRecord`. Anything less
-        raises :class:`PromptPromotionError` and leaves the alias untouched.
+        an adopt :class:`~aai_core.decisions.DecisionRecord`. The evidence
+        must also be bound to template content — through ``expected_digest``
+        or the record's ``prompt_digest`` — and the registry version's actual
+        template must match that digest, so evidence gathered for one
+        template can never move the alias onto another. Anything less raises
+        :class:`PromptPromotionError` and leaves the alias untouched.
         """
 
         from aai_core.decisions import Decision, DecisionRecord
@@ -153,6 +159,7 @@ class PromptManager:
                     remediation="Record an adopt decision backed by a passing "
                     "gate before moving the production alias.",
                 )
+            bound_digest = expected_digest
         elif isinstance(evidence, DecisionRecord):
             if evidence.decision is not Decision.ADOPT:
                 raise PromptPromotionError(
@@ -161,8 +168,50 @@ class PromptManager:
                     remediation="Record an adopt decision backed by a passing "
                     "gate before moving the production alias.",
                 )
+            if (
+                expected_digest
+                and evidence.prompt_digest
+                and expected_digest != evidence.prompt_digest
+            ):
+                raise PromptPromotionError(
+                    f"Refusing to move alias {alias!r} for prompt {name!r}: "
+                    "expected_digest disagrees with the decision's "
+                    "prompt_digest",
+                    remediation="Pass one binding, or make both name the "
+                    "same template content digest.",
+                )
+            bound_digest = expected_digest or evidence.prompt_digest
         else:
             raise TypeError("evidence must be a GateResult or DecisionRecord")
+
+        if not bound_digest:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+                "evidence is not bound to any template content",
+                remediation="Pass expected_digest=prompt_digest(template) or "
+                "record the decision with prompt_digest so promotion can "
+                "verify the registry version it moves.",
+            )
+        registered = self.load(name, version=version)
+        template = getattr(registered, "template", None)
+        if template is None:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: "
+                f"registry version {version} exposes no template to verify",
+                remediation="Promote a registered prompt version whose "
+                "template content the registry returns.",
+            )
+        observed_digest = prompt_digest(template)
+        if observed_digest != bound_digest:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: "
+                f"version {version} has content digest "
+                f"{observed_digest[:16]} but the evidence is bound to "
+                f"{bound_digest[:16]}",
+                remediation="Evaluate the exact registry version being "
+                "promoted and bind its content digest to the decision "
+                "evidence.",
+            )
         self.set_alias(name, alias=alias, version=version)
 
     def set_alias(self, name: str, *, alias: str, version: int) -> None:
