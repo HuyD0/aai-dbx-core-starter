@@ -1,0 +1,1266 @@
+{
+  "dbu_prices": {
+    "eastus": {
+      "ALL_PURPOSE_COMPUTE": 0.55,
+      "ALL_PURPOSE_COMPUTE_PHOTON": 0.55,
+      "ALL_PURPOSE_SERVERLESS": 0.95,
+      "DLT_ADVANCED": 0.54,
+      "DLT_ADVANCED_PHOTON": 0.54,
+      "DLT_CORE": 0.3,
+      "DLT_CORE_PHOTON": 0.3,
+      "DLT_PRO": 0.38,
+      "DLT_PRO_PHOTON": 0.38,
+      "DLT_SERVERLESS": 0.45,
+      "FMAPI": 0.07,
+      "JOBS_COMPUTE": 0.3,
+      "JOBS_COMPUTE_PHOTON": 0.3,
+      "JOBS_SERVERLESS": 0.45,
+      "MODEL_SERVING": 0.07,
+      "SQL_CLASSIC": 0.22,
+      "SQL_PRO": 0.55,
+      "SQL_SERVERLESS": 0.7,
+      "VECTOR_SEARCH": 0.07
+    },
+    "eastus2": {
+      "ALL_PURPOSE_COMPUTE": 0.55,
+      "ALL_PURPOSE_COMPUTE_PHOTON": 0.55,
+      "ALL_PURPOSE_SERVERLESS": 0.95,
+      "DLT_ADVANCED": 0.54,
+      "DLT_ADVANCED_PHOTON": 0.54,
+      "DLT_CORE": 0.3,
+      "DLT_CORE_PHOTON": 0.3,
+      "DLT_PRO": 0.38,
+      "DLT_PRO_PHOTON": 0.38,
+      "DLT_SERVERLESS": 0.45,
+      "FMAPI": 0.07,
+      "JOBS_COMPUTE": 0.3,
+      "JOBS_COMPUTE_PHOTON": 0.3,
+      "JOBS_SERVERLESS": 0.45,
+      "MODEL_SERVING": 0.07,
+      "SQL_CLASSIC": 0.22,
+      "SQL_PRO": 0.55,
+      "SQL_SERVERLESS": 0.7,
+      "VECTOR_SEARCH": 0.07
+    },
+    "northeurope": {
+      "ALL_PURPOSE_COMPUTE": 0.55,
+      "ALL_PURPOSE_COMPUTE_PHOTON": 0.55,
+      "ALL_PURPOSE_SERVERLESS": 1.0,
+      "DLT_ADVANCED": 0.54,
+      "DLT_ADVANCED_PHOTON": 0.54,
+      "DLT_CORE": 0.3,
+      "DLT_CORE_PHOTON": 0.3,
+      "DLT_PRO": 0.38,
+      "DLT_PRO_PHOTON": 0.38,
+      "DLT_SERVERLESS": 0.47,
+      "FMAPI": 0.078,
+      "JOBS_COMPUTE": 0.3,
+      "JOBS_COMPUTE_PHOTON": 0.3,
+      "JOBS_SERVERLESS": 0.47,
+      "MODEL_SERVING": 0.078,
+      "SQL_CLASSIC": 0.22,
+      "SQL_PRO": 0.72,
+      "SQL_SERVERLESS": 0.91,
+      "VECTOR_SEARCH": 0.078
+    },
+    "uksouth": {
+      "ALL_PURPOSE_COMPUTE": 0.55,
+      "ALL_PURPOSE_COMPUTE_PHOTON": 0.55,
+      "ALL_PURPOSE_SERVERLESS": 1.0,
+      "DLT_ADVANCED": 0.54,
+      "DLT_ADVANCED_PHOTON": 0.54,
+      "DLT_CORE": 0.3,
+      "DLT_CORE_PHOTON": 0.3,
+      "DLT_PRO": 0.38,
+      "DLT_PRO_PHOTON": 0.38,
+      "DLT_SERVERLESS": 0.5,
+      "FMAPI": 0.081,
+      "JOBS_COMPUTE": 0.3,
+      "JOBS_COMPUTE_PHOTON": 0.3,
+      "JOBS_SERVERLESS": 0.5,
+      "MODEL_SERVING": 0.081,
+      "SQL_CLASSIC": 0.22,
+      "SQL_PRO": 0.74,
+      "SQL_SERVERLESS": 0.95,
+      "VECTOR_SEARCH": 0.081
+    },
+    "westeurope": {
+      "ALL_PURPOSE_COMPUTE": 0.55,
+      "ALL_PURPOSE_COMPUTE_PHOTON": 0.55,
+      "ALL_PURPOSE_SERVERLESS": 1.0,
+      "DLT_ADVANCED": 0.54,
+      "DLT_ADVANCED_PHOTON": 0.54,
+      "DLT_CORE": 0.3,
+      "DLT_CORE_PHOTON": 0.3,
+      "DLT_PRO": 0.38,
+      "DLT_PRO_PHOTON": 0.38,
+      "DLT_SERVERLESS": 0.5,
+      "FMAPI": 0.084,
+      "JOBS_COMPUTE": 0.3,
+      "JOBS_COMPUTE_PHOTON": 0.3,
+      "JOBS_SERVERLESS": 0.5,
+      "MODEL_SERVING": 0.084,
+      "SQL_CLASSIC": 0.22,
+      "SQL_PRO": 0.72,
+      "SQL_SERVERLESS": 0.91,
+      "VECTOR_SEARCH": 0.084
+    },
+    "westus2": {
+      "ALL_PURPOSE_COMPUTE": 0.55,
+      "ALL_PURPOSE_COMPUTE_PHOTON": 0.55,
+      "ALL_PURPOSE_SERVERLESS": 0.95,
+      "DLT_ADVANCED": 0.54,
+      "DLT_ADVANCED_PHOTON": 0.54,
+      "DLT_CORE": 0.3,
+      "DLT_CORE_PHOTON": 0.3,
+      "DLT_PRO": 0.38,
+      "DLT_PRO_PHOTON": 0.38,
+      "DLT_SERVERLESS": 0.45,
+      "FMAPI": 0.07,
+      "JOBS_COMPUTE": 0.3,
+      "JOBS_COMPUTE_PHOTON": 0.3,
+      "JOBS_SERVERLESS": 0.45,
+      "MODEL_SERVING": 0.07,
+      "SQL_CLASSIC": 0.22,
+      "SQL_PRO": 0.55,
+      "SQL_SERVERLESS": 0.7,
+      "VECTOR_SEARCH": 0.07
+    }
+  },
+  "fmapi": {
+    "models": {
+      "bge-large-en": {
+        "label": "BGE Large EN (embeddings)",
+        "per_million_tokens_dbu": {
+          "input_token": 1.429
+        },
+        "provisioned_dbu_per_hour": 24.0
+      },
+      "gemma-3-12b": {
+        "label": "Gemma 3 12B",
+        "per_million_tokens_dbu": {
+          "input_token": 2.143,
+          "output_token": 7.143
+        },
+        "provisioned_dbu_per_hour": 71.429
+      },
+      "gpt-oss-120b": {
+        "label": "GPT-OSS 120B",
+        "per_million_tokens_dbu": {
+          "input_token": 2.143,
+          "output_token": 8.571
+        },
+        "provisioned_dbu_per_hour": 71.429
+      },
+      "gpt-oss-20b": {
+        "label": "GPT-OSS 20B",
+        "per_million_tokens_dbu": {
+          "input_token": 1.0,
+          "output_token": 4.286
+        },
+        "provisioned_dbu_per_hour": 53.571
+      },
+      "gte-large-en": {
+        "label": "GTE Large EN (embeddings)",
+        "per_million_tokens_dbu": {
+          "input_token": 1.857
+        },
+        "provisioned_dbu_per_hour": 20.0
+      },
+      "llama-3-1-8b": {
+        "label": "Llama 3.1 8B Instruct",
+        "per_million_tokens_dbu": {
+          "input_token": 2.143,
+          "output_token": 6.429
+        },
+        "provisioned_dbu_per_hour": 53.571
+      },
+      "llama-3-3-70b": {
+        "label": "Llama 3.3 70B Instruct",
+        "per_million_tokens_dbu": {
+          "input_token": 7.143,
+          "output_token": 21.429
+        },
+        "provisioned_dbu_per_hour": 85.714
+      },
+      "llama-4-maverick": {
+        "label": "Llama 4 Maverick",
+        "per_million_tokens_dbu": {
+          "input_token": 7.143,
+          "output_token": 21.429
+        },
+        "provisioned_dbu_per_hour": 85.714
+      },
+      "qwen3-embedding-0-6b": {
+        "label": "Qwen3 Embedding 0.6B",
+        "per_million_tokens_dbu": {
+          "input_token": 0.286
+        },
+        "provisioned_dbu_per_hour": 25.0
+      },
+      "qwen3-next-80b-a3b-instruct": {
+        "label": "Qwen3 Next 80B A3B Instruct",
+        "per_million_tokens_dbu": {
+          "input_token": 2.143,
+          "output_token": 17.143
+        },
+        "provisioned_dbu_per_hour": 78.571
+      }
+    }
+  },
+  "instances": {
+    "Standard_D16ds_v5": {
+      "dbu_per_hour": 4.0,
+      "family": "General Purpose",
+      "memory_gb": 64,
+      "vcpus": 16
+    },
+    "Standard_D32ds_v5": {
+      "dbu_per_hour": 8.0,
+      "family": "General Purpose",
+      "memory_gb": 128,
+      "vcpus": 32
+    },
+    "Standard_D4ds_v5": {
+      "dbu_per_hour": 1.0,
+      "family": "General Purpose",
+      "memory_gb": 16,
+      "vcpus": 4
+    },
+    "Standard_D8ds_v5": {
+      "dbu_per_hour": 2.0,
+      "family": "General Purpose",
+      "memory_gb": 32,
+      "vcpus": 8
+    },
+    "Standard_DS3_v2": {
+      "dbu_per_hour": 0.75,
+      "family": "General Purpose",
+      "memory_gb": 14,
+      "vcpus": 4
+    },
+    "Standard_DS4_v2": {
+      "dbu_per_hour": 1.5,
+      "family": "General Purpose",
+      "memory_gb": 28,
+      "vcpus": 8
+    },
+    "Standard_DS5_v2": {
+      "dbu_per_hour": 3.0,
+      "family": "General Purpose",
+      "memory_gb": 56,
+      "vcpus": 16
+    },
+    "Standard_E16ds_v4": {
+      "dbu_per_hour": 4.0,
+      "family": "Memory Optimized",
+      "memory_gb": 128,
+      "vcpus": 16
+    },
+    "Standard_E16ds_v5": {
+      "dbu_per_hour": 5.5,
+      "family": "Memory Optimized",
+      "memory_gb": 128,
+      "vcpus": 16
+    },
+    "Standard_E32ds_v4": {
+      "dbu_per_hour": 8.0,
+      "family": "Memory Optimized",
+      "memory_gb": 256,
+      "vcpus": 32
+    },
+    "Standard_E32ds_v5": {
+      "dbu_per_hour": 11.0,
+      "family": "Memory Optimized",
+      "memory_gb": 256,
+      "vcpus": 32
+    },
+    "Standard_E4ds_v5": {
+      "dbu_per_hour": 1.5,
+      "family": "Memory Optimized",
+      "memory_gb": 32,
+      "vcpus": 4
+    },
+    "Standard_E64ds_v4": {
+      "dbu_per_hour": 16.0,
+      "family": "Memory Optimized",
+      "memory_gb": 504,
+      "vcpus": 64
+    },
+    "Standard_E8ds_v4": {
+      "dbu_per_hour": 2.0,
+      "family": "Memory Optimized",
+      "memory_gb": 64,
+      "vcpus": 8
+    },
+    "Standard_E8ds_v5": {
+      "dbu_per_hour": 2.75,
+      "family": "Memory Optimized",
+      "memory_gb": 64,
+      "vcpus": 8
+    },
+    "Standard_F16s_v2": {
+      "dbu_per_hour": 3.0,
+      "family": "Compute Optimized",
+      "memory_gb": 32,
+      "vcpus": 16
+    },
+    "Standard_F32s_v2": {
+      "dbu_per_hour": 6.0,
+      "family": "Compute Optimized",
+      "memory_gb": 64,
+      "vcpus": 32
+    },
+    "Standard_F8s_v2": {
+      "dbu_per_hour": 1.5,
+      "family": "Compute Optimized",
+      "memory_gb": 16,
+      "vcpus": 8
+    },
+    "Standard_L16s_v3": {
+      "dbu_per_hour": 5.5,
+      "family": "Storage Optimized",
+      "memory_gb": 128,
+      "vcpus": 16
+    },
+    "Standard_L8s_v3": {
+      "dbu_per_hour": 2.75,
+      "family": "Storage Optimized",
+      "memory_gb": 64,
+      "vcpus": 8
+    },
+    "Standard_NC24ads_A100_v4": {
+      "dbu_per_hour": 10.0,
+      "family": "GPU",
+      "memory_gb": 220,
+      "vcpus": 24
+    },
+    "Standard_NC4as_T4_v3": {
+      "dbu_per_hour": 1.0,
+      "family": "GPU",
+      "memory_gb": 28,
+      "vcpus": 4
+    },
+    "Standard_NC8as_T4_v3": {
+      "dbu_per_hour": 1.5,
+      "family": "GPU",
+      "memory_gb": 56,
+      "vcpus": 8
+    }
+  },
+  "metadata": {
+    "as_of": "2026-04-10",
+    "cloud": "azure",
+    "currency": "USD",
+    "disclaimer": "Public pay-as-you-go list prices for Azure Databricks. Estimates are forward-looking projections, not observed billing, and not a quote. Negotiated, committed-use, and marketplace pricing differ.",
+    "schema_version": 1,
+    "sources": {
+      "dbu_prices": {
+        "as_of": "2026-04-10",
+        "url": "https://learn.microsoft.com/en-gb/azure/databricks/resources/pricing"
+      },
+      "fmapi": {
+        "as_of": "2026-04-10",
+        "url": "https://www.databricks.com/product/pricing/foundation-model-serving"
+      },
+      "instances": {
+        "as_of": "2026-04-10",
+        "url": "https://azure.microsoft.com/en-us/pricing/details/databricks/"
+      },
+      "model_serving": {
+        "as_of": "2026-04-10",
+        "url": "https://www.databricks.com/product/pricing/model-serving"
+      },
+      "sql_warehouses": {
+        "as_of": "2026-04-10",
+        "url": "https://learn.microsoft.com/en-gb/azure/databricks/compute/sql-warehouse/warehouse-behavior#sizing-and-cluster-provisioning"
+      },
+      "vector_search": {
+        "as_of": "2026-04-10",
+        "url": "https://www.databricks.com/product/pricing/vector-search"
+      },
+      "vm_rates": {
+        "as_of": "2026-08-01",
+        "url": "https://prices.azure.com/api/retail/prices"
+      }
+    }
+  },
+  "model_serving": {
+    "sizes": {
+      "cpu": {
+        "dbu_per_hour": 1.0,
+        "label": "CPU (per concurrency unit)"
+      },
+      "gpu_2xlarge_a100_80gb_2x": {
+        "dbu_per_hour": 157.2,
+        "label": "GPU 2XLarge (2x A100 80GB)"
+      },
+      "gpu_4xlarge_a100_80gb_4x": {
+        "dbu_per_hour": 314.4,
+        "label": "GPU 4XLarge (4x A100 80GB)"
+      },
+      "gpu_small_t4": {
+        "dbu_per_hour": 10.48,
+        "label": "GPU Small (T4)"
+      },
+      "gpu_xlarge_a100_80gb_1x": {
+        "dbu_per_hour": 78.6,
+        "label": "GPU XLarge (1x A100 80GB)"
+      }
+    }
+  },
+  "multipliers": {
+    "jobs_serverless_performance": 2.0,
+    "photon": {
+      "ALL_PURPOSE": 2.0,
+      "DLT": 2.5,
+      "JOBS": 2.5
+    }
+  },
+  "regions": [
+    {
+      "display": "East US",
+      "id": "eastus"
+    },
+    {
+      "display": "East US 2",
+      "id": "eastus2"
+    },
+    {
+      "display": "West US 2",
+      "id": "westus2"
+    },
+    {
+      "display": "West Europe",
+      "id": "westeurope"
+    },
+    {
+      "display": "North Europe",
+      "id": "northeurope"
+    },
+    {
+      "display": "UK South",
+      "id": "uksouth"
+    }
+  ],
+  "skus": {
+    "ALL_PURPOSE_COMPUTE": {
+      "cross_service_discount": true,
+      "label": "All-Purpose Compute"
+    },
+    "ALL_PURPOSE_COMPUTE_PHOTON": {
+      "cross_service_discount": true,
+      "label": "All-Purpose Compute (Photon)"
+    },
+    "ALL_PURPOSE_SERVERLESS": {
+      "cross_service_discount": true,
+      "label": "All-Purpose Serverless"
+    },
+    "DLT_ADVANCED": {
+      "cross_service_discount": true,
+      "label": "DLT Advanced"
+    },
+    "DLT_ADVANCED_PHOTON": {
+      "cross_service_discount": true,
+      "label": "DLT Advanced (Photon)"
+    },
+    "DLT_CORE": {
+      "cross_service_discount": true,
+      "label": "DLT Core"
+    },
+    "DLT_CORE_PHOTON": {
+      "cross_service_discount": true,
+      "label": "DLT Core (Photon)"
+    },
+    "DLT_PRO": {
+      "cross_service_discount": true,
+      "label": "DLT Pro"
+    },
+    "DLT_PRO_PHOTON": {
+      "cross_service_discount": true,
+      "label": "DLT Pro (Photon)"
+    },
+    "DLT_SERVERLESS": {
+      "cross_service_discount": true,
+      "label": "DLT Serverless"
+    },
+    "FMAPI": {
+      "cross_service_discount": false,
+      "label": "Foundation Model Serving (Serverless Real-Time Inference)"
+    },
+    "JOBS_COMPUTE": {
+      "cross_service_discount": true,
+      "label": "Jobs Compute"
+    },
+    "JOBS_COMPUTE_PHOTON": {
+      "cross_service_discount": true,
+      "label": "Jobs Compute (Photon)"
+    },
+    "JOBS_SERVERLESS": {
+      "cross_service_discount": true,
+      "label": "Jobs Serverless"
+    },
+    "MODEL_SERVING": {
+      "cross_service_discount": false,
+      "label": "Model Serving (Serverless Real-Time Inference)"
+    },
+    "SQL_CLASSIC": {
+      "cross_service_discount": true,
+      "label": "SQL Classic"
+    },
+    "SQL_PRO": {
+      "cross_service_discount": true,
+      "label": "SQL Pro"
+    },
+    "SQL_SERVERLESS": {
+      "cross_service_discount": true,
+      "label": "SQL Serverless"
+    },
+    "VECTOR_SEARCH": {
+      "cross_service_discount": false,
+      "label": "Vector Search (Serverless Real-Time Inference)"
+    }
+  },
+  "sql_warehouses": {
+    "compute_equivalents": {
+      "classic": {
+        "2X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 64,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "2X-Small": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E8ds_v4",
+          "worker_count": 1,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "3X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 128,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "4X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 256,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E32ds_v4",
+          "worker_count": 16,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "Medium": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E32ds_v4",
+          "worker_count": 8,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "Small": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E16ds_v4",
+          "worker_count": 4,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 32,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "X-Small": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E8ds_v4",
+          "worker_count": 2,
+          "worker_instance": "Standard_E8ds_v4"
+        }
+      },
+      "pro": {
+        "2X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 64,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "2X-Small": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E8ds_v4",
+          "worker_count": 1,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "3X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 128,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "4X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 256,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E32ds_v4",
+          "worker_count": 16,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "Medium": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E32ds_v4",
+          "worker_count": 8,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "Small": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E16ds_v4",
+          "worker_count": 4,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "X-Large": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E64ds_v4",
+          "worker_count": 32,
+          "worker_instance": "Standard_E8ds_v4"
+        },
+        "X-Small": {
+          "driver_count": 1,
+          "driver_instance": "Standard_E8ds_v4",
+          "worker_count": 2,
+          "worker_instance": "Standard_E8ds_v4"
+        }
+      }
+    },
+    "dbu_per_hour": {
+      "classic": {
+        "2X-Large": 144,
+        "2X-Small": 4,
+        "3X-Large": 272,
+        "4X-Large": 528,
+        "Large": 40,
+        "Medium": 24,
+        "Small": 12,
+        "X-Large": 80,
+        "X-Small": 6
+      },
+      "pro": {
+        "2X-Large": 144,
+        "2X-Small": 4,
+        "3X-Large": 272,
+        "4X-Large": 528,
+        "Large": 40,
+        "Medium": 24,
+        "Small": 12,
+        "X-Large": 80,
+        "X-Small": 6
+      },
+      "serverless": {
+        "2X-Large": 144,
+        "2X-Small": 4,
+        "3X-Large": 272,
+        "4X-Large": 528,
+        "Large": 40,
+        "Medium": 24,
+        "Small": 12,
+        "X-Large": 80,
+        "X-Small": 6
+      }
+    },
+    "sizes": [
+      "2X-Small",
+      "X-Small",
+      "Small",
+      "Medium",
+      "Large",
+      "X-Large",
+      "2X-Large",
+      "3X-Large",
+      "4X-Large"
+    ]
+  },
+  "vector_search": {
+    "modes": {
+      "standard": {
+        "dbu_per_hour_per_unit": 4.0,
+        "label": "Standard",
+        "vectors_millions_per_unit": 2
+      },
+      "storage_optimized": {
+        "dbu_per_hour_per_unit": 18.29,
+        "label": "Storage-optimized",
+        "vectors_millions_per_unit": 64
+      }
+    }
+  },
+  "vm_rates": {
+    "eastus": {
+      "Standard_D16ds_v5": {
+        "on_demand": 0.904,
+        "spot": 0.190834
+      },
+      "Standard_D32ds_v5": {
+        "on_demand": 1.808,
+        "spot": 0.381669
+      },
+      "Standard_D4ds_v5": {
+        "on_demand": 0.226,
+        "spot": 0.047709
+      },
+      "Standard_D8ds_v5": {
+        "on_demand": 0.452,
+        "spot": 0.095417
+      },
+      "Standard_DS3_v2": {
+        "on_demand": 0.293,
+        "spot": 0.057428
+      },
+      "Standard_DS4_v2": {
+        "on_demand": 0.585,
+        "spot": 0.11466
+      },
+      "Standard_DS5_v2": {
+        "on_demand": 1.17,
+        "spot": 0.22932
+      },
+      "Standard_E16ds_v4": {
+        "on_demand": 1.152,
+        "spot": 0.24215
+      },
+      "Standard_E16ds_v5": {
+        "on_demand": 1.152,
+        "spot": 0.242266
+      },
+      "Standard_E32ds_v4": {
+        "on_demand": 2.304,
+        "spot": 0.484301
+      },
+      "Standard_E32ds_v5": {
+        "on_demand": 2.304,
+        "spot": 0.484531
+      },
+      "Standard_E4ds_v5": {
+        "on_demand": 0.288,
+        "spot": 0.060566
+      },
+      "Standard_E64ds_v4": {
+        "on_demand": 4.608,
+        "spot": 0.968602
+      },
+      "Standard_E8ds_v4": {
+        "on_demand": 0.576,
+        "spot": 0.121075
+      },
+      "Standard_E8ds_v5": {
+        "on_demand": 0.576,
+        "spot": 0.121133
+      },
+      "Standard_F16s_v2": {
+        "on_demand": 0.677,
+        "spot": 0.14894
+      },
+      "Standard_F32s_v2": {
+        "on_demand": 1.353,
+        "spot": 0.29766
+      },
+      "Standard_F8s_v2": {
+        "on_demand": 0.338,
+        "spot": 0.07436
+      },
+      "Standard_L16s_v3": {
+        "on_demand": 1.392,
+        "spot": 0.295243
+      },
+      "Standard_L8s_v3": {
+        "on_demand": 0.696,
+        "spot": 0.147622
+      },
+      "Standard_NC24ads_A100_v4": {
+        "on_demand": 3.673,
+        "spot": 0.67877
+      },
+      "Standard_NC4as_T4_v3": {
+        "on_demand": 0.526,
+        "spot": 0.15254
+      },
+      "Standard_NC8as_T4_v3": {
+        "on_demand": 0.752,
+        "spot": 0.21808
+      }
+    },
+    "eastus2": {
+      "Standard_D16ds_v5": {
+        "on_demand": 0.904,
+        "spot": 0.452723
+      },
+      "Standard_D32ds_v5": {
+        "on_demand": 1.808,
+        "spot": 0.905446
+      },
+      "Standard_D4ds_v5": {
+        "on_demand": 0.226,
+        "spot": 0.113181
+      },
+      "Standard_D8ds_v5": {
+        "on_demand": 0.452,
+        "spot": 0.226362
+      },
+      "Standard_DS3_v2": {
+        "on_demand": 0.229,
+        "spot": 0.140881
+      },
+      "Standard_DS4_v2": {
+        "on_demand": 0.458,
+        "spot": 0.281762
+      },
+      "Standard_DS5_v2": {
+        "on_demand": 0.916,
+        "spot": 0.563523
+      },
+      "Standard_E16ds_v4": {
+        "on_demand": 1.152,
+        "spot": 0.536371
+      },
+      "Standard_E16ds_v5": {
+        "on_demand": 1.152,
+        "spot": 0.536371
+      },
+      "Standard_E32ds_v4": {
+        "on_demand": 2.304,
+        "spot": 1.072742
+      },
+      "Standard_E32ds_v5": {
+        "on_demand": 2.304,
+        "spot": 1.072742
+      },
+      "Standard_E4ds_v5": {
+        "on_demand": 0.288,
+        "spot": 0.134093
+      },
+      "Standard_E64ds_v4": {
+        "on_demand": 4.608,
+        "spot": 2.145485
+      },
+      "Standard_E8ds_v4": {
+        "on_demand": 0.576,
+        "spot": 0.268186
+      },
+      "Standard_E8ds_v5": {
+        "on_demand": 0.576,
+        "spot": 0.268186
+      },
+      "Standard_F16s_v2": {
+        "on_demand": 0.677,
+        "spot": 0.356102
+      },
+      "Standard_F32s_v2": {
+        "on_demand": 1.353,
+        "spot": 0.711678
+      },
+      "Standard_F8s_v2": {
+        "on_demand": 0.338,
+        "spot": 0.177788
+      },
+      "Standard_L16s_v3": {
+        "on_demand": 1.396,
+        "spot": 0.715031
+      },
+      "Standard_L8s_v3": {
+        "on_demand": 0.698,
+        "spot": 0.357516
+      },
+      "Standard_NC24ads_A100_v4": {
+        "on_demand": 3.673,
+        "spot": 0.67877
+      },
+      "Standard_NC4as_T4_v3": {
+        "on_demand": 0.526,
+        "spot": 0.262369
+      },
+      "Standard_NC8as_T4_v3": {
+        "on_demand": 0.752,
+        "spot": 0.375098
+      }
+    },
+    "northeurope": {
+      "Standard_D16ds_v5": {
+        "on_demand": 1.008,
+        "spot": 0.328003
+      },
+      "Standard_D32ds_v5": {
+        "on_demand": 2.016,
+        "spot": 0.656006
+      },
+      "Standard_D4ds_v5": {
+        "on_demand": 0.252,
+        "spot": 0.082001
+      },
+      "Standard_D8ds_v5": {
+        "on_demand": 0.504,
+        "spot": 0.164002
+      },
+      "Standard_DS3_v2": {
+        "on_demand": 0.263,
+        "spot": 0.048602
+      },
+      "Standard_DS4_v2": {
+        "on_demand": 0.527,
+        "spot": 0.09739
+      },
+      "Standard_DS5_v2": {
+        "on_demand": 1.053,
+        "spot": 0.194594
+      },
+      "Standard_E16ds_v4": {
+        "on_demand": 1.28,
+        "spot": 0.34496
+      },
+      "Standard_E16ds_v5": {
+        "on_demand": 1.28,
+        "spot": 0.416512
+      },
+      "Standard_E32ds_v4": {
+        "on_demand": 2.56,
+        "spot": 0.68992
+      },
+      "Standard_E32ds_v5": {
+        "on_demand": 2.56,
+        "spot": 0.833024
+      },
+      "Standard_E4ds_v5": {
+        "on_demand": 0.32,
+        "spot": 0.104128
+      },
+      "Standard_E64ds_v4": {
+        "on_demand": 5.12,
+        "spot": 1.37984
+      },
+      "Standard_E8ds_v4": {
+        "on_demand": 0.64,
+        "spot": 0.17248
+      },
+      "Standard_E8ds_v5": {
+        "on_demand": 0.64,
+        "spot": 0.208256
+      },
+      "Standard_F16s_v2": {
+        "on_demand": 0.768,
+        "spot": 0.203366
+      },
+      "Standard_F32s_v2": {
+        "on_demand": 1.536,
+        "spot": 0.406733
+      },
+      "Standard_F8s_v2": {
+        "on_demand": 0.384,
+        "spot": 0.101683
+      },
+      "Standard_L16s_v3": {
+        "on_demand": 1.536,
+        "spot": 0.665395
+      },
+      "Standard_L8s_v3": {
+        "on_demand": 0.768,
+        "spot": 0.332698
+      },
+      "Standard_NC24ads_A100_v4": {
+        "on_demand": 4.408,
+        "spot": 0.814598
+      },
+      "Standard_NC4as_T4_v3": {
+        "on_demand": 0.587,
+        "spot": 0.195941
+      },
+      "Standard_NC8as_T4_v3": {
+        "on_demand": 0.838,
+        "spot": 0.279724
+      }
+    },
+    "uksouth": {
+      "Standard_D16ds_v5": {
+        "on_demand": 1.048,
+        "spot": 0.137602
+      },
+      "Standard_D32ds_v5": {
+        "on_demand": 2.096,
+        "spot": 0.275205
+      },
+      "Standard_D4ds_v5": {
+        "on_demand": 0.262,
+        "spot": 0.034401
+      },
+      "Standard_D8ds_v5": {
+        "on_demand": 0.524,
+        "spot": 0.068801
+      },
+      "Standard_DS3_v2": {
+        "on_demand": 0.351,
+        "spot": 0.059459
+      },
+      "Standard_DS4_v2": {
+        "on_demand": 0.702,
+        "spot": 0.118919
+      },
+      "Standard_DS5_v2": {
+        "on_demand": 1.405,
+        "spot": 0.238007
+      },
+      "Standard_E16ds_v4": {
+        "on_demand": 1.352,
+        "spot": 0.16224
+      },
+      "Standard_E16ds_v5": {
+        "on_demand": 1.352,
+        "spot": 0.16224
+      },
+      "Standard_E32ds_v4": {
+        "on_demand": 2.704,
+        "spot": 0.32448
+      },
+      "Standard_E32ds_v5": {
+        "on_demand": 2.704,
+        "spot": 0.32448
+      },
+      "Standard_E4ds_v5": {
+        "on_demand": 0.338,
+        "spot": 0.04056
+      },
+      "Standard_E64ds_v4": {
+        "on_demand": 5.408,
+        "spot": 0.64896
+      },
+      "Standard_E8ds_v4": {
+        "on_demand": 0.676,
+        "spot": 0.08112
+      },
+      "Standard_E8ds_v5": {
+        "on_demand": 0.676,
+        "spot": 0.08112
+      },
+      "Standard_F16s_v2": {
+        "on_demand": 0.808,
+        "spot": 0.111746
+      },
+      "Standard_F32s_v2": {
+        "on_demand": 1.616,
+        "spot": 0.223493
+      },
+      "Standard_F8s_v2": {
+        "on_demand": 0.404,
+        "spot": 0.055873
+      },
+      "Standard_L16s_v3": {
+        "on_demand": 1.616,
+        "spot": 0.298637
+      },
+      "Standard_L8s_v3": {
+        "on_demand": 0.808,
+        "spot": 0.149318
+      },
+      "Standard_NC24ads_A100_v4": {
+        "on_demand": 4.591,
+        "spot": 0.848417
+      },
+      "Standard_NC4as_T4_v3": {
+        "on_demand": 0.615,
+        "spot": 0.180441
+      },
+      "Standard_NC8as_T4_v3": {
+        "on_demand": 0.88,
+        "spot": 0.258192
+      }
+    },
+    "westeurope": {
+      "Standard_D16ds_v5": {
+        "on_demand": 1.088,
+        "spot": 0.201062
+      },
+      "Standard_D32ds_v5": {
+        "on_demand": 2.176,
+        "spot": 0.402125
+      },
+      "Standard_D4ds_v5": {
+        "on_demand": 0.272,
+        "spot": 0.050266
+      },
+      "Standard_D8ds_v5": {
+        "on_demand": 0.544,
+        "spot": 0.100531
+      },
+      "Standard_DS3_v2": {
+        "on_demand": 0.272,
+        "spot": 0.050266
+      },
+      "Standard_DS4_v2": {
+        "on_demand": 0.544,
+        "spot": 0.100531
+      },
+      "Standard_DS5_v2": {
+        "on_demand": 1.087,
+        "spot": 0.200878
+      },
+      "Standard_E16ds_v4": {
+        "on_demand": 1.384,
+        "spot": 0.255763
+      },
+      "Standard_E16ds_v5": {
+        "on_demand": 1.384,
+        "spot": 0.255763
+      },
+      "Standard_E32ds_v4": {
+        "on_demand": 2.768,
+        "spot": 0.511526
+      },
+      "Standard_E32ds_v5": {
+        "on_demand": 2.768,
+        "spot": 0.511526
+      },
+      "Standard_E4ds_v5": {
+        "on_demand": 0.346,
+        "spot": 0.063941
+      },
+      "Standard_E64ds_v4": {
+        "on_demand": 5.536,
+        "spot": 1.023053
+      },
+      "Standard_E8ds_v4": {
+        "on_demand": 0.692,
+        "spot": 0.127882
+      },
+      "Standard_E8ds_v5": {
+        "on_demand": 0.692,
+        "spot": 0.127882
+      },
+      "Standard_F16s_v2": {
+        "on_demand": 0.776,
+        "spot": 0.143405
+      },
+      "Standard_F32s_v2": {
+        "on_demand": 1.552,
+        "spot": 0.28681
+      },
+      "Standard_F8s_v2": {
+        "on_demand": 0.388,
+        "spot": 0.071702
+      },
+      "Standard_L16s_v3": {
+        "on_demand": 1.664,
+        "spot": 0.307507
+      },
+      "Standard_L8s_v3": {
+        "on_demand": 0.832,
+        "spot": 0.153754
+      },
+      "Standard_NC24ads_A100_v4": {
+        "on_demand": 4.775,
+        "spot": 1.097295
+      },
+      "Standard_NC4as_T4_v3": {
+        "on_demand": 0.658,
+        "spot": 0.457113
+      },
+      "Standard_NC8as_T4_v3": {
+        "on_demand": 0.94,
+        "spot": 0.653018
+      }
+    },
+    "westus2": {
+      "Standard_D16ds_v5": {
+        "on_demand": 0.904,
+        "spot": 0.237662
+      },
+      "Standard_D32ds_v5": {
+        "on_demand": 1.808,
+        "spot": 0.475323
+      },
+      "Standard_D4ds_v5": {
+        "on_demand": 0.226,
+        "spot": 0.059415
+      },
+      "Standard_D8ds_v5": {
+        "on_demand": 0.452,
+        "spot": 0.118831
+      },
+      "Standard_DS3_v2": {
+        "on_demand": 0.229,
+        "spot": 0.042319
+      },
+      "Standard_DS4_v2": {
+        "on_demand": 0.458,
+        "spot": 0.084638
+      },
+      "Standard_DS5_v2": {
+        "on_demand": 0.916,
+        "spot": 0.169277
+      },
+      "Standard_E16ds_v4": {
+        "on_demand": 1.152,
+        "spot": 0.29641
+      },
+      "Standard_E16ds_v5": {
+        "on_demand": 1.152,
+        "spot": 0.29641
+      },
+      "Standard_E32ds_v4": {
+        "on_demand": 2.304,
+        "spot": 0.592819
+      },
+      "Standard_E32ds_v5": {
+        "on_demand": 2.304,
+        "spot": 0.592819
+      },
+      "Standard_E4ds_v5": {
+        "on_demand": 0.288,
+        "spot": 0.074102
+      },
+      "Standard_E64ds_v4": {
+        "on_demand": 4.608,
+        "spot": 1.185638
+      },
+      "Standard_E8ds_v4": {
+        "on_demand": 0.576,
+        "spot": 0.148205
+      },
+      "Standard_E8ds_v5": {
+        "on_demand": 0.576,
+        "spot": 0.148205
+      },
+      "Standard_F16s_v2": {
+        "on_demand": 0.677,
+        "spot": 0.164646
+      },
+      "Standard_F32s_v2": {
+        "on_demand": 1.353,
+        "spot": 0.32905
+      },
+      "Standard_F8s_v2": {
+        "on_demand": 0.338,
+        "spot": 0.082202
+      },
+      "Standard_L16s_v3": {
+        "on_demand": 1.396,
+        "spot": 0.35933
+      },
+      "Standard_L8s_v3": {
+        "on_demand": 0.698,
+        "spot": 0.179665
+      },
+      "Standard_NC24ads_A100_v4": {
+        "on_demand": 3.673,
+        "spot": 0.67877
+      },
+      "Standard_NC4as_T4_v3": {
+        "on_demand": 0.526,
+        "spot": 0.15254
+      },
+      "Standard_NC8as_T4_v3": {
+        "on_demand": 0.752,
+        "spot": 0.21808
+      }
+    }
+  }
+}

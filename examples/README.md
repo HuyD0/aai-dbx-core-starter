@@ -351,6 +351,23 @@ The numbered 00–12 files above remain one contiguous lifecycle curriculum.
 Larger projects with their own dependency and data boundaries live in nested
 directories and are intentionally not added to that runner.
 
+### Classical classification
+
+[`local-classification/`](local-classification/README.md) is a standalone,
+zero-download sklearn and MLflow course. It has its own exact environment, local
+SQLite tracking store, tests, and ten-notebook path. It teaches problem and data
+contracts, time splits, leakage-safe Pipelines, imbalance-aware metrics,
+validation-only model/threshold selection, a frozen release test, registry
+aliases, inference, drift, and the move to Databricks. Start with:
+
+```bash
+make classification-install
+make classification-check
+make classification-notebook
+```
+
+### Offline Apple-silicon fine-tuning
+
 [`local-finetuning/`](local-finetuning/README.md) is an Apple-silicon,
 offline-first Bitext and MLX-LM study project. It prepares all third-party
 assets before travel, proves local execution with sockets blocked, compares

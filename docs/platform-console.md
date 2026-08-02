@@ -17,6 +17,7 @@ failure runbooks are documented in
 | **Generate** | Builds the `az login` → export → `databricks bundle init` sequence for the chosen template, with this workspace's identifiers already substituted. This is the one thing `scripts/setup_dev.py` cannot do. |
 | **Platform state** | Reports what the *app's own service principal* can reach: its identity, the constrained compute policy, the SDK artifact volume. |
 | **Hub** | Publishes the `ai-platform/v1` schema and registration/workflow API, and renders portfolio, readiness, application detail, cost-optimization, and action-queue surfaces. Hosted stateful and observability capabilities remain gated until the resources in `docs/ai-platform-hub.md` are approved. |
+| **Estimate** | A cost estimator ([`docs/cost-estimation.md`](cost-estimation.md)): composes multi-workload monthly estimates from a bundled Azure list-price snapshot, entirely stateless and clearly labelled as estimates — never observed billing. |
 
 **The console never verifies your personal access.** On-behalf-of-user authorization is
 not used, for two reasons that are not going to change soon:

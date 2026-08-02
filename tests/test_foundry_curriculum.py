@@ -135,6 +135,40 @@ def test_connected_call_requires_an_explicit_network_opt_in():
         setup.create_text_response(session, "hello")
 
 
+@pytest.mark.parametrize(
+    ("project_endpoint", "deployment"),
+    (
+        (
+            "https://replace-with-foundry-account.services.ai.azure.com/"
+            "api/projects/project-dev",
+            "chat-model",
+        ),
+        (
+            "https://account.services.ai.azure.com/api/projects/"
+            "replace-with-project",
+            "chat-model",
+        ),
+        (
+            "https://account.services.ai.azure.com/api/projects/project-dev",
+            "replace-with-model-deployment",
+        ),
+    ),
+)
+def test_connected_call_rejects_placeholder_configuration(project_endpoint, deployment):
+    session = setup.FoundryNotebookSession(
+        curriculum_root=CURRICULUM,
+        config_path=Path("config.yml"),
+        logical_model="foundry-chat",
+        project_endpoint=project_endpoint,
+        deployment=deployment,
+        context=SimpleNamespace(),
+    )
+
+    assert not session.connected_ready
+    with pytest.raises(RuntimeError, match="endpoint.*deployment"):
+        setup.create_text_response(session, "hello", allow_network=True)
+
+
 def test_curriculum_has_eight_clean_compilable_notebooks():
     notebooks = sorted((CURRICULUM / "notebooks").glob("*.ipynb"))
     assert [path.name for path in notebooks] == [
@@ -159,7 +193,7 @@ def test_curriculum_has_eight_clean_compilable_notebooks():
             "".join(cell.get("source", [])) for cell in notebook["cells"]
         )
         assert "load_session(" in source
-        assert "aif-huy-dev.services.ai.azure.com" not in source
+        assert ".services.ai.azure.com/api/projects/" not in source
         for index, cell in enumerate(notebook["cells"]):
             if cell["cell_type"] != "code":
                 continue

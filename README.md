@@ -162,6 +162,30 @@ leakage-safe splits, baselines, prompting, LoRA, frozen evaluation, MLflow
 decisions, and the capstone. CLI targets remain optional automation for
 preflight and long runs.
 
+### Learn classical classification locally
+
+The standalone [local classification course](examples/local-classification/README.md)
+trains a small sklearn subscription-churn model on deterministic synthetic data.
+It needs no download, cloud credential, GPU, or Databricks workspace and keeps
+its dependencies in a separate exact lock.
+
+```bash
+make classification-install
+make classification-check
+make classification-notebook
+```
+
+The ten notebooks cover problem framing, data contracts, time-based leakage-safe
+splits, a no-skill baseline, sklearn Pipelines, explicit MLflow tracking, model
+and threshold selection, one frozen-test gate, conditional registry promotion,
+model reload, monitoring, and a current Unity Catalog/Databricks handoff. Run a
+completed lifecycle with `make classification-train`, then inspect it in another
+terminal with `make classification-ui`.
+
+The course uses the same lifecycle vocabulary as the platform—`baseline ->
+change -> result -> decision`, with `adopt`, `reject`, or `inconclusive`—while
+keeping sklearn out of the SDK runtime.
+
 ## Install for SDK development
 
 ```bash
@@ -316,6 +340,7 @@ cloud and identity resources are provisioned outside this repository.
 - [10 — Layered and calibrated judges](examples/10_layered_judges.ipynb)
 - [11 — Cost-quality trade-off](examples/11_cost_quality_tradeoff.ipynb)
 - [12 — Optional agent alignment and optimization](examples/12_agent_alignment_optimization.ipynb)
+- [Local classical-classification course](examples/local-classification/README.md)
 - [Offline Apple-silicon fine-tuning sample](examples/local-finetuning/README.md)
 - [Developer guide](docs/developer-guide.md)
 - [Platform architecture](docs/platform-architecture.md)
@@ -326,5 +351,7 @@ cloud and identity resources are provisioned outside this repository.
   same identifier conflicts on every sync
 - [Platform audit](docs/platform-audit.md) — findings and prioritised backlog
 - [Tagging standard](docs/tagging-standard.md)
+- [Cost estimation](docs/cost-estimation.md) — the console's list-price estimator
+  and its pricing snapshot
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)

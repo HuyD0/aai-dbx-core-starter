@@ -81,7 +81,8 @@ Open the repository in VS Code or JupyterLab, choose `.venv/bin/python`, and run
 the notebooks in order. Every notebook is safe to run without a cloud request
 by default. The first connected call requires both:
 
-1. a real `deployment` value in the selected configuration; and
+1. real project `endpoint` and model `deployment` values in the selected
+   configuration; and
 2. changing that notebook's explicit `RUN_CONNECTED` switch to `True`.
 
 The switch is a learning guard, not a production control. Production access is

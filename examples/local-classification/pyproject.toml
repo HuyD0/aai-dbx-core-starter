@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aai-local-classification"
+version = "0.1.0"
+description = "Notebook-led local classification and MLOps curriculum with MLflow."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "matplotlib==3.11.1",
+  "mlflow==3.14.0",
+  "numpy==2.5.1; python_version >= '3.12'",
+  "numpy==1.26.4; python_version < '3.12'",
+  "pandas==2.3.3",
+  "pydantic==2.13.4",
+  "PyYAML==6.0.3",
+  "scikit-learn==1.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black[jupyter]==26.5.1",
+  "ipykernel==7.3.0",
+  "jupyterlab==4.6.2",
+  "pytest==9.1.1",
+  "ruff==0.16.0",
+]
+
+[project.scripts]
+aai-classification = "aai_local_classification.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aai_local_classification"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/render_notebooks.py" = ["E501"]
+"notebooks/*.ipynb" = ["E501", "I001"]
+
+[tool.black]
+target-version = ["py311", "py312"]
+line-length = 88
+extend-exclude = "notebooks/.*\\.ipynb"

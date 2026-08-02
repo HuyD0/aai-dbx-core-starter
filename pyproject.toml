@@ -69,12 +69,14 @@ aai-core = "aai_core.diagnostics:main"
 packages = ["src/aai_core"]
 
 [tool.hatch.build.targets.sdist]
-# The plane-study sample is a standalone locked project, not SDK package data.
-# Keeping it out of the SDK sdist also prevents accidental third-party data or
-# model artifacts from entering a future source release.
+# Standalone study projects own separate environments and are not SDK package
+# data. Excluding them also prevents local data, models, or experiment artifacts
+# from entering a future source release.
 exclude = [
   "/examples/local-finetuning",
   "/tests/test_local_finetuning_project.py",
+  "/examples/local-classification",
+  "/tests/test_local_classification_project.py",
 ]
 
 [tool.pytest.ini_options]
@@ -88,6 +90,7 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+exclude = ["examples/local-classification"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -98,3 +101,4 @@ known-first-party = ["aai_core", "aai_console", "app", "jobs"]
 [tool.black]
 target-version = ["py311", "py312"]
 line-length = 88
+extend-exclude = "(^|/)examples/local-classification/"

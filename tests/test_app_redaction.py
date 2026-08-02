@@ -21,6 +21,7 @@ import pytest
 from asgi_client import ASGIClient
 
 from aai_console.config import IDENTIFIER_KEYS, ConsoleConfig
+from aai_console.pricing import load_snapshot
 from aai_console.server import create_app
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,13 +64,35 @@ def test_json_endpoints_return_only_allowlisted_keys(client, path):
 
 
 def test_no_credential_material_reaches_any_response_body(client):
-    paths = ["/", "/healthz", "/api/session", "/api/content", "/api/palette?q=a"]
+    paths = [
+        "/",
+        "/healthz",
+        "/api/session",
+        "/api/content",
+        "/api/palette?q=a",
+        "/estimator",
+    ]
     for path in paths:
         assert SENTINEL not in client.get(path).text, path
     for path in ["/api/checks/run"]:
         assert SENTINEL not in client.post(path).text, path
     generated = client.post("/api/generate", json={"template": "rag-app"})
     assert SENTINEL not in generated.text
+    estimate = {
+        "region": load_snapshot().regions[0].id,
+        "lines": [
+            {
+                "kind": "custom_dbu",
+                "label": "probe",
+                "dbu_per_month": 1,
+                "price_per_dbu": 0.5,
+            }
+        ],
+    }
+    for path in ["/api/estimator/render", "/api/estimator/export.csv"]:
+        response = client.post(path, json=estimate)
+        assert response.status_code == 200, path
+        assert SENTINEL not in response.text, path
 
 
 def test_no_credential_material_reaches_a_log_line(client, caplog):
