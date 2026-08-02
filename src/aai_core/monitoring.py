@@ -62,18 +62,25 @@ def log_feedback(
     addresses are personal identities and are rejected.
     """
 
-    # Normalize before building the native request: these identifiers are
-    # forwarded to MLflow, and an untrimmed trace id addresses a different
-    # (or no) trace while an untrimmed name records feedback under a label
-    # that later lookups will not match.
-    trace_id = str(trace_id).strip()
+    # This is an untrusted-input boundary: str() would turn None into the
+    # nonblank literal "None" and an int into a plausible id, addressing
+    # the wrong trace instead of failing here. Require the declared type,
+    # then normalize — an untrimmed trace id addresses a different (or no)
+    # trace, and an untrimmed name records feedback under a label later
+    # lookups will not match.
+    for label, supplied in (("trace_id", trace_id), ("name", name)):
+        if not isinstance(supplied, str):
+            raise TypeError(f"{label} must be a string; got {type(supplied).__name__}")
+    trace_id = trace_id.strip()
     if not trace_id:
         raise ValueError("trace_id must not be blank")
-    name = str(name).strip()
+    name = name.strip()
     if not name:
         raise ValueError("name must not be blank")
     if span_id is not None:
-        span_id = str(span_id).strip()
+        if not isinstance(span_id, str):
+            raise TypeError(f"span_id must be a string; got {type(span_id).__name__}")
+        span_id = span_id.strip()
         if not span_id:
             raise ValueError("span_id must not be blank when provided")
     if not isinstance(source_kind, FeedbackSourceKind):

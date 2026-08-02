@@ -301,7 +301,17 @@ def _config_issues(example: Example) -> list[str]:
     issues = []
     for dotted_path in example.config_fields:
         value = _nested_value(document, dotted_path)
-        if _is_placeholder(value):
+        if value is not None and not isinstance(value, str):
+            # Every configured identifier is a string. The checks below
+            # stringify, so 123 would read as a configured name and pass
+            # the qualifier regex as "123", leaving strict PlatformSettings
+            # to reject it at bootstrap — after the cloud preflight ran.
+            # A missing key stays None so it still reports as unconfigured.
+            issues.append(
+                f"`{dotted_path}` must be a string in aai-platform.yml "
+                f"(current value: {value!r})."
+            )
+        elif _is_placeholder(value):
             issues.append(
                 f"Configure `{dotted_path}` in aai-platform.yml "
                 f"(current value: {value!r})."

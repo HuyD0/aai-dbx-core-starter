@@ -136,6 +136,28 @@ def test_log_feedback_namespace_must_match_the_source_kind():
     assert captured["source"].source_id == "code:response_length_ok"
 
 
+def test_log_feedback_requires_string_identifiers():
+    # str() would turn None into the nonblank literal "None" and an int
+    # into a plausible id, so MLflow would be called for the wrong trace
+    # instead of the input failing at this untrusted-input boundary.
+    for field, bad in (
+        ("trace_id", None),
+        ("trace_id", 123),
+        ("name", None),
+        ("span_id", 7),
+    ):
+        arguments = {
+            "trace_id": "trace-1",
+            "name": "correct",
+            "value": True,
+            "source_id": "group:domain-reviewers",
+            "mlflow_module": _fake_mlflow({}),
+        }
+        arguments[field] = bad
+        with pytest.raises(TypeError, match=field):
+            log_feedback(**arguments)
+
+
 def test_log_feedback_normalizes_forwarded_identifiers():
     # These reach MLflow: an untrimmed trace id addresses a different or
     # invalid trace, and an untrimmed name records feedback under a label

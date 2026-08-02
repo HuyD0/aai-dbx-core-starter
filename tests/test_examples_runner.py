@@ -410,6 +410,43 @@ platform:
     assert "must be a string" in issues[0]
 
 
+def test_config_preflight_rejects_non_string_configuration(
+    runner, tmp_path, monkeypatch
+):
+    # The placeholder and qualifier checks stringify, so a numeric catalog
+    # passes the qualifier regex as "123" and a numeric declared
+    # experiment name reads as configured — both only fail inside strict
+    # PlatformSettings at bootstrap, after the cloud preflight has run.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: 123
+  catalog: 456
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+
+    # first_trace declares the experiment name; platform_llm_operations
+    # declares the catalog and schema qualifiers.
+    declared_name = runner._config_issues(runner.EXAMPLES["first_trace"])
+    declared_qualifiers = runner._config_issues(
+        runner.EXAMPLES["platform_llm_operations"]
+    )
+
+    assert any("experiment_name` must be a string" in issue for issue in declared_name)
+    assert any("catalog` must be a string" in issue for issue in declared_qualifiers)
+    # A missing key is still reported as unconfigured, not as a type error.
+    config.write_text("platform:\n  schema: example_ai\n", encoding="utf-8")
+    missing = runner._config_issues(runner.EXAMPLES["first_trace"])
+    assert missing == [
+        "Configure `platform.experiment_name` in aai-platform.yml "
+        "(current value: None)."
+    ]
+
+
 def test_config_preflight_rejects_malformed_qualifiers(runner, tmp_path, monkeypatch):
     # The SDK helpers reject dotted or invalid-character qualifiers; the
     # preflight must fail before any cloud check instead of opening the

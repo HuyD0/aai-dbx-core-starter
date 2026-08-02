@@ -93,9 +93,10 @@ All notable changes to `aai-core` are documented here.
   (`group:` for human review, `judge:`/`code:` for automated scorers) so
   no governed feedback lands without provenance and no personal identity —
   username, employee id, or email — can pass as provenance; the trace id,
-  assessment name, and span id are normalized before the native request,
-  so an untrimmed id cannot address the wrong trace and an untrimmed name
-  cannot record feedback under a label later lookups miss. Plus `traces_with_feedback()`
+  assessment name, and span id must be strings and are normalized before
+  the native request, so neither a coerced `str(None)` nor an untrimmed
+  id can address the wrong trace and no untrimmed name can record
+  feedback under a label later lookups miss. Plus `traces_with_feedback()`
   for curating reviewed production traces into the governed regression
   dataset, counting only valid feedback assessments — expectations,
   invalidated (overridden) entries, and errored scorer feedback never
