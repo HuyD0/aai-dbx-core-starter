@@ -484,7 +484,12 @@ def get_or_create_evaluation_dataset(
             "schema (letters, digits, underscores, and hyphens); got "
             f"{name!r}"
         )
-    if not str(experiment_id).strip():
+    # Normalize before the first request: the raw value is both sent to
+    # create_dataset() and compared against backend ids, which come back
+    # normalized, so untrimmed input would fail in the cloud or falsely
+    # report the dataset as associated with the wrong experiment.
+    experiment_id = str(experiment_id).strip()
+    if not experiment_id:
         raise ValueError("experiment_id must not be blank")
     catalog = _dataset_qualifier("catalog", catalog)
     schema = _dataset_qualifier("schema", schema)
@@ -503,8 +508,10 @@ def get_or_create_evaluation_dataset(
             experiment_id=experiment_id,
         )
 
-    experiment_ids = {str(associated) for associated in (dataset.experiment_ids or [])}
-    if str(experiment_id) not in experiment_ids:
+    experiment_ids = {
+        str(associated).strip() for associated in (dataset.experiment_ids or [])
+    }
+    if experiment_id not in experiment_ids:
         raise RuntimeError(
             f"Unity Catalog dataset {qualified_name!r} is not associated with "
             f"MLflow experiment {experiment_id!r}. Databricks does not "

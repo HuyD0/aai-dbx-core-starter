@@ -518,6 +518,41 @@ def test_dataset_helper_creates_without_unsupported_tags():
     assert result.merged_records is None
 
 
+def test_dataset_helper_normalizes_the_experiment_id():
+    # The id is both sent to create_dataset() and compared against backend
+    # ids, which come back normalized: an untrimmed value must not reach
+    # the cloud call or falsely read as a wrong-experiment association.
+    datasets = FakeDatasetApi(
+        get_error=RuntimeError("RESOURCE_DOES_NOT_EXIST: dataset not found")
+    )
+
+    created = get_or_create_evaluation_dataset(
+        name="regression_v1",
+        catalog="main",
+        schema="default",
+        experiment_id="  experiment-1  ",
+        mlflow_module=_dataset_mlflow(datasets),
+    )
+
+    assert datasets.create_arguments["experiment_id"] == "experiment-1"
+    assert created.experiment_ids == ["experiment-1"]
+    # The same normalization applies to an existing dataset's association.
+    existing = FakeEvaluationDataset(
+        name="main.default.regression_v1",
+        experiment_ids=[" experiment-1 "],
+    )
+    assert (
+        get_or_create_evaluation_dataset(
+            name="regression_v1",
+            catalog="main",
+            schema="default",
+            experiment_id="experiment-1 ",
+            mlflow_module=_dataset_mlflow(FakeDatasetApi(existing=existing)),
+        )
+        is existing
+    )
+
+
 def test_dataset_helper_rejects_wrong_experiment_association():
     dataset = FakeEvaluationDataset(
         name="main.default.regression_v1",

@@ -62,7 +62,9 @@ All notable changes to `aai-core` are documented here.
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder, dotted, or
   invalid-character catalog/schema qualifiers and logical dataset names
-  instead of querying the registry.
+  instead of querying the registry; the experiment id is normalized
+  before the first request, so an untrimmed value can neither reach the
+  cloud call nor misreport an association the backend reports normalized.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
   dependency-free `registered_*` bodies (logic inlined, equivalence
