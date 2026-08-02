@@ -1,0 +1,415 @@
+"""Unit tests for the shared scorer registry: integrity, selection, building."""
+
+from types import SimpleNamespace
+
+import pytest
+
+from aai_core.agentkit.catalog import (
+    CATALOG,
+    CODE_SCORER_FUNCTIONS,
+    JudgeBinding,
+    ScorerKind,
+    build_scorer,
+    effective_threshold,
+    get_spec,
+    keyword_coverage,
+    refusal_compliance,
+    render_plan,
+    response_length_ok,
+    score_all,
+    select_scorers,
+)
+from aai_core.agentkit.config import AgentkitConfig
+from aai_core.agentkit.datasets import DatasetShape
+from aai_core.agentkit.errors import ConfigError, UnknownScorerError
+
+
+def _shape(
+    expectation_keys=("expected_response",),
+    has_traces=False,
+    row_count=10,
+    has_outputs=True,
+):
+    return DatasetShape(
+        row_count=row_count,
+        input_keys=("question",),
+        has_outputs=has_outputs,
+        expectation_keys=tuple(expectation_keys),
+        has_traces=has_traces,
+        strata_values={},
+    )
+
+
+def _config(**overrides):
+    values = {"version": 1, "agent": "agent.py:respond", "dataset": "golden.json"}
+    values.update(overrides)
+    return AgentkitConfig(**values)
+
+
+def _selected_names(plan):
+    return {entry.spec.name for entry in plan.entries}
+
+
+def _excluded(plan, name):
+    for item in plan.excluded:
+        if item.spec.name == name:
+            return item.reason
+    return None
+
+
+def test_catalog_integrity():
+    names = [spec.name for spec in CATALOG]
+    assert len(names) == len(set(names)), "scorer names must be unique"
+    metrics = [spec.metric for spec in CATALOG]
+    assert len(metrics) == len(set(metrics)), "metric keys must be unique"
+    for spec in CATALOG:
+        assert spec.version >= 1
+        if spec.kind in {ScorerKind.BUILTIN, ScorerKind.PROMPT_JUDGE}:
+            assert spec.judge is not None, spec.name
+        if spec.kind is ScorerKind.PROMPT_JUDGE:
+            assert spec.judge.prompt_name, spec.name
+            assert spec.judge.fallback_instructions, spec.name
+        if spec.kind is ScorerKind.CODE:
+            assert spec.judge_overhead_tokens == 0, spec.name
+
+
+def test_get_spec_unknown_name_lists_registry():
+    with pytest.raises(UnknownScorerError) as excinfo:
+        get_spec("made_up")
+    assert "correctness" in str(excinfo.value)
+
+
+def test_auto_selection_with_expected_response_and_judges():
+    plan = select_scorers(_shape(), _config(), mode="live", judges_enabled=True)
+
+    names = _selected_names(plan)
+    assert {
+        "response_length_ok",
+        "keyword_coverage",
+        "refusal_compliance",
+        "correctness",
+        "safety",
+        "latency_seconds",
+    } <= names
+    assert "relevance" not in names  # expectations exist
+    assert "equivalence" not in names  # add-only scorer
+    assert "pii_detection" not in names  # add-only scorer
+
+
+def test_code_only_smoke_excludes_judges_with_reason():
+    plan = select_scorers(
+        _shape(),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=False,
+        judge_note="smoke runs code scorers only; use --live for judges",
+    )
+
+    names = _selected_names(plan)
+    assert names == {"response_length_ok", "keyword_coverage", "refusal_compliance"}
+    assert "code scorers only" in _excluded(plan, "correctness")
+    assert "live agent call" in _excluded(plan, "latency_seconds")
+
+
+def test_guidelines_rows_select_expectations_guidelines():
+    plan = select_scorers(
+        _shape(expectation_keys=("guidelines",)),
+        _config(),
+        mode="live",
+        judges_enabled=True,
+    )
+
+    assert "expectations_guidelines" in _selected_names(plan)
+    assert "correctness" not in _selected_names(plan)
+
+
+def test_bare_inputs_select_relevance_with_warning_reason():
+    plan = select_scorers(
+        _shape(expectation_keys=()), _config(), mode="live", judges_enabled=True
+    )
+
+    names = _selected_names(plan)
+    assert "relevance" in names
+    assert "keyword_coverage" not in names
+    entry = next(e for e in plan.entries if e.spec.name == "relevance")
+    assert "no expectations" in entry.reason
+
+
+def test_trace_rows_select_trace_dependent_scorers():
+    plan = select_scorers(
+        _shape(has_traces=True),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "retrieval_groundedness" in names
+    assert "tool_call_correctness" in names
+
+
+def test_trace_scorers_excluded_on_plain_rows_with_reason():
+    plan = select_scorers(
+        _shape(),
+        _config(scorers={"add": ["retrieval_groundedness"]}),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    reason = _excluded(plan, "retrieval_groundedness")
+    assert reason is not None
+    assert "RETRIEVER spans" in reason
+
+
+def test_trace_scorer_added_in_live_mode_is_conditional():
+    plan = select_scorers(
+        _shape(),
+        _config(scorers={"add": ["retrieval_groundedness"]}),
+        mode="live",
+        judges_enabled=True,
+    )
+
+    entry = next(e for e in plan.entries if e.spec.name == "retrieval_groundedness")
+    assert "conditional" in entry.reason
+
+
+def test_add_violating_expectation_contract_fails_before_any_spend():
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(expectation_keys=()),
+            _config(scorers={"add": ["equivalence"]}),
+            mode="live",
+            judges_enabled=True,
+        )
+    assert "expectations.expected_response" in str(excinfo.value)
+
+
+def test_remove_wins_over_auto_selection():
+    plan = select_scorers(
+        _shape(),
+        _config(scorers={"remove": ["response_length_ok"]}),
+        mode="live",
+        judges_enabled=True,
+    )
+
+    assert "response_length_ok" not in _selected_names(plan)
+    assert _excluded(plan, "response_length_ok") == "removed by scorers.remove"
+
+
+def test_config_guidelines_select_guidelines_scorer():
+    plan = select_scorers(
+        _shape(),
+        _config(scorers={"guidelines": ["Always cite the policy number."]}),
+        mode="live",
+        judges_enabled=True,
+    )
+
+    assert "guidelines" in _selected_names(plan)
+
+
+def test_effective_threshold_precedence():
+    spec = get_spec("correctness")
+
+    by_name = _config(thresholds={"correctness": ">=0.9"})
+    by_metric = _config(thresholds={"correctness/mean": ">=0.8"})
+    default = _config()
+
+    assert effective_threshold(spec, by_name) == ">=0.9"
+    assert effective_threshold(spec, by_metric) == ">=0.8"
+    assert effective_threshold(spec, default) == ">=0.7"
+    assert effective_threshold(get_spec("fluency"), default) is None
+
+
+def test_plan_render_names_versions_thresholds_and_exclusions():
+    plan = select_scorers(
+        _shape(),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=False,
+        judge_note="smoke runs code scorers only",
+    )
+
+    text = render_plan(plan, judge_model_uri="endpoints:/judge")
+    assert "keyword_coverage" in text
+    assert ">=0.6" in text
+    assert "excluded: correctness" in text
+    assert "note: smoke runs code scorers only" in text
+
+
+def test_scorer_versions_tag_is_sorted_and_compact():
+    plan = select_scorers(
+        _shape(), _config(), mode="answer-sheet", judges_enabled=False
+    )
+
+    tag = plan.scorer_versions_tag()
+    assert tag == "keyword_coverage=1,refusal_compliance=1,response_length_ok=1"
+
+
+@pytest.mark.parametrize(
+    ("outputs", "expectations", "expected"),
+    [
+        (
+            "The capital of France is Paris",
+            {"expected_response": "Paris is the capital of France"},
+            1.0,
+        ),
+        ("Nothing relevant here", {"expected_response": ""}, 1.0),
+        ("Nothing relevant at all", {"expected_response": "quarterly report"}, 0.0),
+    ],
+)
+def test_keyword_coverage_values(outputs, expectations, expected):
+    assert keyword_coverage(outputs, expectations) == expected
+
+
+def test_refusal_compliance_values():
+    refusal_expected = {"expected_response": "The agent should refuse politely."}
+    assert refusal_compliance("I cannot help with that", refusal_expected) == 1.0
+    assert refusal_compliance("Sure, here it is", refusal_expected) == 0.0
+    normal = {"expected_response": "The report is due Friday."}
+    assert refusal_compliance("It is due Friday", normal) == 1.0
+    assert refusal_compliance("I cannot help with that", normal) == 0.0
+
+
+def test_answer_length_values():
+    assert response_length_ok("", {}) == 0.0
+    assert response_length_ok("ok", {}) == 1.0
+    assert response_length_ok("x" * 2001, {}) == 0.0
+
+
+def test_score_all_covers_every_row_level_code_scorer():
+    scores = score_all("answer", {"expected_response": "answer"})
+    assert set(scores) == set(CODE_SCORER_FUNCTIONS)
+
+
+def _fake_mlflow(make_judge=None):
+    def scorer_decorator(name=None):
+        def wrap(function):
+            return SimpleNamespace(name=name, function=function)
+
+        return wrap
+
+    def builtin(class_name):
+        def factory(**kwargs):
+            return SimpleNamespace(class_name=class_name, kwargs=kwargs)
+
+        return factory
+
+    scorers = SimpleNamespace(
+        scorer=scorer_decorator,
+        Correctness=builtin("Correctness"),
+        Equivalence=builtin("Equivalence"),
+        RelevanceToQuery=builtin("RelevanceToQuery"),
+        Safety=builtin("Safety"),
+        Fluency=builtin("Fluency"),
+        Completeness=builtin("Completeness"),
+        ExpectationsGuidelines=builtin("ExpectationsGuidelines"),
+        Guidelines=builtin("Guidelines"),
+        PIIDetection=builtin("PIIDetection"),
+        RetrievalGroundedness=builtin("RetrievalGroundedness"),
+        RetrievalRelevance=builtin("RetrievalRelevance"),
+        RetrievalSufficiency=builtin("RetrievalSufficiency"),
+        ToolCallCorrectness=builtin("ToolCallCorrectness"),
+        ToolCallEfficiency=builtin("ToolCallEfficiency"),
+    )
+    genai = SimpleNamespace(scorers=scorers)
+    if make_judge is not None:
+        genai.make_judge = make_judge
+    return SimpleNamespace(genai=genai)
+
+
+def test_build_code_scorer_wraps_the_pure_function():
+    built = build_scorer(get_spec("keyword_coverage"), mlflow_module=_fake_mlflow())
+
+    assert built.name == "keyword_coverage"
+    value = built.function(outputs="Paris", expectations={"expected_response": "Paris"})
+    assert value == 1.0
+
+
+def test_every_judge_routes_through_the_governed_endpoint():
+    fake = _fake_mlflow()
+
+    for name in ("correctness", "safety", "relevance", "pii_detection"):
+        built = build_scorer(
+            get_spec(name), judge_model_uri="endpoints:/judge", mlflow_module=fake
+        )
+        assert built.kwargs.get("model") == "endpoints:/judge", name
+
+
+def test_a_non_overridable_binding_keeps_the_platform_default_judge():
+    spec = get_spec("safety").model_copy(
+        update={"judge": JudgeBinding(overridable=False)}
+    )
+
+    built = build_scorer(
+        spec, judge_model_uri="endpoints:/judge", mlflow_module=_fake_mlflow()
+    )
+
+    assert built.kwargs == {}
+
+
+def test_build_guidelines_scorer_requires_project_text():
+    fake = _fake_mlflow()
+
+    with pytest.raises(ConfigError):
+        build_scorer(get_spec("guidelines"), mlflow_module=fake)
+
+    built = build_scorer(
+        get_spec("guidelines"),
+        guidelines=("Always cite the policy number.",),
+        judge_model_uri="endpoints:/judge",
+        mlflow_module=fake,
+    )
+    assert built.kwargs["name"] == "guidelines"
+    assert built.kwargs["guidelines"] == ["Always cite the policy number."]
+
+
+def test_build_prompt_judge_uses_make_judge_with_fallback_instructions():
+    captured = {}
+
+    def make_judge(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(name=kwargs["name"])
+
+    build_scorer(
+        get_spec("pension_domain_policy"),
+        judge_model_uri="endpoints:/judge",
+        mlflow_module=_fake_mlflow(make_judge=make_judge),
+    )
+
+    assert captured["name"] == "pension_domain_policy"
+    assert "{{ inputs }}" in captured["instructions"]
+    assert "official support channels" in captured["instructions"]
+    assert captured["model"] == "endpoints:/judge"
+
+
+def test_build_prompt_judge_prefers_registry_prompt_text():
+    captured = {}
+
+    def make_judge(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(name=kwargs["name"])
+
+    def prompt_loader(name, alias):
+        assert name == "agentkit_judge_domain_policy"
+        assert alias == "production"
+        return SimpleNamespace(template="Registry rules {{ inputs }} {{ outputs }}")
+
+    build_scorer(
+        get_spec("pension_domain_policy"),
+        prompt_loader=prompt_loader,
+        mlflow_module=_fake_mlflow(make_judge=make_judge),
+    )
+
+    assert captured["instructions"].startswith("Registry rules")
+
+
+def test_build_prompt_judge_falls_back_to_guidelines_without_make_judge():
+    built = build_scorer(
+        get_spec("pension_domain_policy"),
+        judge_model_uri="endpoints:/judge",
+        mlflow_module=_fake_mlflow(),
+    )
+
+    assert built.class_name == "Guidelines"
+    assert built.kwargs["name"] == "pension_domain_policy"
+    assert len(built.kwargs["guidelines"]) == 3

@@ -1,0 +1,93 @@
+# Optional: the Unity Catalog deployment-job gate.
+#
+# `databricks.yml` globs `resources/*.yml` only — one level deep — so nothing
+# in this directory is deployed until you opt in by adding an explicit
+# include:
+#
+#   include:
+#     - resources/*.yml
+#     - resources/optional/deployment_job.yml
+#     - resources/optional/registered_model.yml
+#
+# A deployment job runs automatically whenever a new version of the
+# registered model is created: it evaluates the version, waits for a human
+# approval, then hands off to deployment.
+#
+# Two things about the approval task are not obvious and will otherwise cost
+# you an afternoon:
+#
+#  1. THE FIRST RUN ALWAYS FAILS on the approval task. That is by design —
+#     approval is recorded as a Unity Catalog tag on the model version, and
+#     no tag exists yet. Approving in the UI writes the tag (key = this
+#     task's name, value = Approved) and the run resumes.
+#  2. The approver needs APPLY TAG on the model and CAN MANAGE RUN on the
+#     job. Use governed tag policies when more than one group must approve,
+#     so nobody can approve their own change.
+#
+# The bundle schema has no field linking a registered model to its
+# deployment job, so run `python scripts/link_deployment_job.py` once after
+# deploying. See docs/agent-evaluation.md.
+resources:
+  jobs:
+    agent_deployment_gate:
+      name: "[${bundle.target}] {{.application_name}} deployment gate"
+
+      # Both parameters are mandatory and must be job-level: Databricks
+      # supplies them when a new model version triggers the job.
+      parameters:
+        - name: model_name
+          default: {{.catalog}}.{{.schema}}.{{.application_name}}
+        - name: model_version
+          default: ""
+
+      tasks:
+        - task_key: evaluation
+          spark_python_task:
+            python_file: ../evals/evaluate.py
+          job_cluster_key: default
+          libraries:
+            - whl: ../dist/*.whl
+            - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
+            - requirements: ../requirements.lock
+
+        # The task name must start with "approval" for Databricks to treat it
+        # as an approval gate. Retries are off deliberately: a retry re-fires
+        # the approval notification.
+        - task_key: approval_gate
+          depends_on:
+            - task_key: evaluation
+          max_retries: 0
+          spark_python_task:
+            python_file: ../scripts/link_deployment_job.py
+            parameters: ["--await-approval"]
+          job_cluster_key: default
+          libraries:
+            - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
+
+        - task_key: deploy
+          depends_on:
+            - task_key: approval_gate
+          spark_python_task:
+            python_file: ../scripts/link_deployment_job.py
+            parameters: ["--report-deployment"]
+          job_cluster_key: default
+          libraries:
+            - whl: ${var.aai_core_volume}/aai_core/${var.aai_core_version}/aai_core-${var.aai_core_version}-py3-none-any.whl
+
+      job_clusters:
+        - job_cluster_key: default
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            num_workers: 1
+            policy_id: ${var.compute_policy_id}
+            custom_tags:
+              application: {{.application_name}}
+              project: {{.project_name}}
+              environment: ${bundle.target}
+              team: ${var.team}
+              owner_group: ${var.owner_group}
+              cost_center: ${var.cost_center}
+              data_classification: internal
+              lifecycle: experimental
+              tag_schema_version: "1"

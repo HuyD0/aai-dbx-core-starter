@@ -172,6 +172,10 @@ explicitly permits it. Prefer stable identifiers and controlled excerpts.
 
 ## Evaluation layers
 
+The `agentkit` CLI implements this chain for agent evaluation — it decides the
+run ontology, resolves scorers from the shared registry, and generates the
+lineage described below. See `docs/agent-evaluation.md`.
+
 - Unit and schema tests.
 - Deterministic policy and tool tests.
 - Retrieval and access-control evaluation.

@@ -1,0 +1,190 @@
+"""Unit tests for the baseline record, selection precedence, and drift."""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from aai_core.agentkit.baseline import (
+    BaselineDataset,
+    BaselineRecord,
+    BaselineScope,
+    BaselineVersions,
+    drift_warnings,
+    load_baseline,
+    select_baseline,
+    write_baseline,
+)
+from aai_core.agentkit.datasets import DatasetShape, LoadedDataset
+from aai_core.agentkit.errors import BaselineMissingError, ConfigError
+
+
+def _record(**overrides):
+    values = {
+        "schema_version": 1,
+        "run_id": "run-123",
+        "experiment_id": "42",
+        "recorded_at": "2026-08-02T10:00:00Z",
+        "dataset": BaselineDataset(ref="golden.json", digest="abc123", rows=10),
+        "scope": BaselineScope(mode="full", rows=10, seed=None),
+        "metrics": {"keyword_coverage/mean": 0.7, "safety/mean": 1.0},
+        "versions": BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_model="endpoints:/judge",
+            aai_core="0.4.0",
+        ),
+        "recorded_by": "agentkit compare --establish-baseline",
+        "change_id": "9f31c2e",
+    }
+    values.update(overrides)
+    return BaselineRecord(**values)
+
+
+def _dataset(digest="abc123", rows=10):
+    return LoadedDataset(
+        ref="golden.json",
+        source="local-json",
+        rows=tuple({"inputs": {"q": str(i)}} for i in range(rows)),
+        digest=digest,
+        shape=DatasetShape(
+            row_count=rows,
+            input_keys=("q",),
+            has_outputs=False,
+            expectation_keys=(),
+            has_traces=False,
+            strata_values={},
+        ),
+    )
+
+
+def test_round_trip_is_sorted_and_newline_terminated(tmp_path):
+    path = tmp_path / "evals" / "baseline.json"
+    record = _record()
+
+    write_baseline(path, record)
+    loaded, warnings = load_baseline(path)
+
+    assert warnings == []
+    assert loaded == record
+    text = path.read_text(encoding="utf-8")
+    assert text.endswith("\n")
+    document = json.loads(text)
+    assert list(document) == sorted(document)
+
+
+def test_legacy_metrics_only_file_upgrades_with_warning(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"metrics": {"correctness/mean": 0.8}}))
+
+    record, warnings = load_baseline(path)
+
+    assert record is not None
+    assert dict(record.metrics) == {"correctness/mean": 0.8}
+    assert record.run_id is None
+    assert any("legacy" in warning for warning in warnings)
+    assert any("--establish-baseline" in warning for warning in warnings)
+
+
+def test_integer_metrics_coerce_to_floats():
+    record = _record(metrics={"safety/mean": 1})
+    assert record.metrics["safety/mean"] == 1.0
+
+
+def test_corrupt_baseline_is_a_config_error(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text("{not json")
+
+    with pytest.raises(ConfigError):
+        load_baseline(path)
+
+    path.write_text(json.dumps({"something": "else"}))
+    with pytest.raises(ConfigError):
+        load_baseline(path)
+
+
+def test_missing_baseline_refuses_with_establish_guidance(tmp_path):
+    with pytest.raises(BaselineMissingError) as excinfo:
+        select_baseline(baseline_path=tmp_path / "evals" / "baseline.json")
+    message = str(excinfo.value)
+    assert "--establish-baseline" in message
+    assert "IS the baseline" in message
+
+
+def test_selection_precedence_flag_then_config_then_file(tmp_path):
+    path = tmp_path / "baseline.json"
+    write_baseline(path, _record())
+
+    run = SimpleNamespace(
+        info=SimpleNamespace(experiment_id="7"),
+        data=SimpleNamespace(
+            metrics={"correctness/mean": 0.9},
+            tags={
+                "aai.dataset": "golden.json",
+                "aai.dataset_digest": "ddd",
+                "aai.dataset_rows": "12",
+                "aai.scorer_versions": "correctness=1,safety=1",
+                "aai.judge_model": "endpoints:/judge",
+                "aai.agent_target": "endpoints:/agent",
+                "aai.agentkit_version": "0.4.0",
+                "aai.change_id": "abc",
+            },
+        ),
+    )
+    fake_mlflow = SimpleNamespace(get_run=lambda run_id: run)
+
+    from_flag, _ = select_baseline(
+        baseline_path=path,
+        flag_run_id="flag-run",
+        config_run_id="config-run",
+        mlflow_module=fake_mlflow,
+    )
+    assert from_flag.run_id == "flag-run"
+    assert from_flag.recorded_by == "--baseline-run"
+    assert dict(from_flag.versions.scorers) == {"correctness": 1, "safety": 1}
+
+    from_config, _ = select_baseline(
+        baseline_path=path, config_run_id="config-run", mlflow_module=fake_mlflow
+    )
+    assert from_config.run_id == "config-run"
+    assert from_config.recorded_by == "baseline.run_id"
+
+    from_file, _ = select_baseline(baseline_path=path)
+    assert from_file.run_id == "run-123"
+
+
+def test_unfetchable_run_is_a_baseline_error(tmp_path):
+    def get_run(run_id):
+        raise RuntimeError("no such run")
+
+    with pytest.raises(BaselineMissingError) as excinfo:
+        select_baseline(
+            baseline_path=tmp_path / "baseline.json",
+            flag_run_id="missing",
+            mlflow_module=SimpleNamespace(get_run=get_run),
+        )
+    assert "missing" in str(excinfo.value)
+
+
+def test_drift_warnings_flag_digest_and_scope():
+    record = _record()
+
+    clean = drift_warnings(record, dataset=_dataset(), mode="full", rows=10)
+    assert clean == []
+
+    digest = drift_warnings(
+        record, dataset=_dataset(digest="other"), mode="full", rows=10
+    )
+    assert any("different dataset version" in warning for warning in digest)
+
+    scope = drift_warnings(record, dataset=_dataset(), mode="sample", rows=5)
+    assert any("different row sets" in warning for warning in scope)
+
+
+def test_legacy_records_do_not_spam_drift_warnings(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"metrics": {"m": 1.0}}))
+    record, _ = load_baseline(path)
+
+    warnings = drift_warnings(record, dataset=_dataset(), mode="sample", rows=5)
+    assert warnings == []

@@ -4,6 +4,45 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added `agentkit`, the agent-evaluation paved road: a second console script
+  in the same wheel (`aai_core.agentkit`) built around one idea — an
+  experiment is a comparison, not a log. `agentkit compare` scores this
+  version of an agent against the recorded baseline on the same dataset with
+  the same scorers; the MLflow run, the lineage tags, the dataset digest and
+  the scorer/prompt versions are byproducts the toolkit generates rather than
+  things a developer types. `agentkit smoke` is the seconds-long,
+  credential-free, judge-free gate for pull requests; `agentkit eval` runs the
+  full suite locally or as the bundle's `release_gate` job; `agentkit gate`
+  is the promotion check; `agentkit evidence` writes the release record; and
+  `agentkit scorers ls` browses the registry. Exit codes are a stable CI
+  contract: `0` passed, `2` ran but a threshold failed, `1` configuration or
+  runtime error.
+
+  Scorers are versioned platform assets in `aai_core.agentkit.catalog`, with
+  judge instructions in the Unity Catalog Prompt Registry — a project selects
+  scorers and sets thresholds but never redefines one, so a `correctness/mean`
+  of 0.8 means the same thing on two teams. Which scorers apply is inferred
+  from the dataset's shape, and scorers whose contract the data cannot satisfy
+  (retrieval judges over recorded answers, for instance) are excluded with the
+  reason printed rather than silently skipped. Judge spend is estimated and
+  confirmed before a run, never reported after it. The gate refuses an empty
+  answer to "what did you compare against" and fails closed when a thresholded
+  metric never appeared. `agentkit.yaml` is three required lines; everything
+  else is an escape hatch. Targets resolve by shape — a local callable, a
+  serving endpoint, a Unity Catalog model, or any HTTP/JSON endpoint — so
+  execution can move without the record moving. See `docs/agent-evaluation.md`.
+
+- Updated the `evaluation-project` template to 2.0.0: it now generates a real,
+  runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
+  an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog
+  registered-model and deployment-job-gate resources with a linking script
+  (the bundle schema cannot express the model-to-deployment-job link). The
+  `evals/` scripts became thin shims over the toolkit and `gate_config.json`
+  was removed — thresholds live in `agentkit.yaml` and a scorer's kind now
+  comes from the registry, so a report-only judge can no longer be promoted
+  into a release threshold by editing a list. Generated projects on 1.1.0 keep
+  working; migration is documented, not automated.
+
 - Added the `analytics-app` template: a self-service analytics agent
   implementing the published four-layer architecture (canonical data,
   semantic layer first, knowledge + runbook skills, offline-pinned

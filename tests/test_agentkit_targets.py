@@ -1,0 +1,277 @@
+"""Unit tests for target detection and the predict-fn adapters."""
+
+import json
+import sys
+import urllib.error
+from types import SimpleNamespace
+
+import pytest
+
+from aai_core.agentkit.config import AgentkitConfig, ProjectContext
+from aai_core.agentkit.errors import (
+    MissingExtraError,
+    TargetContractError,
+    TargetInvocationError,
+    TargetResolutionError,
+)
+from aai_core.agentkit.targets import (
+    TargetKind,
+    build_predict_fn,
+    resolve_target,
+)
+from aai_core.testing import dev_settings
+
+FAKE_MLFLOW = SimpleNamespace(trace=lambda fn: fn)
+
+
+def _project(tmp_path, **config_overrides):
+    values = {
+        "version": 1,
+        "agent": "src/app/example_agent.py:respond",
+        "dataset": "evals/data/golden_cases.json",
+    }
+    values.update(config_overrides)
+    return ProjectContext(
+        config=AgentkitConfig(**values),
+        settings=dev_settings(),
+        root=tmp_path,
+    )
+
+
+def test_detection_table(tmp_path):
+    (tmp_path / "agent.py").write_text("def respond(q):\n    return q\n")
+    (tmp_path / "answers.json").write_text("[]")
+
+    cases = [
+        ("endpoints:/serving", TargetKind.SERVING_ENDPOINT, "endpoints:/serving"),
+        ("models:/main.eval.agent", TargetKind.UC_MODEL, "models:/main.eval.agent"),
+        ("https://host/score", TargetKind.HTTP, "https://host/score"),
+        ("agent.py:respond", TargetKind.LOCAL_CALLABLE, "agent.py:respond"),
+        ("json.tool:main", TargetKind.LOCAL_CALLABLE, "json.tool:main"),
+        ("answers.json", TargetKind.ANSWER_SHEET, "answers.json"),
+        ("my-endpoint", TargetKind.SERVING_ENDPOINT, "endpoints:/my-endpoint"),
+    ]
+    for reference, kind, normalized in cases:
+        target = resolve_target(reference, root=tmp_path)
+        assert target.kind is kind, reference
+        assert target.normalized == normalized, reference
+
+
+def test_logical_model_wins_over_bare_endpoint(tmp_path):
+    settings = dev_settings(
+        models={"target-model": {"provider": "databricks", "deployment": "x"}}
+    )
+
+    target = resolve_target("target-model", root=tmp_path, settings=settings)
+    assert target.kind is TargetKind.LOGICAL_MODEL
+
+    bare = resolve_target("other-endpoint", root=tmp_path, settings=settings)
+    assert bare.kind is TargetKind.SERVING_ENDPOINT
+
+
+def test_missing_local_file_is_an_error(tmp_path):
+    with pytest.raises(TargetResolutionError) as excinfo:
+        resolve_target("missing.py:respond", root=tmp_path)
+    assert "does not exist" in str(excinfo.value)
+
+
+def test_unresolvable_reference_lists_supported_shapes(tmp_path):
+    with pytest.raises(TargetResolutionError) as excinfo:
+        resolve_target("!!definitely not a target!!", root=tmp_path)
+    message = str(excinfo.value)
+    assert "endpoints:/" in message
+    assert "models:/" in message
+    assert "answer sheet" in message
+
+
+def test_answer_sheet_target_builds_no_predict_fn(tmp_path):
+    (tmp_path / "answers.json").write_text("[]")
+    target = resolve_target("answers.json", root=tmp_path)
+
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+    assert predict is None
+
+
+def test_local_callable_single_argument(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(question):\n    return f'echo {question}'\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+    assert predict(question="hello") == "echo hello"
+    # sole input under a different key still maps to the single parameter
+    assert predict(prompt="hi") == "echo hi"
+
+
+def test_local_callable_keyword_arguments(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(question, tone):\n    return f'{tone}: {question}'\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+    assert predict(question="q", tone="formal") == "formal: q"
+
+
+def test_local_callable_contract_mismatch(tmp_path):
+    (tmp_path / "agent.py").write_text("def respond(question):\n    return question\n")
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    with pytest.raises(TargetContractError) as excinfo:
+        predict(alpha="a", beta="b")
+    assert "question" in str(excinfo.value)
+
+
+def test_local_callable_runtime_error_wraps(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(question):\n    raise RuntimeError('boom')\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    with pytest.raises(TargetInvocationError) as excinfo:
+        predict(question="q")
+    assert "boom" in str(excinfo.value)
+
+
+def test_local_callable_missing_attribute(tmp_path):
+    (tmp_path / "agent.py").write_text("VALUE = 1\n")
+    target = resolve_target("agent.py:VALUE", root=tmp_path)
+
+    with pytest.raises(TargetResolutionError) as excinfo:
+        build_predict_fn(target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW)
+    assert "not a callable" in str(excinfo.value)
+
+
+def test_http_adapter_maps_request_and_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_TOKEN", "token-value")
+    captured = {}
+
+    def transport(request):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"result": {"text": "the answer"}}).encode("utf-8")
+
+    project = _project(
+        tmp_path,
+        request_mapping={
+            "request_field": "payload.input",
+            "response_field": "result.text",
+            "extra_body": {"payload": {"mode": "chat"}, "version": 2},
+            "auth_env": "AGENT_TOKEN",
+        },
+    )
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=project, transport=transport, mlflow_module=FAKE_MLFLOW
+    )
+
+    assert predict(question="what is my balance") == "the answer"
+    assert captured["url"] == "https://host/score"
+    assert captured["body"] == {
+        "payload": {"mode": "chat", "input": "what is my balance"},
+        "version": 2,
+    }
+    assert captured["headers"].get("Authorization") == "Bearer token-value"
+
+
+def test_http_adapter_missing_auth_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_TOKEN", raising=False)
+    project = _project(tmp_path, request_mapping={"auth_env": "AGENT_TOKEN"})
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target,
+        project=project,
+        transport=lambda request: b"{}",
+        mlflow_module=FAKE_MLFLOW,
+    )
+
+    with pytest.raises(TargetInvocationError) as excinfo:
+        predict(question="q")
+    assert "AGENT_TOKEN" in str(excinfo.value)
+
+
+def test_http_adapter_missing_response_path_lists_keys_not_bodies(tmp_path):
+    def transport(request):
+        return json.dumps({"unexpected": "secret-content", "status": "ok"}).encode(
+            "utf-8"
+        )
+
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target,
+        project=_project(tmp_path),
+        transport=transport,
+        mlflow_module=FAKE_MLFLOW,
+    )
+
+    with pytest.raises(TargetContractError) as excinfo:
+        predict(question="q")
+    message = str(excinfo.value)
+    assert "unexpected" in message
+    assert "status" in message
+    assert "secret-content" not in message
+
+
+def test_http_adapter_translates_http_errors(tmp_path):
+    def transport(request):
+        raise urllib.error.HTTPError(request.full_url, 401, "unauthorized", None, None)
+
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target,
+        project=_project(tmp_path),
+        transport=transport,
+        mlflow_module=FAKE_MLFLOW,
+    )
+
+    with pytest.raises(TargetInvocationError) as excinfo:
+        predict(question="q")
+    assert "401" in str(excinfo.value)
+    assert "auth" in str(excinfo.value).lower()
+
+
+def test_http_adapter_rejects_non_json(tmp_path):
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target,
+        project=_project(tmp_path),
+        transport=lambda request: b"<html>oops</html>",
+        mlflow_module=FAKE_MLFLOW,
+    )
+
+    with pytest.raises(TargetContractError):
+        predict(question="q")
+
+
+def test_serving_endpoint_without_sdk_names_the_extra(tmp_path, monkeypatch):
+    # A None entry makes the import fail the way an absent package does,
+    # so this holds whether or not the extras are installed here.
+    monkeypatch.setitem(sys.modules, "databricks_openai", None)
+    target = resolve_target("endpoints:/serving", root=tmp_path)
+
+    with pytest.raises(MissingExtraError) as excinfo:
+        build_predict_fn(target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW)
+    assert "aai-core[databricks]" in str(excinfo.value)
+
+
+def test_serving_endpoint_without_credentials_explains_login(tmp_path):
+    pytest.importorskip("databricks_openai")
+    target = resolve_target("endpoints:/serving", root=tmp_path)
+
+    with pytest.raises(TargetResolutionError) as excinfo:
+        build_predict_fn(target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW)
+    assert "az login" in str(excinfo.value)

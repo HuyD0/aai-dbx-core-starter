@@ -11,13 +11,12 @@ from random import Random
 
 from mlflow.entities import AssessmentSource, AssessmentSourceType
 
-from aai_core import bootstrap
 from aai_core.runtime import find_platform_config
 from app.judges import judge_model_uri, judge_scorers
 
-context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
-judge_uri = judge_model_uri(context.settings)
-scorers = judge_scorers(context.settings)
+# The judges the shared registry selects for this project's dataset.
+judge_uri = judge_model_uri()
+scorers = judge_scorers()
 print({"judge_model": judge_uri, "scorers": [judge.name for judge in scorers]})
 
 # COMMAND ----------
@@ -61,28 +60,30 @@ print(
 
 # Calibration workflow:
 #
-# 1. Run mlflow.genai.evaluate() on calibration_cases with the application
-#    predict_fn and `scorers` above.
-# 2. Have reviewers label the resulting traces. For the native Guidelines
-#    scorer, use its exact name ("domain_policy") and categorical value:
+# 1. Run `agentkit compare` (or mlflow.genai.evaluate directly) over
+#    calibration_cases with the `scorers` above.
+# 2. Have reviewers label the resulting traces, using the judge's exact
+#    registry name and its categorical value:
 #
 #    mlflow.log_feedback(
 #        trace_id=trace_id,
-#        name="domain_policy",
+#        name="pension_domain_policy",
 #        value="yes",  # or "no"
 #        rationale="No private contact data; official support path offered.",
 #        source=human_source,
 #    )
 #
-# 3. Compare judge assessments with HUMAN assessments. Refine the written
-#    DOMAIN_POLICY_GUIDELINES only against calibration_cases.
+# 3. Compare judge assessments with HUMAN assessments.
 # 4. Freeze the scorer, evaluate validation_cases once, and require >= 75%
-#    agreement before relying on domain_policy/mean in the release gate.
+#    agreement before gating on pension_domain_policy/mean.
 # 5. Keep validation failures held out for the next scorer version; do not
 #    repeatedly tune against the same validation labels.
-# 6. Record the scorer version, judge model, split manifest, agreement result,
-#    and approval. Only then move domain_policy/mean from
-#    report_only_judge_metrics to judge_metrics and add its threshold.
+# 6. The judge's instructions are a versioned platform asset in the Unity
+#    Catalog Prompt Registry, and its threshold lives in the shared scorer
+#    registry — so calibration evidence goes to the platform team, who
+#    publish a new judge prompt version and give the scorer a gating
+#    threshold. A project never edits a judge's instructions locally; that
+#    is what keeps one team's 0.8 comparable with another's.
 
 # COMMAND ----------
 
@@ -93,7 +94,7 @@ print(
 #
 # from mlflow.genai.judges.optimizers import MemAlignOptimizer
 #
-# domain_policy = next(s for s in scorers if s.name == "domain_policy")
+# domain_policy = next(s for s in scorers if "domain_policy" in s.name)
 # optimizer = MemAlignOptimizer(
 #     reflection_lm=judge_uri,
 #     embedding_model="databricks:/<approved-embedding-model>",
@@ -103,5 +104,6 @@ print(
 #     optimizer=optimizer,
 # )
 #
-# `calibration_traces` must contain HUMAN assessments named "domain_policy"
-# from `human_source`. Do not add API keys to make this optional path work.
+# `calibration_traces` must contain HUMAN assessments named
+# "pension_domain_policy" from `human_source`. Do not add API keys to make
+# this optional path work.
