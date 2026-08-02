@@ -71,13 +71,22 @@ def run_doctor(
 def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
     """Report lifecycle readiness; optional configuration skips, never fails."""
 
-    checks = [
-        DoctorCheck(
-            "lifecycle:experiment",
-            "pass",
-            settings.effective_experiment_name,
-        )
-    ]
+    # An explicit placeholder name would pass straight through
+    # effective_experiment_name to get_experiment_by_name(); only the
+    # 'unset' sentinel derives the conventional /Shared/... name.
+    experiment = settings.effective_experiment_name
+    if _is_placeholder(experiment):
+        checks = [
+            DoctorCheck(
+                "lifecycle:experiment",
+                "skip",
+                "set platform.experiment_name to a real experiment path, or "
+                "leave it 'unset' to derive "
+                "/Shared/<team>-<project>-<application>",
+            )
+        ]
+    else:
+        checks = [DoctorCheck("lifecycle:experiment", "pass", experiment)]
 
     # Same placeholder vocabulary the dataset helper rejects, so the doctor
     # never reports ready what the connected workflow will refuse.

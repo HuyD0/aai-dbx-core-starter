@@ -10,9 +10,9 @@ All notable changes to `aai-core` are documented here.
 - Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
   vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
   passing, metrics-bearing gate whose recorded policy applied at least one
-  release rule; `decided_by` rejects personal emails; `prompt_digest`
-  accepts only a sha256 hexdigest so raw prompt text, user content, or
-  secrets cannot enter persisted tags), and `record_decision()`
+  release rule; `decided_by` rejects personal emails; `prompt_digest` and
+  `release_digest` accept only sha256 hexdigests so raw prompt text, user
+  content, or secrets cannot enter persisted tags), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
@@ -76,7 +76,9 @@ All notable changes to `aai-core` are documented here.
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The
   prompt-registry preflight applies the same qualifier validation as the
-  SDK helpers (placeholder vocabulary and dotted values alike).
+  SDK helpers (placeholder vocabulary and dotted values alike), and an
+  explicit placeholder experiment name reports skip instead of passing the
+  literal through to the registry.
 - Aligned the executable examples' release decision with the documented
   vocabulary: `aai.decision` and `LIFECYCLE_RESULT` now record
   `adopt`/`reject` instead of `release_change`/`keep_baseline`.

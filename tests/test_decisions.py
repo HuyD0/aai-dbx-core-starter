@@ -80,7 +80,7 @@ def _record(**overrides):
 def test_decision_record_is_a_strict_frozen_serializable_contract():
     record = _record(
         prompt_digest="a" * 64,
-        release_digest="digest-1",
+        release_digest="b" * 64,
         decided_by="group:app-owners",
     )
 
@@ -102,20 +102,22 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
             "baseline_metrics": None,
         },
         "prompt_digest": "a" * 64,
-        "release_digest": "digest-1",
+        "release_digest": "b" * 64,
         "decided_by": "group:app-owners",
         "schema_version": "1",
     }
     assert record.as_tags()["prompt_digest"] == "a" * 64
 
 
-def test_prompt_digest_field_accepts_only_a_sha256_hexdigest():
+def test_digest_fields_accept_only_a_sha256_hexdigest():
     # Raw prompt text, user content, or secrets must never reach the
-    # persisted tag through this field.
-    for bad in ("Summarize {{excerpt}} politely.", "A" * 64, "deadbeef", ""):
-        with pytest.raises(ValidationError):
-            _record(prompt_digest=bad)
-    assert _record(prompt_digest="0123456789abcdef" * 4).prompt_digest
+    # persisted tags through these fields; both known digests are sha256
+    # hexdigests (prompt_digest() and ApplicationRelease.digest).
+    for field in ("prompt_digest", "release_digest"):
+        for bad in ("Summarize {{excerpt}} politely.", "A" * 64, "deadbeef", ""):
+            with pytest.raises(ValidationError):
+                _record(**{field: bad})
+        assert getattr(_record(**{field: "0123456789abcdef" * 4}), field)
 
 
 def test_decision_parses_the_documented_string_vocabulary():

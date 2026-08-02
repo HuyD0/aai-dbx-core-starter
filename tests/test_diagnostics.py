@@ -65,6 +65,22 @@ def test_doctor_treats_every_placeholder_qualifier_as_unconfigured(tmp_path):
     assert by_name["lifecycle:prompt-registry"].status == "skip"
 
 
+def test_doctor_treats_placeholder_experiment_names_as_unconfigured(tmp_path):
+    # An explicit placeholder passes straight through to the registry;
+    # only 'unset' derives the conventional /Shared/... name.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  experiment_name: replace-with-experiment\n",
+        encoding="utf-8",
+    )
+
+    checks = run_doctor(config_path=config)
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["lifecycle:experiment"].status == "skip"
+    assert "platform.experiment_name" in by_name["lifecycle:experiment"].detail
+
+
 def test_doctor_treats_dotted_qualifiers_as_unconfigured(tmp_path):
     # The SDK helpers reject dotted qualifiers; the doctor must not report
     # ready what the connected workflow will refuse.

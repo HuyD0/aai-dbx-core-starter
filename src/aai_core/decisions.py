@@ -45,10 +45,11 @@ class DecisionRecord(ContractModel):
     baseline_run_id: str | None = Field(default=None, min_length=1)
     change_run_id: str | None = Field(default=None, min_length=1)
     gate: GateResult | None = None
-    # Exactly a sha256 hexdigest (the prompt_digest() output): raw prompt
-    # text, user content, or secrets can never enter the persisted tag.
+    # Exactly sha256 hexdigests (prompt_digest() and
+    # ApplicationRelease.digest): raw prompt text, user content, or secrets
+    # can never enter the persisted tags through these fields.
     prompt_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    release_digest: str | None = Field(default=None, min_length=1)
+    release_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     decided_by: str | None = Field(default=None, min_length=1)
     schema_version: Literal["1"] = "1"
 
