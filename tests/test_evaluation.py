@@ -174,6 +174,24 @@ def test_gate_synthesizes_error_counts_from_native_result_rows():
     relaxed = apply_gate(result, policy=GatePolicy(fail_on_scorer_errors=False))
     assert relaxed.passed
 
+    # A failing predict_fn lands in the bare error_message column; it must
+    # gate even though no scorer column mentions it.
+    predict_failures = pd.DataFrame(
+        {
+            "error_message": [None, "model timed out"],
+            "correctness/value": ["yes", None],
+            "correctness/error_message": [None, None],
+        }
+    )
+    prediction_result = SimpleNamespace(
+        metrics={"quality": 1.0}, result_df=predict_failures
+    )
+
+    gated = apply_gate(prediction_result, policy=GatePolicy())
+
+    assert not gated.passed
+    assert gated.metrics["predict_fn/error_count"] == 1.0
+
 
 def test_gate_fails_negative_scorer_error_counts_as_corrupt():
     result = apply_gate({"correctness/error_count": -1}, policy=GatePolicy())

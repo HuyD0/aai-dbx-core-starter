@@ -302,12 +302,14 @@ def _evaluate_policy(
 
 
 def _row_level_error_counts(result: Any, suffix: str) -> dict[str, float]:
-    """Count per-row scorer failures a native result never aggregates.
+    """Count per-row failures a native result never aggregates.
 
-    ``mlflow.genai.evaluate()`` records a failed invocation as a non-null
-    ``<scorer>/error_message`` cell in ``result_df`` and omits it from the
-    ``metrics`` mapping entirely; synthesizing ``<scorer>/error_count``
-    evidence here is what lets the gate see scorer health at all.
+    ``mlflow.genai.evaluate()`` records a failed scorer invocation as a
+    non-null ``<scorer>/error_message`` cell in ``result_df``, and a failed
+    ``predict_fn`` invocation in the bare ``error_message`` column; neither
+    reaches the ``metrics`` mapping. Synthesizing ``*/error_count``
+    evidence here is what lets the gate see scorer and application health
+    at all.
     """
 
     frame = getattr(result, "result_df", None)
@@ -317,6 +319,11 @@ def _row_level_error_counts(result: Any, suffix: str) -> dict[str, float]:
     counts: dict[str, float] = {}
     for column in columns:
         name = str(column)
+        if name == "error_message":
+            errored = int(frame[column].notna().sum())
+            if errored:
+                counts[f"predict_fn{suffix}"] = float(errored)
+            continue
         if not name.endswith("/error_message"):
             continue
         errored = int(frame[column].notna().sum())
