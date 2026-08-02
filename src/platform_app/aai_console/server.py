@@ -25,7 +25,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -39,6 +39,13 @@ from .checks import (
 )
 from .config import ConfigError, ConsoleConfig, HubJobMode, load_config
 from .content import Track, inline_code, resolve_placeholders
+from .estimator import (
+    EstimateError,
+    EstimateRequest,
+    estimate,
+    estimate_csv,
+    estimator_page_context,
+)
 from .generate import GenerateError, GenerateRequest, bundle_init
 from .hub.api_models import (
     AdminActionListResponse,
@@ -103,6 +110,7 @@ from .hub.service import (
     RegistrationRequest,
     parse_tag_filters,
 )
+from .pricing import load_snapshot, usd
 from .registry import TrackRegistry
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -934,8 +942,14 @@ def create_app(
     )
 
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+    # Starlette's select_autoescape keys off the template extension, and every
+    # console template ends in .j2 — so without this, user-shaped values (search
+    # filters, estimator labels) would render unescaped. Force it on: templates
+    # here are HTML only, and inline_code already returns Markup.
+    templates.env.autoescape = True
     # The only markup content may use. Escapes first, so it cannot inject an element.
     templates.env.filters["icode"] = inline_code
+    templates.env.filters["usd"] = usd
     app.mount(
         "/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static"
     )
@@ -944,6 +958,10 @@ def create_app(
     # Re-reading the YAML per request would put blocking disk I/O on the event loop of a
     # single-worker server for no benefit.
     app.state.tracks = _render_tracks(app.state.registry.tracks(), app.state.config)
+
+    # Same rationale as tracks: the bundled list-price snapshot is static for the
+    # life of the process, and a malformed snapshot should fail at import.
+    app.state.pricing = load_snapshot()
 
     def tracks_for(request: Request) -> tuple[Track, ...]:
         return request.app.state.tracks
@@ -1390,6 +1408,61 @@ def create_app(
             request,
             "optimization.html.j2",
             context,
+        )
+
+    @app.get("/estimator", response_class=HTMLResponse)
+    async def estimator_page(request: Request) -> HTMLResponse:
+        actor = _actor_for(request)
+        context = common_context(
+            request,
+            actor=actor,
+            active_section="estimator",
+        )
+        context.update(
+            estimator_page_context(
+                request.app.state.pricing,
+                today=datetime.now(UTC).date(),
+            )
+        )
+        return templates.TemplateResponse(request, "estimator.html.j2", context)
+
+    def _priced_estimate(request: Request, payload: EstimateRequest):
+        try:
+            return estimate(payload, request.app.state.pricing)
+        except EstimateError as error:
+            # error.message names request paths and snapshot vocabulary only,
+            # never user-entered text, so it is safe for a problem body.
+            raise ProblemError(
+                422,
+                "Estimate cannot be priced",
+                "The request references pricing the snapshot does not carry.",
+                problem_type="urn:aai:problem:estimate-unpriceable",
+                errors=[error.as_problem_item()],
+            ) from error
+
+    @app.post("/api/estimator/render", response_class=HTMLResponse)
+    async def estimator_render(
+        request: Request,
+        payload: EstimateRequest,
+    ) -> HTMLResponse:
+        _actor_for(request)
+        result = _priced_estimate(request, payload)
+        return templates.TemplateResponse(
+            request,
+            "fragments/estimate.html.j2",
+            {"estimate": result},
+        )
+
+    @app.post("/api/estimator/export.csv")
+    async def estimator_export(
+        request: Request,
+        payload: EstimateRequest,
+    ) -> PlainTextResponse:
+        _actor_for(request)
+        result = _priced_estimate(request, payload)
+        return PlainTextResponse(
+            estimate_csv(result),
+            media_type="text/csv; charset=utf-8",
         )
 
     @app.get("/admin/actions", response_class=HTMLResponse)

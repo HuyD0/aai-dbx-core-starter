@@ -47,6 +47,16 @@
             </span>
           </a>
           <a
+            class="navrow {% if active_section | default('') == 'estimator' %}navrow--active{% endif %}"
+            href="/estimator"
+          >
+            <span class="navrow__glyph navrow__glyph--estimate" aria-hidden="true"></span>
+            <span class="navrow__text">
+              <span class="navrow__title">Cost estimator</span>
+              <span class="navrow__sub">Plan list-price spend</span>
+            </span>
+          </a>
+          <a
             class="navrow {% if active_section | default('') == 'admin' %}navrow--active{% endif %}"
             href="/admin/actions"
           >
