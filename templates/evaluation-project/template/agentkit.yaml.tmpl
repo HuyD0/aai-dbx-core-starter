@@ -73,6 +73,13 @@ regression_budget:
 # the deployment-job gate (see resources/optional/deployment_job.yml).
 # registered_model: {{.catalog}}.{{.schema}}.{{.application_name}}
 
+# The deployment job's approval task names. Every one must carry an
+# `Approved` tag on the model version before evidence reports approval.
+# Without this list, evidence can only report the tags that happen to
+# exist — which cannot tell an approved gate from a stale tag left behind
+# by a renamed task — and it says so instead of implying otherwise.
+# approvals: [approval_gate]
+
 # smoke:
 #   rows: 20
 #   answer_sheet: evals/data/answer_sheet.json

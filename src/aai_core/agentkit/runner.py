@@ -380,7 +380,11 @@ def run_scoring(
         versions=versions,
         baseline_run_id=baseline.run_id if baseline else None,
         baseline_metrics=baseline_metrics,
+        baseline_recorded_at=baseline.recorded_at if baseline else None,
+        baseline_dataset_digest=baseline.dataset.digest if baseline else None,
         established_baseline=establish_baseline,
+        policy_rules=policy.rules,
+        allow_missing_regression_baseline=policy.allow_missing_regression_baseline,
         decision=recorded_decision,
         change_id=change_id,
         gate_passed=gate.passed,
@@ -472,13 +476,21 @@ def _default_mode(target: Any, dataset: LoadedDataset) -> str:
 
 
 def _mode_warnings(mode: str, dataset: LoadedDataset, *, explicit: bool) -> list[str]:
+    warnings = []
     if mode == "live" and dataset.shape.has_traces and explicit:
-        return [
+        warnings.append(
             "--mode live on a dataset that carries traces: the agent is "
             "called again and the recorded traces are not what gets scored. "
             "Use --mode traces to score the traces the dataset holds."
-        ]
-    return []
+        )
+    if dataset.shape.partial_traces:
+        # Scoring traces needs every row to have one: a traces run supplies
+        # no predict_fn, so the untraced rows would have no answer at all.
+        warnings.append(
+            f"only some rows carry a trace, so this is a {mode} run. Give "
+            "every row a trace to score the recorded behaviour instead."
+        )
+    return warnings
 
 
 def _answer_sheet_path(project: ProjectContext, target: Any) -> Path:

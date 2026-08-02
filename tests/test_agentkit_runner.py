@@ -804,3 +804,75 @@ def test_publish_failure_warns_without_failing_the_run(tmp_path):
 
     assert code == EXIT_PASS
     assert any("could not attach the results record" in w for w in outcome.warnings)
+
+
+def test_partial_traces_do_not_select_trace_mode(tmp_path):
+    """Mixed rows cannot be scored as traces, and the run says so."""
+
+    _project(tmp_path)
+    mixed = list(TRACE_ROWS[:6]) + [
+        {
+            "inputs": {"question": f"question {index}"},
+            "expectations": {"expected_response": f"answer {index} about pensions"},
+        }
+        for index in range(6, 12)
+    ]
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(mixed))
+    project = ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+    mlflow = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert outcome.results.mode == "live"
+    assert mlflow.evaluate_calls[0]["predict_fn"] is not None
+    assert any("only some rows carry a trace" in w for w in outcome.warnings)
+
+
+def test_the_run_records_the_rules_it_was_judged_by(tmp_path):
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    metrics = {rule.metric for rule in outcome.results.policy_rules}
+    assert "keyword_coverage/mean" in metrics
+    assert "correctness/mean" in metrics
+    assert outcome.results.allow_missing_regression_baseline is True
+
+
+def test_the_run_records_the_baseline_it_compared_against(tmp_path):
+    project = _project(tmp_path)
+    run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    outcome, _ = run_scoring(
+        project,
+        command="compare",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    baseline, _ = load_baseline(project.baseline_path)
+    assert outcome.results.baseline_recorded_at == baseline.recorded_at
+    assert outcome.results.baseline_dataset_digest == baseline.dataset.digest

@@ -236,6 +236,14 @@ nobody has interpreted has not concluded anything.
 what ran, on which data version, scored how, against what, with which verdict
 and whose approval. Attach it to the promotion request.
 
+A record carries the rules it was judged by. Re-deriving thresholds from the
+current `agentkit.yaml` when reopening a run would mean relaxing one turns a
+failed run into approved evidence with nothing re-scored — so the record
+decides, and the verdict is the same for every reader. If the project's rules
+have changed since a run was scored, `agentkit gate` refuses it and names what
+changed rather than judging old numbers by new rules; re-run `agentkit
+compare`.
+
 Each recorded run also attaches its results record to the MLflow run itself.
 `.aai/agentkit/results/` is whatever filesystem the run happened on, and for
 the deployment-job gate that is an ephemeral job cluster nobody can reach
@@ -265,10 +273,14 @@ Three things about it are worth knowing before you enable it:
   score a specific target without editing the config.
 
 Set `registered_model` in `agentkit.yaml` to have `agentkit evidence` read the
-approval tags off the model version the run actually scored. Every
-`approval*` tag is reported and all of them must read `Approved`: a job with
-two approval tasks writes two tags, and a renamed task leaves its old one
-behind, so one tag is not a verdict.
+approval tags off the model version the run actually scored, and `approvals:`
+to name the job's approval tasks. Every named tag must read `Approved`.
+
+Naming them is what makes the report a verdict. A renamed approval task
+leaves `approval_old=Approved` behind while the current `approval_gate` tag
+never appears, and a set discovered from the tags that happen to exist cannot
+see the one that is missing. Without `approvals:`, evidence reports the tags
+it found and states plainly that it could not verify completeness.
 
 The approver needs `APPLY TAG` on the model and `CAN MANAGE RUN` on the job.
 Use governed tag policies when several groups must sign off, so nobody can

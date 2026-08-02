@@ -42,6 +42,9 @@ class DatasetShape:
     partial_expectation_keys: tuple[str, ...] = ()
     has_retrieval_spans: bool = False
     has_tool_spans: bool = False
+    # Some rows carry a trace and some do not: the dataset cannot be
+    # scored as traces, and saying so beats silently scoring a subset.
+    partial_traces: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,7 +191,7 @@ def validate_dataset(
         )
     for index, row in enumerate(dataset.rows):
         inputs = row.get("inputs")
-        if "trace" in row:
+        if _is_populated(row.get("trace")):
             continue
         if not isinstance(inputs, Mapping) or not inputs:
             failures.append(f"row {index} is missing a non-empty inputs object")
@@ -227,7 +230,12 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
     # it never checked, inflating the aggregate the gate reads.
     expectation_keys: set[str] | None = None
     partial_expectation_keys: set[str] = set()
-    has_traces = False
+    # Trace coverage is per-row for the same reason expectations are: a
+    # traces run supplies no predict_fn, so a row without a populated
+    # trace has no answer at all — it cannot be scored, only skipped or
+    # errored. A nullable Unity Catalog trace column makes `trace: null`
+    # the ordinary shape of that, not an exotic one.
+    traced_rows = 0
     has_retrieval_spans = False
     has_tool_spans = False
     has_outputs = bool(rows)
@@ -253,8 +261,8 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         expectation_keys = (
             present if expectation_keys is None else expectation_keys & present
         )
-        if "trace" in row:
-            has_traces = True
+        if _is_populated(row.get("trace")):
+            traced_rows += 1
             retrieval, tools = _trace_span_kinds(row["trace"])
             has_retrieval_spans = has_retrieval_spans or retrieval
             has_tool_spans = has_tool_spans or tools
@@ -267,6 +275,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         and not any(value.startswith("<") for value in values)
     }
     complete = expectation_keys or set()
+    has_traces = bool(rows) and traced_rows == len(rows)
     return DatasetShape(
         row_count=len(rows),
         input_keys=tuple(sorted(input_keys)),
@@ -274,6 +283,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         expectation_keys=tuple(sorted(complete)),
         partial_expectation_keys=tuple(sorted(partial_expectation_keys - complete)),
         has_traces=has_traces,
+        partial_traces=0 < traced_rows < len(rows),
         has_retrieval_spans=has_retrieval_spans,
         has_tool_spans=has_tool_spans,
         strata_values=strata_values,

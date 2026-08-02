@@ -137,7 +137,14 @@ def test_gate_exits_two_when_a_threshold_fails(project_dir, capsys):
 
 
 def test_gate_fails_closed_on_a_missing_thresholded_metric(project_dir, capsys):
-    main(["smoke", "--establish-baseline", *_config_flag(project_dir)])
+    """A run cannot pass a threshold it never measured.
+
+    The threshold is configured BEFORE scoring, so it is one of the rules
+    the run was judged by; `correctness` never runs in judge-free smoke,
+    so the metric is absent and the gate fails closed on the record's own
+    policy.
+    """
+
     (project_dir / "agentkit.yaml").write_text(
         "version: 1\n"
         "agent: src/app/example_agent.py:respond\n"
@@ -145,12 +152,41 @@ def test_gate_fails_closed_on_a_missing_thresholded_metric(project_dir, capsys):
         "thresholds:\n"
         '  correctness: ">=0.7"\n'
     )
+    main(["smoke", "--establish-baseline", *_config_flag(project_dir)])
     capsys.readouterr()
 
     code = main(["gate", *_config_flag(project_dir)])
 
     assert code == 2
     assert "missing" in capsys.readouterr().out
+
+
+def test_gate_refuses_a_record_whose_rules_have_since_changed(project_dir, capsys):
+    """Editing thresholds does not re-judge numbers already scored.
+
+    Applying the new rules to old metrics would let a relaxed threshold
+    turn a failed run into approved evidence with nothing re-scored;
+    ignoring them silently would be its own lie. So the gate refuses and
+    names what changed.
+    """
+
+    main(["smoke", "--establish-baseline", *_config_flag(project_dir)])
+    (project_dir / "agentkit.yaml").write_text(
+        "version: 1\n"
+        "agent: src/app/example_agent.py:respond\n"
+        "dataset: evals/data/golden_cases.json\n"
+        "thresholds:\n"
+        '  keyword_coverage: ">=0.01"\n'
+    )
+    capsys.readouterr()
+
+    code = main(["gate", *_config_flag(project_dir)])
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert "rules changed after this run was scored" in output
+    assert "keyword_coverage/mean" in output
+    assert "agentkit compare" in output
 
 
 def test_broken_agent_fails_the_gate_with_exit_two(project_dir, capsys):

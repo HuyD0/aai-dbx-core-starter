@@ -24,6 +24,7 @@ from pydantic import Field, ValidationError, field_serializer, field_validator
 from aai_core.agentkit.baseline import BaselineDataset, BaselineScope, BaselineVersions
 from aai_core.agentkit.errors import ConfigError
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
+from aai_core.evaluation import MetricRule
 
 RESULTS_GLOB = "*.json"
 RESULTS_ARTIFACT_DIR = "agentkit"
@@ -48,7 +49,18 @@ class ResultsRecord(ContractModel):
     versions: BaselineVersions
     baseline_run_id: str | None = None
     baseline_metrics: Mapping[str, float] = Field(default_factory=dict)
+    # The baseline's own lineage, snapshotted. Reading it from the local
+    # `evals/baseline.json` at render time would let evidence pair this
+    # run's deltas with a baseline that has since been re-established.
+    baseline_recorded_at: str | None = None
+    baseline_dataset_digest: str | None = None
     established_baseline: bool = False
+    # The rules this run was actually judged by. A record is evidence, and
+    # evidence is only evidence if reopening it cannot change the verdict:
+    # without this, relaxing a threshold in agentkit.yaml turns a failed
+    # run into a passing one with no re-scoring.
+    policy_rules: tuple[MetricRule, ...] = ()
+    allow_missing_regression_baseline: bool = False
     decision: str = Field(min_length=1)
     change_id: str = Field(min_length=1)
     gate_passed: bool
@@ -56,7 +68,7 @@ class ResultsRecord(ContractModel):
     warnings: tuple[str, ...] = ()
     judges_enabled: bool = False
 
-    @field_validator("gate_failures", "warnings", mode="before")
+    @field_validator("gate_failures", "warnings", "policy_rules", mode="before")
     @classmethod
     def coerce_sequences(cls, value: Any) -> Any:
         # Round-tripping through JSON turns tuples into lists; strict mode

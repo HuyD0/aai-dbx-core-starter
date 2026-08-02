@@ -120,10 +120,16 @@ class AgentkitConfig(ContractModel):
     request_mapping: RequestMapping = Field(default_factory=RequestMapping)
     concurrency: int = Field(default=8, ge=1, le=64)
     # The Unity Catalog model this project promotes into, if any. Evidence
-    # reads its deployment-job approval tag to report who approved.
+    # reads its deployment-job approval tags to report who approved.
     registered_model: str | None = Field(default=None, min_length=1)
+    # The deployment job's approval task names. Every one must carry an
+    # `Approved` tag on the model version for evidence to report approval.
+    # Without them, evidence can only report the tags that exist — which
+    # cannot distinguish an approved gate from a stale tag left behind by a
+    # renamed task, and says so rather than implying otherwise.
+    approvals: tuple[str, ...] = ()
 
-    @field_validator("strata", mode="before")
+    @field_validator("strata", "approvals", mode="before")
     @classmethod
     def coerce_strata(cls, value: Any) -> Any:
         return _as_tuple(value)

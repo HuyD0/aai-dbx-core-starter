@@ -75,11 +75,18 @@ def build_evidence(
             "judge_prompts": dict(results.versions.judge_prompts),
             "aai_core": results.versions.aai_core,
         },
+        # The baseline the RUN was compared against, taken from the run's
+        # own record. Reading the local `evals/baseline.json` instead would
+        # pair this run's deltas with whatever baseline the reader's
+        # checkout currently holds — different machine, or re-established
+        # since. The local file is only a fallback for older records.
         "comparison": {
             "established_baseline": results.established_baseline,
             "baseline_run_id": results.baseline_run_id,
-            "baseline_recorded_at": baseline.recorded_at if baseline else None,
-            "baseline_dataset_digest": (baseline.dataset.digest if baseline else None),
+            "baseline_recorded_at": results.baseline_recorded_at
+            or (baseline.recorded_at if baseline else None),
+            "baseline_dataset_digest": results.baseline_dataset_digest
+            or (baseline.dataset.digest if baseline else None),
             "metrics": _metric_rows(results),
         },
         "gate": {
@@ -91,6 +98,11 @@ def build_evidence(
                 )
             ],
             "message": gate_report.message if gate_report is not None else None,
+            "policy_source": (
+                "the run's own recorded rules"
+                if gate_report is not None and not gate_report.policy_note
+                else (gate_report.policy_note if gate_report is not None else None)
+            ),
         },
         "decision": results.decision,
         "change_id": results.change_id,
@@ -189,6 +201,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
             lines.append(f"- **{failure['metric']}**: {failure['reason']}")
     if gate.get("message"):
         lines.extend(["", "## Gate note", "", gate["message"]])
+    if gate.get("policy_source"):
+        lines.extend(["", f"Thresholds applied: {gate['policy_source']}."])
 
     approver = document["approver"]
     lines.extend(
@@ -202,8 +216,13 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     for key in ("model_version", "reason"):
         if approver.get(key):
             lines.append(f"- {key.replace('_', ' ').capitalize()}: {approver[key]}")
+    if approver.get("required"):
+        required = ", ".join(f"`{name}`" for name in approver["required"])
+        lines.append(f"- Required approvals: {required}")
     for tag, value in sorted(dict(approver.get("tags") or {}).items()):
         lines.append(f"- Approval tag `{tag}`: {value}")
+    if approver.get("caveat"):
+        lines.append(f"- **Not verified**: {approver['caveat']}")
 
     if document["warnings"]:
         lines.extend(["", "## Warnings", ""])
@@ -279,32 +298,68 @@ def databricks_approver_lookup(
         identity = f"{model_name} v{version.version}"
         if evaluated is None:
             identity += " (latest; the run did not name a model version)"
-        if not approvals:
-            return {
-                "status": "pending",
-                "model_version": identity,
-                "reason": "no approval tag is set on the model version yet",
-            }
-        # Every approval tag counts. A job with two approval tasks writes
-        # two tags, and a renamed task leaves its old one behind: reading
-        # only the first alphabetically would report a version as approved
-        # on the strength of a stale tag while a real gate is still open.
         recorded = {key: str(value) for key, value in sorted(approvals.items())}
-        outstanding = [
-            key for key, value in recorded.items() if value.lower() != "approved"
-        ]
-        approver: dict[str, Any] = {
-            "status": "approved" if not outstanding else "not approved",
-            "tags": recorded,
-            "model_version": identity,
-        }
-        if outstanding:
-            approver["reason"] = "not approved: " + ", ".join(
-                f"{key}={recorded[key]}" for key in outstanding
-            )
-        return approver
+        return _verdict(recorded, tuple(project.config.approvals), identity)
     except Exception as error:  # pragma: no cover - network/credential paths
         return {"status": "unknown", "reason": f"could not read approval tag: {error}"}
+
+
+def _verdict(
+    recorded: Mapping[str, str], required: tuple[str, ...], identity: str
+) -> dict[str, Any]:
+    """Approved only when every required approval tag says so.
+
+    Discovering the required set from the tags that happen to exist cannot
+    detect an absent one: a renamed approval task leaves `approval_old=
+    Approved` behind while the current `approval_gate` tag never appears,
+    and "every tag present says Approved" reads that as approved. So the
+    required task names are configuration (`approvals:` in agentkit.yaml),
+    and evidence generated without them says plainly that it could not
+    verify completeness rather than implying it did.
+    """
+
+    approver: dict[str, Any] = {"model_version": identity}
+    if recorded:
+        approver["tags"] = dict(recorded)
+    if required:
+        approver["required"] = list(required)
+        missing = [name for name in required if name not in recorded]
+        unapproved = [
+            name
+            for name in required
+            if name in recorded and recorded[name].lower() != "approved"
+        ]
+        if missing or unapproved:
+            reasons = [f"{name} is not set" for name in missing]
+            reasons += [f"{name}={recorded[name]}" for name in unapproved]
+            approver["status"] = "pending" if not unapproved else "not approved"
+            approver["reason"] = "outstanding approvals: " + ", ".join(reasons)
+        else:
+            approver["status"] = "approved"
+        return approver
+
+    if not recorded:
+        approver["status"] = "pending"
+        approver["reason"] = "no approval tag is set on the model version yet"
+        return approver
+    outstanding = [
+        key for key, value in recorded.items() if value.lower() != "approved"
+    ]
+    approver["status"] = "not approved" if outstanding else "approved"
+    if outstanding:
+        approver["reason"] = "outstanding approvals: " + ", ".join(
+            f"{key}={recorded[key]}" for key in outstanding
+        )
+    else:
+        # Not a verified verdict: without the required set this cannot tell
+        # an approved gate from a stale tag left by a renamed task.
+        approver["caveat"] = (
+            "the required approval set is not configured, so this reports "
+            "only the tags that exist and cannot detect a required approval "
+            "whose tag is absent; list the approval task names under "
+            "`approvals:` in agentkit.yaml to verify completeness"
+        )
+    return approver
 
 
 def evaluated_model_version(agent: str, model_name: str) -> str | None:

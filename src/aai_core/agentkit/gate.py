@@ -61,6 +61,8 @@ class GateReport:
     baseline: BaselineRecord | None
     rules: tuple[MetricRule, ...]
     message: str | None = None
+    # Set only when the rules did not come from the record itself.
+    policy_note: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -134,8 +136,16 @@ def evaluate_gate(
     results: ResultsRecord,
     baseline: BaselineRecord | None,
     plan: ScorerPlan | None = None,
+    check_policy_drift: bool = False,
 ) -> tuple[GateReport, int]:
-    """Apply the policy to an existing results record."""
+    """Apply the policy to an existing results record.
+
+    ``check_policy_drift`` belongs to the promotion check: gating a record
+    whose rules no longer match the project's configuration means the
+    evidence is stale, and the answer is to re-score rather than to judge
+    old numbers by new rules. Evidence rendering leaves it off — a run
+    fetched from another machine is not expected to match this checkout.
+    """
 
     if not results.is_comparison:
         # The refusal has to be a failure, not just an exit code: the JSON
@@ -167,18 +177,65 @@ def evaluate_gate(
         if results.baseline_metrics
         else dict(baseline.metrics) if baseline is not None else {}
     )
-    policy = build_policy(
-        project,
-        plan=plan,
-        scorer_names=tuple(results.versions.scorers),
-        allow_missing_regression_baseline=results.established_baseline
-        or not baseline_metrics,
-    )
+    # The rules the run was judged by travel with the run. Re-deriving them
+    # from the current agentkit.yaml would mean a relaxed threshold turns a
+    # failed run into approved evidence with nothing re-scored, and a
+    # record fetched with `--run` would be judged by whatever config the
+    # reader happens to have checked out.
+    note: str | None = None
+    if results.policy_rules:
+        policy = GatePolicy(
+            rules=results.policy_rules,
+            allow_missing_regression_baseline=(
+                results.allow_missing_regression_baseline
+            ),
+        )
+        drift = _policy_drift(project, results, plan) if check_policy_drift else None
+        if drift is not None:
+            # Neither applying the new rules to old numbers nor quietly
+            # ignoring them is honest. Refuse, and name what changed.
+            refused = GateResult(
+                metrics=dict(results.metrics),
+                failures=(GateFailure(metric="policy", reason=drift),),
+            )
+            return (
+                GateReport(
+                    result=refused,
+                    results=results,
+                    baseline=baseline,
+                    rules=policy.rules,
+                    message=(
+                        f"The gate rules changed after this run was scored: "
+                        f"{drift}.\nThese results were judged by the rules in "
+                        "force when they were produced, so the new rules "
+                        "cannot be applied to them. Run:\n"
+                        "    agentkit compare\nthen run `agentkit gate` again."
+                    ),
+                ),
+                EXIT_THRESHOLD_FAILED,
+            )
+    else:
+        policy = build_policy(
+            project,
+            plan=plan,
+            scorer_names=tuple(results.versions.scorers),
+            allow_missing_regression_baseline=results.established_baseline
+            or not baseline_metrics,
+        )
+        note = (
+            "these results predate recorded gate rules, so the current "
+            "agentkit.yaml was applied; re-run `agentkit compare` for a "
+            "record that carries its own policy"
+        )
     result = apply_gate(
         dict(results.metrics), policy=policy, baseline_metrics=baseline_metrics
     )
     report = GateReport(
-        result=result, results=results, baseline=baseline, rules=policy.rules
+        result=result,
+        results=results,
+        baseline=baseline,
+        rules=policy.rules,
+        policy_note=note,
     )
     return report, (EXIT_PASS if result.passed else EXIT_THRESHOLD_FAILED)
 
@@ -206,7 +263,9 @@ def run_gate(
             return None, EXIT_ERROR, NO_RESULTS_MESSAGE
         results, _ = found
     baseline, _ = load_baseline(project.baseline_path)
-    report, code = evaluate_gate(project, results=results, baseline=baseline)
+    report, code = evaluate_gate(
+        project, results=results, baseline=baseline, check_policy_drift=True
+    )
     return report, code, report.message
 
 
@@ -239,14 +298,49 @@ def render_report(report: GateReport) -> str:
         lines.append(f"  compared against {reference}")
     lines.append(f"  decision         {results.decision}")
     if report.rules:
-        lines.append("  thresholds:")
+        source = "as recorded by the run" if not report.policy_note else "from config"
+        lines.append(f"  thresholds ({source}):")
         for rule in report.rules:
             observed = results.metrics.get(rule.metric)
             observed_text = "missing" if observed is None else f"{observed:g}"
             lines.append(f"    {rule.metric}: {observed_text} " f"({_rule_text(rule)})")
     for failure in report.result.failures:
         lines.append(f"  FAIL {failure.metric}: {failure.reason}")
+    if report.policy_note:
+        lines.append(f"  note: {report.policy_note}")
     return "\n".join(lines)
+
+
+def _policy_drift(
+    project: ProjectContext,
+    results: ResultsRecord,
+    plan: ScorerPlan | None,
+) -> str | None:
+    """How the project's current rules differ from the recorded ones."""
+
+    current = build_policy(
+        project,
+        plan=plan,
+        scorer_names=tuple(results.versions.scorers),
+        allow_missing_regression_baseline=(results.allow_missing_regression_baseline),
+    )
+    recorded = {rule.metric: rule for rule in results.policy_rules}
+    live = {rule.metric: rule for rule in current.rules}
+    added = sorted(set(live) - set(recorded))
+    removed = sorted(set(recorded) - set(live))
+    changed = sorted(
+        metric
+        for metric in set(recorded) & set(live)
+        if recorded[metric] != live[metric]
+    )
+    parts = []
+    if added:
+        parts.append(f"added {', '.join(added)}")
+    if removed:
+        parts.append(f"removed {', '.join(removed)}")
+    if changed:
+        parts.append(f"changed {', '.join(changed)}")
+    return "; ".join(parts) if parts else None
 
 
 def _rule_text(rule: MetricRule) -> str:

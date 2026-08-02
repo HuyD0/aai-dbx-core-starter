@@ -350,3 +350,71 @@ def test_retrieval_fanout_ignores_rows_without_retrieval():
     from aai_core.agentkit.datasets import retrieval_fanout
 
     assert retrieval_fanout([{"inputs": {"q": "a"}}]).rows_counted == 0
+
+
+def test_trace_coverage_is_per_row(tmp_path):
+    """One traced row does not make a dataset trace-backed.
+
+    A traces run supplies no predict_fn, so an untraced row has no answer
+    at all — it can only be skipped or error. Partial coverage must not
+    select the mode.
+    """
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {"data": {"spans": [{"type": "RETRIEVER"}]}},
+        },
+        {"inputs": {"question": "b"}},
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_traces is False
+    assert shape.partial_traces is True
+
+
+def test_null_trace_column_does_not_count_as_traced(tmp_path):
+    """A nullable Unity Catalog trace column yields `trace: null`."""
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {"data": {"spans": [{"type": "RETRIEVER"}]}},
+        },
+        {"inputs": {"question": "b"}, "trace": None},
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_traces is False
+    assert shape.partial_traces is True
+
+
+def test_fully_traced_rows_are_trace_backed(tmp_path):
+    rows = [
+        {
+            "inputs": {"question": name},
+            "trace": {"data": {"spans": [{"type": "RETRIEVER"}]}},
+        }
+        for name in ("a", "b")
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_traces is True
+    assert shape.partial_traces is False
+
+
+def test_a_row_with_a_null_trace_still_needs_inputs(tmp_path):
+    """`trace: null` must not exempt a row from structural validation."""
+
+    rows = [{"inputs": {}, "trace": None}] + _rows(11)
+    _write_dataset(tmp_path, rows)
+
+    failures = validate_dataset(load_dataset("golden.json", root=tmp_path))
+
+    assert any("row 0" in failure for failure in failures)

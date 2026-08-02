@@ -226,7 +226,13 @@ def test_approval_is_read_for_the_evaluated_model_version():
     assert evaluated_model_version(f"models:/{name}@champion", name) is None
 
 
-def _lookup_with_tags(tmp_path, monkeypatch, tags, agent="models:/main.eval.agent/7"):
+def _lookup_with_tags(
+    tmp_path,
+    monkeypatch,
+    tags,
+    agent="models:/main.eval.agent/7",
+    approvals=(),
+):
     """Run the real approver lookup against a fake UC registry client."""
 
     import sys
@@ -252,6 +258,7 @@ def _lookup_with_tags(tmp_path, monkeypatch, tags, agent="models:/main.eval.agen
             agent=agent,
             dataset="evals/data/golden_cases.json",
             registered_model="main.eval.agent",
+            approvals=approvals,
         ),
         settings=dev_settings(),
         root=tmp_path,
@@ -316,3 +323,98 @@ def test_markdown_lists_every_approval_tag(tmp_path):
 
     assert "Approval tag `approval_business`: Approved" in markdown
     assert "Approval tag `approval_risk`: Pending" in markdown
+
+
+def test_absent_required_approval_tag_is_not_approved(tmp_path, monkeypatch):
+    """A stale tag cannot stand in for a required approval that is absent.
+
+    A renamed approval task leaves `approval_old=Approved` behind while
+    the current `approval_gate` tag never appears. Discovering the required
+    set from the tags that exist cannot see the gap; the required names
+    are configuration.
+    """
+
+    approver = _lookup_with_tags(
+        tmp_path,
+        monkeypatch,
+        {"approval_old": "Approved"},
+        approvals=("approval_gate",),
+    )
+
+    assert approver["status"] == "pending"
+    assert "approval_gate is not set" in approver["reason"]
+    assert approver["required"] == ["approval_gate"]
+
+
+def test_every_required_approval_present_is_approved(tmp_path, monkeypatch):
+    approver = _lookup_with_tags(
+        tmp_path,
+        monkeypatch,
+        {"approval_gate": "Approved", "approval_old": "Superseded"},
+        approvals=("approval_gate",),
+    )
+
+    assert approver["status"] == "approved"
+    # The stale tag is still shown; it just no longer decides anything.
+    assert approver["tags"]["approval_old"] == "Superseded"
+
+
+def test_unconfigured_required_set_says_it_cannot_verify(tmp_path, monkeypatch):
+    approver = _lookup_with_tags(tmp_path, monkeypatch, {"approval_gate": "Approved"})
+
+    assert approver["status"] == "approved"
+    assert "cannot detect a required approval whose tag is absent" in (
+        approver["caveat"]
+    )
+
+
+def test_markdown_flags_an_unverified_approval(tmp_path):
+    from aai_core.agentkit.evidence import build_evidence
+
+    _, markdown = build_evidence(
+        _project(tmp_path),
+        results=_results(),
+        baseline=None,
+        gate_report=None,
+        approver_lookup=lambda *_: {
+            "status": "approved",
+            "tags": {"approval_gate": "Approved"},
+            "caveat": "the required approval set is not configured",
+        },
+    )
+
+    assert "**Not verified**" in markdown
+
+
+def test_evidence_reads_baseline_lineage_from_the_record(tmp_path):
+    """`evidence --run` must not pair a run's deltas with a local baseline."""
+
+    from aai_core.agentkit.evidence import build_evidence
+
+    results = _results(
+        baseline_run_id="run-0",
+        baseline_recorded_at="2026-07-01T09:00:00Z",
+        baseline_dataset_digest="digest-of-the-run",
+    )
+    local = BaselineRecord(
+        schema_version=1,
+        run_id="run-99",
+        recorded_at="2026-08-02T23:59:00Z",
+        dataset=BaselineDataset(ref="golden.json", digest="a-newer-digest", rows=10),
+        scope=BaselineScope(mode="full", rows=10),
+        metrics={"keyword_coverage/mean": 0.1},
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            aai_core="0.4.0",
+        ),
+        recorded_by="agentkit compare --establish-baseline",
+        change_id="zzz9999",
+    )
+
+    document, _ = build_evidence(
+        _project(tmp_path), results=results, baseline=local, gate_report=None
+    )
+
+    assert document["comparison"]["baseline_recorded_at"] == "2026-07-01T09:00:00Z"
+    assert document["comparison"]["baseline_dataset_digest"] == "digest-of-the-run"

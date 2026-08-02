@@ -306,6 +306,9 @@ def _cmd_evidence(arguments: argparse.Namespace) -> int:
     project = _project(arguments)
     if arguments.run_id:
         results = fetch_results(arguments.run_id)
+        # No local baseline: that run was compared against whatever its own
+        # record names, and this checkout's `evals/baseline.json` is not it.
+        baseline = None
     else:
         found = load_latest_results(project.results_dir)
         if found is None:
@@ -320,7 +323,7 @@ def _cmd_evidence(arguments: argparse.Namespace) -> int:
                 ),
             )
         results, _ = found
-    baseline, _ = load_baseline(project.baseline_path)
+        baseline, _ = load_baseline(project.baseline_path)
     report, _ = evaluate_gate(project, results=results, baseline=baseline)
     document, markdown = build_evidence(
         project,

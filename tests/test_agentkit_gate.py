@@ -320,3 +320,47 @@ def test_standalone_regression_budget_defaults_to_higher_is_better(tmp_path):
     _, code = evaluate_gate(project, results=worse, baseline=_baseline())
 
     assert code == EXIT_THRESHOLD_FAILED
+
+
+def test_recorded_rules_survive_a_relaxed_config(tmp_path):
+    """Relaxing a threshold must not turn a failed run into evidence.
+
+    The record is judged by the rules that were in force when it was
+    scored; a reader with a different agentkit.yaml gets the same verdict.
+    """
+
+    from aai_core.evaluation import MetricDirection, MetricRule
+
+    project = _project(tmp_path, thresholds={"keyword_coverage": ">=0.9"})
+    results = _results(
+        metrics={"keyword_coverage/mean": 0.5},
+        baseline_run_id="run-0",
+        policy_rules=(
+            MetricRule(
+                metric="keyword_coverage/mean",
+                direction=MetricDirection.HIGHER,
+                required=0.9,
+            ),
+        ),
+    )
+    relaxed = _project(tmp_path, thresholds={"keyword_coverage": ">=0.1"})
+
+    report, code = evaluate_gate(relaxed, results=results, baseline=None)
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert not report.passed
+    # The rules applied are the record's, not the reader's.
+    assert report.rules[0].required == 0.9
+    assert report.policy_note is None
+    assert project is not None
+
+
+def test_records_without_recorded_rules_fall_back_and_say_so(tmp_path):
+    project = _project(tmp_path, thresholds={"keyword_coverage": ">=0.9"})
+    results = _results(metrics={"keyword_coverage/mean": 0.5}, baseline_run_id="run-0")
+
+    report, code = evaluate_gate(project, results=results, baseline=None)
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert report.policy_note is not None
+    assert "predate recorded gate rules" in report.policy_note

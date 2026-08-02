@@ -47,6 +47,17 @@ All notable changes to `aai-core` are documented here.
   every `approval*` tag on a model version is reported rather than only the
   first.
 
+  A results record is self-contained evidence: it carries the gate rules the
+  run was judged by and the lineage of the baseline it was compared against,
+  so reopening it cannot change the verdict and evidence cannot pair one
+  run's deltas with another checkout's baseline. `agentkit gate` refuses a
+  record whose rules have since changed instead of judging old numbers by new
+  ones. Approval reporting takes the required task names from `approvals:` in
+  `agentkit.yaml` — a set discovered from the tags that exist cannot detect a
+  required approval whose tag is absent — and says so when they are not
+  configured. Trace coverage is per row, so a `trace: null` column or a
+  partially traced dataset no longer selects the traces mode.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog
