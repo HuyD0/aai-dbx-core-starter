@@ -1027,9 +1027,14 @@ print(
 # MAGIC   EXISTS` does nothing to a table that already exists, so a release
 # MAGIC   that added a field would fail `INSERT *` against the old schema,
 # MAGIC   and one that removed a field would leave a column still serving
-# MAGIC   the previous release's values. Added columns are applied; stale
-# MAGIC   ones are reported for a human, since dropping a column destroys
-# MAGIC   data and may itself be a governance event.
+# MAGIC   the previous release's values. Added columns are applied
+# MAGIC   automatically. A column this release no longer produces **blocks
+# MAGIC   the run**: `UPDATE SET *` / `INSERT *` expand over the *target's*
+# MAGIC   columns and need every one to resolve in the source, so it would
+# MAGIC   fail at analysis anyway — better to stop here, naming the
+# MAGIC   statements, than inside a SQL error that never mentions releases.
+# MAGIC   Dropping a column destroys data and may itself be a governance
+# MAGIC   event, so that decision stays with a human.
 # MAGIC - **Idempotent restart**: an anti-join selects only rows this
 # MAGIC   release has not landed yet, so re-running the same statement after
 # MAGIC   a partial failure finishes the job instead of paying for inference
@@ -1059,19 +1064,19 @@ gbi.require_executable(spec_v2, report_v2)  # raises unless the gate adopted
 spark.sql(gbi.create_target_table_sql(spec_v2))
 
 # `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
-# exists, so a release that changed the field set has to migrate it. Skip
-# this and `INSERT *` fails analysis against the previous spec's schema.
-migration = gbi.plan_target_migration(
+# exists, so a release that changed the field set has to migrate it.
+# Additive changes are applied here; a column this release no longer
+# produces raises, because `INSERT *` expands over the *target's* columns
+# and cannot resolve one the source does not have. Dropping it destroys
+# data and may itself be a governance event, so a human decides — and the
+# refusal names the statements rather than failing later inside a SQL
+# error that never mentions releases.
+migration = gbi.require_migrated_target(
     spec_v2, [field.name for field in spark.table(TARGET_TABLE).schema.fields]
 )
 for statement in migration.statements:
-    if statement.startswith("ALTER TABLE"):
-        spark.sql(statement)
-        print(f"migrated: {statement}")
-    else:
-        # Dropping a column destroys data and may itself be a governance
-        # event, so it is printed for a human, never run automatically.
-        print(statement)
+    spark.sql(statement)
+    print(f"migrated: {statement}")
 
 execute_sql = gbi.build_execute_sql(
     spec_v2,
@@ -1216,7 +1221,7 @@ target_version = spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1").first()[
 
 spark.sql(gbi.create_run_metadata_table_sql(spec_v2))
 spark.sql(
-    gbi.run_metadata_insert_sql(
+    gbi.run_metadata_upsert_sql(
         spec_v2,
         report_v2,
         run_id=RUN_ID,

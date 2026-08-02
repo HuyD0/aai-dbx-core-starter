@@ -129,6 +129,10 @@ class EvidenceMismatch(RuntimeError):
     """Raised when evidence does not belong to the release being gated."""
 
 
+class TargetSchemaMismatch(RuntimeError):
+    """Raised when the target table still holds columns a release dropped."""
+
+
 # ---------------------------------------------------------------------------
 # 1. Declare — the spec is written before any results exist
 # ---------------------------------------------------------------------------
@@ -651,6 +655,12 @@ def apply_abstention_policy(
     abstention set. A field that is simply absent from the document stays
     null without being an abstention — that is a legitimate answer, not a
     declined one.
+
+    A confidence outside [0, 1] is malformed rather than high: structured
+    output constrains the JSON *type*, while "from 0 to 1" is only prose in
+    the field description, so a model can return 5. Such a value is
+    declined, not trusted — an unusable confidence is exactly the case
+    where guessing is least defensible.
     """
     permitted: dict[str, object] = {}
     abstained: set[str] = set()
@@ -658,10 +668,10 @@ def apply_abstention_policy(
     for field in spec.fields:
         value = values.get(field.name)
         confidence = confidences.get(field.name)
-        below_threshold = value is not None and (
-            confidence is None or confidence < spec.abstain_threshold
+        unusable_confidence = value is not None and not (
+            confidence is not None and spec.abstain_threshold <= confidence <= 1.0
         )
-        if field.name in listed or below_threshold:
+        if field.name in listed or unusable_confidence:
             abstained.add(field.name)
             permitted[field.name] = None
         else:
@@ -1110,6 +1120,38 @@ def require_matching_evidence(
                 f"confidence {score.confidence}, but the spec declares "
                 f"{spec.confidence_level}. Re-score at the declared level."
             )
+        # The intervals are what the gate actually reads, and they carry
+        # their own confidence. Checking only the score's outer label would
+        # let evidence relabelled to 99% be gated on bounds computed at
+        # 95% — the very substitution the outer check exists to stop.
+        for metric, interval in (
+            ("precision", score.precision),
+            ("recall", score.recall),
+        ):
+            if interval is not None and interval.confidence != spec.confidence_level:
+                raise EvidenceMismatch(
+                    f"the {metric} interval for {score.field!r}/"
+                    f"{score.stratum!r} was computed at confidence "
+                    f"{interval.confidence}, but the spec declares "
+                    f"{spec.confidence_level}. Its bounds do not mean what "
+                    "the score claims; re-score at the declared level."
+                )
+        # The intervals are what the gate actually reads, and each carries
+        # its own confidence. Checking only the score's outer label would
+        # let relabelled or hand-assembled evidence present 95% bounds as
+        # 99% ones — the same false adoption the release check closes.
+        for metric, interval in (
+            ("precision", score.precision),
+            ("recall", score.recall),
+        ):
+            if interval is not None and interval.confidence != spec.confidence_level:
+                raise EvidenceMismatch(
+                    f"the {metric} interval for {score.field!r}/"
+                    f"{score.stratum!r} was computed at confidence "
+                    f"{interval.confidence}, but the spec declares "
+                    f"{spec.confidence_level}. Its bounds do not mean what "
+                    "the score claims; re-score at the declared level."
+                )
 
     manifests = {score.sample_strata for score in scores}
     if len(manifests) != 1:
@@ -1328,17 +1370,31 @@ def create_target_table_sql(spec: BatchInferenceSpec) -> str:
 
 
 class TargetMigration(BaseModel):
-    """What an existing target table needs before this release can land."""
+    """What an existing target table needs before this release can land.
+
+    ``add`` is applied automatically; ``blocking`` is not. ``UPDATE SET *``
+    and ``INSERT *`` expand over the *target's* columns and require every
+    one of them to resolve in the source, so any column the release no
+    longer produces stops the MERGE at analysis. ``stale`` are the
+    ``ai_``-prefixed ones — output from a previous release — and
+    ``foreign`` are columns this pipeline never owned.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     add: tuple[tuple[str, str], ...] = ()
     stale: tuple[str, ...] = ()
+    foreign: tuple[str, ...] = ()
     statements: tuple[str, ...] = ()
 
     @property
+    def blocking(self) -> tuple[str, ...]:
+        """Columns a human must resolve before the release can execute."""
+        return self.stale + self.foreign
+
+    @property
     def required(self) -> bool:
-        return bool(self.add or self.stale)
+        return bool(self.add or self.blocking)
 
 
 def plan_target_migration(
@@ -1368,12 +1424,15 @@ def plan_target_migration(
         for name, sql_type in expected
         if name.casefold() not in existing
     )
+    unexpected = [
+        column for column in existing_columns if column.casefold() not in expected_names
+    ]
     stale = tuple(
         column
-        for column in existing_columns
-        if column.casefold() not in expected_names
-        and column.casefold().startswith(AI_COLUMN_PREFIX)
+        for column in unexpected
+        if column.casefold().startswith(AI_COLUMN_PREFIX)
     )
+    foreign = tuple(column for column in unexpected if column not in stale)
     statements: list[str] = []
     if add:
         columns = ", ".join(f"{name} {sql_type}" for name, sql_type in add)
@@ -1385,7 +1444,45 @@ def plan_target_migration(
             "longer produced by this release and now holds values from an "
             f"earlier one\n-- ALTER TABLE {spec.target_table} DROP COLUMN {column}"
         )
-    return TargetMigration(add=add, stale=stale, statements=tuple(statements))
+    for column in foreign:
+        statements.append(
+            f"-- review before running: {spec.target_table}.{column} is not "
+            "produced by this pipeline at all; move it to its own table or "
+            f"drop it\n-- ALTER TABLE {spec.target_table} DROP COLUMN {column}"
+        )
+    return TargetMigration(
+        add=add, stale=stale, foreign=foreign, statements=tuple(statements)
+    )
+
+
+def require_migrated_target(
+    spec: BatchInferenceSpec, existing_columns: Sequence[str]
+) -> TargetMigration:
+    """Refuse to execute against a target that still has unresolved columns.
+
+    ``UPDATE SET *`` / ``INSERT *`` expand over the target's columns and
+    need each one to resolve in the source, so a leftover column does not
+    degrade the run — it stops the MERGE at analysis. Failing here, with
+    the statements to fix it, beats failing later inside a SQL error that
+    does not mention releases at all.
+
+    Additive migration is returned for the caller to apply; anything
+    destructive stays a human decision.
+    """
+    migration = plan_target_migration(spec, existing_columns)
+    if migration.blocking:
+        raise TargetSchemaMismatch(
+            f"{spec.target_table} still has columns this release does not "
+            f"produce: {list(migration.blocking)}. `INSERT *` cannot resolve "
+            "them, so the run would fail at analysis. Resolve them "
+            "deliberately first:\n"
+            + "\n".join(
+                statement
+                for statement in migration.statements
+                if statement.startswith("--")
+            )
+        )
+    return migration
 
 
 def target_columns(spec: BatchInferenceSpec) -> tuple[tuple[str, str], ...]:
@@ -1453,10 +1550,14 @@ def build_execute_sql(
     for field in spec.fields:
         value, confidence, abstained = _generated_column_names(field.name)
         literal = sql_string_literal(field.name)
+        # Below the threshold *or* outside [0, 1]: the schema constrains
+        # the JSON type, not the range, so a confidence of 5 is malformed
+        # output rather than a very confident answer.
+        confidence_sql = f"coalesce(parsed.{field.name}_confidence, -1)"
         rule = (
             f"coalesce(array_contains(parsed.abstained_fields, {literal}), false) "
             f"OR (parsed.{field.name} IS NOT NULL "
-            f"AND coalesce(parsed.{field.name}_confidence, -1) < {threshold})"
+            f"AND NOT ({confidence_sql} BETWEEN {threshold} AND 1))"
         )
         value_lines.append(
             f"    CASE WHEN {rule} THEN NULL ELSE parsed.{field.name} END AS {value}"
@@ -1574,7 +1675,7 @@ def create_run_metadata_table_sql(spec: BatchInferenceSpec) -> str:
 )"""
 
 
-def run_metadata_insert_sql(
+def run_metadata_upsert_sql(
     spec: BatchInferenceSpec,
     report: GateReport,
     *,
@@ -1582,23 +1683,36 @@ def run_metadata_insert_sql(
     projected_cost_cad: float,
     target_table_version: int,
 ) -> str:
+    """Write the run record, keyed on ``run_id`` so a retry cannot duplicate it.
+
+    A plain INSERT would add a second row whenever the client lost the
+    response and the cell was re-run. ``ai_run_id`` is the join key every
+    landed row uses to reach this table, so a duplicate fans out every
+    downstream join and can tie one run to two recorded table versions —
+    it corrupts the provenance record rather than merely repeating it.
+    """
     approved = sql_string_literal(report.approved_by) if report.approved_by else "NULL"
-    return f"""INSERT INTO {spec.run_metadata_table} VALUES (
-  {sql_string_literal(run_id)},
-  {sql_string_literal(spec.name)},
-  {sql_string_literal(spec.spec_digest)},
-  {sql_string_literal(spec.to_yaml())},
-  {int(spec.use_tier)},
-  {sql_string_literal(spec.endpoint)},
-  {sql_string_literal(spec.model_version)},
-  {sql_string_literal(spec.prompt_version)},
-  {sql_string_literal(report.decision.value)},
-  {approved},
-  {float(projected_cost_cad)},
-  {sql_string_literal(spec.target_table)},
-  {int(target_table_version)},
-  current_timestamp()
-)"""
+    return f"""MERGE INTO {spec.run_metadata_table} AS target
+USING (
+  SELECT
+    {sql_string_literal(run_id)} AS run_id,
+    {sql_string_literal(spec.name)} AS spec_name,
+    {sql_string_literal(spec.spec_digest)} AS spec_digest,
+    {sql_string_literal(spec.to_yaml())} AS spec_yaml,
+    {int(spec.use_tier)} AS use_tier,
+    {sql_string_literal(spec.endpoint)} AS endpoint,
+    {sql_string_literal(spec.model_version)} AS model_version,
+    {sql_string_literal(spec.prompt_version)} AS prompt_version,
+    {sql_string_literal(report.decision.value)} AS gate_decision,
+    {approved} AS approved_by,
+    {float(projected_cost_cad)} AS projected_cost_cad,
+    {sql_string_literal(spec.target_table)} AS target_table,
+    {int(target_table_version)} AS target_table_version,
+    current_timestamp() AS executed_at
+) AS source
+ON target.run_id = source.run_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *"""
 
 
 # ---------------------------------------------------------------------------

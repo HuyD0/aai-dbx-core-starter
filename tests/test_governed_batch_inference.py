@@ -483,6 +483,25 @@ def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
         gbi.evaluate_gate(spec, [s for s in scores if s.stratum != gbi.WEIGHTED])
 
 
+def test_gate_refuses_intervals_computed_at_the_wrong_confidence():
+    """The gate reads the intervals, so relabelling the score is not enough.
+
+    Evidence round-trips through MLflow as JSON, so a score whose outer
+    confidence says 99% while its intervals were computed at 95% is a real
+    shape, and gating it would reinstate the false adoption.
+    """
+    spec = one_field_spec(criticality="high", confidence_level=0.99)
+    scores = list(score(records_for("standard", correct=400), spec))
+    gbi.evaluate_gate(spec, scores)  # consistent evidence is fine
+
+    tampered = []
+    for item in scores:
+        relabelled = item.precision.model_copy(update={"confidence": 0.95})
+        tampered.append(item.model_copy(update={"precision": relabelled}))
+    with pytest.raises(gbi.EvidenceMismatch, match="precision interval"):
+        gbi.evaluate_gate(spec, tampered)
+
+
 def test_gate_refuses_scores_spliced_from_two_scoring_runs():
     spec = one_field_spec(criticality="high")
     two_strata = score(CENTRAL_LESSON_RECORDS, spec)
@@ -818,12 +837,62 @@ def test_abstained_and_low_confidence_values_are_never_landed():
     )
     for name in ("issuer_name", "account_id"):
         assert f"array_contains(parsed.abstained_fields, '{name}')" in sql
-        assert f"coalesce(parsed.{name}_confidence, -1) < 0.7" in sql
+        assert f"coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1" in sql
         assert f"THEN NULL ELSE parsed.{name} END AS ai_{name}" in sql
     # The landed list is re-derived, so a threshold abstention the model
     # never declared still reaches the exception queue.
     assert "array_compact(array(" in sql
     assert "parsed.abstained_fields AS ai_abstained_fields" not in sql
+
+
+def test_a_confidence_outside_zero_to_one_is_declined_not_trusted():
+    """The schema constrains the JSON type; "0 to 1" is only prose."""
+    spec = make_spec(abstain_threshold=0.7)
+    permitted, abstained = gbi.apply_abstention_policy(
+        spec,
+        {"issuer_name": "Impossible Co", "account_id": "AC1"},
+        {"issuer_name": 5.0, "account_id": -0.5},
+        [],
+    )
+    assert permitted == {"issuer_name": None, "account_id": None}
+    assert abstained == frozenset({"issuer_name", "account_id"})
+    # Exactly 1.0 is a legitimate confidence and must still land.
+    permitted, abstained = gbi.apply_abstention_policy(
+        spec, {"issuer_name": "Certain Co"}, {"issuer_name": 1.0}, []
+    )
+    assert permitted["issuer_name"] == "Certain Co"
+    assert abstained == frozenset()
+
+    sql = gbi.build_execute_sql(
+        spec, run_id="run-1", prompt_sql="concat('x', doc_text)"
+    )
+    for name in ("issuer_name", "account_id"):
+        assert f"NOT (coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1)" in sql
+
+
+def test_run_metadata_write_is_idempotent():
+    """ai_run_id is the provenance join key, so a duplicate row fans out
+    every downstream join — a retry must not create one."""
+    spec = make_spec()
+    scores = score(records_for("standard", correct=200), one_field_spec())
+    report = gbi.evaluate_gate(one_field_spec(), scores)
+    sql = gbi.run_metadata_upsert_sql(
+        spec,
+        report,
+        run_id="run-1",
+        projected_cost_cad=12.5,
+        target_table_version=4,
+    )
+    assert sql.startswith("MERGE INTO main.finance_docs.batch_inference_runs")
+    assert "ON target.run_id = source.run_id" in sql
+    assert "WHEN MATCHED THEN UPDATE SET *" in sql
+    assert "WHEN NOT MATCHED THEN INSERT *" in sql
+    assert "INSERT INTO" not in sql
+    # Every column of the metadata table is supplied, by name.
+    ddl = gbi.create_run_metadata_table_sql(spec)
+    for line in ddl.split("\n")[1:-1]:
+        column = line.strip().split(" ")[0]
+        assert f" AS {column}" in sql
 
 
 def test_target_migration_plans_added_columns_and_flags_stale_ones():
@@ -863,6 +932,32 @@ def test_target_migration_compares_case_insensitively():
     assert not gbi.plan_target_migration(spec, shouting).required
 
 
+def test_execution_is_blocked_until_removed_columns_are_resolved():
+    """`INSERT *` expands over the target's columns and needs each one in
+    the source, so a leftover column stops the MERGE at analysis. Fail
+    here with the statements instead of there with a SQL error."""
+    spec = make_spec()
+    expected = [name for name, _ in gbi.target_columns(spec)]
+
+    # A clean table migrates cleanly, and an additive change is applied.
+    assert gbi.require_migrated_target(spec, expected).statements == ()
+    additive = [c for c in expected if not c.startswith("ai_account_id")]
+    assert gbi.require_migrated_target(spec, additive).add
+
+    # A column the release no longer produces blocks, ai_-prefixed or not.
+    with pytest.raises(gbi.TargetSchemaMismatch, match="ai_dropped_field"):
+        gbi.require_migrated_target(spec, expected + ["ai_dropped_field"])
+    with pytest.raises(gbi.TargetSchemaMismatch, match="reviewed_by"):
+        gbi.require_migrated_target(spec, expected + ["reviewed_by"])
+
+    migration = gbi.plan_target_migration(
+        spec, expected + ["ai_dropped_field", "reviewed_by"]
+    )
+    assert migration.stale == ("ai_dropped_field",)
+    assert migration.foreign == ("reviewed_by",)
+    assert migration.blocking == ("ai_dropped_field", "reviewed_by")
+
+
 def test_provenance_layers_are_generated():
     spec = make_spec()
     statements = gbi.column_tag_statements(spec, "run-123")
@@ -882,14 +977,16 @@ def test_provenance_layers_are_generated():
             predicted={"issuer_name": "v", "account_id": "v"},
         )
     ] * 200
-    insert = gbi.run_metadata_insert_sql(
+    insert = gbi.run_metadata_upsert_sql(
         spec,
         gbi.evaluate_gate(spec, score(records, spec)),
         run_id="run-123",
         projected_cost_cad=12.5,
         target_table_version=4,
     )
-    assert "'run-123'" in insert and "12.5" in insert and "4," in insert
+    assert "'run-123' AS run_id" in insert
+    assert "12.5 AS projected_cost_cad" in insert
+    assert "4 AS target_table_version" in insert
 
 
 def test_sql_string_literal_escapes_quotes_and_backslashes():
@@ -967,7 +1064,7 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
     report_artifact = recorder.dicts["governed_batch_inference/gate_report.json"]
     assert report_artifact["approved_by"] == approver
 
-    metadata_sql = gbi.run_metadata_insert_sql(
+    metadata_sql = gbi.run_metadata_upsert_sql(
         spec,
         approved,
         run_id="run-1",

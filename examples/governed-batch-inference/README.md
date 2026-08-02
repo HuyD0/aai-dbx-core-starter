@@ -93,14 +93,24 @@ abstention path) then passes the same gate on the same terms.
     changed while those labels held still. Bump `spec_version` when a code
     change alters what the pipeline produces, since the digest covers the
     spec rather than the module. A field-set change also needs the target
-    table migrated (`plan_target_migration`) — `CREATE TABLE IF NOT EXISTS`
-    will not touch a table that already exists.
+    table migrated (`require_migrated_target`) — `CREATE TABLE IF NOT
+    EXISTS` will not touch a table that already exists. Additive changes
+    are applied; a column the release no longer produces *blocks* the run,
+    because `INSERT *` expands over the target's columns and cannot
+    resolve one the source lacks. Dropping it destroys data, so a human
+    decides.
 11. **An abstention is enforced, not merely recorded.** A value the model
-    both returned and declared abstained, or answered below the declared
-    threshold, is nulled rather than landed — scoring treated it as an
-    abstention, so it never went through the precision gate. The same rule
-    runs in evaluation and in execution (`apply_abstention_policy` and the
-    generated SQL), so what was measured is what lands.
+    both returned and declared abstained, answered below the declared
+    threshold, or answered with a confidence outside [0, 1] — structured
+    output constrains the JSON type, not the range — is nulled rather than
+    landed, because scoring treated it as an abstention and it never went
+    through the precision gate. The same rule runs in evaluation and in
+    execution (`apply_abstention_policy` and the generated SQL), so what
+    was measured is what lands.
+12. **The run record is written once per `run_id`.** It is a keyed `MERGE`,
+    not an `INSERT`: `ai_run_id` is the join key every landed row uses to
+    reach the run metadata, so a duplicate from a retried cell would fan
+    out downstream joins and tie one run to two table versions.
 
 ## Adapting it to a new use case
 
