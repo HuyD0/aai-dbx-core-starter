@@ -128,3 +128,27 @@ def test_traces_with_feedback_reads_nested_feedback_values():
 
     assert traces_with_feedback([trace], name="correct", value=False) == [trace]
     assert traces_with_feedback([trace], name="correct", value=True) == []
+
+
+def test_traces_with_feedback_ignores_invalidated_assessments():
+    invalidated = SimpleNamespace(name="correct", value=False, valid=False)
+    corrected = SimpleNamespace(name="correct", value=True, valid=True)
+    trace = _trace("overridden", [invalidated, corrected])
+
+    assert traces_with_feedback([trace], name="correct", value=False) == []
+    assert traces_with_feedback([trace], name="correct", value=True) == [trace]
+
+
+def test_traces_with_feedback_prefers_native_assessment_search():
+    stale = SimpleNamespace(name="correct", value=False)
+    corrected = SimpleNamespace(name="correct", value=True)
+    trace = SimpleNamespace(
+        trace_id="searched",
+        info=SimpleNamespace(assessments=[stale, corrected]),
+        search_assessments=lambda: [corrected],
+    )
+
+    # The native search already excludes overridden feedback, so the stale
+    # raw-list entry must not select the trace.
+    assert traces_with_feedback([trace], name="correct", value=False) == []
+    assert traces_with_feedback([trace], name="correct", value=True) == [trace]

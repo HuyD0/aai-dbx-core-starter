@@ -110,13 +110,26 @@ class PromptManager:
             # NOT_FOUND.
             prompt_exists = False
         if prompt_exists:
-            for version in client.search_prompt_versions(qualified):
-                version_tags = getattr(version, "tags", None) or {}
-                if getattr(version, "template", None) == template and (
-                    version_tags.get("aai_prompt_digest") == digest
-                    or version_tags.get("aai.prompt_digest") == digest
-                ):
-                    return version
+            # The registry paginates version search; a long-lived prompt's
+            # matching version may sit past the first page.
+            page_token = None
+            while True:
+                if page_token is None:
+                    page = client.search_prompt_versions(qualified)
+                else:
+                    page = client.search_prompt_versions(
+                        qualified, page_token=page_token
+                    )
+                for version in page:
+                    version_tags = getattr(version, "tags", None) or {}
+                    if getattr(version, "template", None) == template and (
+                        version_tags.get("aai_prompt_digest") == digest
+                        or version_tags.get("aai.prompt_digest") == digest
+                    ):
+                        return version
+                page_token = getattr(page, "token", None)
+                if not page_token:
+                    break
         merged_tags = dict(tags or {})
         merged_tags["prompt_digest"] = digest
         return self.register(
@@ -133,64 +146,50 @@ class PromptManager:
         version: int,
         evidence: Any,
         alias: str = "production",
-        expected_digest: str | None = None,
     ) -> None:
-        """Move a governed alias only on adopt-grade evidence bound to the
+        """Move a governed alias only on an adopt decision bound to the
         exact version being promoted.
 
-        ``evidence`` is a passing :class:`~aai_core.evaluation.GateResult` or
-        an adopt :class:`~aai_core.decisions.DecisionRecord`. The evidence
-        must also be bound to template content — through ``expected_digest``
-        or the record's ``prompt_digest`` — and the registry version's actual
-        template must match that digest, so evidence gathered for one
-        template can never move the alias onto another. Anything less raises
-        :class:`PromptPromotionError` and leaves the alias untouched.
+        ``evidence`` is an adopt :class:`~aai_core.decisions.DecisionRecord`
+        whose ``prompt_digest`` was recorded at decision time; the registry
+        version's actual template must match that digest, so evidence
+        gathered for one template can never move the alias onto another.
+        A bare :class:`~aai_core.evaluation.GateResult` is refused: gate
+        evidence alone carries no template identity, and a digest supplied
+        at promotion time would prove only what is being promoted, not what
+        was evaluated. Anything less raises :class:`PromptPromotionError`
+        and leaves the alias untouched.
         """
 
         from aai_core.decisions import Decision, DecisionRecord
         from aai_core.evaluation import GateResult
 
         if isinstance(evidence, GateResult):
-            if not evidence.passed:
-                failing = ", ".join(failure.metric for failure in evidence.failures)
-                raise PromptPromotionError(
-                    f"Refusing to move alias {alias!r} for prompt {name!r}: "
-                    f"the cited gate failed on {failing}",
-                    remediation="Record an adopt decision backed by a passing "
-                    "gate before moving the production alias.",
-                )
-            bound_digest = expected_digest
-        elif isinstance(evidence, DecisionRecord):
-            if evidence.decision is not Decision.ADOPT:
-                raise PromptPromotionError(
-                    f"Refusing to move alias {alias!r} for prompt {name!r}: "
-                    f"the cited decision is {evidence.decision.value!r}",
-                    remediation="Record an adopt decision backed by a passing "
-                    "gate before moving the production alias.",
-                )
-            if (
-                expected_digest
-                and evidence.prompt_digest
-                and expected_digest != evidence.prompt_digest
-            ):
-                raise PromptPromotionError(
-                    f"Refusing to move alias {alias!r} for prompt {name!r}: "
-                    "expected_digest disagrees with the decision's "
-                    "prompt_digest",
-                    remediation="Pass one binding, or make both name the "
-                    "same template content digest.",
-                )
-            bound_digest = expected_digest or evidence.prompt_digest
-        else:
-            raise TypeError("evidence must be a GateResult or DecisionRecord")
-
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: "
+                "gate evidence alone carries no template identity",
+                remediation="Record an adopt DecisionRecord citing this gate "
+                "with prompt_digest set at decision time, and promote with "
+                "that record.",
+            )
+        if not isinstance(evidence, DecisionRecord):
+            raise TypeError("evidence must be a DecisionRecord")
+        if evidence.decision is not Decision.ADOPT:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: "
+                f"the cited decision is {evidence.decision.value!r}",
+                remediation="Record an adopt decision backed by a passing "
+                "gate before moving the production alias.",
+            )
+        bound_digest = evidence.prompt_digest
         if not bound_digest:
             raise PromptPromotionError(
                 f"Refusing to move alias {alias!r} for prompt {name!r}: the "
-                "evidence is not bound to any template content",
-                remediation="Pass expected_digest=prompt_digest(template) or "
-                "record the decision with prompt_digest so promotion can "
-                "verify the registry version it moves.",
+                "adopt decision is not bound to any template content",
+                remediation="Record the decision with "
+                "prompt_digest=prompt_digest(template) for the evaluated "
+                "template so promotion can verify the registry version it "
+                "moves.",
             )
         registered = self.load(name, version=version)
         template = getattr(registered, "template", None)

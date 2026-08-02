@@ -81,13 +81,15 @@ def traces_with_feedback(
     name: str,
     value: Any | None = None,
 ) -> list[Any]:
-    """Return the native traces carrying a matching feedback assessment.
+    """Return the native traces carrying a matching, still-valid assessment.
 
-    Tolerant of trace shape differences: assessments are read from
-    ``trace.info.assessments``, ``trace.assessments``, or
-    ``trace.search_assessments()``, whichever exists. Traces are returned
-    unchanged so curation stays native, for example
-    ``dataset.merge_records(selected)`` after review.
+    Native ``trace.search_assessments()`` is preferred because it excludes
+    assessments that were later corrected or overridden; raw assessment
+    lists (``trace.info.assessments``, ``trace.assessments``) are consulted
+    as fallbacks with explicitly invalidated entries (``valid=False``)
+    dropped, so obsolete feedback never selects a trace for the regression
+    dataset. Traces are returned unchanged so curation stays native, for
+    example ``dataset.merge_records(selected)`` after review.
     """
 
     selected = []
@@ -101,15 +103,19 @@ def traces_with_feedback(
 
 
 def _trace_assessments(trace: Any) -> list[Any]:
-    info = getattr(trace, "info", None)
-    assessments = getattr(info, "assessments", None)
-    if assessments is None:
-        assessments = getattr(trace, "assessments", None)
-    if assessments is None:
-        searcher = getattr(trace, "search_assessments", None)
-        if callable(searcher):
-            assessments = searcher()
-    return list(assessments or [])
+    searcher = getattr(trace, "search_assessments", None)
+    if callable(searcher):
+        assessments = searcher()
+    else:
+        info = getattr(trace, "info", None)
+        assessments = getattr(info, "assessments", None)
+        if assessments is None:
+            assessments = getattr(trace, "assessments", None)
+    return [
+        assessment
+        for assessment in (assessments or [])
+        if getattr(assessment, "valid", True) is not False
+    ]
 
 
 def _assessment_matches(assessment: Any, *, name: str, value: Any | None) -> bool:

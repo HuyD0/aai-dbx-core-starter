@@ -57,12 +57,14 @@ def test_score_all_names_match_gate_metric_prefixes():
     }
 
 
-def test_as_mlflow_scorers_wraps_each_function_under_its_own_name(monkeypatch):
+def test_as_mlflow_scorers_wraps_self_contained_bodies_under_stable_names(
+    monkeypatch,
+):
     registered = []
 
     def fake_scorer(*, name):
         def decorate(fn):
-            registered.append(name)
+            registered.append((name, fn.__name__))
             return {"name": name, "fn": fn}
 
         return decorate
@@ -71,16 +73,49 @@ def test_as_mlflow_scorers_wraps_each_function_under_its_own_name(monkeypatch):
 
     wrapped = as_mlflow_scorers()
 
+    # Metric names stay stable while the decorated function is the
+    # registered_* sibling whose body survives body-only serialization.
     assert registered == [
-        "keyword_coverage",
-        "refusal_compliance",
-        "response_length_ok",
+        ("keyword_coverage", "registered_keyword_coverage"),
+        ("refusal_compliance", "registered_refusal_compliance"),
+        ("response_length_ok", "registered_response_length_ok"),
     ]
     refusal = wrapped[1]["fn"]
     assert refusal("I cannot share that.", EXPECT_REFUSAL) == 1.0
     assert refusal("Sure! Here it is.", EXPECT_REFUSAL) == 0.0
     # None expectations must normalize to an empty mapping, not crash.
     assert refusal("Sure! Here it is.", None) == 1.0
+
+
+def test_registered_bodies_survive_body_only_reconstruction():
+    # MLflow rebuilds a registered scorer by exec()ing the extracted function
+    # source in a namespace without the original module globals or closures.
+    import inspect
+
+    from aai_core.scorers import registered_refusal_compliance
+
+    namespace: dict = {}
+    exec(inspect.getsource(registered_refusal_compliance), {}, namespace)
+    rebuilt = namespace["registered_refusal_compliance"]
+
+    assert rebuilt("I cannot share that.", EXPECT_REFUSAL) == 1.0
+    assert rebuilt("Sure! Here it is.", None) == 1.0
+
+
+def test_as_mlflow_scorers_rejects_closure_dependent_custom_functions(
+    monkeypatch,
+):
+    install_fake_module(
+        monkeypatch,
+        "mlflow.genai.scorers",
+        scorer=lambda *, name: (lambda fn: fn),
+    )
+
+    def custom_scorer(outputs, expectations):
+        return 1.0
+
+    with pytest.raises(ValueError, match="self-contained"):
+        as_mlflow_scorers([custom_scorer])
 
 
 def test_as_mlflow_scorers_requires_the_genai_extra(monkeypatch):

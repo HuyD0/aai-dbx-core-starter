@@ -23,22 +23,26 @@ All notable changes to `aai-core` are documented here.
   promotes the governed dataset helper from `examples/notebook_setup.py`,
   which keeps its copy until the notebooks migrate.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
-  gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter. Template
-  copies are unchanged until each template's next version.
+  gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
+  self-contained `registered_*` bodies so registered monitoring scorers
+  survive MLflow's body-only serialization (the monitoring environment must
+  have aai-core installed). Template copies are unchanged until each
+  template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with an explicit non-personal assessment source, and
   `traces_with_feedback()` for curating reviewed production traces into the
-  governed regression dataset. Sampled-scorer registration remains a
-  documented notebook step.
+  governed regression dataset, preferring native assessment search and
+  ignoring invalidated (overridden) feedback. Sampled-scorer registration
+  remains a documented notebook step.
 - Added evidence-gated prompt promotion: `prompt_digest()`,
   `PromptManager.ensure_version()` registering idempotently by content
-  digest (promoted from the lifecycle examples), and `PromptManager.promote()`
-  refusing to move a governed alias without a passing gate or an adopt
-  decision (`aai_core.prompts.promotion_blocked`). Promotion also verifies
-  the registry version's template content against the evidence's digest
-  (`DecisionRecord.prompt_digest` or an explicit `expected_digest`), so
-  evidence gathered for one template can never promote another version.
-  `set_alias()` is unchanged.
+  digest across every registry page (promoted from the lifecycle examples),
+  and `PromptManager.promote()` moving a governed alias only on an adopt
+  decision whose `prompt_digest` was recorded at decision time and matches
+  the registry version's actual template
+  (`aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
+  carries no template identity, so evidence gathered for one template can
+  never promote another version. `set_alias()` is unchanged.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail.

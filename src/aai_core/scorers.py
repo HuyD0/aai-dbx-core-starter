@@ -5,6 +5,13 @@ credential-free CI, inside the full judge evaluation (wrapped with MLflow's
 ``@scorer`` via :func:`as_mlflow_scorers`), and in production monitoring, so
 quality means the same thing before and after deployment. Add an LLM judge
 only where semantic judgment is actually required.
+
+Registered monitoring scorers are rebuilt server-side from the extracted
+function body alone — closures are not serialized — so the ``registered_*``
+wrappers keep their bodies self-contained and import this module at
+invocation time. The monitoring environment must therefore have ``aai-core``
+installed (platform workloads install the pinned wheel from the artifact
+volume).
 """
 
 from __future__ import annotations
@@ -79,11 +86,48 @@ def score_all(outputs: str, expectations: dict) -> dict[str, float]:
     return {fn.__name__: fn(outputs, expectations) for fn in CODE_SCORERS}
 
 
+# MLflow serializes a registered scorer as its extracted function body and
+# rebuilds it with exec() in a namespace holding only MLflow entities, so
+# these bodies stay self-contained: input normalization plus an import
+# resolved at invocation time. Closures or factory wrappers would NameError
+# on every sampled invocation.
+def registered_keyword_coverage(outputs, expectations):
+    from aai_core.scorers import keyword_coverage
+
+    return keyword_coverage(str(outputs), dict(expectations or {}))
+
+
+def registered_refusal_compliance(outputs, expectations):
+    from aai_core.scorers import refusal_compliance
+
+    return refusal_compliance(str(outputs), dict(expectations or {}))
+
+
+def registered_response_length_ok(outputs, expectations):
+    from aai_core.scorers import response_length_ok
+
+    return response_length_ok(str(outputs), dict(expectations or {}))
+
+
+_REGISTERED_BODIES = {
+    keyword_coverage: registered_keyword_coverage,
+    refusal_compliance: registered_refusal_compliance,
+    response_length_ok: registered_response_length_ok,
+}
+
+
 def as_mlflow_scorers(
     functions: Sequence[Callable[[str, dict], float]] = CODE_SCORERS,
 ) -> list[Any]:
-    """Wrap pure scorers with ``mlflow.genai.scorers.scorer`` for
-    ``mlflow.genai.evaluate()`` and production monitoring."""
+    """Wrap the shared scorers with ``mlflow.genai.scorers.scorer`` for
+    ``mlflow.genai.evaluate()`` and registered production monitoring.
+
+    Only the scorers in :data:`CODE_SCORERS` are accepted: each is wrapped
+    through its self-contained ``registered_*`` body so ``.register()`` /
+    ``.start()`` survives MLflow's body-only serialization. Wrap any other
+    function with ``mlflow.genai.scorers.scorer`` directly and keep its body
+    free of closure variables.
+    """
 
     try:
         from mlflow.genai.scorers import scorer
@@ -96,15 +140,16 @@ def as_mlflow_scorers(
 
     wrapped = []
     for fn in functions:
-
-        def make(inner):
-            @scorer(name=inner.__name__)
-            def code_scorer(outputs, expectations):
-                return inner(str(outputs), dict(expectations or {}))
-
-            return code_scorer
-
-        wrapped.append(make(fn))
+        registered_body = _REGISTERED_BODIES.get(fn)
+        if registered_body is None:
+            raise ValueError(
+                f"as_mlflow_scorers only wraps the shared CODE_SCORERS; got "
+                f"{getattr(fn, '__name__', fn)!r}. MLflow rebuilds registered "
+                "scorers from the extracted function body alone, so wrap "
+                "custom functions with mlflow.genai.scorers.scorer directly "
+                "and keep their bodies self-contained."
+            )
+        wrapped.append(scorer(name=fn.__name__)(registered_body))
     return wrapped
 
 
