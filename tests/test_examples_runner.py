@@ -356,6 +356,28 @@ providers:
     ]
 
 
+def test_config_preflight_rejects_dotted_qualifiers(runner, tmp_path, monkeypatch):
+    # The SDK helpers reject dotted catalog/schema values; the preflight
+    # must fail before any cloud check instead of opening the notebook.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: /Shared/learning
+  catalog: main.extra
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert issues == [
+        "`platform.catalog` must be a single Unity Catalog qualifier "
+        "without dots (current value: 'main.extra')."
+    ]
+
+
 def test_connect_creates_local_config_once(runner, tmp_path, monkeypatch, capsys):
     config = tmp_path / "aai-platform.yml"
     example = tmp_path / "aai-platform.example.yml"

@@ -281,6 +281,11 @@ def _is_placeholder(value: Any) -> bool:
     )
 
 
+# Unity Catalog qualifier fields: exactly one level each, so a dotted value
+# is a configuration error the connected SDK helpers will reject.
+_QUALIFIER_FIELDS = {"platform.catalog", "platform.schema"}
+
+
 def _config_issues(example: Example) -> list[str]:
     if not example.connected:
         return []
@@ -299,6 +304,13 @@ def _config_issues(example: Example) -> list[str]:
             issues.append(
                 f"Configure `{dotted_path}` in aai-platform.yml "
                 f"(current value: {value!r})."
+            )
+        elif dotted_path in _QUALIFIER_FIELDS and "." in str(value):
+            # The SDK's qualifier validation rejects dotted values; fail the
+            # preflight instead of opening cloud checks that will refuse.
+            issues.append(
+                f"`{dotted_path}` must be a single Unity Catalog qualifier "
+                f"without dots (current value: {value!r})."
             )
     return issues
 
