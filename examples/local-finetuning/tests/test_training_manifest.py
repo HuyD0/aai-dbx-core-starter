@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 import threading
@@ -40,6 +41,22 @@ def _write_training_inputs(
     config_name: str = "lora.yaml",
     resume_adapter_file: str = "null",
 ) -> _Inputs:
+    source_dir = root / "src" / "aai_local_finetuning"
+    source_dir.mkdir(parents=True)
+    (source_dir / "training.py").write_text(
+        '"""Fixture training source."""\n',
+        encoding="utf-8",
+    )
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "notebook_pedagogy.py").write_text(
+        '"""Fixture notebook pedagogy source."""\n',
+        encoding="utf-8",
+    )
+    (scripts_dir / "render_notebooks.py").write_text(
+        '"""Fixture notebook renderer source."""\n',
+        encoding="utf-8",
+    )
     model_dir = root / "models" / "tiny"
     model_dir.mkdir(parents=True)
     runtime = {
@@ -176,6 +193,18 @@ def test_success_manifest_binds_all_model_data_and_adapter_bytes(
     assert manifest.data_path == "data/processed/study-v1"
     assert manifest.adapter_size_bytes == len(b"adapter-v1")
     assert manifest.effective_config["iters"] == 12
+    assert manifest.schema_version == "3.0.0"
+    assert tuple(item.path for item in manifest.execution_contract.source_files) == (
+        "scripts/notebook_pedagogy.py",
+        "scripts/render_notebooks.py",
+        "src/aai_local_finetuning/training.py",
+    )
+    assert manifest.execution_contract.runtime_packages
+    assert manifest.execution_contract.python_version == platform.python_version()
+    assert manifest.execution_contract.python_implementation == (
+        platform.python_implementation()
+    )
+    assert evidence.execution_contract_sha256 == manifest.execution_contract_sha256
     assert evidence.training_manifest_sha256 == snapshot.manifest_sha256
     assert snapshot.manifest_sha256 == _sha256(snapshot.raw_manifest_bytes)
     assert ".training-" not in " ".join(evidence.command)
@@ -468,6 +497,47 @@ def test_verifier_rejects_changes_to_any_bound_input_file(
         (inputs.data_dir / "notes.txt").write_text("changed dataset note\n")
 
     with pytest.raises(training.TrainingManifestError, match="stale or mismatched"):
+        _verify(inputs)
+
+
+def test_verifier_rejects_source_code_changed_after_training(
+    training_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _write_training_inputs(training_root)
+    monkeypatch.setattr(training.subprocess, "run", _successful_mlx_run())
+    _run(inputs)
+
+    source = training_root / "src" / "aai_local_finetuning" / "training.py"
+    source.write_text(source.read_text() + "# changed evaluator logic\n")
+
+    with pytest.raises(
+        training.TrainingManifestError,
+        match="evaluator and training source code",
+    ):
+        _verify(inputs)
+
+
+def test_verifier_rejects_runtime_package_set_changed_after_training(
+    training_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _write_training_inputs(training_root)
+    monkeypatch.setattr(training.subprocess, "run", _successful_mlx_run())
+    _run(inputs)
+    captured = training._capture_runtime_packages()
+    changed = tuple(
+        package for package in captured if package.name != "aai-runtime-mutation-test"
+    ) + (
+        training.RuntimePackageEvidence(
+            name="aai-runtime-mutation-test",
+            version="1.0.0",
+        ),
+    )
+    changed = tuple(sorted(changed, key=lambda package: package.name))
+    monkeypatch.setattr(training, "_capture_runtime_packages", lambda: changed)
+
+    with pytest.raises(training.TrainingManifestError, match="runtime package set"):
         _verify(inputs)
 
 

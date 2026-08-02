@@ -7,6 +7,12 @@ from typing import Literal
 
 from pydantic import Field
 
+from ..training import (
+    ValidatedTrainingSnapshot,
+    capture_execution_contract,
+    execution_contract_sha256,
+    recheck_training_snapshot,
+)
 from .models import EvaluationReport, StrictEvidenceModel
 
 
@@ -42,6 +48,11 @@ class EvaluationSnapshot(StrictEvidenceModel):
     evaluation_fingerprint: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
     )
+    evaluation_execution_contract_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     supported_intents: tuple[str, ...] = Field(min_length=1)
     macro_f1: float = Field(ge=0.0, le=1.0)
     schema_validity_rate: float = Field(ge=0.0, le=1.0)
@@ -53,6 +64,16 @@ class ChangeEvidence(StrictEvidenceModel):
     name: str = Field(min_length=1)
     method: Literal["lora_fine_tune"] = "lora_fine_tune"
     training_manifest_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    training_execution_contract_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    evaluation_execution_contract_sha256: str = Field(
         min_length=64,
         max_length=64,
         pattern=r"^[0-9a-f]{64}$",
@@ -82,19 +103,54 @@ class PromotionAssessment(StrictEvidenceModel):
 def decide_lora_promotion(
     *,
     change_name: str,
-    training_manifest_sha256: str,
+    training_snapshot: ValidatedTrainingSnapshot,
     change_report: EvaluationReport,
     baselines: tuple[BaselineEvaluation, ...] | list[BaselineEvaluation],
     thresholds: PromotionThresholds | None = None,
 ) -> PromotionAssessment:
-    """Adopt only when a comparable LoRA result clears every required gate."""
+    """Adopt only when current source/runtime lineage and every gate remain valid."""
 
     if not change_name.strip():
         raise ValueError("change_name must not be blank")
+    validated_snapshot = recheck_training_snapshot(training_snapshot)
+    current_execution_contract = capture_execution_contract()
+    current_execution_contract_sha256 = execution_contract_sha256(
+        current_execution_contract
+    )
+    training_manifest_sha256 = validated_snapshot.manifest_sha256
+    training_execution_contract_sha256 = (
+        validated_snapshot.manifest.execution_contract_sha256
+    )
     if change_report.training_manifest_sha256 != training_manifest_sha256:
         raise ValueError(
             "change report must carry the supplied training manifest SHA-256"
         )
+    if (
+        change_report.training_execution_contract_sha256
+        != training_execution_contract_sha256
+    ):
+        raise ValueError(
+            "change report must carry the current training execution-contract SHA-256"
+        )
+    evaluated_reports = (change_report,) + tuple(
+        baseline.report for baseline in baselines
+    )
+    if any(
+        report.evaluation_execution_contract_sha256 != current_execution_contract_sha256
+        for report in evaluated_reports
+    ):
+        raise ValueError(
+            "every report must match the current evaluation source/runtime contract"
+        )
+
+    def finalize(assessment: PromotionAssessment) -> PromotionAssessment:
+        if capture_execution_contract() != current_execution_contract:
+            raise RuntimeError(
+                "evaluation source code or runtime package set changed during promotion"
+            )
+        recheck_training_snapshot(validated_snapshot)
+        return assessment
+
     policy = thresholds or PromotionThresholds()
     evaluated_change = _snapshot(change_name, change_report)
     schema_pass = (
@@ -116,21 +172,29 @@ def decide_lora_promotion(
             reasons.append("change missed the absolute response-policy threshold")
         if not unsupported_pass:
             reasons.append("change exceeded the unsupported-intent threshold")
-        return PromotionAssessment(
-            baseline=None,
-            change=ChangeEvidence(
-                name=change_name,
-                training_manifest_sha256=training_manifest_sha256,
-            ),
-            result=PromotionResult(
-                evaluated_change=evaluated_change,
-                comparable=False,
-                passes_schema_threshold=schema_pass,
-                passes_policy_threshold=policy_pass,
-                passes_unsupported_intent_threshold=unsupported_pass,
-                reasons=tuple(reasons),
-            ),
-            decision=PromotionDecision.INCONCLUSIVE,
+        return finalize(
+            PromotionAssessment(
+                baseline=None,
+                change=ChangeEvidence(
+                    name=change_name,
+                    training_manifest_sha256=training_manifest_sha256,
+                    training_execution_contract_sha256=(
+                        training_execution_contract_sha256
+                    ),
+                    evaluation_execution_contract_sha256=(
+                        current_execution_contract_sha256
+                    ),
+                ),
+                result=PromotionResult(
+                    evaluated_change=evaluated_change,
+                    comparable=False,
+                    passes_schema_threshold=schema_pass,
+                    passes_policy_threshold=policy_pass,
+                    passes_unsupported_intent_threshold=unsupported_pass,
+                    reasons=tuple(reasons),
+                ),
+                decision=PromotionDecision.INCONCLUSIVE,
+            )
         )
 
     strongest = min(
@@ -148,24 +212,32 @@ def decide_lora_promotion(
         == evaluated_change.evaluation_fingerprint
     )
     if not comparable:
-        return PromotionAssessment(
-            baseline=baseline_snapshot,
-            change=ChangeEvidence(
-                name=change_name,
-                training_manifest_sha256=training_manifest_sha256,
-            ),
-            result=PromotionResult(
-                evaluated_change=evaluated_change,
-                comparable=False,
-                passes_schema_threshold=schema_pass,
-                passes_policy_threshold=policy_pass,
-                passes_unsupported_intent_threshold=unsupported_pass,
-                reasons=(
-                    "change and strongest meaningful baseline were not scored "
-                    "on comparable evaluation sets",
+        return finalize(
+            PromotionAssessment(
+                baseline=baseline_snapshot,
+                change=ChangeEvidence(
+                    name=change_name,
+                    training_manifest_sha256=training_manifest_sha256,
+                    training_execution_contract_sha256=(
+                        training_execution_contract_sha256
+                    ),
+                    evaluation_execution_contract_sha256=(
+                        current_execution_contract_sha256
+                    ),
                 ),
-            ),
-            decision=PromotionDecision.INCONCLUSIVE,
+                result=PromotionResult(
+                    evaluated_change=evaluated_change,
+                    comparable=False,
+                    passes_schema_threshold=schema_pass,
+                    passes_policy_threshold=policy_pass,
+                    passes_unsupported_intent_threshold=unsupported_pass,
+                    reasons=(
+                        "change and strongest meaningful baseline were not scored "
+                        "on comparable evaluation sets",
+                    ),
+                ),
+                decision=PromotionDecision.INCONCLUSIVE,
+            )
         )
 
     gain = evaluated_change.macro_f1 - baseline_snapshot.macro_f1
@@ -198,27 +270,33 @@ def decide_lora_promotion(
             "change beat the strongest meaningful baseline and passed all "
             "absolute output gates"
         )
-    return PromotionAssessment(
-        baseline=baseline_snapshot,
-        change=ChangeEvidence(
-            name=change_name,
-            training_manifest_sha256=training_manifest_sha256,
-        ),
-        result=PromotionResult(
-            evaluated_change=evaluated_change,
-            macro_f1_gain=gain,
-            comparable=True,
-            beats_strongest_meaningful_baseline=beats_baseline,
-            passes_schema_threshold=schema_pass,
-            passes_policy_threshold=policy_pass,
-            passes_unsupported_intent_threshold=unsupported_pass,
-            reasons=tuple(reasons),
-        ),
-        decision=(
-            PromotionDecision.ADOPT
-            if beats_baseline and schema_pass and policy_pass and unsupported_pass
-            else PromotionDecision.REJECT
-        ),
+    return finalize(
+        PromotionAssessment(
+            baseline=baseline_snapshot,
+            change=ChangeEvidence(
+                name=change_name,
+                training_manifest_sha256=training_manifest_sha256,
+                training_execution_contract_sha256=(training_execution_contract_sha256),
+                evaluation_execution_contract_sha256=(
+                    current_execution_contract_sha256
+                ),
+            ),
+            result=PromotionResult(
+                evaluated_change=evaluated_change,
+                macro_f1_gain=gain,
+                comparable=True,
+                beats_strongest_meaningful_baseline=beats_baseline,
+                passes_schema_threshold=schema_pass,
+                passes_policy_threshold=policy_pass,
+                passes_unsupported_intent_threshold=unsupported_pass,
+                reasons=tuple(reasons),
+            ),
+            decision=(
+                PromotionDecision.ADOPT
+                if beats_baseline and schema_pass and policy_pass and unsupported_pass
+                else PromotionDecision.REJECT
+            ),
+        )
     )
 
 
@@ -227,6 +305,9 @@ def _snapshot(name: str, report: EvaluationReport) -> EvaluationSnapshot:
         name=name,
         total_examples=report.total_examples,
         evaluation_fingerprint=report.evaluation_fingerprint,
+        evaluation_execution_contract_sha256=(
+            report.evaluation_execution_contract_sha256
+        ),
         supported_intents=report.supported_intents,
         macro_f1=report.classification.macro_f1,
         schema_validity_rate=report.output_quality.json_schema_validity_rate,

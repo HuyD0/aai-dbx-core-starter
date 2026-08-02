@@ -9,6 +9,7 @@ The project has two deliberately separate phases:
 
 1. `make prepare-flight` is online. It installs the exact locked environment,
    downloads pinned public assets, verifies them, creates leakage-safe splits,
+   records governed source plus interpreter/platform and package evidence,
    writes local MLflow evidence, and runs a small real MLX check.
 2. `make flight-check` is offline. It performs no installation or download,
    enables library offline controls, denies Python sockets, rechecks every
@@ -151,12 +152,21 @@ are `adopt`, `reject`, or `inconclusive`.
 A completed training process is not sufficient evidence by itself. The
 canonical adapter is eligible only when its success manifest matches the exact
 base-model revision and runtime files, every training-data file, the effective
-configuration, and both adapter outputs. Evaluation carries that same manifest
-fingerprint into its report, tracking run, and decision. A failed retrain or a
-mid-evaluation adapter change therefore fails closed instead of reusing stale
-weights under the same change name. A per-adapter shared/exclusive lock keeps
-training publication and evaluation from overlapping, and tracked change runs
-retain both the adapter weights and `adapter_config.json` needed to reload them.
+configuration, both adapter outputs, governed Python/notebook source, the exact
+Python implementation and platform, and every installed distribution version.
+Every baseline and change report also records its evaluation-time execution
+contract. Promotion revalidates the preparation manifest and requires all
+reports, the current runtime, and the LoRA training evidence to agree. A failed
+retrain, source/package drift, or a mid-evaluation adapter change therefore
+fails closed instead of reusing stale evidence under the same change name. A
+per-adapter shared/exclusive lock keeps training publication and evaluation
+from overlapping, and tracked change runs retain both the adapter weights and
+`adapter_config.json` needed to reload them.
+
+The governed source boundary is the reusable `src/aai_local_finetuning` package
+plus `scripts/render_notebooks.py` and `scripts/notebook_pedagogy.py`. Generated
+notebooks are outputs of those canonical sources; saving cell outputs does not
+silently redefine evaluator or promotion logic.
 
 ## Project map
 

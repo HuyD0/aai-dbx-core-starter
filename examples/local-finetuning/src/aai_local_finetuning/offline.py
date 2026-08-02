@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.metadata
 import json
 import os
 import platform
 import socket
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from .data.manifests import DatasetIntegrityError, require_valid_manifest
 from .settings import PROJECT_ROOT, ProjectSettings, sha256_file
+from .training import capture_execution_contract, execution_contract_sha256
 
 OFFLINE_ENVIRONMENT = {
     "HF_HUB_OFFLINE": "1",
@@ -49,7 +49,7 @@ class FlightManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: str
+    schema_version: Literal["2.0.0"] = "2.0.0"
     python: str
     platform: str
     project_lock_sha256: str
@@ -58,6 +58,10 @@ class FlightManifest(BaseModel):
     model_revision: str
     model_weight_sha256: str
     packages: dict[str, str]
+    source_files: dict[str, str]
+    source_files_sha256: str
+    runtime_packages_sha256: str
+    execution_contract_sha256: str
     model_files: dict[str, str]
     processed_files: dict[str, str]
     preflight_adapter_files: dict[str, str]
@@ -220,14 +224,17 @@ def require_assets(settings: ProjectSettings) -> list[AssetCheck]:
 
 
 def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
+    execution_contract = capture_execution_contract()
     processed = {
         str(path.relative_to(settings.processed_dir)): sha256_file(path)
         for path in sorted(settings.processed_dir.rglob("*"))
         if path.is_file()
     }
     packages = {
-        (distribution.metadata.get("Name") or "unknown").lower(): distribution.version
-        for distribution in importlib.metadata.distributions()
+        package.name: package.version for package in execution_contract.runtime_packages
+    }
+    source_files = {
+        source.path: source.sha256 for source in execution_contract.source_files
     }
     model_files = {
         str(path.relative_to(settings.model_dir)): sha256_file(path)
@@ -240,7 +247,7 @@ def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
         if path.is_file()
     }
     return FlightManifest(
-        schema_version="1.0.0",
+        schema_version="2.0.0",
         python=platform.python_version(),
         platform=f"{platform.system()}-{platform.machine()}",
         project_lock_sha256=sha256_file(PROJECT_ROOT / "uv.lock"),
@@ -251,6 +258,10 @@ def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
             settings.model_dir / settings.model.primary_weight
         ),
         packages=packages,
+        source_files=source_files,
+        source_files_sha256=execution_contract.source_files_sha256,
+        runtime_packages_sha256=execution_contract.runtime_packages_sha256,
+        execution_contract_sha256=execution_contract_sha256(execution_contract),
         model_files=model_files,
         processed_files=processed,
         preflight_adapter_files=preflight_adapter_files,

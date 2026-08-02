@@ -246,7 +246,15 @@ def _canonical_raw(
         return manifest.model_dump(mode="json")
     if not isinstance(manifest, Mapping):
         raise TypeError("manifest must be an ApplicationManifest or mapping")
-    return dict(manifest)
+    raw = dict(manifest)
+    try:
+        encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        validated = ApplicationManifest.model_validate_json(encoded)
+    except (TypeError, ValueError, ValidationError):
+        # Invalid input remains raw so schema evidence names the original fields
+        # and rule evaluators never receive coerced values or trusted defaults.
+        return raw
+    return validated.model_dump(mode="json")
 
 
 def _non_empty_string(value: object) -> bool:

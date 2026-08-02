@@ -12,6 +12,8 @@ from .settings import PROJECT_ROOT, ProjectSettings
 from .training import (
     TRAINING_MANIFEST_NAME,
     ValidatedTrainingSnapshot,
+    capture_execution_contract,
+    execution_contract_sha256,
     recheck_training_snapshot,
     shared_adapter_lock,
 )
@@ -90,6 +92,17 @@ def log_evaluation(
     import mlflow
     import pandas as pd
 
+    evaluation_execution_contract = capture_execution_contract()
+    evaluation_execution_contract_sha256 = execution_contract_sha256(
+        evaluation_execution_contract
+    )
+    if (
+        report.get("evaluation_execution_contract_sha256")
+        != evaluation_execution_contract_sha256
+    ):
+        raise ValueError(
+            "evaluation report does not match the current source/runtime contract"
+        )
     if role == "change":
         if training_snapshot is None:
             raise ValueError("change tracking requires a validated training snapshot")
@@ -99,6 +112,10 @@ def log_evaluation(
             raise ValueError(
                 "change report and validated training snapshot lineage differ"
             )
+        if report.get("training_execution_contract_sha256") != (
+            training_snapshot.manifest.execution_contract_sha256
+        ):
+            raise ValueError("change report and training source/runtime lineage differ")
         recheck_training_snapshot(training_snapshot)
     elif training_snapshot is not None:
         raise ValueError("only change tracking accepts training evidence")
@@ -132,6 +149,14 @@ def log_evaluation(
         if role == "change":
             tags["change_id"] = "bitext-structured-output-lora-v1"
         mlflow.set_tags(tags)
+        mlflow.log_param(
+            "evaluation_execution_contract_sha256",
+            evaluation_execution_contract_sha256,
+        )
+        mlflow.log_dict(
+            evaluation_execution_contract.model_dump(mode="json"),
+            "runtime/evaluation-execution-contract.json",
+        )
         if model_based:
             mlflow.log_params(
                 {
@@ -163,7 +188,20 @@ def log_evaluation(
                             validated_manifest.effective_config_sha256
                         ),
                         "training_manifest_sha256": (training_snapshot.manifest_sha256),
+                        "training_source_files_sha256": (
+                            validated_manifest.execution_contract.source_files_sha256
+                        ),
+                        "training_runtime_packages_sha256": (
+                            validated_manifest.execution_contract.runtime_packages_sha256
+                        ),
+                        "training_execution_contract_sha256": (
+                            validated_manifest.execution_contract_sha256
+                        ),
                     }
+                )
+                mlflow.log_dict(
+                    validated_manifest.execution_contract.model_dump(mode="json"),
+                    "change/training-execution-contract.json",
                 )
                 mlflow.log_artifact(str(adapter), artifact_path="change")
                 mlflow.log_artifact(str(adapter_config), artifact_path="change")
@@ -177,4 +215,8 @@ def log_evaluation(
         mlflow.log_artifact(str(prediction_path), artifact_path="evaluation")
         if training_snapshot is not None:
             recheck_training_snapshot(training_snapshot)
+        if capture_execution_contract() != evaluation_execution_contract:
+            raise RuntimeError(
+                "evaluation source code or runtime package set changed while tracking"
+            )
         return run.info.run_id

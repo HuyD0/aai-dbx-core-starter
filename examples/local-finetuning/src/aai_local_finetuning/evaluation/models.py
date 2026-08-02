@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictEvidenceModel(BaseModel):
@@ -157,7 +157,18 @@ class EvaluationReport(StrictEvidenceModel):
     evaluation_fingerprint: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
     )
+    evaluation_execution_contract_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     training_manifest_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    training_execution_contract_sha256: str | None = Field(
         default=None,
         min_length=64,
         max_length=64,
@@ -171,6 +182,17 @@ class EvaluationReport(StrictEvidenceModel):
     by_flag: dict[str, SliceMetrics]
     by_difficulty: dict[str, SliceMetrics]
     error_analysis: ErrorAnalysis
+
+    @model_validator(mode="after")
+    def _require_complete_training_lineage(self) -> EvaluationReport:
+        if (self.training_manifest_sha256 is None) != (
+            self.training_execution_contract_sha256 is None
+        ):
+            raise ValueError(
+                "training manifest and execution-contract hashes must be "
+                "recorded together"
+            )
+        return self
 
     def flat_metrics(self) -> dict[str, float]:
         """Return stable scalar names for trackers without importing MLflow."""

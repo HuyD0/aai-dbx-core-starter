@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ..training import capture_execution_contract, execution_contract_sha256
 from .models import (
     ClassificationMetrics,
     DistributionSummary,
@@ -72,6 +73,7 @@ class Evaluator:
         records: Sequence[EvaluationRecord],
         predictions: Sequence[Prediction],
     ) -> EvaluationReport:
+        execution_contract = capture_execution_contract()
         if not records:
             raise ValueError("records must not be empty")
         ordered_predictions = _align_predictions(records, predictions)
@@ -89,9 +91,16 @@ class Evaluator:
         )
         classification = _classification_metrics(scored, supported_intents)
         output_quality = _output_quality_metrics(scored)
+        if capture_execution_contract() != execution_contract:
+            raise RuntimeError(
+                "evaluation source code or runtime package set changed while scoring"
+            )
         return EvaluationReport(
             total_examples=len(scored),
             evaluation_fingerprint=_evaluation_fingerprint(records),
+            evaluation_execution_contract_sha256=(
+                execution_contract_sha256(execution_contract)
+            ),
             supported_intents=supported_intents,
             classification=classification,
             output_quality=output_quality,

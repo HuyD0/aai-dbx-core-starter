@@ -7,7 +7,11 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .duplicates import find_near_text_pairs, text_similarity
+from .duplicates import (
+    DEFAULT_MAX_LENGTH_FALLBACK_CANDIDATES,
+    find_near_text_pairs,
+    text_similarity,
+)
 from .normalization import canonical_text, inferred_template
 from .schemas import (
     ChatExample,
@@ -51,6 +55,7 @@ def check_split_leakage(
     prompt_tuning: Sequence[ChatExample] = (),
     near_threshold: float = 0.9,
     max_findings: int = 1_000,
+    max_length_fallback_candidates: int = (DEFAULT_MAX_LENGTH_FALLBACK_CANDIDATES),
 ) -> LeakageReport:
     """Check exact/template/near, group, target, and evaluation-set leakage."""
 
@@ -75,6 +80,7 @@ def check_split_leakage(
                 normalized_splits[right_name],
                 near_threshold,
                 collector,
+                max_length_fallback_candidates,
             )
 
     frozen_test = normalized_splits.get("test", ())
@@ -134,6 +140,7 @@ def check_split_files(
     few_shot_path: str | Path | None = None,
     prompt_tuning_path: str | Path | None = None,
     near_threshold: float = 0.9,
+    max_length_fallback_candidates: int = (DEFAULT_MAX_LENGTH_FALLBACK_CANDIDATES),
 ) -> LeakageReport:
     """Load the standard local filenames and run all leakage checks."""
 
@@ -150,6 +157,7 @@ def check_split_files(
         few_shot=few_shot,
         prompt_tuning=prompt_tuning,
         near_threshold=near_threshold,
+        max_length_fallback_candidates=max_length_fallback_candidates,
     )
 
 
@@ -160,6 +168,7 @@ def _check_split_pair(
     right: tuple[ChatExample, ...],
     near_threshold: float,
     collector: _FindingCollector,
+    max_length_fallback_candidates: int,
 ) -> None:
     _check_key_overlap(
         left_name,
@@ -209,6 +218,7 @@ def _check_split_pair(
         texts,
         threshold=near_threshold,
         excluded_group_keys=templates,
+        max_length_fallback_candidates=max_length_fallback_candidates,
     ):
         if pair.left_index < len(left) <= pair.right_index:
             left_example = combined[pair.left_index]

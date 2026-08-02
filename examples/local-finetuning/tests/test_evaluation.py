@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from aai_local_finetuning import training
 from aai_local_finetuning.evaluation import (
     BaselineEvaluation,
     EvaluationDataError,
@@ -27,12 +29,33 @@ from aai_local_finetuning.evaluation import (
     write_records_jsonl,
     write_report_json,
 )
+from aai_local_finetuning.evaluation import metrics as evaluation_metrics
+from aai_local_finetuning.evaluation import promotion as promotion_module
 
 
 def test_default_promotion_contract_requires_a_minimum_useful_gain():
     thresholds = PromotionThresholds()
 
     assert thresholds.minimum_macro_f1_gain == 0.01
+
+
+@pytest.mark.parametrize("mutation", ("source", "package"))
+def test_evaluator_rejects_source_or_package_change_while_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    record = _record("one", "forgot password", "recover_password", "account")
+    original = training.capture_execution_contract()
+    changed = _mutated_execution_contract(original, mutation)
+    contracts = iter((original, changed))
+    monkeypatch.setattr(
+        evaluation_metrics,
+        "capture_execution_contract",
+        lambda: next(contracts),
+    )
+
+    with pytest.raises(RuntimeError, match="changed while scoring"):
+        evaluate_predictions([record], _perfect_predictions([record]))
 
 
 def _record(
@@ -84,6 +107,44 @@ def _prediction(
 
 def _perfect_predictions(records: list[EvaluationRecord]) -> tuple[Prediction, ...]:
     return tuple(_prediction(record, record.target) for record in records)
+
+
+def _mutated_execution_contract(
+    contract: training.ExecutionContract,
+    mutation: str,
+) -> training.ExecutionContract:
+    source_files = contract.source_files
+    packages = contract.runtime_packages
+    if mutation == "source":
+        first = source_files[0]
+        changed_digest = "0" * 64 if first.sha256 != "0" * 64 else "1" * 64
+        source_files = (
+            first.model_copy(update={"sha256": changed_digest}),
+            *source_files[1:],
+        )
+    else:
+        packages = tuple(
+            sorted(
+                (
+                    *packages,
+                    training.RuntimePackageEvidence(
+                        name="zz-runtime-mutation-test",
+                        version="1.0.0",
+                    ),
+                ),
+                key=lambda package: package.name,
+            )
+        )
+    return training.ExecutionContract(
+        python_version=contract.python_version,
+        python_implementation=contract.python_implementation,
+        operating_system=contract.operating_system,
+        machine=contract.machine,
+        source_files=source_files,
+        source_files_sha256=training._evidence_sequence_sha256(source_files),
+        runtime_packages=packages,
+        runtime_packages_sha256=training._evidence_sequence_sha256(packages),
+    )
 
 
 def test_support_output_is_strict_and_forbids_extras() -> None:
@@ -311,14 +372,21 @@ def test_evaluator_tracks_structure_policy_performance_and_slices(
     assert json.loads(report_path.read_text(encoding="utf-8"))["total_examples"] == 4
 
 
-def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> None:
+def test_promotion_requires_best_meaningful_baseline_and_absolute_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     records = [
         _record("one", "forgot password", "recover_password", "account"),
         _record("two", "cash at atm", "cash_withdrawal", "cash"),
     ]
     perfect_report = evaluate_predictions(records, _perfect_predictions(records))
     lined_perfect_report = perfect_report.model_copy(
-        update={"training_manifest_sha256": "a" * 64}
+        update={
+            "training_manifest_sha256": "a" * 64,
+            "training_execution_contract_sha256": (
+                perfect_report.evaluation_execution_contract_sha256
+            ),
+        }
     )
     weak_predictions = (
         _prediction(records[0], records[0].target),
@@ -329,10 +397,24 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
         BaselineEvaluation(name="majority", report=perfect_report, meaningful=False),
         BaselineEvaluation(name="keyword-rule", report=weak_report, meaningful=True),
     ]
+    monkeypatch.setattr(
+        "aai_local_finetuning.evaluation.promotion.recheck_training_snapshot",
+        lambda snapshot: snapshot,
+    )
+
+    def snapshot(digest: str):
+        return SimpleNamespace(
+            manifest_sha256=digest,
+            manifest=SimpleNamespace(
+                execution_contract_sha256=(
+                    perfect_report.evaluation_execution_contract_sha256
+                )
+            ),
+        )
 
     adopted = decide_lora_promotion(
         change_name="support-lora-v1",
-        training_manifest_sha256="a" * 64,
+        training_snapshot=snapshot("a" * 64),
         change_report=lined_perfect_report,
         baselines=baselines,
         thresholds=PromotionThresholds(
@@ -346,14 +428,23 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
     assert adopted.baseline.name == "keyword-rule"
     assert adopted.change.method == "lora_fine_tune"
     assert adopted.change.training_manifest_sha256 == "a" * 64
+    assert (
+        adopted.change.evaluation_execution_contract_sha256
+        == perfect_report.evaluation_execution_contract_sha256
+    )
     assert adopted.result.beats_strongest_meaningful_baseline is True
 
     lined_tied_report = perfect_report.model_copy(
-        update={"training_manifest_sha256": "b" * 64}
+        update={
+            "training_manifest_sha256": "b" * 64,
+            "training_execution_contract_sha256": (
+                perfect_report.evaluation_execution_contract_sha256
+            ),
+        }
     )
     tied = decide_lora_promotion(
         change_name="support-lora-v2",
-        training_manifest_sha256="b" * 64,
+        training_snapshot=snapshot("b" * 64),
         change_report=lined_tied_report,
         baselines=[
             BaselineEvaluation(
@@ -377,11 +468,16 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
     )
     unsafe_report = evaluate_predictions(records, unsafe_predictions)
     lined_unsafe_report = unsafe_report.model_copy(
-        update={"training_manifest_sha256": "c" * 64}
+        update={
+            "training_manifest_sha256": "c" * 64,
+            "training_execution_contract_sha256": (
+                unsafe_report.evaluation_execution_contract_sha256
+            ),
+        }
     )
     rejected = decide_lora_promotion(
         change_name="support-lora-unsafe",
-        training_manifest_sha256="c" * 64,
+        training_snapshot=snapshot("c" * 64),
         change_report=lined_unsafe_report,
         baselines=baselines,
         thresholds=PromotionThresholds(minimum_policy_compliance_rate=1.0),
@@ -390,11 +486,16 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
     assert rejected.result.passes_policy_threshold is False
 
     lined_inconclusive_report = perfect_report.model_copy(
-        update={"training_manifest_sha256": "d" * 64}
+        update={
+            "training_manifest_sha256": "d" * 64,
+            "training_execution_contract_sha256": (
+                perfect_report.evaluation_execution_contract_sha256
+            ),
+        }
     )
     inconclusive = decide_lora_promotion(
         change_name="support-lora-no-baseline",
-        training_manifest_sha256="d" * 64,
+        training_snapshot=snapshot("d" * 64),
         change_report=lined_inconclusive_report,
         baselines=[
             BaselineEvaluation(name="majority", report=weak_report, meaningful=False)
@@ -406,9 +507,53 @@ def test_promotion_requires_best_meaningful_baseline_and_absolute_gates() -> Non
     with pytest.raises(ValueError, match="must carry the supplied"):
         decide_lora_promotion(
             change_name="support-lora-mismatched-lineage",
-            training_manifest_sha256="e" * 64,
+            training_snapshot=snapshot("e" * 64),
             change_report=lined_perfect_report,
             baselines=baselines,
+        )
+
+
+@pytest.mark.parametrize("mutation", ("source", "package"))
+def test_promotion_rejects_reports_after_source_or_package_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    records = [
+        _record("one", "forgot password", "recover_password", "account"),
+        _record("two", "cash at atm", "cash_withdrawal", "cash"),
+    ]
+    report = evaluate_predictions(records, _perfect_predictions(records))
+    training_digest = report.evaluation_execution_contract_sha256
+    change_report = report.model_copy(
+        update={
+            "training_manifest_sha256": "a" * 64,
+            "training_execution_contract_sha256": training_digest,
+        }
+    )
+    snapshot = SimpleNamespace(
+        manifest_sha256="a" * 64,
+        manifest=SimpleNamespace(execution_contract_sha256=training_digest),
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "recheck_training_snapshot",
+        lambda value: value,
+    )
+    changed = _mutated_execution_contract(
+        training.capture_execution_contract(), mutation
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "capture_execution_contract",
+        lambda: changed,
+    )
+
+    with pytest.raises(ValueError, match="current evaluation source/runtime"):
+        decide_lora_promotion(
+            change_name="support-lora-drifted",
+            training_snapshot=snapshot,  # type: ignore[arg-type]
+            change_report=change_report,
+            baselines=[BaselineEvaluation(name="strong", report=report)],
         )
 
 

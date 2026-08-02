@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import Field, ValidationError, model_validator
 
+from ..training import capture_execution_contract, execution_contract_sha256
 from .schemas import (
     CapstoneRecord,
     CheckOutcome,
@@ -105,7 +106,12 @@ class CapstoneErrorAnalysis(StrictFrozenModel):
 class CapstoneEvaluationReport(StrictFrozenModel):
     total_examples: int = Field(ge=1)
     evaluation_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evaluation_execution_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     training_manifest_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    training_execution_contract_sha256: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
@@ -113,6 +119,17 @@ class CapstoneEvaluationReport(StrictFrozenModel):
     by_slice: dict[str, CapstoneScoreMetrics]
     performance: CapstonePerformance
     error_analysis: CapstoneErrorAnalysis
+
+    @model_validator(mode="after")
+    def _require_complete_training_lineage(self) -> CapstoneEvaluationReport:
+        if (self.training_manifest_sha256 is None) != (
+            self.training_execution_contract_sha256 is None
+        ):
+            raise ValueError(
+                "training manifest and execution-contract hashes must be "
+                "recorded together"
+            )
+        return self
 
     def flat_metrics(self) -> dict[str, float]:
         return {
@@ -311,6 +328,7 @@ def evaluate_capstone_predictions(
     *,
     error_limit: int = 20,
 ) -> CapstoneEvaluationReport:
+    execution_contract = capture_execution_contract()
     if not records:
         raise ValueError("records must not be empty")
     if error_limit < 0:
@@ -326,9 +344,16 @@ def evaluate_capstone_predictions(
         for slice_name in item.record.metadata.slices:
             by_slice_items[slice_name].append(item)
     errors = [item for item in scored if item.issues]
+    if capture_execution_contract() != execution_contract:
+        raise RuntimeError(
+            "evaluation source code or runtime package set changed while scoring"
+        )
     return CapstoneEvaluationReport(
         total_examples=len(scored),
         evaluation_fingerprint=_fingerprint(records),
+        evaluation_execution_contract_sha256=(
+            execution_contract_sha256(execution_contract)
+        ),
         aggregate=aggregate,
         by_slice={
             name: _metrics(tuple(items))

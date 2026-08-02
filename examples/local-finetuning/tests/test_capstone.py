@@ -70,6 +70,57 @@ def test_ready_manifest_passes_all_static_checks() -> None:
     assert all(check.provenance.policy_version == "1.0.0" for check in review.checks)
 
 
+def test_schema_valid_mapping_and_model_apply_identical_optional_defaults() -> None:
+    raw = _ready_manifest()
+    raw.pop("external_registry_lookup_required")
+    raw.pop("human_risk_judgment_required")
+    validated = ApplicationManifest.model_validate_json(json.dumps(raw))
+
+    engine = ReadinessPolicyEngine()
+    mapping_review = engine.review(raw)
+    model_review = engine.review(validated)
+
+    assert mapping_review == model_review
+    assert mapping_review.status is ReadinessStatus.READY
+    assert _check(mapping_review, "external_registry_verification").result is (
+        CheckOutcome.PASS
+    )
+    assert _check(mapping_review, "human_risk_review").result is CheckOutcome.PASS
+    assert "external_registry_lookup_required" not in raw
+    assert "human_risk_judgment_required" not in raw
+
+
+@pytest.mark.parametrize(
+    ("mutation", "schema_evidence"),
+    [
+        ({"registry_verified": True}, "registry_verified"),
+        ({"cost_tags_present": "true"}, "cost_tags_present"),
+        ({"declared_controls": {"change-review"}}, "valid JSON"),
+    ],
+)
+def test_malformed_mappings_keep_raw_failure_and_review_evidence(
+    mutation: dict[str, object],
+    schema_evidence: str,
+) -> None:
+    raw = _ready_manifest()
+    raw.pop("external_registry_lookup_required")
+    raw.pop("human_risk_judgment_required")
+    raw.update(mutation)
+
+    review = ReadinessPolicyEngine().review(raw)
+
+    schema_check = _check(review, "manifest_schema")
+    assert review.status is ReadinessStatus.NOT_READY
+    assert schema_check.result is CheckOutcome.FAIL
+    assert schema_evidence in schema_check.evidence
+    assert _check(review, "external_registry_verification").result is (
+        CheckOutcome.REVIEW
+    )
+    assert _check(review, "human_risk_review").result is CheckOutcome.REVIEW
+    if "cost_tags_present" in mutation:
+        assert _check(review, "cost_tags").result is CheckOutcome.FAIL
+
+
 @pytest.mark.parametrize(
     ("mutation", "check_name", "severity"),
     [

@@ -19,7 +19,7 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     for name, content in (
         ("adapters.safetensors", b"weights"),
         ("adapter_config.json", b'{"rank":8}\n'),
-        ("training-manifest.json", b'{"schema_version":"2.0.0"}\n'),
+        ("training-manifest.json", b'{"schema_version":"3.0.0"}\n'),
     ):
         (adapter_dir / name).write_bytes(content)
     training_config = tmp_path / "configs" / "training" / "lora.yaml"
@@ -35,6 +35,16 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     unbound_evidence.write_text('{"training_manifest_sha256":"stale"}\n')
 
     digest = "a" * 64
+    training_contract_digest = "1" * 64
+    evaluation_contract_digest = "2" * 64
+    training_contract = SimpleNamespace(
+        source_files_sha256="3" * 64,
+        runtime_packages_sha256="4" * 64,
+        model_dump=lambda **_kwargs: {"schema_version": "1.0.0"},
+    )
+    evaluation_contract = SimpleNamespace(
+        model_dump=lambda **_kwargs: {"schema_version": "1.0.0"}
+    )
     snapshot = SimpleNamespace(
         adapter_path=adapter_dir,
         config_path=training_config,
@@ -44,6 +54,8 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
             adapter_config_sha256="c" * 64,
             source_config_sha256="d" * 64,
             effective_config_sha256="e" * 64,
+            execution_contract=training_contract,
+            execution_contract_sha256=training_contract_digest,
         ),
     )
     settings = SimpleNamespace(
@@ -58,6 +70,13 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     )
     fake_mlflow.set_tags = lambda _tags: None  # type: ignore[attr-defined]
     fake_mlflow.log_params = parameters.update  # type: ignore[attr-defined]
+    fake_mlflow.log_param = (  # type: ignore[attr-defined]
+        lambda name, value: parameters.__setitem__(name, value)
+    )
+    logged_dicts: list[str] = []
+    fake_mlflow.log_dict = (  # type: ignore[attr-defined]
+        lambda _payload, path: logged_dicts.append(path)
+    )
     fake_mlflow.log_input = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
     fake_mlflow.log_metrics = lambda _metrics: None  # type: ignore[attr-defined]
     fake_mlflow.log_artifact = (  # type: ignore[attr-defined]
@@ -77,6 +96,16 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
     monkeypatch.setattr(tracking, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(tracking, "configure_local_mlflow", lambda _settings: None)
+    monkeypatch.setattr(
+        tracking,
+        "capture_execution_contract",
+        lambda: evaluation_contract,
+    )
+    monkeypatch.setattr(
+        tracking,
+        "execution_contract_sha256",
+        lambda _contract: evaluation_contract_digest,
+    )
     monkeypatch.setattr(tracking, "recheck_training_snapshot", lambda _snapshot: None)
     monkeypatch.setattr(
         tracking,
@@ -90,7 +119,11 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
         role="change",
         method="lora-change",
         metrics={"macro_f1": 0.5},
-        report={"training_manifest_sha256": digest},
+        report={
+            "evaluation_execution_contract_sha256": evaluation_contract_digest,
+            "training_manifest_sha256": digest,
+            "training_execution_contract_sha256": training_contract_digest,
+        },
         records=({"example_id": "one"},),
         manifest_path=dataset_manifest,
         prediction_path=predictions,
@@ -107,4 +140,12 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     } <= set(artifacts)
     assert parameters["training_manifest_sha256"] == digest
     assert parameters["adapter_config_sha256"] == "c" * 64
+    assert parameters["evaluation_execution_contract_sha256"] == (
+        evaluation_contract_digest
+    )
+    assert parameters["training_execution_contract_sha256"] == (
+        training_contract_digest
+    )
+    assert "runtime/evaluation-execution-contract.json" in logged_dicts
+    assert "change/training-execution-contract.json" in logged_dicts
     assert not any(name == "latest.json" for name, _ in artifacts)

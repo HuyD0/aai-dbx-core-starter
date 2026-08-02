@@ -15,8 +15,11 @@ made after looking at frozen test failures.
 Run a short MLX-LM check, train the LoRA change, and evaluate all methods with
 the framework-neutral scorer. Treat the successful-training manifest as an
 immutable lineage handle: it binds the expected model, exact training files,
-effective configuration, and adapter outputs, and the same fingerprint must
-survive inference, tracking, and the decision. Required measures:
+effective configuration, adapter outputs, governed package/notebook source,
+interpreter/platform, and exact installed distribution versions. Every report
+also captures the evaluation-time execution contract. The preparation manifest,
+training contract, all comparable reports, current runtime, tracking record, and
+decision must agree; source or package drift fails closed. Required measures:
 
 - intent accuracy, macro precision/recall/F1, weighted F1, and per-intent F1;
 - category and escalation accuracy;

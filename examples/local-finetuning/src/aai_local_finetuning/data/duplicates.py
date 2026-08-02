@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -40,6 +41,12 @@ _STOPWORDS = frozenset(
     }
 )
 _MAX_INDEX_BUCKET = 64
+_MAX_CHARACTER_NGRAM = 4
+DEFAULT_MAX_LENGTH_FALLBACK_CANDIDATES = 768
+
+
+class NearDuplicateCandidateLimitError(RuntimeError):
+    """A recall-preserving exhaustive candidate audit exceeded its budget."""
 
 
 @dataclass(frozen=True)
@@ -69,7 +76,10 @@ class _UnionFind:
 
 
 def group_related_records(
-    records: tuple[CanonicalRecord, ...], *, near_threshold: float = 0.9
+    records: tuple[CanonicalRecord, ...],
+    *,
+    near_threshold: float = 0.9,
+    max_length_fallback_candidates: int = (DEFAULT_MAX_LENGTH_FALLBACK_CANDIDATES),
 ) -> GroupingResult:
     """Keep exact templates and conservative near duplicates in one split group."""
 
@@ -88,6 +98,7 @@ def group_related_records(
         texts,
         threshold=near_threshold,
         excluded_group_keys=template_ids,
+        max_length_fallback_candidates=max_length_fallback_candidates,
     )
     for pair in near_pairs:
         union_find.union(pair.left_index, pair.right_index)
@@ -204,30 +215,47 @@ def find_near_text_pairs(
     *,
     threshold: float = 0.9,
     excluded_group_keys: list[str] | None = None,
+    max_length_fallback_candidates: int = (DEFAULT_MAX_LENGTH_FALLBACK_CANDIDATES),
 ) -> tuple[TextSimilarityPair, ...]:
     """Find likely near duplicates with an indexed fast path.
 
-    Candidate generation combines rare-token indexing, SimHash bands, and stable
-    prefix/suffix buckets. Buckets over the candidate cap use exhaustive member
-    confirmation to preserve recall. Every candidate is confirmed with the public
-    lexical similarity function. Exact matches are returned; callers can exclude a
-    known exact/template group with ``excluded_group_keys``.
+    Candidate generation combines rare-token indexing, an exact global-prefix
+    filter for token-set Jaccard similarity, SimHash bands, stable edge buckets,
+    and a bounded character-block fallback for sequence-similar text. The
+    fallback fails closed instead of truncating when its explicit budget is
+    exceeded. Every candidate is confirmed with the public lexical similarity
+    function. Exact matches are returned; callers can exclude a known
+    exact/template group with ``excluded_group_keys``.
     """
+
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError("threshold must be in the interval (0, 1]")
+    if max_length_fallback_candidates < 1:
+        raise ValueError("max_length_fallback_candidates must be positive")
 
     normalized = [canonical_text(text) for text in texts]
     token_lists = [_tokens(text) for text in normalized]
     token_sets = [set(tokens) for tokens in token_lists]
+    character_counts = [Counter(text) for text in normalized]
     frequencies: Counter[str] = Counter()
     for tokens in token_sets:
         frequencies.update(tokens)
+    required_ngram_sizes = _required_ngram_sizes(
+        {len(text) for text in normalized if text},
+        threshold=threshold,
+    )
+    indexed_ngram_sizes = set(required_ngram_sizes.values())
 
     token_index: dict[str, list[int]] = defaultdict(list)
+    token_prefix_index: dict[str, list[int]] = defaultdict(list)
     band_index: dict[tuple[int, int], list[int]] = defaultdict(list)
     edge_index: dict[tuple[str, tuple[str, ...], int], list[int]] = defaultdict(list)
+    character_ngram_index: dict[tuple[int, str], list[int]] = defaultdict(list)
     pairs: list[TextSimilarityPair] = []
 
     for right_index, text in enumerate(normalized):
         tokens = token_lists[right_index]
+        right_token_set = token_sets[right_index]
         informative = [token for token in set(tokens) if token not in _STOPWORDS]
         if not informative:
             informative = list(set(tokens))
@@ -270,18 +298,64 @@ def find_near_text_pairs(
         # the length and quick-ratio checks below still discard impossible matches.
         candidates.update(overflow_candidates)
 
-        for left_index in sorted(candidates):
-            if excluded_group_keys is not None:
-                if excluded_group_keys[left_index] == excluded_group_keys[right_index]:
+        token_prefix = _token_set_prefix(
+            right_token_set,
+            frequencies=frequencies,
+            threshold=threshold,
+        )
+        for token in token_prefix:
+            for left_index in token_prefix_index[token]:
+                if _excluded_pair(
+                    left_index,
+                    right_index,
+                    excluded_group_keys=excluded_group_keys,
+                ):
                     continue
+                left_token_set = token_sets[left_index]
+                if not left_token_set or not right_token_set:
+                    continue
+                if _token_set_similarity(left_token_set, right_token_set) >= threshold:
+                    candidates.add(left_index)
+
+        candidates.update(
+            _sequence_similarity_fallback_candidates(
+                right_index=right_index,
+                normalized=normalized,
+                character_counts=character_counts,
+                character_ngram_index=character_ngram_index,
+                required_ngram_size=required_ngram_sizes.get(len(text)),
+                existing_candidates=candidates,
+                excluded_group_keys=excluded_group_keys,
+                threshold=threshold,
+                max_candidates=max_length_fallback_candidates,
+            )
+        )
+
+        for left_index in sorted(candidates):
+            if _excluded_pair(
+                left_index,
+                right_index,
+                excluded_group_keys=excluded_group_keys,
+            ):
+                continue
             left_length = len(normalized[left_index])
             right_length = len(text)
             if not left_length or not right_length:
                 continue
-            minimum_length_ratio = threshold / (2.0 - threshold)
-            if (
-                min(left_length, right_length) / max(left_length, right_length)
-                < minimum_length_ratio
+            left_token_set = token_sets[left_index]
+            token_score = _token_set_similarity(left_token_set, right_token_set)
+            if token_score < threshold and (
+                _maximum_sequence_similarity(left_length, right_length) < threshold
+            ):
+                continue
+            if token_score < threshold and (
+                _character_multiset_ratio(
+                    character_counts[left_index],
+                    character_counts[right_index],
+                    left_length=left_length,
+                    right_length=right_length,
+                )
+                < threshold
             ):
                 continue
             score = _confirmed_similarity(
@@ -302,16 +376,193 @@ def find_near_text_pairs(
 
         for token in selected:
             token_index[token].append(right_index)
+        for token in token_prefix:
+            token_prefix_index[token].append(right_index)
         for band in range(4):
             band_index[(band, (simhash >> (band * 16)) & 0xFFFF)].append(right_index)
         edge_index[("prefix", prefix, length_bucket)].append(right_index)
         edge_index[("suffix", suffix, length_bucket)].append(right_index)
+        for ngram_size in indexed_ngram_sizes:
+            for ngram in _character_ngrams(text, ngram_size):
+                character_ngram_index[(ngram_size, ngram)].append(right_index)
 
     return tuple(pairs)
 
 
 def _tokens(value: str) -> list[str]:
     return _WORD.findall(value)
+
+
+def _token_set_prefix(
+    tokens: set[str],
+    *,
+    frequencies: Counter[str],
+    threshold: float,
+) -> tuple[str, ...]:
+    """Return the global-order prefix required by Jaccard prefix filtering."""
+
+    if not tokens:
+        return ()
+    prefix_length = max(0, len(tokens) - math.ceil(threshold * len(tokens)) + 1)
+    ordered = sorted(
+        tokens,
+        key=lambda token: (frequencies[token], -len(token), token),
+    )
+    return tuple(ordered[:prefix_length])
+
+
+def _token_set_similarity(left: set[str], right: set[str]) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+
+def _excluded_pair(
+    left_index: int,
+    right_index: int,
+    *,
+    excluded_group_keys: list[str] | None,
+) -> bool:
+    return (
+        excluded_group_keys is not None
+        and excluded_group_keys[left_index] == excluded_group_keys[right_index]
+    )
+
+
+def _required_ngram_sizes(
+    lengths: set[int],
+    *,
+    threshold: float,
+) -> dict[int, int]:
+    """Return the weakest sound matching-block requirement per observed length."""
+
+    required: dict[int, int] = {}
+    ordered_lengths = sorted(lengths)
+    for right_length in ordered_lengths:
+        compatible_sizes = (
+            size
+            for left_length in ordered_lengths
+            if (
+                size := _required_matching_block_size(
+                    left_length,
+                    right_length,
+                    threshold=threshold,
+                )
+            )
+            is not None
+        )
+        minimum_size = min(compatible_sizes, default=None)
+        if minimum_size is not None:
+            required[right_length] = minimum_size
+    return required
+
+
+def _required_matching_block_size(
+    left_length: int,
+    right_length: int,
+    *,
+    threshold: float,
+) -> int | None:
+    """Return a shared n-gram size required by a SequenceMatcher hit.
+
+    A ratio at least ``threshold`` requires a minimum number of matched
+    characters. Every gap between matching blocks consumes at least one
+    unmatched character, which bounds the number of blocks and therefore the
+    size of the largest exact shared block.
+    """
+
+    if not left_length or not right_length:
+        return None
+    total_length = left_length + right_length
+    minimum_matches = max(1, math.ceil(threshold * total_length / 2.0))
+    while (
+        minimum_matches > 1
+        and (2.0 * (minimum_matches - 1)) / total_length >= threshold
+    ):
+        minimum_matches -= 1
+    while (2.0 * minimum_matches) / total_length < threshold:
+        minimum_matches += 1
+    if minimum_matches > min(left_length, right_length):
+        return None
+    maximum_unmatched = total_length - (2 * minimum_matches)
+    required_size = math.ceil(minimum_matches / (maximum_unmatched + 1))
+    return min(_MAX_CHARACTER_NGRAM, max(1, required_size))
+
+
+def _character_ngrams(text: str, size: int) -> tuple[str, ...]:
+    return tuple(
+        sorted({text[index : index + size] for index in range(len(text) - size + 1)})
+    )
+
+
+def _character_multiset_ratio(
+    left: Counter[str],
+    right: Counter[str],
+    *,
+    left_length: int,
+    right_length: int,
+) -> float:
+    matches = sum((left & right).values())
+    return (2.0 * matches) / (left_length + right_length)
+
+
+def _maximum_sequence_similarity(left_length: int, right_length: int) -> float:
+    return (2.0 * min(left_length, right_length)) / (left_length + right_length)
+
+
+def _sequence_similarity_fallback_candidates(
+    *,
+    right_index: int,
+    normalized: list[str],
+    character_counts: list[Counter[str]],
+    character_ngram_index: dict[tuple[int, str], list[int]],
+    required_ngram_size: int | None,
+    existing_candidates: set[int],
+    excluded_group_keys: list[str] | None,
+    threshold: float,
+    max_candidates: int,
+) -> tuple[int, ...]:
+    """Return all still-possible sequence candidates or fail closed."""
+
+    right_length = len(normalized[right_index])
+    if not right_length or required_ngram_size is None:
+        return ()
+    possible: set[int] = set()
+    for ngram in _character_ngrams(
+        normalized[right_index],
+        required_ngram_size,
+    ):
+        possible.update(character_ngram_index[(required_ngram_size, ngram)])
+
+    fallback: list[int] = []
+    for left_index in sorted(possible):
+        if left_index in existing_candidates or _excluded_pair(
+            left_index,
+            right_index,
+            excluded_group_keys=excluded_group_keys,
+        ):
+            continue
+        left_length = len(normalized[left_index])
+        if _maximum_sequence_similarity(left_length, right_length) < threshold:
+            continue
+        if (
+            _character_multiset_ratio(
+                character_counts[left_index],
+                character_counts[right_index],
+                left_length=left_length,
+                right_length=right_length,
+            )
+            < threshold
+        ):
+            continue
+        fallback.append(left_index)
+        if len(fallback) > max_candidates:
+            raise NearDuplicateCandidateLimitError(
+                "sequence-similarity near-duplicate audit exceeded "
+                f"max_length_fallback_candidates={max_candidates} at record "
+                f"index {right_index}; rerun with a larger explicit budget or "
+                "partition the audit without crossing split/group boundaries"
+            )
+    return tuple(sorted(fallback))
 
 
 def _confirmed_similarity(
@@ -321,13 +572,8 @@ def _confirmed_similarity(
     right_tokens: set[str],
     threshold: float,
 ) -> float:
-    union = left_tokens | right_tokens
-    token_score = len(left_tokens & right_tokens) / len(union) if union else 0.0
-    if token_score >= threshold:
-        return round(token_score, 6)
+    token_score = _token_set_similarity(left_tokens, right_tokens)
     matcher = SequenceMatcher(None, left, right, autojunk=False)
-    if matcher.quick_ratio() < threshold:
-        return round(token_score, 6)
     return round(max(token_score, matcher.ratio()), 6)
 
 

@@ -1635,11 +1635,15 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 overwrites the canonical `bitext-lora-v1` change. For the full configured
                 run, set `TRAINING_ITERATIONS = None` only after the smoke evidence looks
                 healthy and you have enough time and battery. Immediately before MLX-LM
-                starts, the cell rechecks the content-addressed preparation manifest. A
-                split that changed since preparation fails closed instead of becoming an
-                unrecorded training-data change. The run also pins the expected base-model
-                revision and every required model and dataset file—not merely paths from
-                the YAML. Training writes into a fresh staging directory; only a zero-exit
+                starts, the cell rechecks both the flight-preparation manifest and the
+                content-addressed dataset manifest. The flight manifest binds the governed
+                `src/` package, canonical notebook renderer/pedagogy source, interpreter,
+                platform, and exact installed package versions. A source, package, or split
+                change after preparation therefore fails closed instead of becoming an
+                unrecorded experiment change. The training success manifest captures that
+                same execution contract plus the expected base-model revision and every
+                required model and dataset file—not merely paths from the YAML. Training
+                writes into a fresh staging directory; only a zero-exit
                 run with valid adapter outputs and durable evidence is published, with
                 `training-manifest.json` acting as the success token. An exclusive
                 per-adapter lock serializes training and publication, so two terminals
@@ -1650,6 +1654,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             code(
                 """
                 from aai_local_finetuning.data import require_valid_manifest
+                from aai_local_finetuning.offline import verify_flight_manifest
                 from aai_local_finetuning.training import run_lora
 
                 RUN_TRAINING = False
@@ -1658,6 +1663,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     PROJECT_ROOT / "artifacts" / "notebook" / "adapters" / "bitext-smoke"
                 )
                 if RUN_TRAINING:
+                    verify_flight_manifest(settings)
                     require_valid_manifest(
                         PROJECT_ROOT / "data" / "processed" / "bitext-v1"
                     )
@@ -1803,6 +1809,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     support_contract,
                 )
                 from aai_local_finetuning.modeling import LocalMLXPredictor
+                from aai_local_finetuning.offline import verify_flight_manifest
                 from aai_local_finetuning.settings import PROJECT_ROOT, load_settings
                 from aai_local_finetuning.training import (
                     TrainingManifestError,
@@ -1812,6 +1819,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 )
 
                 settings = load_settings()
+                verify_flight_manifest(settings)
                 splits = load_support_splits(settings)
                 allowed_intents, _ = support_contract(splits.train)
                 FULL_FROZEN_COUNT = len(splits.test)
@@ -1896,10 +1904,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 file alone is not training lineage: the success manifest must also match
                 the current adapter bytes, adapter configuration, full training YAML,
                 effective settings, expected base-model revision and files, and every
-                prepared training-data file. One shared adapter lock now covers validation,
-                prediction, scoring, report writes, and the exact manifest copy. Training
-                cannot replace the adapter during any part of that evidence chain. Missing
-                or stale evidence keeps the later decision inconclusive.
+                prepared training-data file. It also binds the training-time source,
+                interpreter/platform, and exact package set. Every baseline and change
+                report separately records the evaluation-time execution-contract hash.
+                One shared adapter lock now covers validation, prediction, scoring, report
+                writes, and the exact manifest copy. Training cannot replace the adapter
+                during any part of that evidence chain. Missing or stale evidence keeps
+                the later decision inconclusive.
                 """),
             code("""
                 evidence_dir = PROJECT_ROOT / "artifacts" / "notebook" / "evaluation"
@@ -1964,7 +1975,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 update={
                                     "training_manifest_sha256": (
                                         adapter_snapshot.manifest_sha256
-                                    )
+                                    ),
+                                    "training_execution_contract_sha256": (
+                                        adapter_snapshot.manifest.execution_contract_sha256
+                                    ),
                                 }
                             )
                             write_predictions_jsonl(
@@ -1996,7 +2010,17 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 display(pd.DataFrame(
                     [report_row(name, report) for name, report in reports.items()]
                 ))
-                sorted(path.name for path in evidence_dir.glob(f"{scope}-*"))
+                {
+                    "evaluation_execution_contract_sha256": sorted(
+                        {
+                            report.evaluation_execution_contract_sha256
+                            for report in reports.values()
+                        }
+                    ),
+                    "artifacts": sorted(
+                        path.name for path in evidence_dir.glob(f"{scope}-*")
+                    ),
+                }
                 """),
             md(
                 """
@@ -2111,6 +2135,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     decide_lora_promotion,
                 )
                 from aai_local_finetuning.learning import load_report, load_support_splits
+                from aai_local_finetuning.offline import verify_flight_manifest
                 from aai_local_finetuning.settings import (
                     PROJECT_ROOT,
                     load_settings,
@@ -2120,12 +2145,15 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 from aai_local_finetuning.training import (
                     TrainingManifest,
                     TrainingManifestError,
+                    capture_execution_contract,
+                    execution_contract_sha256,
                     recheck_training_snapshot,
                     require_valid_training_snapshot,
                     shared_adapter_lock,
                 )
 
                 settings = load_settings()
+                verify_flight_manifest(settings)
                 configure_local_mlflow(settings)
                 runs = mlflow.search_runs(order_by=["start_time DESC"], max_results=20)
                 runs[
@@ -2162,7 +2190,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "evaluation fingerprint",
                         "model revision",
                         "adapter and configuration hashes",
-                        "evaluator and policy versions",
+                        "training and evaluation source/runtime contracts",
                         "locked thresholds",
                         "reports and final decision",
                     ],
@@ -2176,8 +2204,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 Promotion requires all meaningful baselines and the LoRA change on the
                 complete frozen set with identical evaluation fingerprints. The LoRA
                 report must also carry the same training-manifest fingerprint that was
-                validated before inference and is still current now. Partial reports,
-                missing methods, or either kind of mismatch force `inconclusive`.
+                validated before inference and is still current now. Every report must
+                carry one evaluation-time source/runtime hash, all of those hashes must
+                agree, and that contract must still match the live interpreter, platform,
+                governed source, and exact package set. Partial reports, missing methods,
+                or any lineage mismatch force `inconclusive`.
                 """,
                 "what-to-notice",
             ),
@@ -2230,6 +2261,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 of silently replacing prior evidence. A shared adapter lock covers report
                 loading, lineage validation, the promotion calculation, and the MLflow
                 decision artifact commit, so one assessment cannot mix adapter generations.
+                The cell recaptures the execution contract immediately after logging; a
+                concurrent source or package change makes the run fail instead of leaving
+                a successful-looking decision envelope.
                 """,
                 "what-to-notice",
             ),
@@ -2241,6 +2275,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 loaded_reports = {}
                 fingerprints = set()
                 counts = set()
+                evaluation_contract_hashes = set()
                 complete_and_comparable = False
 
                 with shared_adapter_lock(settings.adapter_dir):
@@ -2259,6 +2294,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             lineage_path.read_text(encoding="utf-8")
                         )
                         current_manifest_sha256 = current_snapshot.manifest_sha256
+                        current_execution_contract = capture_execution_contract()
+                        current_execution_sha256 = execution_contract_sha256(
+                            current_execution_contract
+                        )
                         lineage_matches = (
                             recorded_manifest == current_manifest
                             and sha256_file(lineage_path) == current_manifest_sha256
@@ -2277,13 +2316,23 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 report.total_examples
                                 for report in loaded_reports.values()
                             }
+                            evaluation_contract_hashes = {
+                                report.evaluation_execution_contract_sha256
+                                for report in loaded_reports.values()
+                            }
                             complete_and_comparable = (
                                 len(fingerprints) == 1
                                 and counts == {len(splits.test)}
+                                and evaluation_contract_hashes
+                                == {current_execution_sha256}
                                 and loaded_reports[
                                     "lora-change"
                                 ].training_manifest_sha256
                                 == current_manifest_sha256
+                                and loaded_reports[
+                                    "lora-change"
+                                ].training_execution_contract_sha256
+                                == current_manifest.execution_contract_sha256
                             )
                     except (OSError, ValueError, TrainingManifestError) as error:
                         report_status["lora-training-lineage"] = False
@@ -2293,7 +2342,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         recheck_training_snapshot(current_snapshot)
                         assessment = decide_lora_promotion(
                             change_name="bitext-structured-output-lora-v1",
-                            training_manifest_sha256=current_manifest_sha256,
+                            training_snapshot=current_snapshot,
                             change_report=loaded_reports["lora-change"],
                             baselines=[
                                 BaselineEvaluation(
@@ -2313,6 +2362,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 "all six methods must be scored on the complete frozen set",
                                 "report counts and evaluation fingerprints must match",
                                 "the LoRA report must match the current success manifest",
+                                "all reports must match the current source/runtime contract",
                             ],
                             "available_reports": report_status,
                             "lineage_error": lineage_error,
@@ -2320,6 +2370,17 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                     if current_snapshot is not None:
                         recheck_training_snapshot(current_snapshot)
+                    decision_execution_contract = capture_execution_contract()
+                    decision_execution_sha256 = execution_contract_sha256(
+                        decision_execution_contract
+                    )
+                    if (
+                        complete_and_comparable
+                        and decision_execution_contract != current_execution_contract
+                    ):
+                        raise RuntimeError(
+                            "source/runtime changed before decision tracking"
+                        )
                     with mlflow.start_run(
                         run_name="notebook-promotion-assessment"
                     ) as run:
@@ -2339,6 +2400,14 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             }
                         )
                         mlflow.log_dict(assessment, "decision/assessment.json")
+                        mlflow.log_param(
+                            "evaluation_execution_contract_sha256",
+                            decision_execution_sha256,
+                        )
+                        mlflow.log_dict(
+                            decision_execution_contract.model_dump(mode="json"),
+                            "runtime/evaluation-execution-contract.json",
+                        )
                         if complete_and_comparable:
                             mlflow.log_param(
                                 "evaluation_fingerprint",
@@ -2348,10 +2417,30 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 "training_manifest_sha256",
                                 current_manifest_sha256,
                             )
+                            mlflow.log_param(
+                                "training_execution_contract_sha256",
+                                current_manifest.execution_contract_sha256,
+                            )
+                            mlflow.log_dict(
+                                current_manifest.execution_contract.model_dump(
+                                    mode="json"
+                                ),
+                                "change/training-execution-contract.json",
+                            )
                             for name, value in loaded_reports[
                                 "lora-change"
                             ].flat_metrics().items():
                                 mlflow.log_metric(f"change.{name}", value)
+                        if (
+                            capture_execution_contract()
+                            != decision_execution_contract
+                        ):
+                            raise RuntimeError(
+                                "source/runtime changed while decision evidence "
+                                "was being committed"
+                            )
+                        if current_snapshot is not None:
+                            recheck_training_snapshot(current_snapshot)
                         decision_run_id = run.info.run_id
                     if current_snapshot is not None:
                         recheck_training_snapshot(current_snapshot)
@@ -2657,9 +2746,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     load_capstone_records,
                 )
                 from aai_local_finetuning.modeling import LocalMLXPredictor
+                from aai_local_finetuning.offline import verify_flight_manifest
                 from aai_local_finetuning.settings import PROJECT_ROOT, load_settings
 
                 settings = load_settings()
+                verify_flight_manifest(settings)
                 source_dir = PROJECT_ROOT / "data" / "processed" / "capstone-readiness-v1"
                 validation_records = load_capstone_records(
                     source_dir / "validation.jsonl"
@@ -2792,9 +2883,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 Keep this disabled for Run All. When enabled it writes a notebook-specific
                 adapter and leaves the canonical capstone change untouched. Its success
-                evidence binds the expected base model and exact capstone training files;
-                a smoke adapter cannot qualify as the canonical change. Falling loss still
-                does not beat the deterministic ceiling.
+                evidence binds the expected base model, exact capstone training files,
+                governed source, interpreter/platform, and exact package set; a smoke
+                adapter cannot qualify as the canonical change. Falling loss still does
+                not beat the deterministic ceiling.
                 """,
                 "exercise",
             ),
@@ -2804,6 +2896,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 RUN_CAPSTONE_TRAINING = False
                 if RUN_CAPSTONE_TRAINING:
+                    verify_flight_manifest(settings)
                     capstone_training = run_lora(
                         iterations=10,
                         config_path=(
@@ -2839,6 +2932,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             ),
             code(
                 """
+                from aai_local_finetuning.training import (
+                    capture_execution_contract,
+                    execution_contract_sha256,
+                )
+
+                verify_flight_manifest(settings)
                 test_records = load_capstone_records(source_dir / "test.jsonl")
                 deterministic_report = evaluate_capstone_predictions(
                     test_records,
@@ -2878,6 +2977,27 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         tuple(model_predictions),
                     )
 
+                current_evaluation_contract_sha256 = execution_contract_sha256(
+                    capture_execution_contract()
+                )
+                report_execution_contracts = {
+                    deterministic_report.evaluation_execution_contract_sha256,
+                    *(
+                        [
+                            model_frozen_report.evaluation_execution_contract_sha256
+                        ]
+                        if model_frozen_report is not None
+                        else []
+                    ),
+                }
+                evaluation_lineage_current = report_execution_contracts == {
+                    current_evaluation_contract_sha256
+                }
+                if not evaluation_lineage_current:
+                    raise RuntimeError(
+                        "capstone reports do not match the current source/runtime contract"
+                    )
+
                 frozen_comparison = {
                     "records": len(test_records),
                     "deterministic_policy": (
@@ -2888,7 +3008,13 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         if model_frozen_report is not None
                         else "not run; comparative model evidence is absent"
                     ),
-                    "comparison_complete": model_frozen_report is not None,
+                    "evaluation_execution_contract_sha256": (
+                        current_evaluation_contract_sha256
+                    ),
+                    "comparison_complete": (
+                        model_frozen_report is not None
+                        and evaluation_lineage_current
+                    ),
                 }
                 frozen_comparison
                 """,
@@ -2936,6 +3062,16 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         "evidence": "groundedness, policy, latency, and fallback tests",
                     },
                 ]
+                verify_flight_manifest(settings)
+                if (
+                    execution_contract_sha256(capture_execution_contract())
+                    != frozen_comparison[
+                        "evaluation_execution_contract_sha256"
+                    ]
+                ):
+                    raise RuntimeError(
+                        "source/runtime changed after the capstone evidence was written"
+                    )
                 architecture_decision
                 """,
                 "exercise",

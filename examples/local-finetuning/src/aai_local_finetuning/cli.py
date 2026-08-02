@@ -46,6 +46,7 @@ from .evaluation import (
     KeywordRuleBaseline,
     MajorityBaseline,
     Prediction,
+    PromotionAssessment,
     decide_lora_promotion,
     format_error_analysis,
     load_records_jsonl,
@@ -66,9 +67,12 @@ from .offline import (
 from .settings import PROJECT_ROOT, ProjectSettings, load_settings
 from .training import (
     TRAINING_MANIFEST_NAME,
+    ExecutionContract,
     TrainingManifestError,
     ValidatedTrainingSnapshot,
+    capture_execution_contract,
     exclusive_adapter_lock,
+    execution_contract_sha256,
     recheck_training_snapshot,
     require_valid_training_snapshot,
     run_lora,
@@ -142,6 +146,19 @@ def _require_prepared_split_integrity(processed_dir: Path) -> None:
         ) from error
 
 
+def _require_current_flight_preparation(settings: ProjectSettings) -> None:
+    """Fail promotion-capable work when plane-preparation evidence has drifted."""
+
+    try:
+        verify_flight_manifest(settings)
+    except (OfflineAssetError, OSError, ValueError) as error:
+        raise StudyCommandError(
+            "flight preparation evidence is missing, stale, or mismatched; "
+            "rerun `make prepare-flight` while online before training or evaluation:\n"
+            f"{error}"
+        ) from error
+
+
 def _require_trained_adapter(
     adapter_dir: Path,
     *,
@@ -185,6 +202,54 @@ def _write_evaluation(
     return prediction_path, report_path
 
 
+def _write_support_promotion(
+    path: Path,
+    assessment: PromotionAssessment,
+    training_snapshot: ValidatedTrainingSnapshot,
+) -> None:
+    """Commit a decision only while runtime and adapter evidence remain current."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(assessment.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    try:
+        execution_is_current = (
+            execution_contract_sha256(capture_execution_contract())
+            == assessment.change.evaluation_execution_contract_sha256
+        )
+        if not execution_is_current:
+            raise StudyCommandError(
+                "evaluation source code or runtime package set changed while "
+                "promotion evidence was being committed"
+            )
+        recheck_training_snapshot(training_snapshot)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _write_capstone_decision(
+    path: Path,
+    payload: dict[str, Any],
+    execution_contract: ExecutionContract,
+    training_snapshot: ValidatedTrainingSnapshot | None,
+) -> None:
+    """Commit capstone evidence only while runtime and adapter remain current."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    try:
+        if capture_execution_contract() != execution_contract:
+            raise StudyCommandError(
+                "evaluation source code or runtime package set changed while "
+                "capstone decision evidence was being committed"
+            )
+        if training_snapshot is not None:
+            recheck_training_snapshot(training_snapshot)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def _track_report(
     settings: ProjectSettings,
     *,
@@ -219,14 +284,19 @@ def _score_predictions(
     records: Sequence[EvaluationRecord],
     predictions: Sequence[Prediction],
     supported_intents: Sequence[str],
-    training_manifest_sha256: str | None = None,
+    training_snapshot: ValidatedTrainingSnapshot | None = None,
 ) -> EvaluationReport:
     report = Evaluator(supported_intents=supported_intents).evaluate(
         records, predictions
     )
-    if training_manifest_sha256 is not None:
+    if training_snapshot is not None:
         report = report.model_copy(
-            update={"training_manifest_sha256": training_manifest_sha256}
+            update={
+                "training_manifest_sha256": training_snapshot.manifest_sha256,
+                "training_execution_contract_sha256": (
+                    training_snapshot.manifest.execution_contract_sha256
+                ),
+            }
         )
     _write_evaluation(
         name=name,
@@ -732,6 +802,7 @@ def _cmd_baselines(args: argparse.Namespace, settings: ProjectSettings) -> None:
 
 def _cmd_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
     _require_prepared_split_integrity(settings.processed_dir)
+    _require_current_flight_preparation(settings)
     require_assets(settings)
     smoke_adapter = (
         settings.adapter_dir.with_name(f"{settings.adapter_dir.name}-smoke")
@@ -748,6 +819,7 @@ def _cmd_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
 
 def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
     _require_prepared_split_integrity(settings.processed_dir)
+    _require_current_flight_preparation(settings)
     require_assets(settings)
 
     requested = {"basic", "strong", "few-shot", "lora"}
@@ -839,7 +911,7 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
                 records=records,
                 predictions=predictions,
                 supported_intents=supported,
-                training_manifest_sha256=lora_snapshot.manifest_sha256,
+                training_snapshot=lora_snapshot,
             )
             reports["lora-change"] = lora_report
             if args.track:
@@ -876,14 +948,14 @@ def _cmd_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
             ]
             assessment = decide_lora_promotion(
                 change_name="bitext-lora-v1",
-                training_manifest_sha256=lora_snapshot.manifest_sha256,
+                training_snapshot=lora_snapshot,
                 change_report=lora_report,
                 baselines=baselines,
             )
-            promotion_path.parent.mkdir(parents=True, exist_ok=True)
-            promotion_path.write_text(
-                assessment.model_dump_json(indent=2) + "\n",
-                encoding="utf-8",
+            _write_support_promotion(
+                promotion_path,
+                assessment,
+                lora_snapshot,
             )
             print(f"Decision: {assessment.decision.value}")
         elif lora_report is not None:
@@ -898,6 +970,7 @@ def _cmd_capstone(_args: argparse.Namespace, _settings: ProjectSettings) -> None
 
 
 def _cmd_capstone_train(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _require_current_flight_preparation(settings)
     require_assets(settings)
     _generate_capstone()
     smoke_adapter = (
@@ -917,6 +990,7 @@ def _cmd_capstone_train(args: argparse.Namespace, settings: ProjectSettings) -> 
 
 
 def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) -> None:
+    _require_current_flight_preparation(settings)
     require_assets(settings)
     if args.limit is not None and args.limit < 1:
         raise StudyCommandError("--limit must be positive")
@@ -959,12 +1033,17 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
         name: str,
         predictions: Sequence[CapstonePrediction],
         *,
-        training_manifest_sha256: str | None = None,
+        training_snapshot: ValidatedTrainingSnapshot | None = None,
     ) -> CapstoneEvaluationReport:
         report = evaluate_capstone_predictions(records, predictions)
-        if training_manifest_sha256 is not None:
+        if training_snapshot is not None:
             report = report.model_copy(
-                update={"training_manifest_sha256": training_manifest_sha256}
+                update={
+                    "training_manifest_sha256": training_snapshot.manifest_sha256,
+                    "training_execution_contract_sha256": (
+                        training_snapshot.manifest.execution_contract_sha256
+                    ),
+                }
             )
         _write_capstone_evaluation(name, records, predictions, report)
         reports[name] = report
@@ -1040,7 +1119,7 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             lora_report = score(
                 "capstone-lora-change",
                 lora_predictions,
-                training_manifest_sha256=lora_snapshot.manifest_sha256,
+                training_snapshot=lora_snapshot,
             )
 
         required_baselines = {"basic", "strong", "few-shot"}
@@ -1050,8 +1129,29 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             and required_baselines <= requested
             and len(records) == 150
         )
+        decision_execution_contract = capture_execution_contract()
+        decision_execution_contract_sha256 = execution_contract_sha256(
+            decision_execution_contract
+        )
         if complete and lora_report is not None and lora_snapshot is not None:
             recheck_training_snapshot(lora_snapshot)
+            if any(
+                report.evaluation_execution_contract_sha256
+                != decision_execution_contract_sha256
+                for report in reports.values()
+            ):
+                raise StudyCommandError(
+                    "capstone reports do not match the current evaluation "
+                    "source/runtime contract"
+                )
+            if (
+                lora_report.training_execution_contract_sha256
+                != lora_snapshot.manifest.execution_contract_sha256
+            ):
+                raise StudyCommandError(
+                    "capstone LoRA report does not match the current training "
+                    "source/runtime contract"
+                )
             strongest_name = max(
                 required_baselines,
                 key=lambda name: (
@@ -1083,11 +1183,20 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                 "baseline": {
                     "name": strongest_name,
                     "exact_review_rate": baseline_score,
+                    "evaluation_execution_contract_sha256": (
+                        decision_execution_contract_sha256
+                    ),
                 },
                 "change": {
                     "name": "capstone-lora-v1",
                     "exact_review_rate": change_score,
                     "training_manifest_sha256": lora_snapshot.manifest_sha256,
+                    "training_execution_contract_sha256": (
+                        lora_snapshot.manifest.execution_contract_sha256
+                    ),
+                    "evaluation_execution_contract_sha256": (
+                        decision_execution_contract_sha256
+                    ),
                 },
                 "result": {"passed_absolute_gates": passed_gates, "reason": reason},
                 "decision": decision,
@@ -1102,6 +1211,14 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
                         if lora_snapshot is not None
                         else None
                     ),
+                    "training_execution_contract_sha256": (
+                        lora_snapshot.manifest.execution_contract_sha256
+                        if lora_snapshot is not None
+                        else None
+                    ),
+                    "evaluation_execution_contract_sha256": (
+                        decision_execution_contract_sha256
+                    ),
                 },
                 "result": {
                     "reason": (
@@ -1115,9 +1232,11 @@ def _cmd_capstone_evaluate(args: argparse.Namespace, settings: ProjectSettings) 
             "Deterministic checks remain authoritative; a model may only supply "
             "bounded normalization or explanation wording."
         )
-        decision_path.write_text(
-            json.dumps(payload, indent=2) + "\n",
-            encoding="utf-8",
+        _write_capstone_decision(
+            decision_path,
+            payload,
+            decision_execution_contract,
+            lora_snapshot,
         )
         print(f"Capstone model-change decision: {payload['decision']}")
 

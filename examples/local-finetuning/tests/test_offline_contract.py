@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import socket
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from aai_local_finetuning import offline, training
 from aai_local_finetuning.data import DatasetIntegrityError
 from aai_local_finetuning.modeling import build_messages
 from aai_local_finetuning.offline import (
@@ -17,6 +20,8 @@ from aai_local_finetuning.offline import (
     enable_offline_environment,
     prepared_dataset_check,
     prove_socket_denial,
+    verify_flight_manifest,
+    write_flight_manifest,
 )
 from aai_local_finetuning.settings import PROJECT_ROOT, load_settings, sha256_file
 
@@ -50,6 +55,86 @@ def test_network_guard_denies_socket_connections():
         prove_socket_denial()
         with pytest.raises(OfflineAssetError, match="network access is blocked"):
             socket.create_connection(("127.0.0.1", 9), timeout=0.01)
+
+
+@pytest.mark.parametrize("mutation", ("source", "package"))
+def test_flight_manifest_rejects_governed_source_or_package_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    archive = tmp_path / "data" / "raw" / "dataset.zip"
+    csv = tmp_path / "data" / "raw" / "dataset.csv"
+    processed = tmp_path / "data" / "processed" / "study"
+    model_dir = tmp_path / "models" / "tiny"
+    preflight = tmp_path / "artifacts" / "preflight"
+    for path, content in (
+        (archive, b"archive"),
+        (csv, b"csv"),
+        (processed / "manifest.json", b"{}\n"),
+        (model_dir / "weights.safetensors", b"weights"),
+        (preflight / "adapters.safetensors", b"adapter"),
+        (tmp_path / "uv.lock", b"locked"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def contract(*, source_digest: str, package_version: str):
+        source_files = (
+            training.TrainingFileEvidence(
+                path="src/aai_local_finetuning/training.py",
+                sha256=source_digest,
+                size_bytes=10,
+            ),
+        )
+        packages = (
+            training.RuntimePackageEvidence(
+                name="aai-local-finetuning",
+                version=package_version,
+            ),
+        )
+        return training.ExecutionContract(
+            python_version="3.12.11",
+            python_implementation="CPython",
+            operating_system="Darwin",
+            machine="arm64",
+            source_files=source_files,
+            source_files_sha256=training._evidence_sequence_sha256(source_files),
+            runtime_packages=packages,
+            runtime_packages_sha256=training._evidence_sequence_sha256(packages),
+        )
+
+    state = {"contract": contract(source_digest="a" * 64, package_version="0.1.0")}
+    settings = SimpleNamespace(
+        archive_path=archive,
+        csv_path=csv,
+        processed_dir=processed,
+        model_dir=model_dir,
+        preflight_adapter_dir=preflight,
+        model=SimpleNamespace(
+            revision="b" * 40,
+            primary_weight="weights.safetensors",
+        ),
+    )
+    monkeypatch.setattr(offline, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        offline,
+        "capture_execution_contract",
+        lambda: state["contract"],
+    )
+
+    path = write_flight_manifest(settings)  # type: ignore[arg-type]
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["schema_version"] == "2.0.0"
+    assert written["source_files"] == {"src/aai_local_finetuning/training.py": "a" * 64}
+
+    state["contract"] = (
+        contract(source_digest="c" * 64, package_version="0.1.0")
+        if mutation == "source"
+        else contract(source_digest="a" * 64, package_version="0.2.0")
+    )
+    with pytest.raises(OfflineAssetError, match="changed after flight preparation"):
+        verify_flight_manifest(settings)  # type: ignore[arg-type]
 
 
 def test_hash_helper_streams_known_file(tmp_path):

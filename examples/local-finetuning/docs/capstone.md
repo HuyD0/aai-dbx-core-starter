@@ -24,6 +24,12 @@ review path still accepts a raw mapping so the frozen test set can record an
 explainable schema failure. `candidate` appears only as a legacy-invalid test
 value; it is not a supported lifecycle stage.
 
+A raw mapping that passes the schema is normalized through
+`ApplicationManifest` before policy evaluation, so omitted optional routing
+flags receive the same documented defaults as an already validated model.
+Malformed mappings remain raw: their original fields and values drive schema
+and rule evidence, without coercion or trusted defaults.
+
 ## Output schema 1.0.0
 
 ```json
@@ -162,7 +168,11 @@ make capstone-evaluate
 The final command uses all 150 frozen examples. A LoRA decision remains
 `inconclusive` for a debug subset or missing prompt baseline, and is `adopt`
 only if the change beats basic, strong, and training-only few-shot untouched
-model evidence while passing absolute structure and invented-check gates.
+model evidence while passing absolute structure and invented-check gates. It
+also requires a current flight-preparation manifest, a still-valid LoRA training
+source/runtime contract, and one current evaluation source/runtime hash shared
+by every compared report. Changing governed source, Python/platform, or an
+installed package after evidence was produced invalidates the decision.
 The complete tiny-model comparison is intentionally a longer study run. For a
 quick report-only rehearsal, use
 `aai-finetune --offline capstone-evaluate --limit 5 --max-tokens 256`.

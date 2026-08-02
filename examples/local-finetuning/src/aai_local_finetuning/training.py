@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -27,6 +28,11 @@ from .settings import PROJECT_ROOT, load_settings
 
 TRAINING_MANIFEST_NAME = "training-manifest.json"
 _MODEL_REVISION_FILE = "LOCAL_REVISION"
+_SOURCE_PACKAGE_PATH = PurePosixPath("src/aai_local_finetuning")
+_NOTEBOOK_SOURCE_PATHS = (
+    PurePosixPath("scripts/notebook_pedagogy.py"),
+    PurePosixPath("scripts/render_notebooks.py"),
+)
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _REVISION_PATTERN = r"^[0-9a-f]{40}$"
 
@@ -88,12 +94,76 @@ class TrainingFileEvidence(BaseModel):
         return self
 
 
+class RuntimePackageEvidence(BaseModel):
+    """One installed distribution, recorded without machine-specific paths."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    version: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _require_canonical_value(self) -> RuntimePackageEvidence:
+        if self.version != self.version.strip():
+            raise ValueError(
+                "runtime package version must not contain outer whitespace"
+            )
+        return self
+
+
+class ExecutionContract(BaseModel):
+    """Portable hashes for the source tree and exact installed package set."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    python_version: str = Field(min_length=1)
+    python_implementation: str = Field(min_length=1)
+    operating_system: str = Field(min_length=1)
+    machine: str = Field(min_length=1)
+    source_files: tuple[TrainingFileEvidence, ...] = Field(min_length=1)
+    source_files_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_packages: tuple[RuntimePackageEvidence, ...] = Field(min_length=1)
+    runtime_packages_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _require_canonical_contract(self) -> ExecutionContract:
+        for field_name in (
+            "python_version",
+            "python_implementation",
+            "operating_system",
+            "machine",
+        ):
+            value = getattr(self, field_name)
+            if value != value.strip():
+                raise ValueError(f"{field_name} must not contain outer whitespace")
+        source_paths = tuple(item.path for item in self.source_files)
+        if source_paths != tuple(sorted(source_paths)) or len(source_paths) != len(
+            set(source_paths)
+        ):
+            raise ValueError("source_files must have unique paths in sorted order")
+        package_keys = tuple(
+            (item.name, item.version) for item in self.runtime_packages
+        )
+        if package_keys != tuple(sorted(package_keys)) or len(
+            {name for name, _version in package_keys}
+        ) != len(package_keys):
+            raise ValueError("runtime_packages must have unique names in sorted order")
+        if self.source_files_sha256 != _evidence_sequence_sha256(self.source_files):
+            raise ValueError("source_files_sha256 does not match source_files")
+        if self.runtime_packages_sha256 != _evidence_sequence_sha256(
+            self.runtime_packages
+        ):
+            raise ValueError("runtime_packages_sha256 does not match runtime_packages")
+        return self
+
+
 class TrainingManifest(BaseModel):
     """Immutable binding between adapter bytes and effective training inputs."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["2.0.0"] = "2.0.0"
+    schema_version: Literal["3.0.0"] = "3.0.0"
     adapter_path: str = Field(min_length=1)
     adapter_sha256: str = Field(pattern=_SHA256_PATTERN)
     adapter_size_bytes: int = Field(gt=0)
@@ -112,6 +182,8 @@ class TrainingManifest(BaseModel):
     data_files: tuple[TrainingFileEvidence, ...] = Field(min_length=1)
     data_manifest_path: str = Field(min_length=1)
     data_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
+    execution_contract: ExecutionContract
+    execution_contract_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def _require_canonical_file_evidence(self) -> TrainingManifest:
@@ -127,6 +199,10 @@ class TrainingManifest(BaseModel):
             paths = tuple(item.path for item in evidence)
             if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
                 raise ValueError(f"{label} must have unique paths in sorted order")
+        if self.execution_contract_sha256 != _model_sha256(self.execution_contract):
+            raise ValueError(
+                "execution_contract_sha256 does not match execution_contract"
+            )
         return self
 
 
@@ -147,6 +223,9 @@ class TrainingEvidence(BaseModel):
     adapter_sha256: str = Field(pattern=_SHA256_PATTERN)
     effective_config_sha256: str = Field(pattern=_SHA256_PATTERN)
     expected_inputs_sha256: str = Field(pattern=_SHA256_PATTERN)
+    source_files_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_packages_sha256: str = Field(pattern=_SHA256_PATTERN)
+    execution_contract_sha256: str = Field(pattern=_SHA256_PATTERN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +251,9 @@ class _CapturedFile:
     changed_ns: int
 
 
+_CapturedExecutionContract = tuple[tuple[_CapturedFile, ...], ExecutionContract]
+
+
 @dataclass(frozen=True, slots=True)
 class _TrainingPlan:
     config_path: Path
@@ -190,6 +272,9 @@ class _TrainingPlan:
     data_files: tuple[_CapturedFile, ...]
     data_manifest_relative_path: str
     data_manifest_sha256: str
+    source_files: tuple[_CapturedFile, ...]
+    execution_contract: ExecutionContract
+    execution_contract_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,6 +847,25 @@ def _require_valid_training_snapshot(
         mismatches.append("training data manifest path")
     if manifest.data_manifest_sha256 != plan.data_manifest_sha256:
         mismatches.append("training data manifest SHA-256")
+    if manifest.execution_contract.source_files != plan.execution_contract.source_files:
+        mismatches.append("evaluator and training source code")
+    if (
+        manifest.execution_contract.source_files_sha256
+        != plan.execution_contract.source_files_sha256
+    ):
+        mismatches.append("source-code set SHA-256")
+    if (
+        manifest.execution_contract.runtime_packages
+        != plan.execution_contract.runtime_packages
+    ):
+        mismatches.append("runtime package set")
+    if (
+        manifest.execution_contract.runtime_packages_sha256
+        != plan.execution_contract.runtime_packages_sha256
+    ):
+        mismatches.append("runtime package-set SHA-256")
+    if manifest.execution_contract_sha256 != plan.execution_contract_sha256:
+        mismatches.append("source/runtime execution contract SHA-256")
     if mismatches:
         raise TrainingManifestError(
             "trained adapter evidence is stale or mismatched: " + ", ".join(mismatches)
@@ -828,6 +932,7 @@ def _build_training_plan(
     )
     data_files = _capture_directory_files(data_path, "training data")
     _require_dataset_files(data_files)
+    source_files, execution_contract = _capture_execution_contract()
 
     configured_iterations = configured.get("iters")
     if not isinstance(configured_iterations, int) or configured_iterations < 1:
@@ -871,6 +976,9 @@ def _build_training_plan(
         data_files=data_files,
         data_manifest_relative_path=(f"{contract.data_path}/manifest.json"),
         data_manifest_sha256=data_manifest.evidence.sha256,
+        source_files=source_files,
+        execution_contract=execution_contract,
+        execution_contract_sha256=_model_sha256(execution_contract),
     )
 
 
@@ -989,6 +1097,8 @@ def _training_manifest(
         data_files=tuple(item.evidence for item in plan.data_files),
         data_manifest_path=plan.data_manifest_relative_path,
         data_manifest_sha256=plan.data_manifest_sha256,
+        execution_contract=plan.execution_contract,
+        execution_contract_sha256=plan.execution_contract_sha256,
     )
 
 
@@ -1026,6 +1136,9 @@ def _training_evidence(
         adapter_sha256=adapter_sha256,
         effective_config_sha256=plan.effective_config_sha256,
         expected_inputs_sha256=plan.expected_inputs_sha256,
+        source_files_sha256=plan.execution_contract.source_files_sha256,
+        runtime_packages_sha256=(plan.execution_contract.runtime_packages_sha256),
+        execution_contract_sha256=plan.execution_contract_sha256,
     )
 
 
@@ -1094,6 +1207,96 @@ def _require_unchanged_training_inputs(plan: _TrainingPlan) -> None:
         ) from error
     if current_data != plan.data_files:
         raise RuntimeError("training data files changed while MLX-LM was running")
+    try:
+        current_source, current_execution = _capture_execution_contract()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(
+            "source code or runtime package set changed while MLX-LM was running"
+        ) from error
+    if current_source != plan.source_files:
+        raise RuntimeError("source code changed while MLX-LM was running")
+    if current_execution.runtime_packages != plan.execution_contract.runtime_packages:
+        raise RuntimeError("runtime package set changed while MLX-LM was running")
+    if current_execution != plan.execution_contract:
+        raise RuntimeError(
+            "source/runtime execution contract changed while MLX-LM was running"
+        )
+
+
+def _capture_execution_contract() -> _CapturedExecutionContract:
+    """Capture portable source bytes and canonical installed distribution versions."""
+
+    source_files = _capture_governed_source_files()
+    packages = _capture_runtime_packages()
+    source_evidence = tuple(item.evidence for item in source_files)
+    return source_files, ExecutionContract(
+        python_version=platform.python_version(),
+        python_implementation=platform.python_implementation(),
+        operating_system=platform.system(),
+        machine=platform.machine(),
+        source_files=source_evidence,
+        source_files_sha256=_evidence_sequence_sha256(source_evidence),
+        runtime_packages=packages,
+        runtime_packages_sha256=_evidence_sequence_sha256(packages),
+    )
+
+
+def capture_execution_contract() -> ExecutionContract:
+    """Return the current portable source/runtime contract for evaluation evidence."""
+
+    _source_files, contract = _capture_execution_contract()
+    return contract
+
+
+def execution_contract_sha256(contract: ExecutionContract) -> str:
+    """Hash a validated execution contract using canonical portable JSON."""
+
+    return _model_sha256(contract)
+
+
+def _capture_governed_source_files() -> tuple[_CapturedFile, ...]:
+    source_root = _project_path(_SOURCE_PACKAGE_PATH.as_posix(), "source package")
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise FileNotFoundError(f"source package directory is missing: {source_root}")
+    paths: list[Path] = []
+    for path in source_root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"source package contains a symbolic link: {path}")
+        if path.is_file() and path.suffix == ".py":
+            paths.append(path)
+        elif path.exists() and not path.is_file() and not path.is_dir():
+            raise ValueError(f"source package contains a non-regular path: {path}")
+    if not paths:
+        raise FileNotFoundError(
+            f"source package contains no Python files: {source_root}"
+        )
+    paths.extend(
+        _project_path(relative.as_posix(), "notebook source")
+        for relative in _NOTEBOOK_SOURCE_PATHS
+    )
+    return tuple(
+        _capture_file(path, _project_relative(path))
+        for path in sorted(paths, key=_project_relative)
+    )
+
+
+def _capture_runtime_packages() -> tuple[RuntimePackageEvidence, ...]:
+    packages: dict[str, RuntimePackageEvidence] = {}
+    for distribution in importlib.metadata.distributions():
+        raw_name = distribution.metadata.get("Name")
+        raw_version = distribution.version
+        if not raw_name or not raw_version:
+            raise RuntimeError("installed distribution metadata is incomplete")
+        name = re.sub(r"[-_.]+", "-", raw_name).lower()
+        package = RuntimePackageEvidence(name=name, version=raw_version)
+        if name in packages:
+            raise RuntimeError(
+                f"installed runtime contains duplicate distribution metadata: {name}"
+            )
+        packages[name] = package
+    if not packages:
+        raise RuntimeError("installed runtime package set is empty")
+    return tuple(packages[name] for name in sorted(packages))
 
 
 def _capture_directory_files(
@@ -1248,6 +1451,16 @@ def _json_sha256(value: dict[str, JsonValue]) -> str:
 def _model_sha256(value: BaseModel) -> str:
     payload = json.dumps(
         value.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _evidence_sequence_sha256(values: tuple[BaseModel, ...]) -> str:
+    payload = json.dumps(
+        [value.model_dump(mode="json") for value in values],
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

@@ -53,6 +53,121 @@ def test_data_consumers_stop_before_work_when_split_integrity_fails(
 
 
 @pytest.mark.parametrize(
+    ("command", "arguments"),
+    (
+        (cli._cmd_train, Namespace(iterations=None)),
+        (
+            cli._cmd_evaluate,
+            Namespace(limit=None, max_tokens=32, methods="all", track=False),
+        ),
+        (cli._cmd_capstone_train, Namespace(iterations=None)),
+        (
+            cli._cmd_capstone_evaluate,
+            Namespace(limit=None, max_tokens=32, methods="all"),
+        ),
+    ),
+)
+def test_promotion_capable_commands_stop_when_flight_source_evidence_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: object,
+    arguments: Namespace,
+) -> None:
+    class Settings:
+        processed_dir = tmp_path / "prepared"
+
+    monkeypatch.setattr(cli, "_require_prepared_split_integrity", lambda _path: None)
+
+    def reject_flight(_settings: object) -> None:
+        raise cli.StudyCommandError("flight source evidence is stale")
+
+    def unexpected_work(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("command performed work with stale flight source evidence")
+
+    monkeypatch.setattr(cli, "_require_current_flight_preparation", reject_flight)
+    monkeypatch.setattr(cli, "require_assets", unexpected_work)
+    monkeypatch.setattr(cli, "run_lora", unexpected_work)
+    monkeypatch.setattr(cli, "_load_splits", unexpected_work)
+    monkeypatch.setattr(cli, "_generate_capstone", unexpected_work)
+
+    with pytest.raises(cli.StudyCommandError, match="flight source evidence is stale"):
+        command(arguments, Settings())  # type: ignore[operator]
+
+
+@pytest.mark.parametrize("failure", ("execution", "snapshot"))
+def test_support_promotion_file_is_removed_when_post_write_recheck_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    expected_digest = "a" * 64
+    assessment = SimpleNamespace(
+        change=SimpleNamespace(evaluation_execution_contract_sha256=expected_digest),
+        model_dump_json=lambda **_kwargs: "{}",
+    )
+    snapshot = object()
+    decision_path = tmp_path / "promotion.json"
+    monkeypatch.setattr(cli, "capture_execution_contract", lambda: object())
+    monkeypatch.setattr(
+        cli,
+        "execution_contract_sha256",
+        lambda _contract: "b" * 64 if failure == "execution" else expected_digest,
+    )
+
+    def recheck(_snapshot: object) -> None:
+        if failure == "snapshot":
+            raise cli.TrainingManifestError("snapshot changed after decision")
+
+    monkeypatch.setattr(cli, "recheck_training_snapshot", recheck)
+
+    with pytest.raises(
+        (cli.StudyCommandError, cli.TrainingManifestError),
+        match="changed|package set",
+    ):
+        cli._write_support_promotion(
+            decision_path,
+            assessment,  # type: ignore[arg-type]
+            snapshot,  # type: ignore[arg-type]
+        )
+
+    assert not decision_path.exists()
+
+
+@pytest.mark.parametrize("failure", ("execution", "snapshot"))
+def test_capstone_decision_file_is_removed_when_post_write_recheck_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    expected_contract = object()
+    decision_path = tmp_path / "decision.json"
+    monkeypatch.setattr(
+        cli,
+        "capture_execution_contract",
+        lambda: object() if failure == "execution" else expected_contract,
+    )
+
+    def recheck(_snapshot: object) -> None:
+        if failure == "snapshot":
+            raise cli.TrainingManifestError("snapshot changed after decision")
+
+    monkeypatch.setattr(cli, "recheck_training_snapshot", recheck)
+
+    with pytest.raises(
+        (cli.StudyCommandError, cli.TrainingManifestError),
+        match="changed|package set",
+    ):
+        cli._write_capstone_decision(
+            decision_path,
+            {"decision": "reject"},
+            expected_contract,  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        )
+
+    assert not decision_path.exists()
+
+
+@pytest.mark.parametrize(
     ("command", "arguments", "adapter_attribute"),
     (
         (
@@ -90,6 +205,7 @@ def test_lora_evaluators_reject_invalid_training_evidence_before_model_work(
         pytest.fail("evaluation performed model or scoring work with stale evidence")
 
     monkeypatch.setattr(cli, "_require_prepared_split_integrity", lambda _path: None)
+    monkeypatch.setattr(cli, "_require_current_flight_preparation", lambda _s: None)
     monkeypatch.setattr(cli, "require_assets", lambda _settings: [])
     monkeypatch.setattr(cli, "_generate_capstone", lambda: None)
     monkeypatch.setattr(cli, "require_valid_training_snapshot", reject_manifest)
@@ -134,6 +250,7 @@ def test_iteration_overrides_train_into_noncanonical_smoke_directories(
         return Evidence()
 
     monkeypatch.setattr(cli, "_require_prepared_split_integrity", lambda _path: None)
+    monkeypatch.setattr(cli, "_require_current_flight_preparation", lambda _s: None)
     monkeypatch.setattr(cli, "require_assets", lambda _settings: [])
     monkeypatch.setattr(cli, "_generate_capstone", lambda: None)
     monkeypatch.setattr(cli, "run_lora", capture_run)
@@ -173,6 +290,7 @@ def test_support_evaluation_rejects_adapter_change_after_inference(
     snapshot = SimpleNamespace(manifest_sha256="a" * 64)
 
     monkeypatch.setattr(cli, "_require_prepared_split_integrity", lambda _path: None)
+    monkeypatch.setattr(cli, "_require_current_flight_preparation", lambda _s: None)
     monkeypatch.setattr(cli, "require_assets", lambda _settings: [])
     monkeypatch.setattr(cli, "_require_trained_adapter", lambda *_args, **_kw: snapshot)
     monkeypatch.setattr(
@@ -212,6 +330,7 @@ def test_capstone_evaluation_rejects_adapter_change_after_inference(
     (Settings.capstone_adapter_dir / "adapters.safetensors").write_bytes(b"adapter")
     snapshot = SimpleNamespace(manifest_sha256="b" * 64)
 
+    monkeypatch.setattr(cli, "_require_current_flight_preparation", lambda _s: None)
     monkeypatch.setattr(cli, "require_assets", lambda _settings: [])
     monkeypatch.setattr(cli, "_generate_capstone", lambda: None)
     monkeypatch.setattr(cli, "_require_trained_adapter", lambda *_args, **_kw: snapshot)

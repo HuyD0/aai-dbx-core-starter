@@ -350,10 +350,30 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
     assert "recheck_training_snapshot" in sources["07_frozen_evaluation.ipynb"]
     assert "shared_adapter_lock" in sources["07_frozen_evaluation.ipynb"]
     assert "lora-change-training-manifest.json" in sources["07_frozen_evaluation.ipynb"]
+    assert "training_execution_contract_sha256" in sources["07_frozen_evaluation.ipynb"]
+    assert (
+        "evaluation_execution_contract_sha256" in sources["07_frozen_evaluation.ipynb"]
+    )
     assert "macro-F1 gain ≥ 0.01" in sources["08_mlflow_and_promotion.ipynb"]
     assert "decision/assessment.json" in sources["08_mlflow_and_promotion.ipynb"]
     assert "lineage_matches" in sources["08_mlflow_and_promotion.ipynb"]
     assert "training_manifest_sha256" in sources["08_mlflow_and_promotion.ipynb"]
+    assert (
+        "evaluation_execution_contract_sha256"
+        in sources["08_mlflow_and_promotion.ipynb"]
+    )
+    for notebook in (
+        "06_lora_finetuning.ipynb",
+        "07_frozen_evaluation.ipynb",
+        "08_mlflow_and_promotion.ipynb",
+        "10_capstone_model_vs_hybrid.ipynb",
+    ):
+        assert "verify_flight_manifest" in sources[notebook]
+    assert "evaluation_lineage_current" in sources["10_capstone_model_vs_hybrid.ipynb"]
+    assert (
+        "source/runtime changed after the capstone evidence was written"
+        in sources["10_capstone_model_vs_hybrid.ipynb"]
+    )
     assert '"state": "unknown"' in sources["11_design_the_next_project.ipynb"]
     for field in (
         "permitted_use",
