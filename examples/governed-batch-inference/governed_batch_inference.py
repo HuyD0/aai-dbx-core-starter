@@ -69,6 +69,9 @@ PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ai_model_version", "STRING"),
     ("ai_prompt_version", "STRING"),
     ("ai_release_sequence", "BIGINT"),
+    #: Digest of the document text this row was derived from, so an
+    #: edit-in-place makes the row pending instead of silently stale.
+    ("ai_source_digest", "STRING"),
     ("ai_executed_at", "TIMESTAMP"),
 )
 
@@ -114,8 +117,22 @@ def _generated_column_names(field_name: str) -> tuple[str, ...]:
 
 
 def sql_string_literal(text: str) -> str:
-    """Escape ``text`` as a single-quoted Spark SQL string literal."""
-    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    """Escape ``text`` as a single-quoted Spark SQL string literal.
+
+    Newlines and tabs are escaped rather than embedded raw: prompt
+    templates and serialised specs are multi-line, and a statement that
+    breaks across lines mid-literal is unreadable in logs and error
+    messages. Spark processes these escapes in string literals by default.
+    """
+    return (
+        "'"
+        + text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        + "'"
+    )
 
 
 class CostCeilingExceeded(RuntimeError):
@@ -255,6 +272,11 @@ class BatchInferenceSpec(BaseModel):
     endpoint: str
     model_version: str
     prompt_version: str
+    #: The instruction text itself, not just its label. The document is
+    #: appended to it. It lives here so the identity can cover what the
+    #: model actually received: ``prompt_version`` is a string the author
+    #: types, and nothing stops it staying "1.0.0" across an edit.
+    prompt_template: str = Field(min_length=1)
     #: Monotonic release counter, incremented whenever any part of the
     #: release changes. It is what lets the pipeline tell *newer* from
     #: merely *different*: identity alone cannot, and without an ordering
@@ -406,6 +428,9 @@ class BatchInferenceSpec(BaseModel):
                 "endpoint": self.endpoint,
                 "model_version": self.model_version,
                 "prompt_version": self.prompt_version,
+                # The text, not the label: an edited prompt is different
+                # output whether or not anyone bumped the version string.
+                "prompt_template": self.prompt_template,
                 "abstain_threshold": self.abstain_threshold,
                 # The response schema is built from these, so they are part
                 # of the request the model actually sees.
@@ -1059,6 +1084,16 @@ def score_extraction(
     for record in records:
         by_stratum.setdefault(record.stratum, []).append(record)
 
+    # WEIGHTED labels the synthetic all-strata row. A real stratum with
+    # that value would collide with it: high-criticality gating filters
+    # both away and finds no evidence, while medium/low would consume the
+    # physical stratum as if it were the population estimate.
+    if WEIGHTED in by_stratum or WEIGHTED in stratum_population:
+        raise ValueError(
+            f"{WEIGHTED!r} is reserved for the population-weighted row and "
+            "cannot be a stratum value; rename the stratum in the source."
+        )
+
     unknown = sorted(set(by_stratum) - set(stratum_population))
     if unknown:
         raise ValueError(
@@ -1661,6 +1696,14 @@ def plan_target_migration(
     if add:
         columns = ", ".join(f"{name} {sql_type}" for name, sql_type in add)
         statements.append(f"ALTER TABLE {spec.target_table} ADD COLUMNS ({columns})")
+    if any(name == "ai_release_sequence" for name, _ in add):
+        # Rows that predate sequencing get -1 rather than NULL. The SQL
+        # comparisons coalesce anyway, but a real value keeps the column
+        # honest for anyone reading the table directly.
+        statements.append(
+            f"UPDATE {spec.target_table} SET ai_release_sequence = -1 "
+            "WHERE ai_release_sequence IS NULL"
+        )
     for column in stale:
         # Emitted for a human to run deliberately, never executed for them.
         statements.append(
@@ -1730,16 +1773,20 @@ def build_execute_sql(
     spec: BatchInferenceSpec,
     *,
     run_id: str,
-    prompt_sql: str,
 ) -> str:
     """The full-table execute statement: restartable *and* release-aware.
 
-    - ``prompt_sql`` is a SQL expression producing the request string (the
-      notebook builds it with ``concat`` from an escaped instruction
-      literal and the document column).
+    - The request is built from ``spec.prompt_template``, not from a
+      caller-supplied expression. Taking the prompt as an argument meant
+      the statement could run one prompt while every stamp claimed
+      another; with one source of truth that disagreement cannot be
+      expressed.
     - **Restart**: the anti-join drops rows this release has already
-      landed, so a re-run after a partial failure finishes the job instead
-      of paying for inference twice. A million-row job will fail partway
+      landed *for this document content*, so a re-run after a partial
+      failure finishes the job instead of paying for inference twice,
+      while a document corrected in place becomes pending again. Keying
+      on the row key alone would leave the target serving values derived
+      from text that no longer exists. A million-row job will fail partway
       at some point, and this is what makes that boring. Current guidance
       is to submit the remaining set as one query — AI Functions manage
       parallelization and retries — rather than hand-chunking it.
@@ -1814,6 +1861,11 @@ def build_execute_sql(
     model_literal = sql_string_literal(spec.model_version)
     prompt_literal = sql_string_literal(spec.prompt_version)
     sequence = int(spec.release_sequence)
+    source_digest = f"sha2({spec.document_column}, 256)"
+    request = (
+        f"concat({sql_string_literal(spec.prompt_template)}, "
+        f"{spec.document_column})"
+    )
     return f"""MERGE INTO {spec.target_table} AS target
 USING (
   WITH pending AS (
@@ -1821,13 +1873,14 @@ USING (
     FROM {spec.source_table} AS source
     LEFT ANTI JOIN {spec.target_table} AS done
       ON source.{spec.key_column} = done.{spec.key_column}
+     AND done.ai_source_digest = sha2(source.{spec.document_column}, 256)
      AND (
        (
          done.ai_spec_digest = {digest_literal}
          AND done.ai_model_version = {model_literal}
          AND done.ai_prompt_version = {prompt_literal}
        )
-       OR done.ai_release_sequence > {sequence}
+       OR coalesce(done.ai_release_sequence, -1) > {sequence}
      )
   ),
   scored AS (
@@ -1835,7 +1888,7 @@ USING (
       *,
       ai_query(
         {sql_string_literal(spec.endpoint)},
-        {prompt_sql},
+        {request},
         responseFormat => {response_format_sql_literal(spec)},
         failOnError => false
       ) AS raw
@@ -1859,11 +1912,13 @@ USING (
     {model_literal} AS ai_model_version,
     {prompt_literal} AS ai_prompt_version,
     {sequence} AS ai_release_sequence,
+    {source_digest} AS ai_source_digest,
     current_timestamp() AS ai_executed_at
   FROM parsed
 ) AS source
 ON target.{spec.key_column} = source.{spec.key_column}
-WHEN MATCHED AND target.ai_release_sequence <= source.ai_release_sequence
+WHEN MATCHED
+  AND coalesce(target.ai_release_sequence, -1) <= source.ai_release_sequence
   THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *"""
 

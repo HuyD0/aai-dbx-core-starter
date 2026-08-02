@@ -78,10 +78,15 @@ abstention path) then passes the same gate on the same terms.
    the same statement.
 9. **Evidence belongs to what produced it, and must be complete.** The
    binding starts at the record: each `EvaluationRecord` names the
-   *inference identity* — endpoint, model version, prompt version,
-   abstention threshold, and the fields that build the response schema —
-   that produced its prediction, and `score_extraction` refuses to score
-   it against a different one. Taking the stamp from the spec at scoring
+   *inference identity* — endpoint, model version, prompt version, **the
+   prompt text itself**, abstention threshold, and the fields that build
+   the response schema — that produced its prediction, and
+   `score_extraction` refuses to score it against a different one. The
+   text and not merely the label, because `prompt_version` is a string
+   someone types: nothing stops it reading "1.0.0" across an edit. The
+   template therefore lives in the spec, and `build_execute_sql` takes no
+   prompt argument at all — there is no way to run one prompt and stamp
+   another. Taking the stamp from the spec at scoring
    time instead would let v1 output certify itself as v2 evidence: the
    gate's release check would be reading a label the same call had just
    written.
@@ -101,10 +106,12 @@ abstention path) then passes the same gate on the same terms.
    budget, and `log_gate_evidence` refuses an estimate measured for
    another release rather than let one clear the ceiling on another's
    assumptions.
-10. **A new release reprocesses the table — and only a newer one may
-    overwrite it.** The restart anti-join matches on the key *and* the full
-    release identity — spec digest, model version, prompt version — and the
-    write is a `MERGE`. It additionally treats a strictly newer
+10. **"Done" means this content, by this release or newer.** The restart
+    anti-join matches on the key, a digest of the source document, *and*
+    the full release identity — spec digest, model version, prompt
+    version — and the write is a `MERGE`. The content digest is what makes
+    an edit-in-place reprocess instead of leaving the target serving values
+    derived from text that no longer exists. It additionally treats a strictly newer
     `release_sequence` as already done, and the MERGE updates a row only
     when its sequence is not being lowered, so an old job resuming after a
     newer release has landed cannot roll production back to its own stale

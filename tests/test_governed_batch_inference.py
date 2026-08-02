@@ -54,6 +54,7 @@ def make_spec(**overrides):
         endpoint="databricks-gpt-oss-20b",
         model_version="gpt-oss-20b-2025-08",
         prompt_version="1.0.0",
+        prompt_template="Extract the fields from the document.\n\nDOCUMENT:\n",
         release_sequence=1,
         cost_ceiling_cad=50.0,
         abstain_threshold=0.7,
@@ -555,6 +556,81 @@ def test_scoring_refuses_records_produced_by_a_different_release():
         gbi.score_extraction(mixed, spec_v2, population)
 
 
+def test_editing_the_prompt_invalidates_records_even_at_the_same_version():
+    """`prompt_version` is a label someone types; the text is the fact.
+
+    Binding evidence to the label alone means an edited prompt keeps
+    certifying itself as the release that was actually measured.
+    """
+    original = one_field_spec()
+    edited = original.model_copy(
+        update={"prompt_template": original.prompt_template + " Be concise."}
+    )
+    assert edited.prompt_version == original.prompt_version
+    assert edited.inference != original.inference
+
+    records = [
+        record.model_copy(update={"inference": original.inference})
+        for record in records_for("standard", correct=200)
+    ]
+    with pytest.raises(gbi.EvidenceMismatch):
+        gbi.score_extraction(records, edited, {"standard": 200})
+
+
+def test_execute_sql_uses_the_spec_prompt_and_takes_no_prompt_argument():
+    """One source of truth: the statement cannot run a prompt the stamps
+    do not describe, because there is nowhere else to supply one."""
+    spec = make_spec(prompt_template="Read this slip.\n\nDOCUMENT:\n")
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    assert "concat('Read this slip.\\n\\nDOCUMENT:\\n', doc_text)" in sql
+    with pytest.raises(TypeError):
+        gbi.build_execute_sql(spec, run_id="run-1", **{"prompt_sql": "anything"})
+
+
+def test_a_changed_source_document_becomes_pending_again():
+    """Correct a document in place and the target must not keep serving
+    values derived from text that no longer exists."""
+    spec = make_spec()
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    anti_join = sql.split("scored AS")[0]
+    assert "done.ai_source_digest = sha2(source.doc_text, 256)" in anti_join
+    assert "sha2(doc_text, 256) AS ai_source_digest" in sql
+    assert ("ai_source_digest", "STRING") in gbi.target_columns(spec)
+
+
+def test_release_sequence_comparisons_survive_migrated_null_rows():
+    """Migration adds the column to legacy rows as NULL, and NULL
+    comparisons are unknown — so without coalesce the MERGE silently
+    declines to update those rows while the anti-join keeps re-selecting
+    (and re-paying for) them."""
+    spec = make_spec()
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
+    assert "coalesce(done.ai_release_sequence, -1) > 1" in sql
+    assert (
+        "coalesce(target.ai_release_sequence, -1) <= source.ai_release_sequence" in sql
+    )
+
+    legacy = [
+        name for name, _ in gbi.target_columns(spec) if name != "ai_release_sequence"
+    ]
+    migration = gbi.plan_target_migration(spec, legacy)
+    assert any("ADD COLUMNS" in statement for statement in migration.statements)
+    assert any(
+        statement.startswith(f"UPDATE {spec.target_table} SET ai_release_sequence = -1")
+        for statement in migration.statements
+    )
+
+
+def test_the_weighted_label_is_reserved_for_the_aggregate_row():
+    spec = one_field_spec(criticality="high")
+    records = [
+        record.model_copy(update={"inference": spec.inference})
+        for record in records_for(gbi.WEIGHTED, correct=200)
+    ]
+    with pytest.raises(ValueError, match="reserved"):
+        gbi.score_extraction(records, spec, {gbi.WEIGHTED: 200})
+
+
 def test_a_policy_change_re_judges_the_same_predictions_without_re_inference():
     """Changing how output is judged does not change the output.
 
@@ -918,20 +994,16 @@ def test_an_older_release_cannot_overwrite_newer_output():
     """
     old = make_spec(prompt_version="1.0.0", release_sequence=1)
     new = make_spec(prompt_version="2.0.0", release_sequence=2)
-    old_sql = gbi.build_execute_sql(
-        old, run_id="run-old", prompt_sql="concat('x', doc_text)"
-    )
-    new_sql = gbi.build_execute_sql(
-        new, run_id="run-new", prompt_sql="concat('x', doc_text)"
-    )
+    old_sql = gbi.build_execute_sql(old, run_id="run-old")
+    new_sql = gbi.build_execute_sql(new, run_id="run-new")
 
     # The old job treats anything from a newer release as already done,
     # so it never even pays to re-infer those rows.
-    assert "OR done.ai_release_sequence > 1" in old_sql
-    assert "OR done.ai_release_sequence > 2" in new_sql
+    assert "OR coalesce(done.ai_release_sequence, -1) > 1" in old_sql
+    assert "OR coalesce(done.ai_release_sequence, -1) > 2" in new_sql
     # And the MERGE refuses to lower a row's release sequence.
     guard = (
-        "WHEN MATCHED AND target.ai_release_sequence <= "
+        "WHEN MATCHED\n  AND coalesce(target.ai_release_sequence, -1) <= "
         "source.ai_release_sequence\n  THEN UPDATE SET *"
     )
     assert guard in old_sql and guard in new_sql
@@ -989,9 +1061,7 @@ def test_response_format_uses_only_supported_schema_features():
 
 def test_execute_sql_is_idempotent_and_carries_row_provenance():
     spec = make_spec()
-    sql = gbi.build_execute_sql(
-        spec, run_id="run-123", prompt_sql="concat('extract: ', doc_text)"
-    )
+    sql = gbi.build_execute_sql(spec, run_id="run-123")
     assert "LEFT ANTI JOIN main.finance_docs.document_entities" in sql
     assert "failOnError => false" in sql
     assert "responseFormat =>" in sql
@@ -1013,9 +1083,7 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     the table still served the previous release's values and provenance.
     """
     spec = make_spec(prompt_version="2.0.0", model_version="model-b")
-    sql = gbi.build_execute_sql(
-        spec, run_id="run-9", prompt_sql="concat('extract: ', doc_text)"
-    )
+    sql = gbi.build_execute_sql(spec, run_id="run-9")
     anti_join = sql.split("scored AS")[0]
     assert "ON source.doc_id = done.doc_id" in anti_join
     assert "done.ai_model_version = 'model-b'" in anti_join
@@ -1027,7 +1095,7 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     edited = spec.model_copy(update={"abstain_threshold": 0.8})
     assert edited.spec_digest != spec.spec_digest
     assert f"done.ai_spec_digest = '{edited.spec_digest}'" in gbi.build_execute_sql(
-        edited, run_id="run-9", prompt_sql="concat('extract: ', doc_text)"
+        edited, run_id="run-9"
     )
     assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
     # Updating in place, but never downwards — see the release-ordering test.
@@ -1040,9 +1108,7 @@ def test_merge_source_projects_exactly_the_target_columns():
     columns are the target's columns, in order — and the document text
     used to build the prompt must not leak into the output table."""
     spec = make_spec(strata=("layout", "doc_type"))
-    sql = gbi.build_execute_sql(
-        spec, run_id="run-1", prompt_sql="concat('extract: ', doc_text)"
-    )
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
     head = sql[: sql.index("\n  FROM parsed")]
     projection = head[head.index("\n", head.rindex("SELECT\n")) :]
     # Split on top-level commas only: projected expressions contain their
@@ -1098,9 +1164,7 @@ def test_abstained_and_low_confidence_values_are_never_landed():
     assert permitted == {"issuer_name": "Maple Grove", "account_id": None}
     assert abstained == frozenset()
 
-    sql = gbi.build_execute_sql(
-        spec, run_id="run-1", prompt_sql="concat('x', doc_text)"
-    )
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
     for name in ("issuer_name", "account_id"):
         assert f"array_contains(parsed.abstained_fields, '{name}')" in sql
         assert f"coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1" in sql
@@ -1129,9 +1193,7 @@ def test_a_confidence_outside_zero_to_one_is_declined_not_trusted():
     assert permitted["issuer_name"] == "Certain Co"
     assert abstained == frozenset()
 
-    sql = gbi.build_execute_sql(
-        spec, run_id="run-1", prompt_sql="concat('x', doc_text)"
-    )
+    sql = gbi.build_execute_sql(spec, run_id="run-1")
     for name in ("issuer_name", "account_id"):
         assert f"NOT (coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1)" in sql
 

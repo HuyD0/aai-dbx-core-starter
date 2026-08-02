@@ -61,6 +61,7 @@
 
 # COMMAND ----------
 
+import hashlib
 import importlib
 import os
 import random
@@ -242,6 +243,17 @@ display(spark.table(SOURCE_TABLE).groupBy("layout").count())
 
 # COMMAND ----------
 
+# The prompt lives *in* the spec, not beside it. `prompt_version` is a
+# string someone types and nothing stops it staying "1.0.0" across an
+# edit, so the identity that guards evidence covers this text itself.
+# Its length is also an input to the cost estimate: a prompt edit is a
+# new release *and* a new budget.
+PROMPT_V1 = (
+    "Extract the following fields from the tax document below and answer "
+    "in the required JSON shape: issuer_name, tax_year, box_amount, "
+    "account_id. Use null for a field that is not present.\n\nDOCUMENT:\n"
+)
+
 spec_v1 = gbi.BatchInferenceSpec(
     name="tax_document_extraction",
     source_table=SOURCE_TABLE,
@@ -281,22 +293,13 @@ spec_v1 = gbi.BatchInferenceSpec(
     endpoint="databricks-gpt-oss-20b",
     model_version="gpt-oss-20b-2025-08",
     prompt_version="1.0.0",
+    prompt_template=PROMPT_V1,
     # Bumped on every release. Identity says two runs differ; only an
     # ordering says which is later, and without that an old job resuming
     # late would overwrite newer rows with its own stale output.
     release_sequence=1,
     cost_ceiling_cad=50.0,
     abstain_threshold=0.70,
-)
-
-# The prompt is what `prompt_version: 1.0.0` names, so it is declared
-# with the spec rather than buried next to the call. Its length is also
-# an input to the cost estimate in stage 2 — a prompt edit is a new
-# release *and* a new budget.
-PROMPT_V1 = (
-    "Extract the following fields from the tax document below and answer "
-    "in the required JSON shape: issuer_name, tax_year, box_amount, "
-    "account_id. Use null for a field that is not present.\n\nDOCUMENT:\n"
 )
 
 spec_yaml = spec_v1.to_yaml()
@@ -384,7 +387,7 @@ probe = spark.table(SOURCE_TABLE).limit(32).collect()
 row_count = spark.table(SOURCE_TABLE).count()
 
 
-def estimate_for(spec, prompt: str) -> "gbi.CostEstimate":
+def estimate_for(spec) -> "gbi.CostEstimate":
     """Cost of running *this* release over the whole table.
 
     The instruction tokens come from the actual prompt, so a longer
@@ -392,7 +395,7 @@ def estimate_for(spec, prompt: str) -> "gbi.CostEstimate":
     constant. The returned estimate carries the release it was measured
     for, and the gate refuses to log an estimate from a different one.
     """
-    instruction_tokens = gbi.estimate_tokens_from_text(prompt)
+    instruction_tokens = gbi.estimate_tokens_from_text(spec.prompt_template)
     return gbi.estimate_cost(
         spec,
         row_count=row_count,
@@ -406,7 +409,7 @@ def estimate_for(spec, prompt: str) -> "gbi.CostEstimate":
     )
 
 
-estimate_v1 = gbi.require_within_ceiling(estimate_for(spec_v1, PROMPT_V1))
+estimate_v1 = gbi.require_within_ceiling(estimate_for(spec_v1))
 print(
     f"{estimate_v1.row_count:,} rows × "
     f"(~{estimate_v1.mean_input_tokens_per_row:.0f} in + "
@@ -421,7 +424,7 @@ print(
 # What the stop looks like: the same table pointed at a frontier-priced
 # endpoint blows through the ceiling, and the pipeline refuses to start.
 # That refusal — before the run — is the conversation you want to force.
-instruction_tokens = gbi.estimate_tokens_from_text(PROMPT_V1)
+instruction_tokens = gbi.estimate_tokens_from_text(spec_v1.prompt_template)
 try:
     gbi.require_within_ceiling(
         gbi.estimate_cost(
@@ -646,9 +649,9 @@ def simulate_extraction(doc_id: str, layout: str, gold: dict, version: str):
     return predicted, abstained
 
 
-def live_extraction(spec, prompt: str, table: str) -> dict:
+def live_extraction(spec, table: str) -> dict:
     """ai_query with structured output over `table`; returns {doc_id: row}."""
-    request = f"concat({gbi.sql_string_literal(prompt)}, doc_text)"
+    request = f"concat({gbi.sql_string_literal(spec.prompt_template)}, doc_text)"
     rows = spark.sql(f"""
         SELECT doc_id,
                from_json(raw.response,
@@ -669,13 +672,13 @@ def live_extraction(spec, prompt: str, table: str) -> dict:
     return {row.doc_id: row for row in rows}
 
 
-def evaluation_records(spec, version: str, prompt: str) -> list:
+def evaluation_records(spec) -> list:
     sample = (
         spark.table(SAMPLE_TABLE)
         .join(spark.table(GOLD_TABLE).drop("layout"), "doc_id")
         .collect()
     )
-    live = live_extraction(spec, prompt, SAMPLE_TABLE) if not SIMULATED else {}
+    live = live_extraction(spec, SAMPLE_TABLE) if not SIMULATED else {}
     records = []
     failed = 0
     for row in sample:
@@ -683,7 +686,7 @@ def evaluation_records(spec, version: str, prompt: str) -> list:
         declared: set[str] = set()
         if SIMULATED:
             predicted, declared = simulate_extraction(
-                row.doc_id, row.layout, gold, version
+                row.doc_id, row.layout, gold, spec.prompt_version
             )
             confidences = {
                 name: (
@@ -764,7 +767,7 @@ def scores_frame(scores) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-records_v1 = evaluation_records(spec_v1, "1.0.0", PROMPT_V1)
+records_v1 = evaluation_records(spec_v1)
 scores_v1 = gbi.score_extraction(records_v1, spec_v1, population)
 print(
     "Tolerances in force (declared in stage 1, before any of these numbers "
@@ -950,12 +953,20 @@ except gbi.GateNotPassed as refusal:
 
 # COMMAND ----------
 
-spec_v2 = gbi.BatchInferenceSpec.from_yaml(
-    spec_v1.to_yaml().replace("prompt_version: 1.0.0", "prompt_version: 2.0.0")
-    # A new release gets the next sequence number, which is what stops a
-    # late-resuming v1 job from writing its output back over v2's rows.
-    .replace("release_sequence: 1", "release_sequence: 2")
+# Built explicitly rather than by string-replacing the YAML: the prompt
+# template is multi-line, so a textual substitution cannot rewrite it
+# safely. The new release gets the next sequence number, which is what
+# stops a late-resuming v1 job writing its output back over v2's rows.
+spec_v2 = gbi.BatchInferenceSpec.model_validate(
+    {
+        **spec_v1.model_dump(mode="json"),
+        "prompt_version": "2.0.0",
+        "prompt_template": PROMPT_V2,
+        "release_sequence": 2,
+    }
 )
+# Still a reviewable, committed artifact — that has not changed.
+print(spec_v2.to_yaml())
 
 # A new release is a new budget. Prompt v2 carries the legacy-scan rules
 # and the abstention instruction, so it is materially longer than v1 —
@@ -963,7 +974,7 @@ spec_v2 = gbi.BatchInferenceSpec.from_yaml(
 # is not ceremony: reusing v1's number would authorise this run against a
 # cheaper release's assumptions, and `log_gate_evidence` refuses an
 # estimate whose release does not match the spec.
-estimate_v2 = gbi.require_within_ceiling(estimate_for(spec_v2, PROMPT_V2))
+estimate_v2 = gbi.require_within_ceiling(estimate_for(spec_v2))
 print(
     f"prompt 1.0.0 projected {estimate_v1.projected_cost_cad:.2f} CAD "
     f"(~{estimate_v1.mean_input_tokens_per_row:.0f} input tokens/row)\n"
@@ -973,7 +984,7 @@ print(
     "CAD for the longer instruction, still inside the declared ceiling"
 )
 
-records_v2 = evaluation_records(spec_v2, "2.0.0", PROMPT_V2)
+records_v2 = evaluation_records(spec_v2)
 scores_v2 = gbi.score_extraction(records_v2, spec_v2, population)
 report_v2 = gbi.evaluate_gate(spec_v2, scores_v2)
 
@@ -1150,11 +1161,7 @@ for statement in migration.statements:
     spark.sql(statement)
     print(f"migrated: {statement}")
 
-execute_sql = gbi.build_execute_sql(
-    spec_v2,
-    run_id=RUN_ID,
-    prompt_sql=f"concat({gbi.sql_string_literal(PROMPT_V2)}, doc_text)",
-)
+execute_sql = gbi.build_execute_sql(spec_v2, run_id=RUN_ID)
 print(execute_sql[:1200] + "\n…")
 
 # "Pending" is release-aware: rows already landed *by this release* are
@@ -1163,6 +1170,7 @@ print(execute_sql[:1200] + "\n…")
 # it, or if a *newer* release already did — an older job must never claim
 # newer rows as unprocessed and overwrite them.
 release_predicate = f"""
+      AND done.ai_source_digest = sha2(source.doc_text, 256)
       AND (
         (
           done.ai_spec_digest = {gbi.sql_string_literal(spec_v2.spec_digest)}
@@ -1171,7 +1179,7 @@ release_predicate = f"""
           AND done.ai_prompt_version =
             {gbi.sql_string_literal(spec_v2.prompt_version)}
         )
-        OR done.ai_release_sequence > {spec_v2.release_sequence}
+        OR coalesce(done.ai_release_sequence, -1) > {spec_v2.release_sequence}
       )
 """
 pending_sql = f"""
@@ -1188,7 +1196,8 @@ else:
     # discipline — release-aware anti-join, then MERGE — with the
     # deterministic extractor standing in for ai_query.
     pending = spark.sql(f"""
-        SELECT source.doc_id, source.layout FROM {SOURCE_TABLE} AS source
+        SELECT source.doc_id, source.layout, source.doc_text
+        FROM {SOURCE_TABLE} AS source
         LEFT ANTI JOIN {TARGET_TABLE} AS done
           ON source.doc_id = done.doc_id{release_predicate}
         """).collect()
@@ -1230,6 +1239,10 @@ else:
         record["ai_model_version"] = spec_v2.model_version
         record["ai_prompt_version"] = spec_v2.prompt_version
         record["ai_release_sequence"] = spec_v2.release_sequence
+        # Matches Spark's sha2(col, 256): both hash the UTF-8 bytes.
+        record["ai_source_digest"] = hashlib.sha256(
+            row.doc_text.encode("utf-8")
+        ).hexdigest()
         output_rows.append(record)
     # Explicit DDL schema (from the module's single source of truth) so
     # Spark never has to infer types from rows with empty arrays/nulls.
