@@ -84,6 +84,15 @@ def response_length_ok(outputs: str, expectations: dict) -> float:
 
 CODE_SCORERS = (keyword_coverage, refusal_compliance, response_length_ok)
 
+# keyword_coverage and refusal_compliance are reference-based: without
+# ground-truth expectations they score vacuously (empty expectations pass
+# coverage, and every request reads as should-not-refuse, penalizing
+# legitimate safety refusals). Ordinary production traces carry no
+# expectations, so sampled monitoring registers only the reference-free
+# subset; the full set belongs to offline evaluation and to
+# expectation-bearing regression datasets.
+MONITORING_SCORERS = (response_length_ok,)
+
 
 def score_all(outputs: str, expectations: dict) -> dict[str, float]:
     return {fn.__name__: fn(outputs, expectations) for fn in CODE_SCORERS}
@@ -145,9 +154,12 @@ def as_mlflow_scorers(
 
     Only the scorers in :data:`CODE_SCORERS` are accepted: each is wrapped
     through its self-contained ``registered_*`` body so ``.register()`` /
-    ``.start()`` survives MLflow's body-only serialization. Wrap any other
-    function with ``mlflow.genai.scorers.scorer`` directly and keep its body
-    free of closure variables.
+    ``.start()`` survives MLflow's body-only serialization. For sampled
+    trace monitoring pass :data:`MONITORING_SCORERS` — production traces
+    carry no ground-truth expectations, and the reference-based scorers
+    would report misleading quality against them. Wrap any other function
+    with ``mlflow.genai.scorers.scorer`` directly and keep its body free of
+    closure variables.
     """
 
     try:

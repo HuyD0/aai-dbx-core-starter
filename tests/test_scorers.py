@@ -141,6 +141,24 @@ def test_as_mlflow_scorers_rejects_closure_dependent_custom_functions(
         as_mlflow_scorers([custom_scorer])
 
 
+def test_monitoring_scorers_are_the_reference_free_subset(monkeypatch):
+    from aai_core.scorers import CODE_SCORERS, MONITORING_SCORERS
+
+    assert set(MONITORING_SCORERS) <= set(CODE_SCORERS)
+    assert keyword_coverage not in MONITORING_SCORERS
+    assert refusal_compliance not in MONITORING_SCORERS
+    assert response_length_ok in MONITORING_SCORERS
+
+    registered = []
+    install_fake_module(
+        monkeypatch,
+        "mlflow.genai.scorers",
+        scorer=lambda *, name: (lambda fn: registered.append((name, fn.__name__))),
+    )
+    as_mlflow_scorers(MONITORING_SCORERS)
+    assert registered == [("response_length_ok", "registered_response_length_ok")]
+
+
 def test_as_mlflow_scorers_requires_the_genai_extra(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlflow.genai.scorers", None)
 

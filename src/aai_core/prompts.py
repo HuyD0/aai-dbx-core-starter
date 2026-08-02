@@ -159,6 +159,13 @@ class PromptManager:
         at promotion time would prove only what is being promoted, not what
         was evaluated. Anything less raises :class:`PromptPromotionError`
         and leaves the alias untouched.
+
+        This is a process guard against mistakes, not an authorization
+        mechanism: metric provenance is not attestable at the client, so
+        authorization for alias moves remains the registry's access
+        controls and the protected-main release path. Persisting the
+        decision first with ``record_decision()`` is the documented
+        convention the labs and templates follow.
         """
 
         from aai_core.decisions import Decision, DecisionRecord

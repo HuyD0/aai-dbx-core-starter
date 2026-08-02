@@ -34,7 +34,10 @@ All notable changes to `aai-core` are documented here.
   dependency-free `registered_*` bodies (logic inlined, equivalence
   test-enforced) so registered monitoring scorers survive MLflow's
   body-only serialization in a scoring service without aai-core installed.
-  Template copies are unchanged until each template's next version.
+  `MONITORING_SCORERS` is the reference-free subset for sampled trace
+  monitoring; reference-based scorers stay with offline evaluation where
+  ground-truth expectations exist. Template copies are unchanged until
+  each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with an explicit non-personal assessment source, and
   `traces_with_feedback()` for curating reviewed production traces into the
