@@ -1,0 +1,130 @@
+"""Unit tests for governed feedback and trace curation."""
+
+from types import SimpleNamespace
+
+import pytest
+
+from aai_core.monitoring import (
+    FeedbackSourceKind,
+    log_feedback,
+    traces_with_feedback,
+)
+
+
+class FakeAssessmentSource:
+    def __init__(self, *, source_type, source_id=None):
+        self.source_type = source_type
+        self.source_id = source_id
+
+
+def _fake_mlflow(captured):
+    return SimpleNamespace(
+        entities=SimpleNamespace(AssessmentSource=FakeAssessmentSource),
+        log_feedback=lambda **kwargs: captured.update(kwargs),
+    )
+
+
+def test_log_feedback_forwards_native_kwargs_with_governed_source():
+    captured: dict = {}
+
+    log_feedback(
+        trace_id="trace-1",
+        name="correct",
+        value=False,
+        rationale="Cited the wrong quarter.",
+        source_kind="human",
+        source_id="group:domain-reviewers",
+        mlflow_module=_fake_mlflow(captured),
+    )
+
+    assert captured["trace_id"] == "trace-1"
+    assert captured["name"] == "correct"
+    assert captured["value"] is False
+    assert captured["rationale"] == "Cited the wrong quarter."
+    assert captured["source"].source_type == "HUMAN"
+    assert captured["source"].source_id == "group:domain-reviewers"
+    assert "metadata" not in captured
+    assert "span_id" not in captured
+
+
+def test_log_feedback_parses_the_source_kind_vocabulary():
+    captured: dict = {}
+
+    log_feedback(
+        trace_id="trace-1",
+        name="groundedness",
+        value=0.5,
+        source_kind=FeedbackSourceKind.LLM_JUDGE,
+        mlflow_module=_fake_mlflow(captured),
+    )
+
+    assert captured["source"].source_type == "LLM_JUDGE"
+    with pytest.raises(ValueError):
+        log_feedback(
+            trace_id="trace-1",
+            name="groundedness",
+            value=0.5,
+            source_kind="vibes",
+            mlflow_module=_fake_mlflow({}),
+        )
+
+
+def test_log_feedback_refuses_personal_email_source():
+    with pytest.raises(ValueError, match="non-personal"):
+        log_feedback(
+            trace_id="trace-1",
+            name="correct",
+            value=True,
+            source_id="reviewer@example.com",
+            mlflow_module=_fake_mlflow({}),
+        )
+
+
+def test_log_feedback_refuses_blank_identifiers():
+    with pytest.raises(ValueError, match="trace_id"):
+        log_feedback(
+            trace_id=" ",
+            name="correct",
+            value=True,
+            mlflow_module=_fake_mlflow({}),
+        )
+
+
+def _trace(trace_id, assessments=None, shape="info"):
+    if shape == "info":
+        return SimpleNamespace(
+            info=SimpleNamespace(assessments=assessments), trace_id=trace_id
+        )
+    if shape == "flat":
+        return SimpleNamespace(assessments=assessments, trace_id=trace_id)
+    return SimpleNamespace(trace_id=trace_id)
+
+
+def test_traces_with_feedback_filters_by_name_and_value():
+    wrong = SimpleNamespace(name="correct", value=False)
+    right = SimpleNamespace(name="correct", value=True)
+    other = SimpleNamespace(name="latency", value=False)
+    traces = [
+        _trace("keep-info", [wrong]),
+        _trace("keep-flat", [wrong, other], shape="flat"),
+        _trace("drop-value", [right]),
+        _trace("drop-name", [other]),
+        _trace("drop-shapeless", shape="bare"),
+    ]
+
+    selected = traces_with_feedback(traces, name="correct", value=False)
+
+    assert [trace.trace_id for trace in selected] == ["keep-info", "keep-flat"]
+    assert traces_with_feedback(traces, name="correct") == traces[:3]
+
+
+def test_traces_with_feedback_reads_nested_feedback_values():
+    nested = SimpleNamespace(
+        name="correct",
+        value=None,
+        feedback=SimpleNamespace(value=False),
+    )
+    trace = _trace("nested", [nested])
+
+    assert traces_with_feedback([trace], name="correct", value=False) == [trace]
+    assert traces_with_feedback([trace], name="correct", value=True) == []
