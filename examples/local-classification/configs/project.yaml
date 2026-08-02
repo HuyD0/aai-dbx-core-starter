@@ -1,0 +1,52 @@
+schema_version: 1
+project_name: local-subscription-churn
+experiment_name: /local/classification/subscription-churn
+registered_model_name: subscription_churn_classifier
+random_seed: 20260801
+
+data:
+  dataset_name: synthetic-subscription-churn-v1
+  generator_version: "1.0"
+  start_month: 2023-01-01
+  months: 24
+  rows_per_month: 120
+  validation_start: 2024-07-01
+  test_start: 2024-10-01
+  target_column: churned_30d
+  id_column: account_id
+  time_column: snapshot_date
+
+features:
+  numeric:
+    - tenure_months
+    - monthly_fee
+    - support_tickets_90d
+    - usage_hours_30d
+    - payment_failures_90d
+  categorical:
+    - contract_type
+    - plan_tier
+    - signup_channel
+    - autopay
+  forbidden:
+    - churned_30d
+    - account_id
+    - snapshot_date
+    - cancellation_reason
+    - closed_account_at
+
+selection:
+  primary_metric: average_precision
+  simpler_model_tolerance: 0.02
+  false_negative_cost: 5.0
+  false_positive_cost: 1.0
+  minimum_validation_precision: 0.30
+  minimum_validation_recall: 0.75
+
+promotion_gate:
+  minimum_test_average_precision: 0.42
+  minimum_test_average_precision_lift: 0.15
+  minimum_test_recall: 0.65
+  maximum_test_brier_score: 0.16
+  maximum_test_cost_per_1000: 600.0
+  maximum_slice_recall_gap: 0.40
