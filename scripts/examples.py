@@ -270,8 +270,11 @@ def _is_placeholder(value: Any) -> bool:
     if value is None:
         return True
     normalized = str(value).strip().lower()
+    # The shared platform placeholder vocabulary; kept literal because this
+    # script stays stdlib-only (SDK homes: aai_core.tags._PLACEHOLDERS and
+    # aai_core.evaluation._QUALIFIER_PLACEHOLDERS).
     return (
-        normalized in {"", "unset"}
+        normalized in {"", "unset", "unknown", "todo", "changeme"}
         or normalized.startswith("replace-with-")
         or "<" in normalized
         or ">" in normalized

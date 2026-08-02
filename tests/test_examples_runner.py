@@ -37,6 +37,23 @@ def lifecycle_support():
     return module
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("unset", True),
+        ("unknown", True),
+        ("ToDo", True),
+        ("changeme", True),
+        (" ", True),
+        ("replace-with-endpoint", True),
+        ("main", False),
+        ("approved-judge-endpoint", False),
+    ],
+)
+def test_preflight_flags_every_platform_placeholder(runner, value, expected):
+    assert runner._is_placeholder(value) is expected
+
+
 def test_progressive_curriculum_uses_stable_fictional_earnings_cases(
     lifecycle_support,
 ):
