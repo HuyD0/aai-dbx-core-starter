@@ -102,9 +102,12 @@ def traces_with_feedback(
     Traces are returned unchanged; convert them before merging, because
     managed evaluation datasets accept record dictionaries or dataframes,
     not native ``Trace`` objects. Build each record's ``inputs`` from the
-    trace request (plus any still-valid expectation assessments), then
-    ``dataset.merge_records(records)`` — lab 14's connected curation cell
-    is the reference implementation of that conversion.
+    trace request plus its still-valid expectation assessments, keep only
+    rows whose expectations carry a nonblank string ``expected_response``
+    (the reference-based scorers fail anything else as a dataset defect,
+    so a malformed row would fail future gates for the wrong reason),
+    then ``dataset.merge_records(records)`` — lab 14's connected curation
+    cell is the reference implementation of that conversion.
     """
 
     selected = []

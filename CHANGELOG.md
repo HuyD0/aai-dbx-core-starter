@@ -70,8 +70,10 @@ All notable changes to `aai-core` are documented here.
   dataset, counting only valid feedback assessments — expectations,
   invalidated (overridden) entries, and errored scorer feedback never
   select a trace; convert selected
-  traces to record dictionaries before `merge_records` (managed datasets
-  reject native traces). Sampled-scorer registration remains a documented
+  traces to record dictionaries and merge only rows whose expectations
+  carry a nonblank string expected response (managed datasets reject
+  native traces, and the reference-based scorers fail anything else as a
+  dataset defect). Sampled-scorer registration remains a documented
   notebook step.
 - Added evidence-gated prompt promotion: `prompt_digest()`,
   `PromptManager.ensure_version()` registering idempotently by content
