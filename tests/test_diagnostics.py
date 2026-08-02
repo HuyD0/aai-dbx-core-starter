@@ -55,8 +55,7 @@ def test_doctor_reports_lifecycle_readiness_as_skips_not_failures(tmp_path):
 def test_doctor_passes_lifecycle_checks_when_configured(tmp_path):
     config = tmp_path / "aai-platform.yml"
     config.write_text(
-        VALID_CONFIG
-        + """
+        VALID_CONFIG + """
   catalog: main
   schema: app
 

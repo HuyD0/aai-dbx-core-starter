@@ -329,9 +329,7 @@ def get_or_create_evaluation_dataset(
             experiment_id=experiment_id,
         )
 
-    experiment_ids = {
-        str(associated) for associated in (dataset.experiment_ids or [])
-    }
+    experiment_ids = {str(associated) for associated in (dataset.experiment_ids or [])}
     if str(experiment_id) not in experiment_ids:
         raise RuntimeError(
             f"Unity Catalog dataset {qualified_name!r} is not associated with "

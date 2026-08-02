@@ -123,9 +123,7 @@ def record_decision(
     ) as active_run:
         if record.gate is not None:
             mlflow.log_metrics(dict(record.gate.metrics))
-        payload = json.dumps(
-            record.model_dump(mode="json"), indent=2, sort_keys=True
-        )
+        payload = json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True)
         with tempfile.TemporaryDirectory() as scratch:
             decision_file = Path(scratch) / "decision.json"
             decision_file.write_text(payload + "\n", encoding="utf-8")

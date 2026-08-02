@@ -146,9 +146,7 @@ class PromptManager:
 
         if isinstance(evidence, GateResult):
             if not evidence.passed:
-                failing = ", ".join(
-                    failure.metric for failure in evidence.failures
-                )
+                failing = ", ".join(failure.metric for failure in evidence.failures)
                 raise PromptPromotionError(
                     f"Refusing to move alias {alias!r} for prompt {name!r}: "
                     f"the cited gate failed on {failing}",
@@ -164,9 +162,7 @@ class PromptManager:
                     "gate before moving the production alias.",
                 )
         else:
-            raise TypeError(
-                "evidence must be a GateResult or DecisionRecord"
-            )
+            raise TypeError("evidence must be a GateResult or DecisionRecord")
         self.set_alias(name, alias=alias, version=version)
 
     def set_alias(self, name: str, *, alias: str, version: int) -> None:
