@@ -296,12 +296,49 @@ def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
         gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
         prompt_digest=prompt_digest(TEMPLATE),
     )
 
     with pytest.raises(PromptPromotionError, match="content digest"):
         _manager(mlflow).promote("earnings_summary", version=2, evidence=record)
 
+    assert mlflow.genai.alias is None
+
+
+def test_promote_binds_evidence_to_the_exact_prompt_and_version():
+    # Content identity is not registry identity: evidence for one prompt
+    # must never promote another that shares the same template.
+    mlflow = FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": TEMPLATE}
+    )
+
+    def _record(**overrides):
+        values = {
+            "decision": Decision.ADOPT,
+            "change_id": "prompt-v2",
+            "change_summary": "Require one exact source citation.",
+            "rationale": "Citation rate reached 1.0 with no regression.",
+            "gate": _passing_gate(),
+            "prompt_digest": prompt_digest(TEMPLATE),
+        }
+        values.update(overrides)
+        return DecisionRecord(**values)
+
+    with pytest.raises(PromptPromotionError, match="names no prompt"):
+        _manager(mlflow).promote("earnings_summary", version=2, evidence=_record())
+    with pytest.raises(PromptPromotionError, match="bound to 'main.app.other_prompt'"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            evidence=_record(prompt_name="main.app.other_prompt"),
+        )
+    with pytest.raises(PromptPromotionError, match="bound to version 3"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            evidence=_record(prompt_name="main.app.earnings_summary", prompt_version=3),
+        )
     assert mlflow.genai.alias is None
 
 
@@ -331,6 +368,8 @@ def test_promote_accepts_an_adopt_decision_bound_by_prompt_digest():
         change_summary="Require one exact source citation.",
         rationale="Citation rate reached 1.0 with no quality regression.",
         gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
         prompt_digest=prompt_digest(TEMPLATE),
     )
 

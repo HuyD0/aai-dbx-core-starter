@@ -45,6 +45,11 @@ class DecisionRecord(ContractModel):
     baseline_run_id: str | None = Field(default=None, min_length=1)
     change_run_id: str | None = Field(default=None, min_length=1)
     gate: GateResult | None = None
+    # The digest binds content; the qualified name and immutable version
+    # bind registry identity, so evidence for one prompt can never promote
+    # another prompt that happens to share a template.
+    prompt_name: str | None = Field(default=None, min_length=1)
+    prompt_version: int | None = Field(default=None, ge=1)
     # Exactly sha256 hexdigests (prompt_digest() and
     # ApplicationRelease.digest): raw prompt text, user content, or secrets
     # can never enter the persisted tags through these fields.
@@ -116,6 +121,10 @@ class DecisionRecord(ContractModel):
             values["change_run_id"] = self.change_run_id
         if self.gate is not None:
             values["gate_passed"] = str(self.gate.passed).lower()
+        if self.prompt_name:
+            values["prompt_name"] = self.prompt_name
+        if self.prompt_version is not None:
+            values["prompt_version"] = str(self.prompt_version)
         if self.prompt_digest:
             values["prompt_digest"] = self.prompt_digest
         if self.release_digest:

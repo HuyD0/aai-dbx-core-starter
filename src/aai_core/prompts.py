@@ -156,9 +156,12 @@ class PromptManager:
         exact version being promoted.
 
         ``evidence`` is an adopt :class:`~aai_core.decisions.DecisionRecord`
-        whose ``prompt_digest`` was recorded at decision time; the registry
-        version's actual template must match that digest, so evidence
-        gathered for one template can never move the alias onto another.
+        whose ``prompt_digest`` and qualified ``prompt_name`` were recorded
+        at decision time; the registry version's actual template must match
+        the digest and the qualified name must match the prompt being
+        promoted (with ``prompt_version`` verified when recorded), so
+        evidence gathered for one template — or one prompt — can never
+        move another prompt's alias.
         A bare :class:`~aai_core.evaluation.GateResult` is refused: gate
         evidence alone carries no template identity, and a digest supplied
         at promotion time would prove only what is being promoted, not what
@@ -207,6 +210,34 @@ class PromptManager:
                 "prompt_digest=prompt_digest(template) for the evaluated "
                 "template so promotion can verify the registry version it "
                 "moves.",
+            )
+        # Content identity is not registry identity: two prompts can share a
+        # template, so the decision must also name the exact prompt (and,
+        # when recorded, the immutable version) it was made for.
+        qualified = self.qualify(name)
+        if not evidence.prompt_name:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+                "adopt decision names no prompt",
+                remediation="Record the decision with "
+                "prompt_name=manager.qualify(name) for the evaluated prompt "
+                "so evidence for one prompt can never promote another.",
+            )
+        if evidence.prompt_name != qualified:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+                f"decision is bound to {evidence.prompt_name!r}, not "
+                f"{qualified!r}",
+                remediation="Promote the prompt the decision was recorded "
+                "for, or record a new decision for this prompt.",
+            )
+        if evidence.prompt_version is not None and evidence.prompt_version != version:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+                f"decision is bound to version {evidence.prompt_version}, "
+                f"not {version}",
+                remediation="Promote the exact registry version the "
+                "decision evaluated.",
             )
         # Every load_prompt flavor links the version to active lineage —
         # even the client-level one attaches it to the active experiment.

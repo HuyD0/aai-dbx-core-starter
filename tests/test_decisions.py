@@ -79,6 +79,8 @@ def _record(**overrides):
 
 def test_decision_record_is_a_strict_frozen_serializable_contract():
     record = _record(
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
         prompt_digest="a" * 64,
         release_digest="b" * 64,
         decided_by="group:app-owners",
@@ -101,12 +103,16 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
             "policy": CITATION_POLICY.model_dump(mode="json"),
             "baseline_metrics": None,
         },
+        "prompt_name": "main.app.earnings_summary",
+        "prompt_version": 2,
         "prompt_digest": "a" * 64,
         "release_digest": "b" * 64,
         "decided_by": "group:app-owners",
         "schema_version": "1",
     }
     assert record.as_tags()["prompt_digest"] == "a" * 64
+    assert record.as_tags()["prompt_name"] == "main.app.earnings_summary"
+    assert record.as_tags()["prompt_version"] == "2"
 
 
 def test_digest_fields_accept_only_a_sha256_hexdigest():

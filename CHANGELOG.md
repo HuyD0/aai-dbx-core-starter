@@ -12,7 +12,9 @@ All notable changes to `aai-core` are documented here.
   passing, metrics-bearing gate whose recorded policy applied at least one
   release rule; `decided_by` rejects personal emails; `prompt_digest` and
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
-  content, or secrets cannot enter persisted tags), and `record_decision()`
+  content, or secrets cannot enter persisted tags; `prompt_name` and
+  `prompt_version` bind the registry identity the evidence was recorded
+  for), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
@@ -61,11 +63,13 @@ All notable changes to `aai-core` are documented here.
   `PromptManager.ensure_version()` registering idempotently by content
   digest across every registry page (promoted from the lifecycle examples),
   and `PromptManager.promote()` moving a governed alias only on an adopt
-  decision whose `prompt_digest` was recorded at decision time and matches
-  the registry version's actual template
-  (`aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
-  carries no template identity, so evidence gathered for one template can
-  never promote another version. `set_alias()` is unchanged. `PromptManager`
+  decision whose `prompt_digest` and qualified `prompt_name` were recorded
+  at decision time and match the registry version's actual template and
+  the prompt being promoted (`prompt_version` verified when recorded;
+  `aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
+  carries no template identity, content identity is not registry identity,
+  and evidence gathered for one prompt or template can never promote
+  another. `set_alias()` is unchanged. `PromptManager`
   fails locally on unconfigured or placeholder catalog/schema qualifiers
   instead of querying the registry for names like `unset.unset.<name>`;
   explicit `catalog.schema.name` qualification remains untouched.
