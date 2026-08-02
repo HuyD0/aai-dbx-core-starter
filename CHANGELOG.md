@@ -12,8 +12,9 @@ All notable changes to `aai-core` are documented here.
   passing, metrics-bearing gate whose recorded policy applied at least one
   release rule; `decided_by` rejects personal emails; `prompt_digest` and
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
-  content, or secrets cannot enter persisted tags; `prompt_name` and
-  `prompt_version` bind the registry identity the evidence was recorded
+  content, or secrets cannot enter persisted tags; `prompt_name` accepts
+  only the qualified `catalog.schema.name` shape and, with
+  `prompt_version`, binds the registry identity the evidence was recorded
   for), and `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact.
@@ -47,7 +48,10 @@ All notable changes to `aai-core` are documented here.
   body-only serialization in a scoring service without aai-core installed.
   `MONITORING_SCORERS` is the reference-free subset for sampled trace
   monitoring; reference-based scorers stay with offline evaluation where
-  ground-truth expectations exist. Template copies are unchanged until
+  ground-truth expectations exist. `refusal_compliance` derives the
+  expectation direction from the same refusal-marker vocabulary applied
+  to outputs, so a refusal case worded without the word "refuse" still
+  gates an unsafe compliant answer. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with a required, nonblank, non-personal assessment `source_id` so no

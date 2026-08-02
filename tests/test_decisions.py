@@ -115,6 +115,21 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
     assert record.as_tags()["prompt_version"] == "2"
 
 
+def test_prompt_name_accepts_only_a_qualified_registry_name():
+    # Typos, prompt text, and credential-like values must never enter the
+    # governed aai.prompt_name tag.
+    for bad in (
+        "earnings_summary",
+        "main.app",
+        "a.b.c.d",
+        "Summarize {{excerpt}} politely.",
+        "main.app.name with spaces",
+    ):
+        with pytest.raises(ValidationError):
+            _record(prompt_name=bad)
+    assert _record(prompt_name="main.app.earnings_summary").prompt_name
+
+
 def test_digest_fields_accept_only_a_sha256_hexdigest():
     # Raw prompt text, user content, or secrets must never reach the
     # persisted tags through these fields; both known digests are sha256

@@ -47,8 +47,13 @@ class DecisionRecord(ContractModel):
     gate: GateResult | None = None
     # The digest binds content; the qualified name and immutable version
     # bind registry identity, so evidence for one prompt can never promote
-    # another prompt that happens to share a template.
-    prompt_name: str | None = Field(default=None, min_length=1)
+    # another prompt that happens to share a template. The constrained
+    # catalog.schema.name shape keeps typos, prompt text, and secrets out
+    # of the governed tag.
+    prompt_name: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$",
+    )
     prompt_version: int | None = Field(default=None, ge=1)
     # Exactly sha256 hexdigests (prompt_digest() and
     # ApplicationRelease.digest): raw prompt text, user content, or secrets
