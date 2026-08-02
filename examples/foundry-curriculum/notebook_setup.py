@@ -4,13 +4,122 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, Literal
+from urllib.parse import quote, urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field
 
 _PROJECT_PATH = re.compile(r"^/api/projects/[^/]+/?$")
 _PLACEHOLDER_PREFIXES = ("replace-", "<", "unset", "todo")
+_RESOURCE_NAME = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+_APP_INSIGHTS_RESOURCE_ID = (
+    r"^(?:replace-with-application-insights-resource-id|"
+    r"/subscriptions/[0-9A-Fa-f-]{36}/resourceGroups/[A-Za-z0-9._()-]+/"
+    r"providers/(?:Microsoft\.Insights|microsoft\.insights)/"
+    r"components/[A-Za-z0-9._()-]+)$"
+)
+
+
+class FoundryAgentSettings(BaseModel):
+    """Immutable identifiers for a pre-provisioned Foundry agent version."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(
+        default="replace-with-agent-name",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+    version: str = Field(
+        default="replace-with-agent-version",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+    id: str = Field(
+        default="replace-with-agent-id",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+
+
+class FoundryEvaluationSettings(BaseModel):
+    """Immutable identifiers for cloud evaluation resources."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evaluator_model: str = Field(
+        default="replace-with-evaluator-model-deployment",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+
+
+class FoundryMemorySettings(BaseModel):
+    """Reference to a memory store provisioned by the platform owner."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    store_name: str = Field(
+        default="replace-with-memory-store-name",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+
+
+class FoundryA2ASettings(BaseModel):
+    """References for a pre-enabled remote A2A agent and project connection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    remote_agent_name: str = Field(
+        default="replace-with-remote-agent-name",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+    connection_name: str = Field(
+        default="replace-with-a2a-connection-name",
+        min_length=1,
+        max_length=256,
+        pattern=_RESOURCE_NAME,
+    )
+    protocol_version: Literal["1.0"] = "1.0"
+
+
+class FoundryObservabilitySettings(BaseModel):
+    """Non-secret resource reference used to resolve legacy telemetry links."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    application_insights_resource_id: str = Field(
+        default="replace-with-application-insights-resource-id",
+        min_length=1,
+        max_length=1024,
+        pattern=_APP_INSIGHTS_RESOURCE_ID,
+    )
+
+
+class FoundryLabSettings(BaseModel):
+    """Strict boundary for optional advanced-lab identifiers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent: FoundryAgentSettings = Field(default_factory=FoundryAgentSettings)
+    evaluation: FoundryEvaluationSettings = Field(
+        default_factory=FoundryEvaluationSettings
+    )
+    memory: FoundryMemorySettings = Field(default_factory=FoundryMemorySettings)
+    a2a: FoundryA2ASettings = Field(default_factory=FoundryA2ASettings)
+    observability: FoundryObservabilitySettings = Field(
+        default_factory=FoundryObservabilitySettings
+    )
 
 
 @dataclass(frozen=True)
@@ -23,12 +132,66 @@ class FoundryNotebookSession:
     project_endpoint: str
     deployment: str
     context: Any
+    labs: FoundryLabSettings = field(default_factory=FoundryLabSettings)
 
     @property
     def connected_ready(self) -> bool:
         deployment_ready = not _is_placeholder(self.deployment)
         endpoint_ready = not _is_project_endpoint_placeholder(self.project_endpoint)
         return deployment_ready and endpoint_ready
+
+    @property
+    def agent_ready(self) -> bool:
+        return self.connected_ready and all(
+            not _is_placeholder(value)
+            for value in (self.labs.agent.name, self.labs.agent.version)
+        )
+
+    @property
+    def trace_ready(self) -> bool:
+        return self.agent_ready and not _is_placeholder(self.labs.agent.id)
+
+    @property
+    def evaluation_ready(self) -> bool:
+        return self.agent_ready and not _is_placeholder(
+            self.labs.evaluation.evaluator_model
+        )
+
+    @property
+    def a2a_ready(self) -> bool:
+        return self.connected_ready and not _is_placeholder(
+            self.labs.a2a.remote_agent_name
+        )
+
+    @property
+    def observability_ready(self) -> bool:
+        return not _is_placeholder(
+            self.labs.observability.application_insights_resource_id
+        )
+
+    @property
+    def a2a_base_url(self) -> str:
+        agent_name = quote(self.labs.a2a.remote_agent_name, safe="-._:")
+        return f"{self.project_endpoint}/agents/{agent_name}/endpoint/protocols/a2a"
+
+    @property
+    def a2a_agent_card_url(self) -> str:
+        return f"{self.a2a_base_url}/agentCard/v{self.labs.a2a.protocol_version}"
+
+    def agent_reference(self) -> dict[str, str]:
+        """Return an immutable agent reference without inventing a latest version."""
+
+        if not self.agent_ready:
+            raise RuntimeError(
+                "Configure foundry.agent.name and foundry.agent.version before "
+                "invoking an agent."
+            )
+        reference = {
+            "type": "agent_reference",
+            "name": self.labs.agent.name,
+            "version": self.labs.agent.version,
+        }
+        return reference
 
     def safe_summary(self) -> dict[str, str | bool]:
         """Return non-secret configuration fields safe to display in a notebook."""
@@ -39,8 +202,16 @@ class FoundryNotebookSession:
             "provider": "foundry",
             "project_endpoint": self.project_endpoint,
             "deployment": self.deployment,
+            "agent_name": self.labs.agent.name,
+            "agent_version": self.labs.agent.version,
+            "a2a_protocol": self.labs.a2a.protocol_version,
             "azure_identity": str(self.context.settings.azure_identity),
             "connected_ready": self.connected_ready,
+            "agent_ready": self.agent_ready,
+            "trace_ready": self.trace_ready,
+            "evaluation_ready": self.evaluation_ready,
+            "a2a_ready": self.a2a_ready,
+            "observability_ready": self.observability_ready,
         }
 
 
@@ -128,6 +299,9 @@ def load_session(
         raise ValueError(
             f"providers.models.{logical_model}.deployment must be configured."
         )
+    raw_settings = getattr(context.settings, "raw", {})
+    foundry_document = dict(raw_settings.get("foundry", {}))
+    labs = FoundryLabSettings.model_validate(foundry_document)
     return FoundryNotebookSession(
         curriculum_root=root,
         config_path=resolved_config,
@@ -135,6 +309,7 @@ def load_session(
         project_endpoint=endpoint,
         deployment=deployment,
         context=context,
+        labs=labs,
     )
 
 
@@ -164,6 +339,37 @@ def create_text_response(
         model=session.deployment,
         input=prompt,
     )
+
+
+def create_agent_response(
+    session: FoundryNotebookSession,
+    prompt: str,
+    *,
+    allow_network: bool = False,
+) -> tuple[Any, Any]:
+    """Create one conversation and invoke one immutable Foundry agent version."""
+
+    if not allow_network:
+        raise RuntimeError(
+            "Connected calls are disabled. Pass allow_network=True only after "
+            "reviewing the prompt, agent version, expected cost, and data policy."
+        )
+    if not session.agent_ready:
+        raise RuntimeError(
+            "Set a real project endpoint plus foundry.agent.name and "
+            "foundry.agent.version before making an agent call."
+        )
+    if not prompt.strip():
+        raise ValueError("prompt must not be blank")
+    model = session.context.providers.model(session.logical_model)
+    client = model.native_client
+    conversation = client.conversations.create()
+    response = client.responses.create(
+        conversation=conversation.id,
+        input=prompt,
+        extra_body={"agent_reference": session.agent_reference()},
+    )
+    return conversation, response
 
 
 def _validate_project_endpoint(value: str) -> str:

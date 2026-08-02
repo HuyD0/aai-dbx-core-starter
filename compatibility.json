@@ -71,6 +71,26 @@
       "support": "preview",
       "owner": "mlflow-native-with-aai-gates"
     },
+    "foundry_cloud_evaluation": {
+      "support": "native-provider",
+      "owner": "curriculum-opt-in",
+      "note": "Response-ID and agent-target evaluation are current; trace and conversation evaluation remain preview."
+    },
+    "foundry_a2a": {
+      "support": "preview",
+      "owner": "curriculum-opt-in",
+      "note": "New integrations target A2A v1.0; project connections, RBAC, and agent cards are provisioned externally."
+    },
+    "foundry_context_engineering": {
+      "support": "native-provider",
+      "owner": "application",
+      "note": "Agent Framework context providers and Responses compaction are current; managed Memory is preview."
+    },
+    "otel_dual_export": {
+      "support": "preview",
+      "owner": "application-with-platform-telemetry",
+      "note": "One OpenTelemetry provider can fan spans to Application Insights and an MLflow OTLP endpoint; there is no backend-to-backend synchronization."
+    },
     "automatic_evaluations": {
       "support": "preview",
       "owner": "platform-governed"
