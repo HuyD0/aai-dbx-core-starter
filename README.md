@@ -237,7 +237,7 @@ aai-core doctor --cloud
 
 ## Generate a project
 
-Five templates cover the AI application lifecycle; pick by what the team is
+Six templates cover the AI application lifecycle; pick by what the team is
 building:
 
 | Template | Use when you want |
@@ -247,6 +247,7 @@ building:
 | `evaluation-project` | A standalone eval harness for an existing app/endpoint: UC datasets, reusable scorers, baselines, CI regression gate, published results |
 | `rag-app` | Governed RAG: chunking pipeline, declared vector index (or Azure AI Search), traced grounded generation, groundedness gate |
 | `agent-app` | Tool-using agents: application-owned async loop, Pydantic outputs/tools, trajectory-aware evals, native MLflow Agent Server invoke/stream, and optional LangGraph recipe |
+| `analytics-app` | Self-service analytics: a runbook agent over a neutral git-versioned semantic layer, knowledge-doc router, provenance footers, snapshot-pinned golden evals, and a warehouse-portable executor protocol |
 
 ```bash
 az login
@@ -354,4 +355,5 @@ cloud and identity resources are provisioned outside this repository.
 - [Cost estimation](docs/cost-estimation.md) — the console's list-price estimator
   and its pricing snapshot
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
+- [Self-service analytics lifecycle](docs/analytics-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)

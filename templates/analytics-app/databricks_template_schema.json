@@ -1,0 +1,141 @@
+{
+  "welcome_message": "Create an AAI self-service analytics application\n\nA governed analytics agent over a neutral, git-versioned semantic layer: curated metric definitions compiled to warehouse SQL, knowledge docs with a runbook loop, provenance footers on every answer, and a two-tier evaluation gate pinned to snapshot data.",
+  "min_databricks_cli_version": "v1.6.0",
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "default": "aai-analytics-app",
+      "description": "Project and bundle name. NOTE: apply template updates deliberately — generated projects record their template version in .aai-template.json",
+      "order": 1,
+      "pattern": "^[a-z][a-z0-9-]+$",
+      "pattern_match_failure_message": "Use lowercase letters, numbers, and hyphens."
+    },
+    "application_name": {
+      "type": "string",
+      "default": "sales-analytics",
+      "description": "Application identifier used in tags, traces, and MLflow experiment names",
+      "order": 2,
+      "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?$",
+      "pattern_match_failure_message": "Use lowercase letters, numbers, and hyphens; start with a letter and do not end with a hyphen."
+    },
+    "repository_url": {
+      "type": "string",
+      "description": "Required absolute HTTPS URL of this project's real Git repository; Hub registration rejects example and placeholder URLs",
+      "order": 22,
+      "pattern": "^https://[^\\s@/?#]+(?:/[^\\s?#]*)?$",
+      "pattern_match_failure_message": "Use an absolute HTTPS repository URL without credentials, spaces, a query string, or a fragment."
+    },
+    "team": {
+      "type": "string",
+      "default": "data-platform",
+      "description": "Owning team",
+      "order": 3
+    },
+    "owner_group": {
+      "type": "string",
+      "default": "group:data-platform-owners",
+      "description": "Non-personal owning group; also stamped as the semantic-model source owner",
+      "order": 4
+    },
+    "cost_center": {
+      "type": "string",
+      "default": "CC-1234",
+      "description": "Non-secret finance cost center",
+      "order": 5
+    },
+    "catalog": {
+      "type": "string",
+      "default": "main",
+      "description": "Unity Catalog catalog holding the seeded demo star schema",
+      "order": 6
+    },
+    "schema": {
+      "type": "string",
+      "default": "analytics_app",
+      "description": "Unity Catalog schema for the seeded demo tables the semantic model reads",
+      "order": 7
+    },
+    "model_provider": {
+      "type": "string",
+      "default": "databricks",
+      "description": "Model provider. Choose `databricks` (recommended default: gateway-ready serving endpoint) unless your team already operates its own Foundry resource. Application code only uses the logical name",
+      "enum": [
+        "databricks",
+        "foundry"
+      ],
+      "order": 8
+    },
+    "model_deployment": {
+      "type": "string",
+      "default": "replace-with-model-endpoint",
+      "description": "Databricks serving endpoint name or Foundry deployment name",
+      "order": 9
+    },
+    "foundry_endpoint": {
+      "type": "string",
+      "default": "https://replace-with-foundry-resource.services.ai.azure.com",
+      "description": "Foundry resource endpoint (only asked for Foundry models)",
+      "order": 10,
+      "skip_prompt_if": {
+        "properties": {
+          "model_provider": {
+            "const": "databricks"
+          }
+        }
+      }
+    },
+    "judge_deployment": {
+      "type": "string",
+      "default": "replace-with-judge-endpoint",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "order": 11
+    },
+    "warehouse_id": {
+      "type": "string",
+      "default": "replace-with-sql-warehouse-id",
+      "description": "Serverless SQL warehouse id used by the seed job and the analytics executor; the deploy identity needs CAN USE on it",
+      "order": 12
+    },
+    "adversarial_review": {
+      "type": "string",
+      "default": "no",
+      "description": "Run the adversarial review second pass on every answer. Measured tradeoff from production use: higher accuracy at roughly +32% tokens and +72% latency",
+      "enum": [
+        "yes",
+        "no"
+      ],
+      "order": 13
+    },
+    "aai_core_version": {
+      "type": "string",
+      "default": "0.3.0",
+      "description": "Pinned aai-core SDK version",
+      "order": 17
+    },
+    "aai_core_volume": {
+      "type": "string",
+      "default": "/Volumes/dbx_dev/dbx_platform/python_packages",
+      "description": "Unity Catalog volume holding aai-core wheels",
+      "order": 18
+    },
+    "workspace_host": {
+      "type": "string",
+      "default": "https://adb-7405609799238491.11.azuredatabricks.net",
+      "description": "Development Azure Databricks workspace",
+      "order": 19
+    },
+    "compute_policy_id": {
+      "type": "string",
+      "default": "0005F2031B6D2319",
+      "description": "Constrained Job Compute policy",
+      "order": 20
+    },
+    "aai_core_pip_source": {
+      "type": "string",
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
+      "order": 21
+    }
+  },
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic offline gate\n  4. Review semantics/semantic_model.yml and knowledge/ — curated definitions are the product\n  5. Complete the warehouse and schema grants in README.md (external platform process)\n  6. databricks bundle deploy -t dev\n  7. databricks bundle run release_gate -t dev   # seeds the demo schema, then evaluates\n\nRun `make help` for every target."
+}
