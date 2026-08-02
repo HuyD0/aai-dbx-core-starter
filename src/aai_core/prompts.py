@@ -156,12 +156,12 @@ class PromptManager:
         exact version being promoted.
 
         ``evidence`` is an adopt :class:`~aai_core.decisions.DecisionRecord`
-        whose ``prompt_digest`` and qualified ``prompt_name`` were recorded
-        at decision time; the registry version's actual template must match
-        the digest and the qualified name must match the prompt being
-        promoted (with ``prompt_version`` verified when recorded), so
-        evidence gathered for one template — or one prompt — can never
-        move another prompt's alias.
+        whose ``prompt_digest``, qualified ``prompt_name``, and immutable
+        ``prompt_version`` were recorded at decision time; the registry
+        version's actual template must match the digest, and the name and
+        version must match the prompt being promoted, so evidence gathered
+        for one template, one prompt, or one version can never move
+        another's alias.
         A bare :class:`~aai_core.evaluation.GateResult` is refused: gate
         evidence alone carries no template identity, and a digest supplied
         at promotion time would prove only what is being promoted, not what
@@ -231,7 +231,19 @@ class PromptManager:
                 remediation="Promote the prompt the decision was recorded "
                 "for, or record a new decision for this prompt.",
             )
-        if evidence.prompt_version is not None and evidence.prompt_version != version:
+        if evidence.prompt_version is None:
+            # The digest hashes only the template: two immutable versions
+            # can share it while differing in native configuration, so
+            # version-unbound evidence could promote an unevaluated sibling.
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+                "adopt decision is not bound to a registry version",
+                remediation="Record the decision with prompt_version set to "
+                "the evaluated registry version so evidence for one "
+                "immutable version can never promote another that shares "
+                "its template.",
+            )
+        if evidence.prompt_version != version:
             raise PromptPromotionError(
                 f"Refusing to move alias {alias!r} for prompt {name!r}: the "
                 f"decision is bound to version {evidence.prompt_version}, "

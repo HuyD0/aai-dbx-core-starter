@@ -297,6 +297,7 @@ def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
         rationale="Citation rate reached 1.0 with no quality regression.",
         gate=_passing_gate(),
         prompt_name="main.app.earnings_summary",
+        prompt_version=2,
         prompt_digest=prompt_digest(TEMPLATE),
     )
 
@@ -332,6 +333,14 @@ def test_promote_binds_evidence_to_the_exact_prompt_and_version():
             "earnings_summary",
             version=2,
             evidence=_record(prompt_name="main.app.other_prompt"),
+        )
+    # Two immutable versions can share a template, so version-unbound
+    # evidence is refused outright, not just on mismatch.
+    with pytest.raises(PromptPromotionError, match="not bound to a registry version"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            evidence=_record(prompt_name="main.app.earnings_summary"),
         )
     with pytest.raises(PromptPromotionError, match="bound to version 3"):
         _manager(mlflow).promote(

@@ -63,13 +63,14 @@ All notable changes to `aai-core` are documented here.
   `PromptManager.ensure_version()` registering idempotently by content
   digest across every registry page (promoted from the lifecycle examples),
   and `PromptManager.promote()` moving a governed alias only on an adopt
-  decision whose `prompt_digest` and qualified `prompt_name` were recorded
-  at decision time and match the registry version's actual template and
-  the prompt being promoted (`prompt_version` verified when recorded;
-  `aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
+  decision whose `prompt_digest`, qualified `prompt_name`, and immutable
+  `prompt_version` were recorded at decision time and match the registry
+  version's actual template and the prompt and version being promoted
+  (`aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
   carries no template identity, content identity is not registry identity,
-  and evidence gathered for one prompt or template can never promote
-  another. `set_alias()` is unchanged. `PromptManager`
+  and two versions can share a template, so evidence gathered for one
+  prompt, template, or version can never promote another. `set_alias()`
+  is unchanged. `PromptManager`
   fails locally on unconfigured or placeholder catalog/schema qualifiers
   instead of querying the registry for names like `unset.unset.<name>`;
   explicit `catalog.schema.name` qualification remains untouched.
