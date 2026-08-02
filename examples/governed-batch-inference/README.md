@@ -111,7 +111,10 @@ abstention path) then passes the same gate on the same terms.
     the full release identity — spec digest, model version, prompt
     version — and the write is a `MERGE`. The content digest is what makes
     an edit-in-place reprocess instead of leaving the target serving values
-    derived from text that no longer exists. It additionally treats a strictly newer
+    derived from text that no longer exists. Stratum labels are row
+    metadata rather than model output, so a corrected label is resynced by
+    `resync_strata_sql` instead of triggering a paid re-run that would
+    regenerate identical values. It additionally treats a strictly newer
     `release_sequence` as already done, and the MERGE updates a row only
     when its sequence is not being lowered, so an old job resuming after a
     newer release has landed cannot roll production back to its own stale
@@ -136,7 +139,14 @@ abstention path) then passes the same gate on the same terms.
     through the precision gate. The same rule runs in evaluation and in
     execution (`apply_abstention_policy` and the generated SQL), so what
     was measured is what lands.
-12. **The run record is written once per `run_id`.** It is a keyed `MERGE`,
+12. **Persisted evidence is verified, not trusted.** Everything the gate
+    reads round-trips through MLflow as JSON, so each model re-derives what
+    it can: a `ConfidenceInterval` checks its bounds against its own counts,
+    a `FieldStratumScore` checks its intervals against the counts printed
+    beside them, and a `GateReport` derives its aggregate decision from its
+    field results and must judge every field in the spec. A truncated or
+    edited artifact fails to load rather than authorising a run.
+13. **The run record is written once per `run_id`.** It is a keyed `MERGE`,
     not an `INSERT`: `ai_run_id` is the join key every landed row uses to
     reach the run metadata, so a duplicate from a retried cell would fan
     out downstream joins and tie one run to two table versions.

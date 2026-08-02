@@ -1187,6 +1187,13 @@ pending_sql = f"""
     LEFT ANTI JOIN {TARGET_TABLE} AS done
       ON source.doc_id = done.doc_id{release_predicate}
 """
+# Strata are row metadata, not model output. If a document's `layout` was
+# corrected while its text stayed the same, the restart predicate rightly
+# calls the row done — but the landed label would stay wrong forever, and
+# monitoring groups by it. Fix the labels directly rather than paying an
+# endpoint to regenerate identical values.
+spark.sql(gbi.resync_strata_sql(spec_v2))
+
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
 if not SIMULATED:

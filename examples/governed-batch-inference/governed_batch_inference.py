@@ -864,6 +864,54 @@ class FieldStratumScore(BaseModel):
     recall: ConfidenceInterval | None
     abstention_rate: float = Field(ge=0.0, le=1.0)
 
+    @model_validator(mode="after")
+    def _intervals_match_the_counts(self) -> FieldStratumScore:
+        """A physical stratum's intervals must be *its own* observations.
+
+        The gate reads the intervals and never the raw counts, so a score
+        reconstructed with `n_asserted=0` and a borrowed 200/200 precision
+        interval would adopt on evidence from some other group. Each
+        interval is therefore tied back to the counts printed beside it.
+
+        The WEIGHTED row is exempt by construction: its intervals are the
+        population estimate expressed through an effective sample size, so
+        their trials are deliberately not a row count.
+        """
+        if self.stratum == WEIGHTED:
+            return self
+        if self.n_correct > min(self.n_asserted, self.n_gold):
+            raise ValueError(
+                "n_correct cannot exceed the values asserted or the values "
+                "that exist"
+            )
+        for metric, interval, denominator in (
+            ("precision", self.precision, self.n_asserted),
+            ("recall", self.recall, self.n_gold),
+        ):
+            if denominator == 0:
+                if interval is not None:
+                    raise ValueError(
+                        f"{metric} has no denominator in stratum "
+                        f"{self.stratum!r}, so it must be absent, not an "
+                        "interval"
+                    )
+                continue
+            if interval is None:
+                raise ValueError(
+                    f"{metric} in stratum {self.stratum!r} has "
+                    f"{denominator} observations but no interval"
+                )
+            if (interval.successes, interval.trials) != (
+                self.n_correct,
+                denominator,
+            ):
+                raise ValueError(
+                    f"the {metric} interval in stratum {self.stratum!r} "
+                    f"reports {interval.successes}/{interval.trials}, but "
+                    f"this score counted {self.n_correct}/{denominator}"
+                )
+        return self
+
 
 def apply_abstention_policy(
     spec: BatchInferenceSpec,
@@ -1191,7 +1239,15 @@ class FieldGateResult(BaseModel):
 
 
 class GateReport(BaseModel):
-    """Immutable gate evidence for one spec + one evaluation sample."""
+    """Immutable gate evidence for one spec + one evaluation sample.
+
+    ``decision`` is derived from ``fields``, so it is verified rather than
+    trusted. The report is a persisted artifact that later authorises a
+    paid, table-mutating run, and ``require_executable`` reads only the
+    aggregate — so a report reconstructed from a truncated artifact, with
+    no field results and an ``adopt`` verdict, would otherwise wave the
+    run through having evaluated nothing.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1199,10 +1255,39 @@ class GateReport(BaseModel):
     spec_digest: str
     use_tier: UseTier
     confidence_level: float
-    fields: tuple[FieldGateResult, ...]
+    fields: tuple[FieldGateResult, ...] = Field(min_length=1)
     decision: GateDecision
     approved_by: str | None = None
     human_review_obligations: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _decision_follows_from_the_fields(self) -> GateReport:
+        verdicts = {result.decision for result in self.fields}
+        if GateDecision.REJECT in verdicts:
+            implied = GateDecision.REJECT
+        elif GateDecision.INCONCLUSIVE in verdicts:
+            implied = GateDecision.INCONCLUSIVE
+        elif self.use_tier == UseTier.CONSEQUENTIAL:
+            # Tier 1 passes only into pending_approval; `approve_gate`
+            # then records the named human who accepted the residual risk.
+            implied = (
+                GateDecision.ADOPT
+                if self.approved_by
+                else GateDecision.PENDING_APPROVAL
+            )
+        else:
+            implied = GateDecision.ADOPT
+        if self.decision != implied:
+            raise ValueError(
+                f"decision {self.decision.value!r} does not follow from the "
+                f"field results, which imply {implied.value!r}"
+            )
+        if self.approved_by is not None and self.use_tier != UseTier.CONSEQUENTIAL:
+            raise ValueError(
+                "approved_by is a tier 1 obligation; a lower tier records no "
+                "named approver"
+            )
+        return self
 
 
 def _gate_metric(
@@ -1525,6 +1610,16 @@ def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> N
             "gate report was produced for a different spec revision; "
             "re-evaluate against the current spec"
         )
+    # A matching digest says the report describes this spec; it does not
+    # say the report judged all of it. Verify the coverage too, so a
+    # report missing a field cannot authorise a run over that field.
+    judged = {result.field for result in report.fields}
+    unjudged = sorted(field.name for field in spec.fields if field.name not in judged)
+    if unjudged:
+        raise GateNotPassed(
+            f"gate report does not judge {unjudged}; it cannot authorise a "
+            "run that writes those fields"
+        )
     if report.decision != GateDecision.ADOPT:
         raise GateNotPassed(
             f"gate decision is {report.decision.value!r}; execution requires " "'adopt'"
@@ -1750,6 +1845,36 @@ def require_migrated_target(
             )
         )
     return migration
+
+
+def resync_strata_sql(spec: BatchInferenceSpec) -> str:
+    """Refresh landed stratum values from the source, without inference.
+
+    Strata are row *metadata*, not model output: correcting a document's
+    ``layout`` from ``standard`` to ``legacy_scan`` changes how the row is
+    grouped for monitoring and re-sampling, but not a character the model
+    would return. The restart predicate keys on content and release, so it
+    rightly treats such a row as done — which would leave the obsolete
+    stratum in place forever.
+
+    Fixing that by widening the anti-join would work, but it would pay an
+    endpoint to regenerate identical output in order to correct a label.
+    This statement updates the labels directly instead. Run it before the
+    execute stage; it is cheap and touches only stratum columns.
+    """
+    assignments = ",\n    ".join(
+        f"target.{column} = source.{column}" for column in spec.strata
+    )
+    differs = "\n     OR ".join(
+        f"NOT (target.{column} <=> source.{column})" for column in spec.strata
+    )
+    return f"""MERGE INTO {spec.target_table} AS target
+USING {spec.source_table} AS source
+ON target.{spec.key_column} = source.{spec.key_column}
+WHEN MATCHED AND (
+     {differs}
+   ) THEN UPDATE SET
+    {assignments}"""
 
 
 def target_columns(spec: BatchInferenceSpec) -> tuple[tuple[str, str], ...]:

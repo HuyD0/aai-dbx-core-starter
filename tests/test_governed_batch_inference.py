@@ -621,6 +621,103 @@ def test_release_sequence_comparisons_survive_migrated_null_rows():
     )
 
 
+def test_a_gate_report_cannot_claim_a_decision_its_fields_do_not_support():
+    """The report authorises a paid, table-mutating run, and
+    `require_executable` reads only the aggregate — so the aggregate is
+    derived from the field results rather than trusted."""
+    spec = one_field_spec(criticality="high")
+    honest = gbi.evaluate_gate(spec, score(records_for("s", correct=200), spec))
+    assert honest.decision == gbi.GateDecision.ADOPT
+
+    # A truncated artifact: no field results, confident verdict.
+    with pytest.raises(ValidationError):
+        gbi.GateReport(
+            spec_name=spec.name,
+            spec_digest=spec.spec_digest,
+            use_tier=spec.use_tier,
+            confidence_level=spec.confidence_level,
+            fields=(),
+            decision=gbi.GateDecision.ADOPT,
+        )
+    # A rejecting field result relabelled as an adoption.
+    rejected = gbi.evaluate_gate(
+        spec, score(records_for("s", correct=80, wrong=20), spec)
+    )
+    assert rejected.decision == gbi.GateDecision.REJECT
+    with pytest.raises(ValidationError, match="does not follow"):
+        gbi.GateReport.model_validate(
+            {**rejected.model_dump(mode="json"), "decision": "adopt"}
+        )
+    # A round-trip of an honest report still validates.
+    assert gbi.GateReport.model_validate(honest.model_dump(mode="json")) == honest
+
+
+def test_execution_needs_a_report_that_judged_every_field():
+    """A matching digest says the report describes this spec; it does not
+    say the report judged all of it."""
+    spec = make_spec()  # two fields
+    records = [
+        gbi.EvaluationRecord(
+            stratum="standard",
+            inference=PLACEHOLDER_INFERENCE,
+            gold={"issuer_name": "v", "account_id": "v"},
+            predicted={"issuer_name": "v", "account_id": "v"},
+        )
+    ] * 200
+    report = gbi.evaluate_gate(spec, score(records, spec))
+    gbi.require_executable(spec, report)
+
+    partial = report.model_copy(
+        update={"fields": tuple(f for f in report.fields if f.field != "account_id")}
+    )
+    with pytest.raises(gbi.GateNotPassed, match="account_id"):
+        gbi.require_executable(spec, partial)
+
+
+def test_a_score_cannot_borrow_another_groups_intervals():
+    """The gate reads intervals, never the raw counts beside them."""
+    spec = one_field_spec()
+    real = next(
+        s
+        for s in score(records_for("s", correct=200), spec)
+        if s.stratum != gbi.WEIGHTED
+    )
+    payload = real.model_dump(mode="json")
+
+    # Claim no observations while keeping the 200/200 intervals: refused
+    # for having an interval where there is no denominator at all.
+    with pytest.raises(ValidationError, match="must be absent, not an interval"):
+        gbi.FieldStratumScore.model_validate(
+            {**payload, "n_correct": 0, "n_asserted": 0, "n_gold": 0}
+        )
+    # Claim fewer observations than the interval reports.
+    with pytest.raises(ValidationError, match="this score counted"):
+        gbi.FieldStratumScore.model_validate(
+            {**payload, "n_correct": 5, "n_asserted": 5, "n_gold": 5}
+        )
+    # Or keep the counts and swap in a stronger interval.
+    stronger = gbi.wilson_interval(400, 400, spec.confidence_level)
+    with pytest.raises(ValidationError, match="this score counted"):
+        gbi.FieldStratumScore.model_validate(
+            {**payload, "precision": stronger.model_dump(mode="json")}
+        )
+    # An honest round-trip is unaffected.
+    assert gbi.FieldStratumScore.model_validate(payload) == real
+
+
+def test_strata_are_resynced_without_paying_for_inference():
+    """A corrected label is metadata drift, not new model output."""
+    spec = make_spec()
+    sql = gbi.resync_strata_sql(spec)
+    assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
+    assert "USING main.finance_docs.document_text AS source" in sql
+    assert "NOT (target.layout <=> source.layout)" in sql  # null-safe
+    assert "target.layout = source.layout" in sql
+    # It touches only strata — no ai_ column and no inference call.
+    assert "ai_query" not in sql
+    assert "ai_" not in sql.split("THEN UPDATE SET")[1]
+
+
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
     spec = one_field_spec(criticality="high")
     records = [
