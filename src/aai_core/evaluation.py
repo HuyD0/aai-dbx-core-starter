@@ -162,6 +162,12 @@ def apply_gate(
     let the gate pass with scorer health unknown, and gate evidence cannot
     carry non-finite values. While ``fail_on_scorer_errors`` is enforced,
     such a result is refused outright instead of becoming evidence.
+
+    Native ``mlflow.genai.evaluate()`` results report scorer failures per
+    row (``<scorer>/error_message`` columns), not as aggregated metrics, so
+    those rows are counted here and persisted as ``<scorer>/error_count``
+    gate evidence — a crashing scorer fails the gate even though the native
+    metric mapping never mentions it.
     """
 
     metrics = _extract_metrics(evaluation_result)
@@ -174,6 +180,12 @@ def apply_gate(
                     "refusing to produce gate evidence with scorer health "
                     "unknown"
                 )
+        for name, count in _row_level_error_counts(
+            evaluation_result, policy.scorer_error_metric_suffix
+        ).items():
+            # A mapping-supplied count wins; rows only fill the gap native
+            # results leave.
+            metrics.setdefault(name, count)
     baseline = dict(baseline_metrics or {})
     return GateResult(
         metrics=metrics,
@@ -287,6 +299,31 @@ def _evaluate_policy(
             )
 
     return tuple(failures)
+
+
+def _row_level_error_counts(result: Any, suffix: str) -> dict[str, float]:
+    """Count per-row scorer failures a native result never aggregates.
+
+    ``mlflow.genai.evaluate()`` records a failed invocation as a non-null
+    ``<scorer>/error_message`` cell in ``result_df`` and omits it from the
+    ``metrics`` mapping entirely; synthesizing ``<scorer>/error_count``
+    evidence here is what lets the gate see scorer health at all.
+    """
+
+    frame = getattr(result, "result_df", None)
+    columns = getattr(frame, "columns", None)
+    if columns is None:
+        return {}
+    counts: dict[str, float] = {}
+    for column in columns:
+        name = str(column)
+        if not name.endswith("/error_message"):
+            continue
+        errored = int(frame[column].notna().sum())
+        if errored:
+            scorer = name.removesuffix("/error_message")
+            counts[f"{scorer}{suffix}"] = float(errored)
+    return counts
 
 
 def _metric_source(result: Any) -> Mapping[str, Any]:

@@ -29,8 +29,11 @@ All notable changes to `aai-core` are documented here.
   them at construction, so gate evidence is self-describing and cannot claim
   a pass its own metrics contradict; while scorer-error enforcement is on,
   `apply_gate` refuses to produce evidence from a non-finite scorer
-  error-count metric instead of silently discarding scorer health, and a
-  negative error count fails the gate as corrupt inside the recomputation;
+  error-count metric instead of silently discarding scorer health, a
+  negative error count fails the gate as corrupt inside the recomputation,
+  and per-row `<scorer>/error_message` failures in a native
+  `mlflow.genai.evaluate()` result are counted into persisted
+  `<scorer>/error_count` evidence (native results never aggregate them);
   `get_or_create_evaluation_dataset` promotes the governed dataset helper
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder catalog/schema

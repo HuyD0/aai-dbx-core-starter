@@ -148,6 +148,33 @@ def test_scorer_error_metrics_fail_without_exposing_error_text():
     assert result.failures[0].reason == "2 scorer invocation(s) failed"
 
 
+def test_gate_synthesizes_error_counts_from_native_result_rows():
+    # Native genai results report scorer failures only as per-row
+    # error_message cells; the gate must count them, or a crashing scorer
+    # passes silently.
+    pd = pytest.importorskip("pandas")
+    frame = pd.DataFrame(
+        {
+            "correctness/value": ["yes", None],
+            "correctness/error_message": [None, "judge timed out"],
+            "safety/value": ["yes", "yes"],
+            "safety/error_message": [None, None],
+        }
+    )
+    result = SimpleNamespace(metrics={"quality": 1.0}, result_df=frame)
+
+    gated = apply_gate(result, policy=GatePolicy())
+
+    assert not gated.passed
+    assert gated.metrics["correctness/error_count"] == 1.0
+    assert "safety/error_count" not in gated.metrics
+    assert gated.failures[0].reason == "1 scorer invocation(s) failed"
+
+    # Opting out of scorer-error enforcement leaves the rows uninspected.
+    relaxed = apply_gate(result, policy=GatePolicy(fail_on_scorer_errors=False))
+    assert relaxed.passed
+
+
 def test_gate_fails_negative_scorer_error_counts_as_corrupt():
     result = apply_gate({"correctness/error_count": -1}, policy=GatePolicy())
 
