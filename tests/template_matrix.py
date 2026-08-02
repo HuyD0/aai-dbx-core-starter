@@ -11,6 +11,57 @@ generated pytest, offline checks), so it must render a fully working project.
 """
 
 COMBOS = {
+    "analytics-app": [
+        {
+            "name": "databricks",
+            "overrides": {
+                "project_name": "test-analytics",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+            },
+            "expect_present": [
+                "semantics/semantic_model.yml",
+                "src/app/semantics/models.py",
+                "src/app/semantics/compiler.py",
+                "src/app/semantics/executor.py",
+                "src/app/knowledge.py",
+                "src/app/provenance.py",
+                "src/app/tools.py",
+                "src/app/agent.py",
+                "src/app/reviewer.py",
+                "src/app/scorers.py",
+                "knowledge/orders.md",
+                "knowledge/customers.md",
+                "knowledge/metrics_definitions.md",
+                "prompts/system_prompt.json",
+                "prompts/reviewer_prompt.json",
+                "jobs/seed_lakehouse.py",
+                "resources/analytics_job.yml",
+                "evals/evaluate.py",
+                "evals/offline_checks.py",
+                "evals/data/seed_data.json",
+                "evals/data/golden_cases.json",
+                "evals/data/answer_sheet.json",
+                "notebooks/01_explore_semantics.py",
+                "notebooks/02_context_engineering.py",
+                "notebooks/03_run_the_agent.py",
+                "notebooks/04_evaluate_and_gate.py",
+            ],
+            # No serving surface by design: projects graduate to agent-app.
+            "expect_absent": ["app.yaml", "start_server.py", "resources/agent_app.yml"],
+        },
+        {
+            "name": "foundry",
+            "overrides": {
+                "project_name": "test-analytics",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "model_deployment": "chat",
+            },
+            "expect_present": ["src/app/agent.py"],
+            "expect_absent": [],
+        },
+    ],
     "experiment-starter": [
         {
             "name": "with-notebook",

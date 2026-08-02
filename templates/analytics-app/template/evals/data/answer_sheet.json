@@ -1,0 +1,58 @@
+[
+  {
+    "question": "What was total revenue in March 2024?",
+    "answer": "Revenue for March 2024 was 600.75, excluding cancelled orders per the governed revenue definition.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 600.75\nsql: SELECT SUM(CASE WHEN `status` <> 'C' THEN `amount` END) AS `revenue` FROM `main`.`analytics_app`.`analytics_orders` WHERE DATE_TRUNC('MONTH', `order_date`) = :p0 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "How many orders have we received overall?",
+    "answer": "We have received 12 orders in total. Note that order_count includes cancelled orders by definition.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 12\nsql: SELECT COUNT(`order_id`) AS `order_count` FROM `main`.`analytics_app`.`analytics_orders` LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "How many distinct customers have placed at least one order?",
+    "answer": "6 distinct customers have placed at least one order (any status).\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 6\nsql: SELECT COUNT(DISTINCT `customer_id`) AS `active_customers` FROM `main`.`analytics_app`.`analytics_orders` LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "What was revenue in April 2024?",
+    "answer": "Revenue for April 2024 was 711.25, excluding cancelled orders.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 711.25\nsql: SELECT SUM(CASE WHEN `status` <> 'C' THEN `amount` END) AS `revenue` FROM `main`.`analytics_app`.`analytics_orders` WHERE DATE_TRUNC('MONTH', `order_date`) = :p0 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "Break down March 2024 revenue by region.",
+    "answer": "March 2024 revenue by region: north 200.50, south 260.25, west 140. The east region had no orders that month, and cancelled orders are excluded.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders, main.analytics_app.analytics_customers\nowner: group:data-platform-owners\nrows: 3\nsql: SELECT `customers`.`region` AS `region`, SUM(CASE WHEN `orders`.`status` <> 'C' THEN `orders`.`amount` END) AS `revenue` FROM `main`.`analytics_app`.`analytics_orders` AS `orders` JOIN `main`.`analytics_app`.`analytics_customers` AS `customers` ON `orders`.`customer_id` = `customers`.`customer_id` WHERE DATE_TRUNC('MONTH', `orders`.`order_date`) = :p0 GROUP BY 1 ORDER BY 1 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "Show the monthly revenue trend for 2024.",
+    "answer": "Monthly revenue in 2024: March 600.75 and April 711.25, excluding cancelled orders.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 2\nsql: SELECT DATE_TRUNC('MONTH', `order_date`) AS `order_date_month`, SUM(CASE WHEN `status` <> 'C' THEN `amount` END) AS `revenue` FROM `main`.`analytics_app`.`analytics_orders` WHERE DATE_TRUNC('YEAR', `order_date`) = :p0 GROUP BY 1 ORDER BY 1 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "How many shipped orders did we have in March 2024?",
+    "answer": "There were 4 shipped orders in March 2024. Shipped is the status code S in the orders table encoding.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 4\nsql: SELECT COUNT(`order_id`) AS `order_count` FROM `main`.`analytics_app`.`analytics_orders` WHERE `status` = :p0 AND DATE_TRUNC('MONTH', `order_date`) = :p1 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "How many orders were cancelled overall?",
+    "answer": "2 orders have been cancelled overall, using the status code C for cancelled.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 2\nsql: SELECT COUNT(`order_id`) AS `order_count` FROM `main`.`analytics_app`.`analytics_orders` WHERE `status` = :p0 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "What was the average order value in March 2024?",
+    "answer": "The average order value in March 2024 was 120.15, excluding cancelled orders.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 120.15\nsql: SELECT AVG(CASE WHEN `status` <> 'C' THEN `amount` END) AS `average_order_value` FROM `main`.`analytics_app`.`analytics_orders` WHERE DATE_TRUNC('MONTH', `order_date`) = :p0 LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "Is the orders data fresh enough to report on right now?",
+    "answer": "No. The orders table was last loaded at the fixed demo snapshot stamp 2024-05-01T06:00:00Z, which is outside its 24 hour freshness SLA, so treat any report from it as stale demo data.\n\n[provenance]\ntier: raw_table\nsources: main.analytics_app.analytics_orders\nfreshness: loaded 2024-05-01T06:00:00Z (OUTSIDE the 24h SLA)\nvalue: 2024-05-01T06:00:00Z\n[/provenance]"
+  },
+  {
+    "question": "What is our total revenue across all time?",
+    "answer": "Total revenue across all time is 1312.00, excluding cancelled orders.\n\n[provenance]\ntier: semantic_layer\nsources: main.analytics_app.analytics_orders\nowner: group:data-platform-owners\nrows: 1\nvalue: 1312.00\nsql: SELECT SUM(CASE WHEN `status` <> 'C' THEN `amount` END) AS `revenue` FROM `main`.`analytics_app`.`analytics_orders` LIMIT 100\n[/provenance]"
+  },
+  {
+    "question": "How is revenue doing?",
+    "answer": "That question is ambiguous, so I have not run a query yet. Revenue excludes cancelled orders by definition. Do you want a specific month such as April 2024, the monthly trend for 2024, or the all-time total?\n\n[provenance]\ntier: curated_reference\nsources: knowledge/metrics_definitions.md\n[/provenance]"
+  },
+  {
+    "question": "List the three largest individual orders with their ids.",
+    "answer": "The three largest orders by amount are O-1004 at 999.99 (note: that order was cancelled), O-1009 at 310.00, and O-1012 at 210.00. This needed row-level detail the semantic layer does not expose, so it used the guarded read-only fallback.\n\n[provenance]\ntier: raw_table\nsources: main.analytics_app.analytics_orders\nrows: 3\nsql: SELECT `order_id`, `amount`, `status` FROM `main`.`analytics_app`.`analytics_orders` ORDER BY `amount` DESC LIMIT 3\n[/provenance]"
+  },
+  {
+    "question": "What will the weather be in Paris tomorrow?",
+    "answer": "I cannot answer that. This analytics surface only covers the governed sales model — orders, revenue, customers, and regions — per its documented scope, and weather is outside it.\n\n[provenance]\ntier: curated_reference\nsources: knowledge/metrics_definitions.md\n[/provenance]"
+  }
+]

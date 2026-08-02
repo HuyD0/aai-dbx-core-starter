@@ -1,0 +1,236 @@
+"""Validate developer access and build an isolated local environment."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_HOST = "{{.workspace_host}}"
+SDK_VERSION = "{{.aai_core_version}}"
+SDK_VOLUME = "{{.aai_core_volume}}"
+COMPUTE_POLICY_ID = "{{.compute_policy_id}}"
+
+
+def command_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment["DATABRICKS_HOST"] = WORKSPACE_HOST
+    environment["DATABRICKS_AUTH_TYPE"] = "azure-cli"
+    environment.pop("DATABRICKS_TOKEN", None)
+    return environment
+
+
+def run(
+    command: list[str],
+    *,
+    environment: dict[str, str],
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=capture,
+        check=False,
+    )
+
+
+def azure_is_authenticated(environment: dict[str, str]) -> bool:
+    result = run(
+        ["az", "account", "show", "--output", "json"],
+        environment=environment,
+        capture=True,
+    )
+    return result.returncode == 0
+
+
+def offer_azure_login(environment: dict[str, str], *, allow_prompt: bool) -> bool:
+    if azure_is_authenticated(environment):
+        return True
+    if not allow_prompt or not sys.stdin.isatty():
+        return False
+    response = input("Azure CLI is not signed in. Run `az login` now? [Y/n] ").strip()
+    if response.lower() not in {"", "y", "yes"}:
+        return False
+    login = run(["az", "login"], environment=environment)
+    return login.returncode == 0 and azure_is_authenticated(environment)
+
+
+def check_json_command(
+    command: list[str],
+    *,
+    environment: dict[str, str],
+) -> bool:
+    result = run(command, environment=environment, capture=True)
+    if result.returncode != 0:
+        return False
+    try:
+        json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def run_preflight(*, allow_login_prompt: bool) -> list[str]:
+    problems: list[str] = []
+    version = sys.version_info
+    if not ((3, 11) <= version[:2] < (3, 13)):
+        problems.append(
+            f"Python {version.major}.{version.minor} is unsupported; "
+            "install Python 3.12 and rerun with `python3.12`."
+        )
+
+    for executable in ("git", "az", "databricks"):
+        if shutil.which(executable) is None:
+            problems.append(f"`{executable}` is not installed or is not on PATH.")
+    if problems:
+        return problems
+
+    environment = command_environment()
+    if not offer_azure_login(environment, allow_prompt=allow_login_prompt):
+        problems.append("Azure CLI is not signed in; run `az login`.")
+        return problems
+
+    if not check_json_command(
+        ["databricks", "current-user", "me", "--output", "json"],
+        environment=environment,
+    ):
+        problems.append(
+            "Databricks authentication failed. Confirm workspace access and run:\n"
+            f"  export DATABRICKS_HOST={WORKSPACE_HOST}\n"
+            "  export DATABRICKS_AUTH_TYPE=azure-cli"
+        )
+        return problems
+
+    wheel = f"aai_core-{SDK_VERSION}-py3-none-any.whl"
+    release_directory = f"dbfs:{SDK_VOLUME}/aai_core/{SDK_VERSION}"
+    listing = run(
+        ["databricks", "fs", "ls", release_directory, "--output", "json"],
+        environment=environment,
+        capture=True,
+    )
+    artifact_names: set[str] = set()
+    if listing.returncode == 0:
+        try:
+            artifact_names = {item["name"] for item in json.loads(listing.stdout)}
+        except (json.JSONDecodeError, KeyError, TypeError):
+            artifact_names = set()
+    for artifact in (wheel, f"{wheel}.sha256", "release-manifest.json"):
+        if artifact not in artifact_names:
+            problems.append(
+                f"Cannot read `{artifact}` from `{SDK_VOLUME}`. Ask the AAI "
+                "platform team to confirm the release exists and your developer "
+                "group has READ VOLUME."
+            )
+
+    if not check_json_command(
+        [
+            "databricks",
+            "cluster-policies",
+            "get",
+            COMPUTE_POLICY_ID,
+            "--output",
+            "json",
+        ],
+        environment=environment,
+    ):
+        problems.append(
+            f"Compute policy `{COMPUTE_POLICY_ID}` is not visible. Ask the AAI "
+            "platform team to grant your developer group CAN_USE."
+        )
+    return problems
+
+
+def venv_python() -> Path:
+    if os.name == "nt":
+        return ROOT / ".venv" / "Scripts" / "python.exe"
+    return ROOT / ".venv" / "bin" / "python"
+
+
+def run_setup() -> int:
+    environment = command_environment()
+    commands = [
+        [sys.executable, "-m", "venv", str(ROOT / ".venv")],
+        [
+            str(venv_python()),
+            str(ROOT / "scripts" / "install_core.py"),
+            "--version",
+            SDK_VERSION,
+            "--volume",
+            SDK_VOLUME,
+        ],
+        [
+            str(venv_python()),
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(ROOT / "requirements.lock"),
+        ],
+        [str(venv_python()), "-m", "pip", "install", "-e", ".[dev]"],
+        [str(venv_python()), "-m", "pytest", "-q"],
+    ]
+    offline_checks = ROOT / "evals" / "offline_checks.py"
+    if offline_checks.is_file():
+        commands.append([str(venv_python()), str(offline_checks)])
+
+    for command in commands:
+        result = run(command, environment=environment)
+        if result.returncode != 0:
+            print(
+                f"\nSetup stopped while running: {' '.join(command)}", file=sys.stderr
+            )
+            return result.returncode
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Validate prerequisites and access without installing anything.",
+    )
+    parser.add_argument(
+        "--no-login-prompt",
+        action="store_true",
+        help="Do not offer to run interactive Azure CLI login.",
+    )
+    arguments = parser.parse_args()
+
+    print("AAI developer preflight")
+    print(f"  Workspace: {WORKSPACE_HOST}")
+    print(f"  SDK:       aai-core {SDK_VERSION}")
+    print(f"  Volume:    {SDK_VOLUME}")
+    print(f"  Policy:    {COMPUTE_POLICY_ID}")
+    sys.stdout.flush()
+
+    problems = run_preflight(allow_login_prompt=not arguments.no_login_prompt)
+    if problems:
+        print("\nPreflight needs attention:", file=sys.stderr)
+        for problem in problems:
+            print(f"\n- {problem}", file=sys.stderr)
+        print("\nNo permissions or cloud resources were changed.", file=sys.stderr)
+        return 1
+
+    print("\nPreflight passed.")
+    if arguments.check_only:
+        return 0
+
+    result = run_setup()
+    if result != 0:
+        return result
+    print("\nAAI development environment is ready.")
+    print(f"Virtual environment: {ROOT / '.venv'}")
+    print("Next: databricks bundle validate -t dev")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

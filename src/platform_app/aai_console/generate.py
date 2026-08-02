@@ -23,6 +23,7 @@ TEMPLATE_IDS = (
     "evaluation-project",
     "rag-app",
     "agent-app",
+    "analytics-app",
 )
 
 
