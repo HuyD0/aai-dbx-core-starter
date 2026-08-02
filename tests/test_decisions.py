@@ -1,0 +1,128 @@
+"""Unit tests for the persisted decision vocabulary and evidence run."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from pydantic import ValidationError
+
+from aai_core.decisions import Decision, DecisionRecord, record_decision
+from aai_core.evaluation import GateFailure, GateResult
+from aai_core.experiments import ExperimentManager
+from aai_core.testing import dev_settings
+
+
+class FakeMlflow:
+    def __init__(self):
+        self.params: dict = {}
+        self.metrics: dict = {}
+        self.tags: dict = {}
+        self.artifacts: list = []
+
+    def set_experiment(self, name):
+        self.experiment = name
+
+    def start_run(self, run_name=None, nested=False, description=None):
+        class _Run:
+            def __enter__(self):
+                return SimpleNamespace(
+                    info=SimpleNamespace(run_id="run-decision-1", run_name=run_name)
+                )
+
+            def __exit__(self, *args):
+                return False
+
+        return _Run()
+
+    def set_tags(self, tags):
+        self.tags.update(tags)
+
+    def log_params(self, params):
+        self.params.update(params)
+
+    def log_metrics(self, metrics):
+        self.metrics.update(metrics)
+
+    def log_artifact(self, path, artifact_path=None):
+        self.artifacts.append((Path(path).name, artifact_path))
+
+
+def _record(**overrides):
+    values = {
+        "decision": Decision.ADOPT,
+        "change_id": "prompt-v2",
+        "change_summary": "Require one exact source citation.",
+        "rationale": "Citation rate reached 1.0 with no quality regression.",
+        "baseline_run_id": "run-baseline",
+        "change_run_id": "run-change",
+        "gate": GateResult(metrics={"citation_rate": 1.0}),
+    }
+    values.update(overrides)
+    return DecisionRecord(**values)
+
+
+def test_decision_record_is_a_strict_frozen_serializable_contract():
+    record = _record(release_digest="digest-1", decided_by="group:app-owners")
+
+    with pytest.raises(ValidationError):
+        DecisionRecord(**{**record.model_dump(), "verdict": "extra"})
+    with pytest.raises(ValidationError):
+        record.rationale = "rewritten"
+    assert record.model_dump(mode="json") == {
+        "decision": "adopt",
+        "change_id": "prompt-v2",
+        "change_summary": "Require one exact source citation.",
+        "rationale": "Citation rate reached 1.0 with no quality regression.",
+        "baseline_run_id": "run-baseline",
+        "change_run_id": "run-change",
+        "gate": {"metrics": {"citation_rate": 1.0}, "failures": []},
+        "release_digest": "digest-1",
+        "decided_by": "group:app-owners",
+        "schema_version": "1",
+    }
+
+
+def test_decision_parses_the_documented_string_vocabulary():
+    assert _record(decision="  Reject ").decision is Decision.REJECT
+    with pytest.raises(ValidationError):
+        _record(decision="ship_it")
+    with pytest.raises(ValidationError):
+        _record(decision="keep_baseline")
+
+
+def test_adopt_cannot_cite_a_failing_gate():
+    failing = GateResult(
+        metrics={"citation_rate": 0.4},
+        failures=(GateFailure(metric="citation_rate", reason="0.4 below 1"),),
+    )
+
+    with pytest.raises(ValidationError, match="adopt"):
+        _record(gate=failing)
+    rejected = _record(decision=Decision.REJECT, gate=failing)
+    assert rejected.as_tags()["gate_passed"] == "false"
+
+
+def test_decided_by_refuses_personal_email_identity():
+    with pytest.raises(ValidationError, match="non-personal"):
+        _record(decided_by="reviewer@example.com")
+
+
+def test_record_decision_emits_governed_searchable_evidence():
+    fake = FakeMlflow()
+    manager = ExperimentManager(
+        experiment_name="/Shared/test",
+        context=dev_settings().resource,
+        mlflow_module=fake,
+    )
+
+    run_id = record_decision(_record(), experiments=manager)
+
+    assert run_id == "run-decision-1"
+    assert fake.tags["aai.decision"] == "adopt"
+    assert fake.tags["aai.run_purpose"] == "decision"
+    assert fake.tags["aai.change_id"] == "prompt-v2"
+    assert fake.tags["aai.baseline_run_id"] == "run-baseline"
+    assert fake.tags["aai.change_run_id"] == "run-change"
+    assert fake.tags["aai.gate_passed"] == "true"
+    assert fake.metrics == {"citation_rate": 1.0}
+    assert ("decision.json", "decision") in fake.artifacts
