@@ -184,9 +184,11 @@ def apply_gate(
         for name, count in _row_level_error_counts(
             evaluation_result, policy.scorer_error_metric_suffix
         ).items():
-            # A mapping-supplied count wins; rows only fill the gap native
-            # results leave.
-            metrics.setdefault(name, count)
+            # Observed failing rows are direct evidence. An aggregate that
+            # contradicts them — 0 in the mapping while error_message rows
+            # exist — must not erase the failure, so keep whichever count
+            # is larger rather than always trusting the mapping.
+            metrics[name] = max(metrics.get(name, 0.0), count)
     baseline = dict(baseline_metrics or {})
     return GateResult(
         metrics=metrics,
@@ -488,7 +490,14 @@ def get_or_create_evaluation_dataset(
     # create_dataset() and compared against backend ids, which come back
     # normalized, so untrimmed input would fail in the cloud or falsely
     # report the dataset as associated with the wrong experiment.
-    experiment_id = str(experiment_id).strip()
+    # str() would turn None into the plausible-looking id "None"; require
+    # the real type before normalizing.
+    if not isinstance(experiment_id, str):
+        raise TypeError(
+            "experiment_id must be a string MLflow experiment id; got "
+            f"{type(experiment_id).__name__}"
+        )
+    experiment_id = experiment_id.strip()
     if not experiment_id or _is_placeholder(experiment_id):
         raise ValueError(
             "experiment_id must be the real MLflow experiment id the dataset "

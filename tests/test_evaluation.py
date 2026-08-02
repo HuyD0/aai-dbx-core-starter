@@ -210,6 +210,40 @@ def test_gate_synthesizes_error_counts_from_native_result_rows():
     assert gated.metrics["predict_fn/error_count"] == 1.0
 
 
+def test_gate_keeps_the_larger_of_aggregate_and_row_error_counts():
+    # An aggregate of 0 alongside failing error_message rows is
+    # contradictory evidence; trusting the mapping would let a crashed
+    # scorer pass the gate and authorize adoption.
+    pd = pytest.importorskip("pandas")
+    frame = pd.DataFrame(
+        {
+            "correctness/value": ["yes", None, None],
+            "correctness/error_message": [None, "judge timed out", "judge timed out"],
+        }
+    )
+    contradicted = SimpleNamespace(
+        metrics={"quality": 1.0, "correctness/error_count": 0},
+        result_df=frame,
+    )
+
+    gated = apply_gate(contradicted, policy=GatePolicy())
+
+    assert not gated.passed
+    assert gated.metrics["correctness/error_count"] == 2.0
+
+    # A larger aggregate is kept: errors need not all produce a message.
+    aggregate_wins = SimpleNamespace(
+        metrics={"quality": 1.0, "correctness/error_count": 5},
+        result_df=frame,
+    )
+    assert (
+        apply_gate(aggregate_wins, policy=GatePolicy()).metrics[
+            "correctness/error_count"
+        ]
+        == 5.0
+    )
+
+
 def test_gate_fails_negative_scorer_error_counts_as_corrupt():
     result = apply_gate({"correctness/error_count": -1}, policy=GatePolicy())
 
@@ -516,6 +550,24 @@ def test_dataset_helper_creates_without_unsupported_tags():
     }
     assert "tags" not in datasets.create_arguments
     assert result.merged_records is None
+
+
+def test_dataset_helper_requires_a_string_experiment_id():
+    # str(None) is the plausible-looking id "None", which would pass the
+    # nonblank and placeholder checks and reach the registry.
+    for bad in (None, 123, ["experiment-1"]):
+        datasets = FakeDatasetApi(
+            get_error=RuntimeError("RESOURCE_DOES_NOT_EXIST: dataset not found")
+        )
+        with pytest.raises(TypeError, match="experiment_id"):
+            get_or_create_evaluation_dataset(
+                name="regression_v1",
+                catalog="main",
+                schema="default",
+                experiment_id=bad,
+                mlflow_module=_dataset_mlflow(datasets),
+            )
+        assert datasets.create_arguments is None
 
 
 def test_dataset_helper_refuses_placeholder_experiment_ids():

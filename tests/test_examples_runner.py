@@ -397,6 +397,18 @@ platform:
     assert len(issues) == 1
     assert "platform.experiment_name" in issues[0]
 
+    # A non-string name reads as configured once stringified, but strict
+    # PlatformSettings rejects it at bootstrap — fail before cloud checks.
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "experiment_name: unknown", "experiment_name: 123"
+        ),
+        encoding="utf-8",
+    )
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "must be a string" in issues[0]
+
 
 def test_config_preflight_rejects_malformed_qualifiers(runner, tmp_path, monkeypatch):
     # The SDK helpers reject dotted or invalid-character qualifiers; the

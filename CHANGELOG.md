@@ -57,15 +57,17 @@ All notable changes to `aai-core` are documented here.
   and per-row failures in a native `mlflow.genai.evaluate()` result —
   `<scorer>/error_message` scorer failures and bare `error_message`
   `predict_fn` failures alike — are counted into persisted
-  `*/error_count` evidence (native results never aggregate them);
+  `*/error_count` evidence (native results never aggregate them), with
+  the larger of the aggregate and observed row counts kept so a mapping
+  reporting zero cannot erase failing rows;
   `get_or_create_evaluation_dataset` promotes the governed dataset helper
   from `examples/notebook_setup.py` (which keeps its copy until the
   notebooks migrate) and fails locally on placeholder, dotted, or
   invalid-character catalog/schema qualifiers and logical dataset names
-  instead of querying the registry; the experiment id is normalized and
-  placeholder-checked before the first request, so neither an untrimmed
-  nor an unconfigured value can reach the cloud call or misreport an
-  association the backend reports normalized.
+  instead of querying the registry; the experiment id must be a string
+  and is normalized and placeholder-checked before the first request, so
+  no untrimmed, unconfigured, or `str(None)`-shaped value can reach the
+  cloud call or misreport an association the backend reports normalized.
 - Added `aai_core.scorers` with the deterministic code scorers shared by
   gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
   dependency-free `registered_*` bodies (logic inlined, equivalence

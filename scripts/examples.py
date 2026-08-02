@@ -336,6 +336,14 @@ def _effective_experiment_issue(document: dict[str, Any]) -> str | None:
     platform = platform if isinstance(platform, dict) else {}
     explicit = platform.get("experiment_name")
     if explicit not in (None, "", "unset"):
+        # _is_placeholder stringifies, so a number or list would read as a
+        # configured name here and only fail later inside strict
+        # PlatformSettings — after the cloud preflight has already run.
+        if not isinstance(explicit, str):
+            return (
+                "`platform.experiment_name` must be a string experiment path "
+                f"(current value: {explicit!r})."
+            )
         if _is_placeholder(explicit):
             return (
                 "Configure `platform.experiment_name` in aai-platform.yml "
