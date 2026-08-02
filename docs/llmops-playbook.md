@@ -129,7 +129,9 @@ used offline; human and automated feedback flows back into the evaluation
 set.
 
 Here: `src/aai_core/monitoring.py` records governed feedback
-(`log_feedback` with an explicit source, never a personal email) and filters
+(`log_feedback` with a kind-namespaced non-personal source — `group:` for
+human review, `judge:`/`code:` for automated scorers — never a username or
+email) and filters
 traces by feedback (`traces_with_feedback`) so reviewed failures become
 regression records via `get_or_create_evaluation_dataset`. Sampled-scorer
 registration (`Scorer.register()`/`.start()`) remains a Databricks notebook

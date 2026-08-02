@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
+from re import fullmatch
 from typing import Any
 
 
@@ -23,6 +24,19 @@ class FeedbackSourceKind(StrEnum):
     HUMAN = "human"
     LLM_JUDGE = "llm_judge"
     CODE = "code"
+
+
+# Provenance identities are namespaced by source kind so a personal
+# identity — a username, employee id, or email address — cannot pass as
+# provenance. The shape cannot prove a string names a real group, but it
+# forces the non-personal claim to be structural rather than aspirational,
+# the same way the tagging standard requires owner_group over an
+# individual email.
+_SOURCE_NAMESPACES = {
+    FeedbackSourceKind.HUMAN: "group",
+    FeedbackSourceKind.LLM_JUDGE: "judge",
+    FeedbackSourceKind.CODE: "code",
+}
 
 
 def log_feedback(
@@ -40,9 +54,12 @@ def log_feedback(
     """Attach governed feedback to a trace through native ``mlflow.log_feedback``.
 
     ``source_id`` is required so no governed feedback can be recorded
-    without provenance: it identifies the reviewer group or scoring system
-    and must be non-personal (for example ``group:domain-reviewers``),
-    never an email address.
+    without provenance, and it is namespaced by ``source_kind`` so a
+    personal identity can never pass as provenance: human feedback uses
+    ``group:<reviewer-group>`` (for example ``group:domain-reviewers``),
+    judge feedback uses ``judge:<judge-name>``, and code scorer feedback
+    uses ``code:<scorer-name>``. Usernames, employee ids, and email
+    addresses are personal identities and are rejected.
     """
 
     if not str(trace_id).strip():
@@ -56,10 +73,18 @@ def log_feedback(
             "source_id must not be blank: governed feedback always carries "
             "a non-personal provenance identity such as 'group:domain-reviewers'"
         )
-    if "@" in source_id:
+    namespace = _SOURCE_NAMESPACES[source_kind]
+    prefix, separator, identifier = str(source_id).partition(":")
+    if (
+        not separator
+        or prefix != namespace
+        or not fullmatch(r"[A-Za-z0-9._-]{1,64}", identifier)
+    ):
         raise ValueError(
-            "source_id must be a non-personal identity such as "
-            "'group:domain-reviewers', never an email address"
+            f"source_id must be a namespaced non-personal identity of the "
+            f"form '{namespace}:<identifier>' for {source_kind.value} "
+            "feedback; usernames, employee ids, and email addresses are "
+            "personal identities and never valid provenance"
         )
 
     mlflow, assessment_source = _mlflow_and_source(mlflow_module)

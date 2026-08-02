@@ -82,6 +82,60 @@ def test_log_feedback_refuses_personal_email_source():
         )
 
 
+def test_log_feedback_requires_kind_namespaced_provenance():
+    # A bare username or employee id is a personal identity even without
+    # an "@"; the kind namespace makes the non-personal claim structural.
+    for personal in (
+        "alice",
+        "employee-1234",
+        "group:",
+        "group:with space",
+        "group:" + "a" * 65,
+        "GROUP:domain-reviewers",
+    ):
+        with pytest.raises(ValueError, match="non-personal"):
+            log_feedback(
+                trace_id="trace-1",
+                name="correct",
+                value=True,
+                source_id=personal,
+                mlflow_module=_fake_mlflow({}),
+            )
+
+
+def test_log_feedback_namespace_must_match_the_source_kind():
+    # A judge cannot claim reviewer-group provenance and vice versa; each
+    # kind owns exactly one namespace.
+    with pytest.raises(ValueError, match="judge:"):
+        log_feedback(
+            trace_id="trace-1",
+            name="groundedness",
+            value=0.5,
+            source_kind=FeedbackSourceKind.LLM_JUDGE,
+            source_id="group:domain-reviewers",
+            mlflow_module=_fake_mlflow({}),
+        )
+    with pytest.raises(ValueError, match="code:"):
+        log_feedback(
+            trace_id="trace-1",
+            name="response_length_ok",
+            value=1.0,
+            source_kind="code",
+            source_id="judge:groundedness-v1",
+            mlflow_module=_fake_mlflow({}),
+        )
+    captured: dict = {}
+    log_feedback(
+        trace_id="trace-1",
+        name="response_length_ok",
+        value=1.0,
+        source_kind="code",
+        source_id="code:response_length_ok",
+        mlflow_module=_fake_mlflow(captured),
+    )
+    assert captured["source"].source_id == "code:response_length_ok"
+
+
 def test_log_feedback_refuses_blank_identifiers():
     with pytest.raises(ValueError, match="trace_id"):
         log_feedback(

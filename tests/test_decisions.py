@@ -34,11 +34,14 @@ class FakeMlflow:
         self.metrics: dict = {}
         self.tags: dict = {}
         self.artifacts: list = []
+        self.run_names: list = []
 
     def set_experiment(self, name):
         self.experiment = name
 
     def start_run(self, run_name=None, nested=False, description=None):
+        self.run_names.append(run_name)
+
         class _Run:
             def __enter__(self):
                 return SimpleNamespace(
@@ -236,3 +239,21 @@ def test_record_decision_emits_governed_searchable_evidence():
     assert fake.tags["aai.gate_passed"] == "true"
     assert fake.metrics == {"citation_rate": 1.0}
     assert ("decision.json", "decision") in fake.artifacts
+
+
+def test_record_decision_derives_the_run_name_from_the_bounded_change_id():
+    # MLflow persists run names as the mlflow.runName tag, so a free-form
+    # name override would let prompts, user content, or secrets bypass the
+    # record's bounded fields; the name derives exclusively from change_id.
+    fake = FakeMlflow()
+    manager = ExperimentManager(
+        experiment_name="/Shared/test",
+        context=dev_settings().resource,
+        mlflow_module=fake,
+    )
+
+    record_decision(_record(), experiments=manager)
+
+    assert fake.run_names == ["decision-prompt-v2"]
+    with pytest.raises(TypeError):
+        record_decision(_record(), experiments=manager, run_name="free text")

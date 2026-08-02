@@ -160,16 +160,18 @@ def record_decision(
     record: DecisionRecord,
     *,
     experiments: ExperimentManager,
-    run_name: str | None = None,
 ) -> str:
     """Persist a decision as a governed run and return its run id.
 
     The run carries ``aai.run_purpose="decision"``, the searchable
     ``aai.decision`` tags, the gate metrics when present, and the complete
-    record as a ``decision.json`` artifact.
+    record as a ``decision.json`` artifact. The run name derives
+    exclusively from the bounded ``change_id`` — MLflow persists run names
+    as the ``mlflow.runName`` tag, so a free-form override would let
+    prompts, user content, or secrets bypass the record's bounded fields.
     """
 
-    resolved_name = run_name or f"decision-{record.change_id}"
+    resolved_name = f"decision-{record.change_id}"
     metadata = ExperimentRunMetadata(
         purpose=RunPurpose.DECISION,
         change_id=record.change_id,

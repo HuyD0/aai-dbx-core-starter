@@ -23,7 +23,10 @@ All notable changes to `aai-core` are documented here.
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact — the free-form rationale persists only
   inside that artifact, never as a run description (MLflow stores
-  descriptions as the `mlflow.note.content` tag).
+  descriptions as the `mlflow.note.content` tag), and the run name derives
+  exclusively from the bounded `change_id` (MLflow persists run names as
+  the `mlflow.runName` tag, so a free-form override would bypass the
+  record's bounded fields).
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
   the single resolver for the approved judge endpoint (it had been duplicated
   across five template sites) and rejects setup-placeholder deployments
@@ -64,8 +67,10 @@ All notable changes to `aai-core` are documented here.
   dataset defect must never inflate a release gate. Template copies are unchanged until
   each template's next version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
-  with a required, nonblank, non-personal assessment `source_id` so no
-  governed feedback lands without provenance, and `traces_with_feedback()`
+  with a required assessment `source_id` namespaced by source kind
+  (`group:` for human review, `judge:`/`code:` for automated scorers) so
+  no governed feedback lands without provenance and no personal identity —
+  username, employee id, or email — can pass as provenance, and `traces_with_feedback()`
   for curating reviewed production traces into the governed regression
   dataset, counting only valid feedback assessments — expectations,
   invalidated (overridden) entries, and errored scorer feedback never
