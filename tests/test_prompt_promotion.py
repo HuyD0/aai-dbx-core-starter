@@ -127,6 +127,17 @@ def test_is_missing_prompt_error_recognizes_only_absence():
     assert is_missing_prompt_error(
         RegistryError("prompt does not exist", error_code="INTERNAL_ERROR")
     )
+    # The file/SQL registries report a missing alias as
+    # INVALID_PARAMETER_VALUE with "Registered model alias ... not found."
+    assert is_missing_prompt_error(
+        RegistryError(
+            "Registered model alias production not found.",
+            error_code="INVALID_PARAMETER_VALUE",
+        )
+    )
+    assert not is_missing_prompt_error(
+        RegistryError("bad page token", error_code="INVALID_PARAMETER_VALUE")
+    )
     # Auth, permission, and transient failures are not absence: a caller
     # seeding a first promotion must never swallow them — even when the
     # registry words the denial as "does not exist" to avoid disclosure.
@@ -332,6 +343,29 @@ def test_promote_rejects_unknown_evidence_types():
     with pytest.raises(TypeError, match="DecisionRecord"):
         _manager(FakeMlflow()).promote(
             "earnings_summary", version=2, evidence={"passed": True}
+        )
+
+
+def test_promote_validates_the_alias_before_any_registry_access():
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    manager = PromptManager(
+        context=dev_settings().resource,
+        catalog="main",
+        schema="app",
+        # An alias typo must fail deterministically before this is touched.
+        mlflow_module=object(),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported governed prompt alias"):
+        manager.promote(
+            "earnings_summary", version=2, evidence=record, alias="prodution"
         )
 
 

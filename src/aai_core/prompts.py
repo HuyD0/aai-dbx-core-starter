@@ -19,6 +19,11 @@ class PromptPromotionError(AaiCoreError):
     code = "aai_core.prompts.promotion_blocked"
 
 
+# 'candidate' remains accepted only as the deprecated alias name that
+# set_alias() warns about; it is not lifecycle vocabulary.
+_GOVERNED_ALIASES = {"development", "validation", "candidate", "production"}
+
+
 @dataclass(frozen=True)
 class PromptReference:
     name: str
@@ -171,6 +176,11 @@ class PromptManager:
         from aai_core.decisions import Decision, DecisionRecord
         from aai_core.evaluation import GateResult
 
+        # The cheapest, fully local check comes first: an alias typo must
+        # fail deterministically, never as a network error from the
+        # verification fetch below.
+        if alias not in _GOVERNED_ALIASES:
+            raise ValueError(f"Unsupported governed prompt alias: {alias}")
         if isinstance(evidence, GateResult):
             raise PromptPromotionError(
                 f"Refusing to move alias {alias!r} for prompt {name!r}: "
@@ -234,7 +244,7 @@ class PromptManager:
                 DeprecationWarning,
                 stacklevel=2,
             )
-        if alias not in {"development", "validation", "candidate", "production"}:
+        if alias not in _GOVERNED_ALIASES:
             raise ValueError(f"Unsupported governed prompt alias: {alias}")
         self._client().genai.set_prompt_alias(
             name=self.qualify(name),

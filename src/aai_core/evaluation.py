@@ -530,10 +530,15 @@ def _is_missing_registry_error(error: Exception) -> bool:
     if error_code in _NON_MISSING_ERROR_CODES:
         return False
     message = str(error).upper()
-    return any(
+    if any(
         marker in message
         for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
-    )
+    ):
+        return True
+    # The file and SQL registries report a missing alias as
+    # INVALID_PARAMETER_VALUE with "Registered model alias ... not found."
+    # — recognized narrowly so unrelated parameter errors stay errors.
+    return "ALIAS" in message and "NOT FOUND" in message
 
 
 def _is_missing_dataset(error: Exception) -> bool:
