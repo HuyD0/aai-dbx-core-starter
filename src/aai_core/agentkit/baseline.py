@@ -271,8 +271,12 @@ def _baseline_from_run(
             digest=tags.get("aai.dataset_digest", _LEGACY_PLACEHOLDER),
             rows=int(tags.get("aai.dataset_rows", "0") or 0),
         ),
+        # The run records its own scope. Assuming "full" would make a
+        # sampled baseline fetched by run id incomparable with the very
+        # sampled run that produced it.
         scope=BaselineScope(
-            mode="full", rows=int(tags.get("aai.dataset_rows", "0") or 0)
+            mode="sample" if tags.get("aai.scope_mode") == "sample" else "full",
+            rows=int(tags.get("aai.scope_rows") or tags.get("aai.dataset_rows") or 0),
         ),
         metrics=metrics,
         versions=BaselineVersions(

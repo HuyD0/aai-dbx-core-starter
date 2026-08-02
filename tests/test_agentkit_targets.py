@@ -275,3 +275,60 @@ def test_serving_endpoint_without_credentials_explains_login(tmp_path):
     with pytest.raises(TargetResolutionError) as excinfo:
         build_predict_fn(target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW)
     assert "az login" in str(excinfo.value)
+
+
+def test_openai_shaped_request_mapping_builds_an_array(tmp_path):
+    """`messages.0.content` is the template's documented mapping.
+
+    Treating every path segment as a dict key would replace the messages
+    list from extra_body with `{"0": {...}}`, and an OpenAI-compatible or
+    Foundry endpoint rejects that on every call.
+    """
+
+    captured = {}
+
+    def transport(request):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "the answer"}}]}).encode(
+            "utf-8"
+        )
+
+    project = _project(
+        tmp_path,
+        request_mapping={
+            "request_field": "messages.0.content",
+            "response_field": "choices.0.message.content",
+            "extra_body": {"messages": [{"role": "user"}], "model": "my-model"},
+        },
+    )
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=project, transport=transport, mlflow_module=FAKE_MLFLOW
+    )
+
+    assert predict(question="what is my balance") == "the answer"
+    assert captured["body"] == {
+        # The list stays a list, and the role extra_body set survives.
+        "messages": [{"role": "user", "content": "what is my balance"}],
+        "model": "my-model",
+    }
+
+
+def test_request_mapping_builds_a_list_without_extra_body(tmp_path):
+    captured = {}
+
+    def transport(request):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"output": "ok"}).encode("utf-8")
+
+    project = _project(
+        tmp_path, request_mapping={"request_field": "messages.0.content"}
+    )
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=project, transport=transport, mlflow_module=FAKE_MLFLOW
+    )
+
+    predict(question="hello")
+
+    assert captured["body"] == {"messages": [{"content": "hello"}]}

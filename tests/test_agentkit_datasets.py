@@ -418,3 +418,91 @@ def test_a_row_with_a_null_trace_still_needs_inputs(tmp_path):
     failures = validate_dataset(load_dataset("golden.json", root=tmp_path))
 
     assert any("row 0" in failure for failure in failures)
+
+
+def test_trace_payload_is_not_dataset_identity(tmp_path):
+    """A trace is the answer, not the question.
+
+    Two runs over the same production questions carry different trace ids,
+    timestamps, and responses. Hashing those would give the very behaviour
+    under comparison a new dataset identity, and the comparability check
+    would reject it as different data.
+    """
+
+    def _rows_with(trace_id, answer):
+        return [
+            {
+                "inputs": {"question": "how do I retire early?"},
+                "trace": {
+                    "info": {"trace_id": trace_id},
+                    "data": {"spans": [{"type": "LLM", "outputs": answer}]},
+                },
+            }
+        ]
+
+    _write_dataset(tmp_path, _rows_with("tr-1", "first answer"), name="a.json")
+    _write_dataset(tmp_path, _rows_with("tr-2", "second answer"), name="b.json")
+
+    first = load_dataset("a.json", root=tmp_path)
+    second = load_dataset("b.json", root=tmp_path)
+
+    assert first.digest == second.digest
+
+
+def test_a_different_question_still_changes_the_digest(tmp_path):
+    def _rows_with(question):
+        return [{"inputs": {"question": question}, "trace": {"data": {"spans": []}}}]
+
+    _write_dataset(tmp_path, _rows_with("question one"), name="a.json")
+    _write_dataset(tmp_path, _rows_with("question two"), name="b.json")
+
+    assert (
+        load_dataset("a.json", root=tmp_path).digest
+        != load_dataset("b.json", root=tmp_path).digest
+    )
+
+
+def test_trace_only_rows_take_their_identity_from_the_request(tmp_path):
+    """Rows with no `inputs` must not all digest to the same thing."""
+
+    def _rows_with(question):
+        return [
+            {
+                "trace": {
+                    "info": {"request_preview": question},
+                    "data": {"spans": [{"type": "LLM"}]},
+                }
+            }
+        ]
+
+    _write_dataset(tmp_path, _rows_with("about pensions"), name="a.json")
+    _write_dataset(tmp_path, _rows_with("about pensions"), name="same.json")
+    _write_dataset(tmp_path, _rows_with("about something else"), name="b.json")
+
+    same = load_dataset("same.json", root=tmp_path).digest
+    assert load_dataset("a.json", root=tmp_path).digest == same
+    assert load_dataset("b.json", root=tmp_path).digest != same
+
+
+def test_trace_only_rows_fall_back_to_the_root_span_inputs(tmp_path):
+    def _rows_with(question):
+        return [
+            {
+                "trace": {
+                    "data": {
+                        "spans": [
+                            {"span_id": "root", "inputs": {"question": question}},
+                            {"span_id": "child", "parent_span_id": "root"},
+                        ]
+                    }
+                }
+            }
+        ]
+
+    _write_dataset(tmp_path, _rows_with("first"), name="a.json")
+    _write_dataset(tmp_path, _rows_with("second"), name="b.json")
+
+    assert (
+        load_dataset("a.json", root=tmp_path).digest
+        != load_dataset("b.json", root=tmp_path).digest
+    )

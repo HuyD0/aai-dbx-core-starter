@@ -75,6 +75,16 @@ All notable changes to `aai-core` are documented here.
   evaluated nothing, and `--mode traces` on a dataset without a trace on
   every row is an error rather than a warning.
 
+  The dataset digest covers the questions a dataset asks and excludes both
+  answer fields — `outputs` and `trace` — so two sets of production traces
+  over the same questions stay comparable while an edited case does not; a
+  trace-only row takes its identity from the request the trace recorded. A
+  run records the scope it scored at, so a sampled baseline fetched by run
+  id is still a sampled baseline. HTTP request mapping builds arrays for
+  numeric path segments, so the documented `messages.0.content` produces a
+  real messages list instead of `{"0": ...}` and preserves what
+  `extra_body` already placed there.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

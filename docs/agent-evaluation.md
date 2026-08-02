@@ -222,6 +222,13 @@ judge model stops the run and asks you to re-establish the baseline. The
 number would still subtract cleanly; it just would not mean anything, which
 is worse than no comparison because it looks like one.
 
+The dataset digest identifies the *questions* a dataset asks. Answers are
+excluded — both the `outputs` an answer sheet supplies and the `trace` a
+production run recorded — because those are the behaviour under comparison,
+not the data. Two weeks of production traces over the same questions
+therefore share a digest and compare cleanly, while adding or editing a case
+changes it and asks for a new baseline.
+
 `--allow-baseline-drift` proceeds anyway and records every reason in the
 results and the evidence pack — an override someone can see, rather than a
 control quietly removed. And a plan that selects no scorers at all is refused

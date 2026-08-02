@@ -241,3 +241,67 @@ def test_legacy_records_cannot_be_checked_and_say_so(tmp_path):
     assert comparability_failures(record, dataset=_dataset(), mode="full", rows=0) == []
     warnings = drift_warnings(record, dataset=_dataset(), mode="full", rows=0)
     assert any("predates dataset digests" in warning for warning in warnings)
+
+
+def test_a_run_baseline_keeps_the_scope_it_was_scored_at(tmp_path):
+    """A sampled baseline fetched by run id must stay a sampled baseline.
+
+    Reconstructing it as `full` makes it incomparable with the very
+    sampled run that produced it, so the comparability check would refuse
+    a repeat of the same command.
+    """
+
+    run = SimpleNamespace(
+        info=SimpleNamespace(experiment_id="42"),
+        data=SimpleNamespace(
+            tags={
+                "aai.dataset": "golden.json",
+                "aai.dataset_digest": "abc123",
+                "aai.dataset_rows": "20",
+                "aai.scope_mode": "sample",
+                "aai.scope_rows": "20",
+                "aai.scorer_versions": "keyword_coverage=1",
+                "aai.agent_target": "src/app/example_agent.py:respond",
+                "aai.recorded_at": "2026-08-02T10:00:00Z",
+            },
+            metrics={"keyword_coverage/mean": 0.8},
+        ),
+    )
+    fake = SimpleNamespace(get_run=lambda run_id: run)
+
+    record, _ = select_baseline(
+        baseline_path=tmp_path / "missing.json",
+        flag_run_id="run-9",
+        mlflow_module=fake,
+    )
+
+    assert record.scope.mode == "sample"
+    assert record.scope.rows == 20
+    assert (
+        comparability_failures(
+            record, dataset=_dataset(digest="abc123", rows=20), mode="sample", rows=20
+        )
+        == []
+    )
+
+
+def test_a_run_baseline_without_scope_tags_reads_as_full(tmp_path):
+    """Runs recorded before the scope tags existed still load."""
+
+    run = SimpleNamespace(
+        info=SimpleNamespace(experiment_id="42"),
+        data=SimpleNamespace(
+            tags={"aai.dataset_rows": "10", "aai.dataset_digest": "abc123"},
+            metrics={},
+        ),
+    )
+    fake = SimpleNamespace(get_run=lambda run_id: run)
+
+    record, _ = select_baseline(
+        baseline_path=tmp_path / "missing.json",
+        flag_run_id="run-9",
+        mlflow_module=fake,
+    )
+
+    assert record.scope.mode == "full"
+    assert record.scope.rows == 10

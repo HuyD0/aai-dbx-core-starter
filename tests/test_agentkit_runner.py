@@ -1095,3 +1095,38 @@ def test_explicit_traces_mode_on_partial_coverage_is_refused(tmp_path):
 
     assert "only some rows carry one" in str(excinfo.value)
     assert mlflow.evaluate_calls == []
+
+
+def test_a_sampled_run_records_its_scope_for_a_run_baseline(tmp_path):
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+
+    run_scoring(
+        project,
+        command="smoke",
+        rows_limit=6,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=mlflow,
+    )
+
+    assert mlflow.tags["aai.scope_mode"] == "sample"
+    assert mlflow.tags["aai.scope_rows"] == "6"
+
+
+def test_a_full_run_records_a_full_scope(tmp_path):
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=mlflow,
+    )
+
+    assert mlflow.tags["aai.scope_mode"] == "full"

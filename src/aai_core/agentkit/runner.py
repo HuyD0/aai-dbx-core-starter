@@ -369,6 +369,10 @@ def run_scoring(
                 "aai.dataset": dataset.ref,
                 "aai.dataset_digest": dataset.digest,
                 "aai.dataset_rows": str(dataset.shape.row_count),
+                # The scope travels with the run so a baseline fetched by
+                # run id knows whether it scored a sample or everything.
+                "aai.scope_mode": "sample" if sampled else "full",
+                "aai.scope_rows": str(dataset.shape.row_count),
                 "aai.agent_target": target.normalized,
                 "aai.recorded_at": recorded_at,
             }

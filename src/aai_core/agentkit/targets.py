@@ -394,15 +394,46 @@ def _primary_text(inputs: Mapping[str, Any], target: Target) -> str:
 
 
 def _set_path(document: dict[str, Any], path: str, value: Any) -> None:
+    """Place ``value`` at a dot path, honouring numeric segments as indices.
+
+    ``messages.0.content`` is the documented mapping for an OpenAI-shaped
+    endpoint, so the segment after ``messages`` has to build a list. It
+    also has to *keep* whatever ``extra_body`` already put there —
+    replacing the list would turn ``{"messages": [{"role": "user"}]}`` into
+    ``{"messages": {"0": ...}}`` and every call would be rejected.
+    """
+
     keys = path.split(".")
-    cursor = document
-    for key in keys[:-1]:
-        existing = cursor.get(key)
-        if not isinstance(existing, dict):
-            existing = {}
-            cursor[key] = existing
-        cursor = existing
-    cursor[keys[-1]] = value
+    cursor: Any = document
+    for position, key in enumerate(keys[:-1]):
+        wants_list = keys[position + 1].isdigit()
+        child = _child(cursor, key)
+        if wants_list and not isinstance(child, list):
+            child = []
+        elif not wants_list and not isinstance(child, dict):
+            child = {}
+        _assign(cursor, key, child)
+        cursor = child
+    _assign(cursor, keys[-1], value)
+
+
+def _child(cursor: Any, key: str) -> Any:
+    if isinstance(cursor, list):
+        index = int(key)
+        return cursor[index] if index < len(cursor) else None
+    return cursor.get(key) if isinstance(cursor, dict) else None
+
+
+def _assign(cursor: Any, key: str, value: Any) -> None:
+    if isinstance(cursor, list):
+        index = int(key)
+        # Grow rather than fail: a mapping may address messages.1 on a
+        # body that only carries messages.0.
+        while len(cursor) <= index:
+            cursor.append({})
+        cursor[index] = value
+    else:
+        cursor[key] = value
 
 
 def _get_path(document: Any, path: str) -> tuple[bool, Any]:

@@ -86,28 +86,78 @@ def load_dataset(
     return _build_dataset(reference, source, rows)
 
 
+_ANSWER_FIELDS = ("outputs", "trace")
+
+
 def dataset_digest(rows: Sequence[Mapping[str, Any]]) -> str:
     """Stable 16-hex digest identifying the questions this dataset asks.
 
-    ``outputs`` are excluded deliberately. They are the answers under
-    test, not the dataset: ``attach_answer_sheet`` merges them in for
-    MLflow's benefit, so including them would give every re-recorded
-    answer sheet a new dataset identity — and a comparison against the
-    previous version would look like a comparison against different data,
-    which is precisely the thing it is not.
+    ``outputs`` and ``trace`` are both excluded, because both are the
+    answer rather than the question. ``attach_answer_sheet`` merges
+    outputs in, and a trace is recorded behaviour carrying its own id,
+    timestamps, and responses — so hashing either would give a new dataset
+    identity to the very thing a comparison exists to measure, and the
+    comparability check would reject it as different data.
+
+    A row that carries only a trace still needs an identity, so the
+    request is extracted from it. Two runs over the same production
+    questions therefore agree on the digest even though every trace
+    differs.
     """
 
     canonical = json.dumps(
-        [
-            {key: _plain(value) for key, value in row.items() if key != "outputs"}
-            for row in rows
-        ],
+        [_row_identity(row) for row in rows],
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _row_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    identity = {
+        key: _plain(value) for key, value in row.items() if key not in _ANSWER_FIELDS
+    }
+    if not _is_populated(identity.get("inputs")):
+        request = _trace_request(row.get("trace"))
+        if request is not None:
+            identity["inputs"] = request
+    return identity
+
+
+def _trace_request(trace: Any) -> Any:
+    """The question a recorded trace answered, if it can be recovered."""
+
+    document = _trace_document(trace)
+    if document is None:
+        return None
+    info = document.get("info")
+    if isinstance(info, Mapping):
+        for key in ("request_preview", "request"):
+            value = info.get(key)
+            if _is_populated(value):
+                return _plain(value)
+    data = document.get("data")
+    spans = data.get("spans") if isinstance(data, Mapping) else None
+    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
+        return None
+    for span in spans:
+        if not isinstance(span, Mapping):
+            continue
+        if span.get("parent_span_id", span.get("parentSpanId")) is not None:
+            continue
+        for candidate in (
+            span.get("inputs"),
+            (
+                (span.get("attributes") or {}).get("mlflow.spanInputs")
+                if isinstance(span.get("attributes"), Mapping)
+                else None
+            ),
+        ):
+            if _is_populated(candidate):
+                return _plain(candidate)
+    return None
 
 
 def smoke_sample(
