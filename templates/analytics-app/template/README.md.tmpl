@@ -1,0 +1,90 @@
+# {{.project_name}}
+
+A governed self-service analytics agent over a **neutral, git-versioned
+semantic layer**. The architecture follows the published playbook for
+LLM analytics that actually holds up: collapse ambiguity into one governed
+answer per concept, make that answer easy to find, and flag when either has
+degraded.
+
+```text
+question
+  -> runbook agent (clarify first)
+  -> semantic layer FIRST  (semantics/semantic_model.yml, compiled to SQL)
+  -> curated references    (knowledge/*.md via the router)
+  -> guarded raw fallback  (read-only, lower provenance tier)
+  -> answer + provenance footer (tier / sources / owner / freshness / SQL)
+```
+
+## Why the semantic layer is repo-owned
+
+The contract in `semantics/semantic_model.yml` is human-curated YAML,
+validated strictly (`src/app/semantics/models.py`) and compiled to portable
+SQL (`compiler.py`). It is not a warehouse object, so:
+
+- it ships in the same diff as the knowledge docs and eval cases (CI fails
+  on drift between them — see `evals/offline_checks.py`);
+- golden answers verify **credential-free** against the versioned snapshot
+  (`evals/data/seed_data.json`) through `FakeWarehouseExecutor`;
+- the warehouse is a plug-in. Databricks ships in
+  `src/app/semantics/executor.py`; any other warehouse (e.g. Snowflake) is
+  an application-code implementation of the three-method
+  `WarehouseExecutor` protocol (`run_plan`, `execute`, `latest_loaded_at`)
+  — no platform change, same compiled grammar.
+
+## Lifecycle
+
+```bash
+python3.12 scripts/setup_dev.py   # preflight + isolated setup
+make check                        # lint, tests, tier-1 offline gate
+databricks bundle deploy -t dev
+databricks bundle run release_gate -t dev   # seed snapshot, then tier-2 gate
+```
+
+Tier 1 (`evals/offline_checks.py`, pull-request CI, zero credentials)
+validates the semantic contract, the knowledge cross-references, compiles
+every golden `expected_query`, reproduces every pinned `expected_value` on
+the snapshot executor, and scores the recorded answer sheet with the
+deterministic provenance scorers.
+
+Tier 2 (`evals/evaluate.py`, the `release_gate` job) runs the real agent
+against the live warehouse, adds Correctness/Safety judges, enforces the
+regression baseline (`--update-baseline` records it) and cost coverage,
+and logs telemetry per run: semantic-model version, knowledge digest,
+model + judge identity, git provenance, token usage, verdict.
+
+## External prerequisites (platform-owned, one-time)
+
+Provisioned through the approved platform process, never by this repo:
+
+- `CAN USE` on a small serverless SQL warehouse (short auto-stop) for the
+  deploying identity; its id goes into the `warehouse_id` bundle variable.
+- `USE CATALOG` on the target catalog; `USE SCHEMA`, `CREATE TABLE`,
+  `MODIFY`, `SELECT` on the target schema (the seed job writes the demo
+  star schema there).
+- `CAN_QUERY` on the chat model and judge serving endpoints.
+
+## Tokenomics
+
+Every answer carries a `TokenUsage` (main vs adversarial-review pass); the
+release gate fails answers without cost accounting (`cost/coverage`) and
+records `tokens/mean_total` / `tokens/mean_review` per run. The optional
+adversarial reviewer (`adversarial_review` input, or
+`AAI_ANALYTICS_ADVERSARIAL_REVIEW=yes`) trades roughly +6% accuracy for
++32% tokens and +72% latency — enable it deliberately. Endpoint-side cost
+attribution rides the platform's AI Gateway request tags automatically.
+
+## Growing the eval set
+
+The shipped 14 golden cases are a floor, not a target. Harvest every
+correction: when a user fixes an answer, add the fixed Q→A as a golden
+case, add the gotcha to the matching `knowledge/*.md`, and ship both in one
+PR. Grow toward dozens of cases per domain; pin values to the snapshot,
+never to live data. Compare runs against `evals/baseline.json` and treat an
+unexplained regression as a release blocker.
+
+## Graduating
+
+- Registered prompts with immutable versions and aliases: see the
+  prompt-app template.
+- Serving the agent over HTTP (Databricks Apps + MLflow Agent Server): see
+  the agent-app template; this project stays job + notebook scoped.

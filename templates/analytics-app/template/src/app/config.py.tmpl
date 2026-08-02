@@ -1,0 +1,46 @@
+"""Generated project constants and environment resolution."""
+
+import os
+
+# The immutable SDK wheel on the Unity Catalog volume.
+AAI_CORE_WHEEL = (
+    "{{.aai_core_volume}}/aai_core/{{.aai_core_version}}/"
+    "aai_core-{{.aai_core_version}}-py3-none-any.whl"
+)
+
+# Warehouse identity is environment configuration, not application logic:
+# resolution order is CLI argument > AAI_ANALYTICS_WAREHOUSE_ID > this stamp.
+WAREHOUSE_ID = "{{.warehouse_id}}"
+DEMO_CATALOG = "{{.catalog}}"
+DEMO_SCHEMA = "{{.schema}}"
+ADVERSARIAL_REVIEW_DEFAULT = "{{.adversarial_review}}"
+
+# Context budgets — the single tuning surface for what enters the model's
+# context (taught in notebooks/02_context_engineering.py). Routing beats
+# dumping: the knowledge index summary rides in the system prompt, full
+# reference docs load on demand, and result sets are truncated with the
+# true row count stated.
+MAX_RESULT_ROWS_IN_CONTEXT = 20
+MAX_REFERENCE_DOC_CHARS = 6000
+MAX_AGENT_TURNS = 8
+
+_PLACEHOLDER_PREFIX = "replace-with-"
+
+
+def resolve_warehouse_id(cli_value: str | None = None) -> str:
+    value = cli_value or os.environ.get("AAI_ANALYTICS_WAREHOUSE_ID") or WAREHOUSE_ID
+    value = value.strip()
+    if not value or value.startswith(_PLACEHOLDER_PREFIX):
+        raise ValueError(
+            "No SQL warehouse configured: pass --warehouse-id, set "
+            "AAI_ANALYTICS_WAREHOUSE_ID, or update the warehouse_id bundle "
+            "variable default in databricks.yml"
+        )
+    return value
+
+
+def adversarial_review_enabled() -> bool:
+    value = os.environ.get(
+        "AAI_ANALYTICS_ADVERSARIAL_REVIEW", ADVERSARIAL_REVIEW_DEFAULT
+    )
+    return value.strip().lower() in {"yes", "true", "1", "on"}

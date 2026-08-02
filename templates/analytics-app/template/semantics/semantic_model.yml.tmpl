@@ -1,0 +1,80 @@
+# The neutral semantic contract: the single governed source of truth the
+# analytics agent consults FIRST. Definitions are human-curated (never
+# auto-generated from tables) and versioned with the code so CI can keep
+# them, the knowledge docs, and the data model from drifting apart.
+#
+# Filters are structured (column/op/value), never free SQL, so the contract
+# compiles identically for any warehouse dialect and evaluates offline.
+semantic_model:
+  name: sales
+  version: 1
+
+sources:
+  orders:
+    table: "{{.catalog}}.{{.schema}}.analytics_orders"
+    grain: one row per order
+    owner: "{{.owner_group}}"
+    freshness_sla_hours: 24
+    loaded_at_column: _loaded_at
+    gotchas:
+      - status uses single-letter codes (see dimension encodings); never
+        compare against full words like 'shipped'
+      - amount is gross; cancelled orders remain in the table and must be
+        excluded from revenue-style metrics
+  customers:
+    table: "{{.catalog}}.{{.schema}}.analytics_customers"
+    grain: one row per customer
+    owner: "{{.owner_group}}"
+    freshness_sla_hours: 168
+    loaded_at_column: _loaded_at
+
+dimensions:
+  order_status:
+    source: orders
+    column: status
+    type: string
+    encodings:
+      S: shipped
+      P: processing
+      C: cancelled
+  order_date:
+    source: orders
+    column: order_date
+    type: date
+  region:
+    source: customers
+    column: region
+    type: string
+    join:
+      from_column: customer_id
+      to_column: customer_id
+
+metrics:
+  revenue:
+    source: orders
+    aggregation: sum
+    expr: amount
+    filter:
+      column: status
+      op: "<>"
+      value: C
+    description: Net revenue excluding cancelled orders.
+  order_count:
+    source: orders
+    aggregation: count
+    expr: order_id
+    description: Count of orders, including cancelled ones.
+  average_order_value:
+    source: orders
+    aggregation: avg
+    expr: amount
+    filter:
+      column: status
+      op: "<>"
+      value: C
+    description: Mean order amount excluding cancelled orders.
+  active_customers:
+    source: orders
+    aggregation: count_distinct
+    expr: customer_id
+    description: Distinct customers with at least one order.
