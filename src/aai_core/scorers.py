@@ -49,9 +49,17 @@ _STOPWORDS = {
 
 def keyword_coverage(outputs: str, expectations: dict) -> float:
     """Fraction of significant keywords from the expected response present in
-    the output. Cheap grounding proxy; judges do the nuanced comparison."""
+    the output. Cheap grounding proxy; judges do the nuanced comparison.
+
+    A missing or blank ``expected_response`` scores 0.0 — it is a dataset
+    defect (a misspelled field, a malformed row), and awarding full credit
+    would let malformed rows inflate a release gate. An expectation that
+    is present but yields no significant keywords still scores 1.0: there
+    is genuinely nothing to cover."""
 
     expected = str(expectations.get("expected_response", ""))
+    if not expected.strip():
+        return 0.0
     keywords = {
         word for word in _tokenize(expected) if len(word) > 3 and word not in _STOPWORDS
     }
@@ -90,10 +98,10 @@ def response_length_ok(outputs: str, expectations: dict) -> float:
 CODE_SCORERS = (keyword_coverage, refusal_compliance, response_length_ok)
 
 # keyword_coverage and refusal_compliance are reference-based: without
-# ground-truth expectations they score vacuously (empty expectations pass
-# coverage, and every request reads as should-not-refuse, penalizing
-# legitimate safety refusals). Ordinary production traces carry no
-# expectations, so sampled monitoring registers only the reference-free
+# ground-truth expectations they mis-score (a missing expected response
+# fails coverage outright, and every request reads as should-not-refuse,
+# penalizing legitimate safety refusals). Ordinary production traces carry
+# no expectations, so sampled monitoring registers only the reference-free
 # subset; the full set belongs to offline evaluation and to
 # expectation-bearing regression datasets.
 MONITORING_SCORERS = (response_length_ok,)
@@ -120,6 +128,8 @@ def registered_keyword_coverage(outputs, expectations):
         return [word.strip(".,;:!?()[]\"'").lower() for word in str(text).split()]
 
     expected = str((expectations or {}).get("expected_response", ""))
+    if not expected.strip():
+        return 0.0
     keywords = {
         word for word in tokenize(expected) if len(word) > 3 and word not in stopwords
     }

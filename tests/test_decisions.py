@@ -115,6 +115,18 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
     assert record.as_tags()["prompt_version"] == "2"
 
 
+def test_tagged_change_fields_are_bounded():
+    # change_id and change_summary become searchable tags: the id is an
+    # identifier and the summary is bounded prose.
+    with pytest.raises(ValidationError):
+        _record(change_id="prompt v2 with spaces")
+    with pytest.raises(ValidationError):
+        _record(change_id="a" * 65)
+    with pytest.raises(ValidationError):
+        _record(change_summary="x" * 201)
+    assert _record(change_summary="x" * 200).change_summary
+
+
 def test_run_ids_accept_only_bounded_opaque_identifiers():
     # Free text and secrets must never reach governed tags through the
     # run-id fields.

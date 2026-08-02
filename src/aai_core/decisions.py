@@ -39,8 +39,12 @@ class DecisionRecord(ContractModel):
     """Immutable decision evidence for one deliberate change."""
 
     decision: Decision
-    change_id: str = Field(min_length=1)
-    change_summary: str = Field(min_length=1)
+    # change_id and change_summary become searchable run tags, so the id is
+    # an identifier and the summary is bounded prose: prompts, user
+    # content, and secrets belong in artifacts, never tags. The free-form
+    # rationale is persisted only inside the decision.json artifact.
+    change_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    change_summary: str = Field(min_length=1, max_length=200)
     rationale: str = Field(min_length=1)
     # Bounded opaque identifiers (MLflow run ids are 32-hex; fixtures and
     # backends vary) so free text and secrets cannot enter governed tags.
