@@ -1,0 +1,33 @@
+platform:
+  application: foundry-learning-assistant
+  project: foundry-curriculum
+  environment: dev
+  team: ai-platform
+  owner_group: group:ai-platform-owners
+  cost_center: learning
+  data_classification: internal
+  lifecycle: experimental
+  repository: replace-with-owner/replace-with-repository
+  release: dev
+  tag_schema_version: "1"
+  catalog: dbx_dev
+  schema: foundry_learning
+  experiment_name: /Shared/foundry-curriculum
+  azure_identity: azure_cli
+
+providers:
+  models:
+    # Notebooks resolve this logical name. Application code never embeds an
+    # environment-specific endpoint or deployment name.
+    foundry-chat:
+      provider: foundry
+      endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
+      deployment: replace-with-model-deployment
+      capabilities:
+        tool_calling: true
+        structured_output: true
+      timeout_seconds: 60
+      max_retries: 2
+
+# Identifiers and approved secret references only. Never paste keys or tokens.
+secrets: {}
