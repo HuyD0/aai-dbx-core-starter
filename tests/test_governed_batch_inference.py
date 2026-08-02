@@ -54,6 +54,7 @@ def make_spec(**overrides):
         endpoint="databricks-gpt-oss-20b",
         model_version="gpt-oss-20b-2025-08",
         prompt_version="1.0.0",
+        release_sequence=1,
         cost_ceiling_cad=50.0,
         abstain_threshold=0.7,
     )
@@ -767,17 +768,65 @@ def test_cost_estimate_is_bound_to_the_release_it_measured(monkeypatch):
     assert not recorder.params
 
 
-def test_null_source_keys_are_refused_before_the_paid_query():
-    """`NULL = NULL` is never true, so a null-keyed row is re-inferred and
-    re-inserted on every run while the restart logic looks like it works."""
+def test_unusable_source_keys_are_refused_before_the_paid_query():
+    """Both halves of the key contract, checked before anything is spent.
+
+    A null key never matches (so the row is re-inferred and re-inserted
+    every run); a duplicated key matches twice (so the MERGE cannot
+    resolve it, and one-row-per-key was never true).
+    """
     spec = make_spec()
-    assert gbi.null_key_count_sql(spec) == (
-        "SELECT count(*) AS null_keys FROM main.finance_docs.document_text "
-        "WHERE doc_id IS NULL"
-    )
-    gbi.require_usable_source_keys(spec, 0)  # the clean case proceeds
+    check = gbi.source_key_check_sql(spec)
+    assert "count_if(doc_id IS NULL) AS null_keys" in check
+    assert "count(DISTINCT doc_id)" in check
+    assert "FROM main.finance_docs.document_text" in check
+
+    gbi.require_usable_source_keys(spec, 0, 0)  # the clean case proceeds
     with pytest.raises(gbi.UnusableSourceKeys, match="3 row"):
-        gbi.require_usable_source_keys(spec, 3)
+        gbi.require_usable_source_keys(spec, 3, 0)
+    with pytest.raises(gbi.UnusableSourceKeys, match="2 duplicate"):
+        gbi.require_usable_source_keys(spec, 0, 2)
+
+
+def test_an_older_release_cannot_overwrite_newer_output():
+    """Identity says two runs differ; only an ordering says which is later.
+
+    A delayed retry or an overlapping deploy would otherwise see every
+    newer row as unprocessed, re-infer it, and write the older model's
+    values back over production.
+    """
+    old = make_spec(prompt_version="1.0.0", release_sequence=1)
+    new = make_spec(prompt_version="2.0.0", release_sequence=2)
+    old_sql = gbi.build_execute_sql(
+        old, run_id="run-old", prompt_sql="concat('x', doc_text)"
+    )
+    new_sql = gbi.build_execute_sql(
+        new, run_id="run-new", prompt_sql="concat('x', doc_text)"
+    )
+
+    # The old job treats anything from a newer release as already done,
+    # so it never even pays to re-infer those rows.
+    assert "OR done.ai_release_sequence > 1" in old_sql
+    assert "OR done.ai_release_sequence > 2" in new_sql
+    # And the MERGE refuses to lower a row's release sequence.
+    guard = (
+        "WHEN MATCHED AND target.ai_release_sequence <= "
+        "source.ai_release_sequence\n  THEN UPDATE SET *"
+    )
+    assert guard in old_sql and guard in new_sql
+    assert "WHEN MATCHED THEN UPDATE SET *" not in old_sql
+    # The sequence is persisted, so the comparison has something to read.
+    assert "1 AS ai_release_sequence" in old_sql
+    assert ("ai_release_sequence", "BIGINT") in gbi.target_columns(old)
+
+
+def test_document_column_must_not_collide_with_key_or_strata():
+    """`pending` selects key, document, and strata together, so a repeat
+    projects one physical column twice and every later use is ambiguous."""
+    with pytest.raises(ValidationError, match="collision"):
+        make_spec(document_column="doc_id")  # equals key_column
+    with pytest.raises(ValidationError, match="collision"):
+        make_spec(document_column="layout")  # equals a stratum column
 
 
 def test_each_table_role_needs_its_own_table():
@@ -860,7 +909,8 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
         edited, run_id="run-9", prompt_sql="concat('extract: ', doc_text)"
     )
     assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
-    assert "WHEN MATCHED THEN UPDATE SET *" in sql
+    # Updating in place, but never downwards — see the release-ordering test.
+    assert "THEN UPDATE SET *" in sql
     assert "WHEN NOT MATCHED THEN INSERT *" in sql
 
 

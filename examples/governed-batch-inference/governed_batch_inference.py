@@ -68,6 +68,7 @@ PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ai_spec_digest", "STRING"),
     ("ai_model_version", "STRING"),
     ("ai_prompt_version", "STRING"),
+    ("ai_release_sequence", "BIGINT"),
     ("ai_executed_at", "TIMESTAMP"),
 )
 
@@ -227,6 +228,12 @@ class BatchInferenceSpec(BaseModel):
     endpoint: str
     model_version: str
     prompt_version: str
+    #: Monotonic release counter, incremented whenever any part of the
+    #: release changes. It is what lets the pipeline tell *newer* from
+    #: merely *different*: identity alone cannot, and without an ordering
+    #: an old job resuming late would treat newer rows as unprocessed and
+    #: overwrite them with its own older output.
+    release_sequence: int = Field(ge=0)
     cost_ceiling_cad: float = Field(gt=0.0)
     abstain_threshold: float = Field(ge=0.0, le=1.0)
     confidence_level: float = Field(default=0.95, gt=0.5, lt=1.0)
@@ -321,6 +328,11 @@ class BatchInferenceSpec(BaseModel):
             seen[key] = owner
 
         claim(self.key_column, "the key column")
+        # The document column is selected alongside the key and strata in
+        # the pending CTE, so it has to be distinct from them or the
+        # projection carries the same physical column twice and every
+        # later reference to it is ambiguous.
+        claim(self.document_column, "the document column")
         for column in self.strata:
             claim(column, f"stratum column {column!r}")
         for name, _ in PROVENANCE_COLUMNS:
@@ -442,16 +454,19 @@ def estimate_cost(
     )
 
 
-def null_key_count_sql(spec: BatchInferenceSpec) -> str:
-    """Count source rows whose key is null — run this before spending."""
-    return (
-        f"SELECT count(*) AS null_keys FROM {spec.source_table} "
-        f"WHERE {spec.key_column} IS NULL"
-    )
+def source_key_check_sql(spec: BatchInferenceSpec) -> str:
+    """Count null and duplicated source keys — run this before spending."""
+    return f"""SELECT
+  count_if({spec.key_column} IS NULL) AS null_keys,
+  count(*) - count(DISTINCT {spec.key_column})
+    - count_if({spec.key_column} IS NULL) AS duplicate_keys
+FROM {spec.source_table}"""
 
 
-def require_usable_source_keys(spec: BatchInferenceSpec, null_count: int) -> None:
-    """Refuse to run when any source key is null.
+def require_usable_source_keys(
+    spec: BatchInferenceSpec, null_count: int, duplicate_count: int = 0
+) -> None:
+    """Refuse to run when the source keys cannot carry the landing contract.
 
     Every idempotence guarantee in this pipeline rests on key equality,
     and ``NULL = NULL`` is not true. A null-keyed row therefore never
@@ -459,6 +474,12 @@ def require_usable_source_keys(spec: BatchInferenceSpec, null_count: int) -> Non
     every run — and never matches the MERGE, so each run inserts another
     copy of it. The restart guarantee does not degrade gracefully here; it
     silently stops holding while appearing to work.
+
+    A duplicated key breaks the same contract from the other side: both
+    rows are sent to the paid endpoint, the MERGE then finds two source
+    rows for one target row and fails outright, and against an empty
+    target it lands two rows under one key — so "one current row per key",
+    which every provenance join assumes, was never true.
 
     The check is deliberately a refusal rather than a filter. Skipping
     those rows would quietly shrink coverage of the very table the gate
@@ -472,6 +493,14 @@ def require_usable_source_keys(spec: BatchInferenceSpec, null_count: int) -> Non
             "anti-join and the MERGE, so those rows would be re-inferred "
             "and re-inserted on every run. Give them keys upstream, or "
             "narrow the source to rows that have one."
+        )
+    if duplicate_count:
+        raise UnusableSourceKeys(
+            f"{duplicate_count} duplicate {spec.key_column} value(s) in "
+            f"{spec.source_table}. The MERGE cannot resolve two source rows "
+            "onto one target row, and one row per key is what every "
+            "provenance join assumes. De-duplicate upstream, or add the "
+            "column that makes the key unique."
         )
 
 
@@ -1619,6 +1648,16 @@ def build_execute_sql(
       MERGE then updates stale rows in place and inserts genuinely new
       keys, keeping one current row per key.
 
+    - **Newer, not merely different.** Release identity says whether two
+      runs differ; it cannot say which is later. Without an ordering, an
+      old job resuming after a newer release has landed would see every
+      newer row as unprocessed, re-infer it, and the key-only MERGE would
+      write the old model's values back over the new ones — a silent
+      rollback of a production table from a delayed retry or an
+      overlapping deploy. So ``release_sequence`` orders releases: the
+      anti-join also treats a strictly newer sequence as done, and the
+      MERGE updates a row only when its sequence is not being lowered.
+
       The digest covers the spec, not this module's code. Bump
       ``spec_version`` when a code change alters what the pipeline
       produces — that is what makes the release identity honest.
@@ -1667,6 +1706,7 @@ def build_execute_sql(
     digest_literal = sql_string_literal(spec.spec_digest)
     model_literal = sql_string_literal(spec.model_version)
     prompt_literal = sql_string_literal(spec.prompt_version)
+    sequence = int(spec.release_sequence)
     return f"""MERGE INTO {spec.target_table} AS target
 USING (
   WITH pending AS (
@@ -1674,9 +1714,14 @@ USING (
     FROM {spec.source_table} AS source
     LEFT ANTI JOIN {spec.target_table} AS done
       ON source.{spec.key_column} = done.{spec.key_column}
-     AND done.ai_spec_digest = {digest_literal}
-     AND done.ai_model_version = {model_literal}
-     AND done.ai_prompt_version = {prompt_literal}
+     AND (
+       (
+         done.ai_spec_digest = {digest_literal}
+         AND done.ai_model_version = {model_literal}
+         AND done.ai_prompt_version = {prompt_literal}
+       )
+       OR done.ai_release_sequence > {sequence}
+     )
   ),
   scored AS (
     SELECT
@@ -1706,11 +1751,13 @@ USING (
     {digest_literal} AS ai_spec_digest,
     {model_literal} AS ai_model_version,
     {prompt_literal} AS ai_prompt_version,
+    {sequence} AS ai_release_sequence,
     current_timestamp() AS ai_executed_at
   FROM parsed
 ) AS source
 ON target.{spec.key_column} = source.{spec.key_column}
-WHEN MATCHED THEN UPDATE SET *
+WHEN MATCHED AND target.ai_release_sequence <= source.ai_release_sequence
+  THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *"""
 
 

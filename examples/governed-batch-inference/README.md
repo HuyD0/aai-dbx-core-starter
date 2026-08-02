@@ -92,11 +92,16 @@ abstention path) then passes the same gate on the same terms.
    budget, and `log_gate_evidence` refuses an estimate measured for
    another release rather than let one clear the ceiling on another's
    assumptions.
-10. **A new release reprocesses the table.** The restart anti-join matches
-    on the key *and* the full release identity — spec digest, model
-    version, prompt version — and the write is a `MERGE`. Matching on the
-    key alone would let a newly gated release report success while every
-    row still carried the previous release's values and provenance;
+10. **A new release reprocesses the table — and only a newer one may
+    overwrite it.** The restart anti-join matches on the key *and* the full
+    release identity — spec digest, model version, prompt version — and the
+    write is a `MERGE`. It additionally treats a strictly newer
+    `release_sequence` as already done, and the MERGE updates a row only
+    when its sequence is not being lowered, so an old job resuming after a
+    newer release has landed cannot roll production back to its own stale
+    output. Matching on the key alone would let a newly gated release
+    report success while every row still carried the previous release's
+    values and provenance;
     matching on model and prompt alone would do the same whenever the spec
     changed while those labels held still. Bump `spec_version` when a code
     change alters what the pipeline produces, since the digest covers the
@@ -124,12 +129,20 @@ abstention path) then passes the same gate on the same terms.
 
 Work through the spec first — most adaptation is spec, not code:
 
-- **A non-null key is a precondition, not a nicety.** Every idempotence
-  guarantee here rests on key equality, and `NULL = NULL` is not true, so a
-  null-keyed source row is re-inferred and re-inserted on every run while the
-  restart logic appears to work. `require_usable_source_keys` refuses rather
-  than filtering: skipping those rows would shrink coverage of the table the
-  gate just certified. Fix the keys upstream, or narrow the source view.
+- **A unique, non-null key is a precondition, not a nicety.** Every
+  idempotence guarantee here rests on key equality. `NULL = NULL` is not true,
+  so a null-keyed row is re-inferred and re-inserted on every run while the
+  restart logic appears to work; a duplicated key matches twice, so the MERGE
+  cannot resolve it and "one current row per key" — which every provenance
+  join assumes — was never true. `require_usable_source_keys` checks both
+  before any spend, and refuses rather than filtering: skipping those rows
+  would shrink coverage of the table the gate just certified. Fix the keys
+  upstream, or narrow the source view.
+- **`release_sequence` must increase with every release.** It is what lets
+  the pipeline tell *newer* from merely *different*. Identity alone cannot,
+  and without an ordering a delayed retry or an overlapping deploy would see
+  newer rows as unprocessed and write older output back over them — a silent
+  rollback of the production table.
 - **Fields and tolerances.** Set `tolerable_error_rate` per field *with the
   consumers named in `consumed_by`*, not alone at a keyboard. Then check the
   feasibility number `min_labelled_rows_for_tolerance` prints: a 1% tolerance

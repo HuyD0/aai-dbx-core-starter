@@ -281,6 +281,10 @@ spec_v1 = gbi.BatchInferenceSpec(
     endpoint="databricks-gpt-oss-20b",
     model_version="gpt-oss-20b-2025-08",
     prompt_version="1.0.0",
+    # Bumped on every release. Identity says two runs differ; only an
+    # ordering says which is later, and without that an old job resuming
+    # late would overwrite newer rows with its own stale output.
+    release_sequence=1,
     cost_ceiling_cad=50.0,
     abstain_threshold=0.70,
 )
@@ -366,9 +370,12 @@ for field in spec_v1.fields:
 # here rests on key equality, and `NULL = NULL` is not true. A null-keyed
 # row would be re-inferred and re-inserted on every single run while the
 # restart logic appeared to work.
-null_keys = spark.sql(gbi.null_key_count_sql(spec_v1)).first().null_keys
-gbi.require_usable_source_keys(spec_v1, null_keys)
-print(f"source keys usable: {null_keys} null {spec_v1.key_column} values")
+keys = spark.sql(gbi.source_key_check_sql(spec_v1)).first()
+gbi.require_usable_source_keys(spec_v1, keys.null_keys, keys.duplicate_keys)
+print(
+    f"source keys usable: {keys.null_keys} null and "
+    f"{keys.duplicate_keys} duplicate {spec_v1.key_column} values"
+)
 
 CAD_PER_M_INPUT = 0.20  # placeholder — use your negotiated list price
 CAD_PER_M_OUTPUT = 0.60  # placeholder
@@ -946,6 +953,9 @@ except gbi.GateNotPassed as refusal:
 
 spec_v2 = gbi.BatchInferenceSpec.from_yaml(
     spec_v1.to_yaml().replace("prompt_version: 1.0.0", "prompt_version: 2.0.0")
+    # A new release gets the next sequence number, which is what stops a
+    # late-resuming v1 job from writing its output back over v2's rows.
+    .replace("release_sequence: 1", "release_sequence: 2")
 )
 
 # A new release is a new budget. Prompt v2 carries the legacy-scan rules
@@ -1150,10 +1160,20 @@ print(execute_sql[:1200] + "\n…")
 
 # "Pending" is release-aware: rows already landed *by this release* are
 # done; rows landed by an older prompt or model are not.
+# Mirrors the builder's predicate: a row is done if this release landed
+# it, or if a *newer* release already did — an older job must never claim
+# newer rows as unprocessed and overwrite them.
 release_predicate = f"""
-      AND done.ai_spec_digest = {gbi.sql_string_literal(spec_v2.spec_digest)}
-      AND done.ai_model_version = {gbi.sql_string_literal(spec_v2.model_version)}
-      AND done.ai_prompt_version = {gbi.sql_string_literal(spec_v2.prompt_version)}
+      AND (
+        (
+          done.ai_spec_digest = {gbi.sql_string_literal(spec_v2.spec_digest)}
+          AND done.ai_model_version =
+            {gbi.sql_string_literal(spec_v2.model_version)}
+          AND done.ai_prompt_version =
+            {gbi.sql_string_literal(spec_v2.prompt_version)}
+        )
+        OR done.ai_release_sequence > {spec_v2.release_sequence}
+      )
 """
 pending_sql = f"""
     SELECT count(*) AS pending FROM {SOURCE_TABLE} AS source
@@ -1210,6 +1230,7 @@ else:
         record["ai_spec_digest"] = spec_v2.spec_digest
         record["ai_model_version"] = spec_v2.model_version
         record["ai_prompt_version"] = spec_v2.prompt_version
+        record["ai_release_sequence"] = spec_v2.release_sequence
         output_rows.append(record)
     # Explicit DDL schema (from the module's single source of truth) so
     # Spark never has to infer types from rows with empty arrays/nulls.
