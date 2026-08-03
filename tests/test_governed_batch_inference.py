@@ -1017,8 +1017,13 @@ def test_the_strata_resync_will_not_relabel_a_newer_release():
     """It runs from a pinned historical snapshot, so without the guard a
     delayed job regresses the grouping monitoring depends on."""
     spec = make_spec(release_sequence=3)
-    sql = gbi.resync_strata_sql(spec, snapshot_for(spec))
-    assert "coalesce(target.ai_release_sequence, -1) <= 3" in sql
+    sql = gbi.resync_strata_sql(spec, snapshot_for(spec, 11))
+    # The same pair the inference MERGE orders on — two cycles of one
+    # unchanged spec tie on the release sequence and differ only in
+    # which snapshot they read.
+    assert "coalesce(target.ai_release_sequence, -1) < 3" in sql
+    assert "coalesce(target.ai_release_sequence, -1) = 3" in sql
+    assert "coalesce(target.ai_source_version, -1) <= 11" in sql
     # Still only touching strata — no inference, no value columns.
     assert "ai_query" not in sql
     assert "ai_" not in sql.split("THEN UPDATE SET")[1]
@@ -1103,6 +1108,78 @@ def test_the_notebook_pins_every_gate_call():
         # The kwarg must appear before the call closes.
         head = call[: call.index(")\n")]
         assert "source_snapshot=" in head, head[:120]
+
+
+def test_the_sql_builder_enforces_the_gate_itself():
+    """It *is* the paid statement. A guard that works only because the
+    caller happened to check first is not a guard."""
+    spec = one_field_spec()
+    rejecting = gate(spec, score(records_for("s", correct=80, wrong=20), spec))
+    assert rejecting.decision == gbi.GateDecision.REJECT
+    assert rejecting.spec_digest == spec.spec_digest  # names the right spec
+
+    with pytest.raises(gbi.GateNotPassed, match="execution requires 'adopt'"):
+        gbi.build_execute_sql(spec, run_id="run-1", report=rejecting)
+
+    # Tier 1 passing-but-unapproved is refused here too, not just by the
+    # notebook's separate call.
+    tier1 = one_field_spec(use_tier=1, rollback_plan="Restore prior version.")
+    pending = gate(tier1, score(records_for("s", correct=200), tier1))
+    assert pending.decision == gbi.GateDecision.PENDING_APPROVAL
+    with pytest.raises(gbi.GateNotPassed):
+        gbi.build_execute_sql(tier1, run_id="run-1", report=pending)
+    # Signed off, it builds.
+    approved = gbi.approve_gate(pending, "governance-board")
+    assert "ai_query" in gbi.build_execute_sql(tier1, run_id="run-1", report=approved)
+
+
+def test_a_persisted_gated_report_must_name_its_snapshot():
+    """`evaluate_gate` enforces this, but reports are read back far more
+    often than they are minted."""
+    spec = one_field_spec()
+    report = adopting_report(spec)
+    payload = report.model_dump(mode="json")
+    assert payload["source_snapshot"] is not None
+
+    with pytest.raises(ValidationError, match="must name the source version"):
+        gbi.GateReport.model_validate({**payload, "source_snapshot": None})
+
+    # Tier 3 has nothing to pin, and is allowed to say so.
+    exploratory = one_field_spec(use_tier=3)
+    unpinned = gate(exploratory, score(records_for("s", correct=200), exploratory))
+    assert unpinned.source_snapshot is None
+    assert gbi.GateReport.model_validate(unpinned.model_dump(mode="json")) == unpinned
+
+
+def test_a_cost_estimate_is_bound_to_the_rows_it_measured(monkeypatch):
+    """Release identity fixes the price per row, not how many rows."""
+    spec = one_field_spec()
+    scores = score(records_for("s", correct=200), spec)
+    report = gate(spec, scores)
+
+    def estimate_over(snapshot, rows):
+        return gbi.estimate_cost(
+            spec,
+            row_count=rows,
+            probe_input_tokens=[10],
+            probe_output_tokens=[10],
+            cad_per_million_input_tokens=0.1,
+            cad_per_million_output_tokens=0.1,
+            source_snapshot=snapshot,
+        )
+
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    # Matching snapshots log fine.
+    gbi.log_gate_evidence(
+        spec, estimate_over(report.source_snapshot, 100), {"s": 200}, scores, report
+    )
+    # A projection made over an older, smaller snapshot cannot authorise
+    # a run gated on a newer one, however cheap it claims to be.
+    stale = estimate_over(snapshot_for(spec, 1), 10)
+    assert stale.release == report.scores[0].release
+    with pytest.raises(gbi.EvidenceMismatch, match="different rows"):
+        gbi.log_gate_evidence(spec, stale, {"s": 200}, scores, report)
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -1882,6 +1959,7 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
         probe_output_tokens=[10],
         cad_per_million_input_tokens=0.1,
         cad_per_million_output_tokens=0.1,
+        source_snapshot=approved.source_snapshot,
     )
 
     recorder = _RecordingMlflow()

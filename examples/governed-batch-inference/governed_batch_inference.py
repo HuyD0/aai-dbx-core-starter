@@ -483,11 +483,18 @@ class CostEstimate(BaseModel):
     different model, or a repriced endpoint is a different budget, so an
     estimate cannot be carried across releases — reusing one would let a
     release clear the declared ceiling on another release's assumptions.
+
+    ``source_snapshot`` is what it was measured *over*. Release identity
+    alone does not pin the row count: the same spec estimated against
+    Monday's snapshot and executed against Friday's clears a ceiling
+    approved for a table that has since grown. Cost is a function of the
+    data as much as of the release, so the estimate records both.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     release: ReleaseIdentity
+    source_snapshot: SourceSnapshot | None = None
     row_count: int = Field(ge=0)
     probe_row_count: int = Field(gt=0)
     mean_input_tokens_per_row: float = Field(ge=0.0)
@@ -517,6 +524,7 @@ def estimate_cost(
     cad_per_million_input_tokens: float,
     cad_per_million_output_tokens: float,
     safety_factor: float = 1.2,
+    source_snapshot: SourceSnapshot | None = None,
 ) -> CostEstimate:
     """Project full-run cost from per-row probe token counts.
 
@@ -539,6 +547,7 @@ def estimate_cost(
     )
     return CostEstimate(
         release=spec.release,
+        source_snapshot=source_snapshot,
         row_count=row_count,
         probe_row_count=len(probe_input_tokens),
         mean_input_tokens_per_row=mean_in,
@@ -1418,6 +1427,21 @@ class GateReport(BaseModel):
     human_review_obligations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
+    def _gated_evidence_names_its_snapshot(self) -> GateReport:
+        """`evaluate_gate` requires this, but a report is more often
+        *reconstructed* than produced — and an unpinned adopting report
+        read back from JSON would pass `require_executable` and let
+        `build_execute_sql` fall through to the live table. The invariant
+        belongs on the artifact, not only on the function that mints it.
+        """
+        if self.use_tier != UseTier.EXPLORATORY and self.source_snapshot is None:
+            raise ValueError(
+                f"tier {self.use_tier} evidence must name the source version "
+                "it describes; an unpinned report cannot authorise a run"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _every_verdict_follows_from_the_scores(self) -> GateReport:
         by_field: dict[str, list[FieldStratumScore]] = {}
         for score in self.scores:
@@ -2137,17 +2161,27 @@ def resync_strata_sql(
     differs = "\n     OR ".join(
         f"NOT (target.{column} <=> source.{column})" for column in spec.strata
     )
-    # Same ordering rule the inference MERGE follows, and it is needed
-    # here for its own reason: this statement runs from a *pinned*
-    # snapshot, so a delayed older run would otherwise relabel rows a
-    # newer release has already landed — regressing exactly the grouping
-    # that monitoring and re-sampling depend on, while the model output
-    # beside it stayed current and made the row look healthy.
+    # The same *pair* ordering the inference MERGE uses, and needed here
+    # for its own reason: this statement runs from a pinned snapshot, so
+    # a delayed older cycle would otherwise relabel rows a newer one has
+    # already resynced — regressing exactly the grouping that monitoring
+    # and re-sampling depend on, while the model output beside it stayed
+    # current and made the row look healthy. Comparing the release
+    # sequence alone is not enough, because two cycles of one unchanged
+    # spec tie there and differ only in which snapshot they read.
+    sequence = int(spec.release_sequence)
+    version = snapshot.version if snapshot else -1
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
 WHEN MATCHED
-  AND coalesce(target.ai_release_sequence, -1) <= {int(spec.release_sequence)}
+  AND (
+    coalesce(target.ai_release_sequence, -1) < {sequence}
+    OR (
+      coalesce(target.ai_release_sequence, -1) = {sequence}
+      AND coalesce(target.ai_source_version, -1) <= {version}
+    )
+  )
   AND (
      {differs}
    ) THEN UPDATE SET
@@ -2291,11 +2325,22 @@ def build_execute_sql(
             "gate report describes, so the report is required to build the "
             "statement"
         )
+    # Checked for any supplied report, including tier 3's optional one,
+    # which `require_executable` deliberately waves through.
     if report is not None and report.spec_digest != spec.spec_digest:
         raise EvidenceMismatch(
             "the report was produced for a different spec revision; its "
             "source snapshot does not describe this run"
         )
+    # This function *is* the paid statement, so it enforces the gate
+    # itself rather than trusting the caller to have done it. Checking
+    # only that a report exists and names the spec left a rejecting or
+    # unapproved one able to produce executable ai_query SQL — the
+    # notebook happened to call `require_executable` first, which made the
+    # gap invisible here while leaving every other caller of this reusable
+    # builder unprotected. A guard that depends on being called in the
+    # right order is not a guard.
+    require_executable(spec, report)
     snapshot = report.source_snapshot if report else None
     source = _source_relation(spec, snapshot)
     source_version = snapshot.version if snapshot else -1
@@ -2583,6 +2628,19 @@ def log_gate_evidence(
             f"{spec.release.model_version} (spec digest "
             f"{spec.release.spec_digest[:12]}…). Re-estimate before "
             "authorising the spend."
+        )
+    # And to the same rows. Release identity does not pin the row count,
+    # so an estimate made against an older, smaller snapshot clears a
+    # ceiling the newer one would not — the run then executes against the
+    # newer snapshot while this record shows the stale projection. This
+    # is the one place that sees the estimate and the report together,
+    # which makes it the place the bundle has to agree.
+    if estimate.source_snapshot != report.source_snapshot:
+        raise EvidenceMismatch(
+            f"the cost estimate describes {estimate.source_snapshot} but the "
+            f"gate report describes {report.source_snapshot}. The projection "
+            "was made over different rows than the gate certified, so it "
+            "cannot authorise this run's spend."
         )
 
     mlflow.log_params(

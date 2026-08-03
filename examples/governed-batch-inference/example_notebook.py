@@ -420,6 +420,11 @@ def estimate_for(spec) -> "gbi.CostEstimate":
     prompt shows up as a larger budget instead of hiding behind a
     constant. The returned estimate carries the release it was measured
     for, and the gate refuses to log an estimate from a different one.
+
+    It carries the snapshot too. The release fixes the price per row; the
+    snapshot fixes how many rows there are, and a projection made over a
+    smaller, older image of the table would clear a ceiling the run then
+    blows through.
     """
     instruction_tokens = gbi.estimate_tokens_from_text(spec.prompt_template)
     return gbi.estimate_cost(
@@ -432,6 +437,7 @@ def estimate_for(spec) -> "gbi.CostEstimate":
         probe_output_tokens=[130] * len(probe),  # structured response, per schema
         cad_per_million_input_tokens=CAD_PER_M_INPUT,
         cad_per_million_output_tokens=CAD_PER_M_OUTPUT,
+        source_snapshot=SOURCE_SNAPSHOT,
     )
 
 
@@ -463,6 +469,7 @@ try:
             probe_output_tokens=[130] * len(probe),
             cad_per_million_input_tokens=7.00,  # frontier-class placeholder
             cad_per_million_output_tokens=21.00,
+            source_snapshot=SOURCE_SNAPSHOT,
         )
     )
 except gbi.CostCeilingExceeded as refusal:
