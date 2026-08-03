@@ -115,6 +115,17 @@ All notable changes to `aai-core` are documented here.
   `https://` (or loopback): the bearer token would otherwise travel in
   cleartext.
 
+  A scorer whose input contract is a choice is satisfied per row: correctness
+  reads `expected_response` or `expected_facts`, so a suite that mixes the two
+  keeps the scorer and its default threshold instead of losing both to an
+  empty intersection. A scorer needing one specific field still needs it on
+  every row. Rows an agent did not retrieve for are skipped by the retrieval
+  scorers rather than raising — MLflow raises there, and since scorer errors
+  fail the gate, an agent that retrieves only when a question needs it could
+  not pass at all. A skipped row is left out of the mean rather than scored
+  zero, and the run reports how many rows each scorer actually judged so a
+  subset mean is never read as a whole-dataset one.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

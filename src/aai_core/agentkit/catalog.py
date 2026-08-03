@@ -15,6 +15,7 @@ dependencies; building an executable scorer imports MLflow on demand.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -541,6 +542,27 @@ def _undecidable_note(
     )
 
 
+def _every_row_satisfies(
+    shape: DatasetShape, needs: set[str], expectation_keys: set[str]
+) -> bool:
+    """Does every row provide at least one of the fields the scorer takes?
+
+    The contract is a choice, not a conjunction: MLflow's correctness
+    scorer reads ``expected_response`` **or** ``expected_facts`` and
+    checks it per row, so a dataset whose rows are split between the two
+    satisfies it — while the intersection of keys present on every row is
+    empty. Asking the intersection would drop the scorer and its default
+    threshold from a dataset that can perfectly well be scored.
+
+    Falls back to the intersection when the per-row detail is absent, so a
+    ``DatasetShape`` built by hand still behaves as before.
+    """
+
+    if not shape.expectation_rows:
+        return bool(needs & expectation_keys)
+    return all(needs & set(row) for row in shape.expectation_rows)
+
+
 def _contract_blocker(
     spec: ScorerSpec,
     shape: DatasetShape,
@@ -553,17 +575,18 @@ def _contract_blocker(
     if spec.judge is not None and not judges_enabled:
         note = judge_note or "judge scorers run in live/full evaluation"
         return note
-    if spec.needs_expectations and not expectation_keys.intersection(
-        spec.needs_expectations
+    if spec.needs_expectations and not _every_row_satisfies(
+        shape, set(spec.needs_expectations), expectation_keys
     ):
         fields = " or ".join(f"expectations.{key}" for key in spec.needs_expectations)
-        if set(shape.partial_expectation_keys).intersection(spec.needs_expectations):
+        available = set(shape.expectation_keys) | set(shape.partial_expectation_keys)
+        if available.intersection(spec.needs_expectations):
             # Scoring only the rows that carry the field would average a
             # subset while reporting it as the whole dataset; the rows
             # without it would score as vacuously perfect.
             return (
-                f"only some rows have {fields}; every row must provide it "
-                "for the score to mean what it says"
+                f"only some rows have {fields}; every row must provide one "
+                "of them for the score to mean what it says"
             )
         return f"dataset rows have no {fields}"
     if spec.needs_trace is TraceNeed.ANY and mode not in TRACE_MODES:
@@ -593,7 +616,13 @@ def _conditional_note(spec: ScorerSpec, shape: DatasetShape, mode: str) -> str |
             if spec.needs_trace is TraceNeed.RETRIEVAL
             else "tool-call spans"
         )
-        return f"conditional: rows without {kind} in the agent's trace skip it"
+        scored = (
+            "scores only the rows whose trace has them, and the run reports "
+            "how many that was"
+            if spec.needs_trace is TraceNeed.RETRIEVAL
+            else "rows without them are scored against an empty tool call list"
+        )
+        return f"conditional: {kind} vary per row; {scored}"
     return None
 
 
@@ -783,6 +812,8 @@ def _build_builtin_scorer(
 ) -> Any:
     class_name = _BUILTIN_CLASSES[spec.name]
     scorer_class = getattr(mlflow.genai.scorers, class_name)
+    if spec.needs_trace is TraceNeed.RETRIEVAL:
+        scorer_class = _skipping_rows_without_retrieval(scorer_class)
     kwargs: dict[str, Any] = {}
     if spec.judge is not None and spec.judge.overridable and judge_model_uri:
         kwargs["model"] = judge_model_uri
@@ -795,6 +826,46 @@ def _build_builtin_scorer(
         kwargs["name"] = spec.name
         kwargs["guidelines"] = list(guidelines)
     return scorer_class(**kwargs)
+
+
+_NO_RETRIEVAL_CONTEXT = "No retrieval context found"
+
+
+def _skipping_rows_without_retrieval(scorer_class: type) -> type:
+    """A row with nothing retrieved is unscorable, not a failure.
+
+    MLflow's retrieval scorers raise when a trace carries no RETRIEVER
+    span. That is right for a scorer asked to judge retrieval that is not
+    there, but wrong as a verdict on an agent that retrieves only when a
+    question needs it: every conversational row would raise, land in the
+    result table as a scorer error, and — since scorer errors fail the
+    gate — make such an agent unable to pass at all.
+
+    Returning an empty feedback list is MLflow's own way to say "nothing
+    to assess here": the row shows as null in the result table and is left
+    out of the aggregate rather than scored zero. The judge, its prompt,
+    and its scale are untouched; only rows outside the scorer's input
+    contract change. ``_scorer_coverage`` then reports how many rows were
+    skipped, so a mean over the retrieving rows is never presented as a
+    mean over the dataset.
+    """
+
+    native_call = scorer_class.__call__
+
+    # functools.wraps sets __wrapped__, and Scorer.run inspects the
+    # signature to decide which arguments to pass. A bare **kwargs
+    # override would match nothing and the scorer would be called with
+    # no trace at all.
+    @functools.wraps(native_call)
+    def __call__(self: Any, **kwargs: Any) -> Any:
+        try:
+            return native_call(self, **kwargs)
+        except Exception as error:
+            if _NO_RETRIEVAL_CONTEXT not in str(error):
+                raise
+            return []
+
+    return type(scorer_class.__name__, (scorer_class,), {"__call__": __call__})
 
 
 def _build_prompt_judge(

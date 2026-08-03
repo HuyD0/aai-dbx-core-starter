@@ -40,6 +40,12 @@ class DatasetShape:
     # Present on some rows but not all; reported so the plan can say why a
     # scorer was not selected instead of leaving it a mystery.
     partial_expectation_keys: tuple[str, ...] = ()
+    # The populated expectation keys of each row, in row order. A scorer
+    # whose contract is a choice — correctness accepts expected_response
+    # OR expected_facts, per row — is satisfied when every row provides
+    # one of them, which the intersection above cannot express: rows split
+    # between the two alternatives intersect to nothing.
+    expectation_rows: tuple[tuple[str, ...], ...] = ()
     has_retrieval_spans: bool = False
     has_tool_spans: bool = False
     # Some rows carry a trace and some do not: the dataset cannot be
@@ -313,6 +319,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
     # it never checked, inflating the aggregate the gate reads.
     expectation_keys: set[str] | None = None
     partial_expectation_keys: set[str] = set()
+    expectation_rows: list[tuple[str, ...]] = []
     # Trace coverage is per-row for the same reason expectations are: a
     # traces run supplies no predict_fn, so a row without a populated
     # trace has no answer at all — it cannot be scored, only skipped or
@@ -344,6 +351,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         expectation_keys = (
             present if expectation_keys is None else expectation_keys & present
         )
+        expectation_rows.append(tuple(sorted(present)))
         if _is_populated(row.get("trace")):
             traced_rows += 1
             retrieval, tools = _trace_span_kinds(row["trace"])
@@ -365,6 +373,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         has_outputs=has_outputs,
         expectation_keys=tuple(sorted(complete)),
         partial_expectation_keys=tuple(sorted(partial_expectation_keys - complete)),
+        expectation_rows=tuple(expectation_rows),
         has_traces=has_traces,
         partial_traces=0 < traced_rows < len(rows),
         has_retrieval_spans=has_retrieval_spans,

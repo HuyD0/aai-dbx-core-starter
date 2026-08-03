@@ -32,6 +32,7 @@ def _shape(
     partial_expectation_keys=(),
     has_retrieval_spans=None,
     has_tool_spans=None,
+    expectation_rows=(),
 ):
     return DatasetShape(
         row_count=row_count,
@@ -41,6 +42,7 @@ def _shape(
         has_traces=has_traces,
         strata_values={},
         partial_expectation_keys=tuple(partial_expectation_keys),
+        expectation_rows=tuple(expectation_rows),
         has_retrieval_spans=(
             has_traces if has_retrieval_spans is None else has_retrieval_spans
         ),
@@ -297,10 +299,18 @@ def _fake_mlflow(make_judge=None):
         return wrap
 
     def builtin(class_name):
-        def factory(**kwargs):
-            return SimpleNamespace(class_name=class_name, kwargs=kwargs)
+        # A class, not a factory: the toolkit subclasses retrieval scorers
+        # so a row with nothing retrieved is skipped instead of raising.
+        class _Fake:
+            def __init__(self, **kwargs):
+                self.class_name = class_name
+                self.kwargs = kwargs
 
-        return factory
+            def __call__(self, *, trace=None):
+                return []
+
+        _Fake.__name__ = class_name
+        return _Fake
 
     scorers = SimpleNamespace(
         scorer=scorer_decorator,
@@ -542,3 +552,102 @@ def test_a_plan_with_no_scorers_is_refused():
     # It names what was dropped, so the developer can act on it.
     assert "response_length_ok" in message
     assert "scorers.remove" in message
+
+
+def test_rows_may_satisfy_an_or_contract_with_different_fields():
+    """`correctness` reads expected_response OR expected_facts, per row.
+
+    A dataset whose rows are split between the two alternatives satisfies
+    that contract, but the keys present on *every* row intersect to
+    nothing — so asking the intersection would drop the scorer and its
+    default >=0.7 threshold from a dataset that scores perfectly well.
+    """
+
+    shape = _shape(
+        expectation_keys=(),
+        partial_expectation_keys=("expected_facts", "expected_response"),
+        expectation_rows=(
+            ("expected_response",),
+            ("expected_facts",),
+            ("expected_response",),
+        ),
+    )
+
+    plan = select_scorers(shape, _config(), mode="answer-sheet", judges_enabled=True)
+
+    names = _selected_names(plan)
+    assert "correctness" in names
+    # A scorer needing one specific field is still blocked by the split.
+    assert "keyword_coverage" not in names
+    assert "one of them" in _excluded(plan, "keyword_coverage")
+
+
+def test_a_row_satisfying_neither_alternative_still_blocks():
+    shape = _shape(
+        expectation_keys=(),
+        partial_expectation_keys=("expected_facts", "expected_response"),
+        expectation_rows=(("expected_response",), (), ("expected_facts",)),
+    )
+
+    plan = select_scorers(shape, _config(), mode="answer-sheet", judges_enabled=True)
+
+    assert "correctness" not in _selected_names(plan)
+    assert "only some rows have" in _excluded(plan, "correctness")
+
+
+def test_retrieval_scorers_skip_rows_with_nothing_retrieved():
+    """MLflow raises there; the toolkit turns that into a skipped row.
+
+    A conditionally retrieving agent would otherwise error on every
+    non-retrieval row, and scorer errors fail the gate — so it could
+    never pass.
+    """
+
+    from aai_core.agentkit.catalog import build_scorer, get_spec
+
+    mlflow = _fake_mlflow()
+
+    class _Raising:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __call__(self, *, trace=None):
+            if trace == "no-retrieval":
+                raise RuntimeError(
+                    "No retrieval context found in the trace. The "
+                    "RetrievalGroundedness scorer requires the trace to "
+                    "contain at least one span with type 'RETRIEVER'."
+                )
+            if trace == "boom":
+                raise RuntimeError("the judge endpoint refused the request")
+            return ["scored"]
+
+    mlflow.genai.scorers.RetrievalGroundedness = _Raising
+    built = build_scorer(
+        get_spec("retrieval_groundedness"),
+        judge_model_uri="endpoints:/judge",
+        mlflow_module=mlflow,
+    )
+
+    assert built(trace="has-retrieval") == ["scored"]
+    assert built(trace="no-retrieval") == []
+    # Any other failure is still a failure.
+    with pytest.raises(RuntimeError, match="judge endpoint"):
+        built(trace="boom")
+
+
+def test_the_plan_says_retrieval_coverage_varies_per_row():
+    plan = select_scorers(
+        _shape(has_traces=False, has_retrieval_spans=False, has_tool_spans=False),
+        _config(scorers={"add": ["retrieval_groundedness"]}),
+        mode="live",
+        judges_enabled=True,
+    )
+
+    reason = next(
+        entry.reason
+        for entry in plan.entries
+        if entry.spec.name == "retrieval_groundedness"
+    )
+    assert "vary per row" in reason
+    assert "skip" not in reason

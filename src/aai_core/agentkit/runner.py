@@ -416,6 +416,7 @@ def run_scoring(
                 tags["aai.judge_prompt_versions"] = ",".join(
                     f"{name}={uri}" for name, uri in sorted(judge_prompts.items())
                 )
+            warnings.extend(_coverage_warnings(native_result))
             gate = apply_gate(
                 _metrics_with_scorer_errors(native_result),
                 policy=policy,
@@ -636,11 +637,7 @@ def _metrics_with_scorer_errors(native_result: Any) -> dict[str, float]:
         for key, value in dict(getattr(native_result, "metrics", {}) or {}).items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
-    frame = getattr(native_result, "result_df", None)
-    if frame is None:
-        tables = getattr(native_result, "tables", None)
-        if isinstance(tables, Mapping):
-            frame = tables.get("eval_results")
+    frame = _result_frame(native_result)
     columns = getattr(frame, "columns", None)
     if columns is None:
         return metrics
@@ -654,6 +651,70 @@ def _metrics_with_scorer_errors(native_result: Any) -> dict[str, float]:
         failures = sum(1 for value in frame[column] if _is_reported_error(value))
         metrics[f"{scorer}/error_count"] = float(failures)
     return metrics
+
+
+def _coverage_warnings(native_result: Any) -> list[str]:
+    """Name the scorers that judged fewer rows than the run scored.
+
+    A retrieval scorer skips a row whose trace retrieved nothing, so its
+    mean is over the retrieving rows only. That is the right arithmetic —
+    scoring the others zero would punish an agent for correctly not
+    retrieving — but reporting it as a whole-dataset number would be the
+    same quiet subset-averaging the expectation checks refuse. So the run
+    says how many rows each scorer actually judged.
+    """
+
+    frame = _result_frame(native_result)
+    columns = getattr(frame, "columns", None)
+    if columns is None:
+        return []
+    names = {str(column) for column in columns}
+    warnings = []
+    for name in sorted(names):
+        if not name.endswith("/value"):
+            continue
+        scorer = name.removesuffix("/value")
+        errors = frame.get(f"{scorer}/error_message") if hasattr(frame, "get") else None
+        rows = list(frame[name])
+        scored = 0
+        skipped = 0
+        for index, value in enumerate(rows):
+            if _is_populated_score(value):
+                scored += 1
+            elif errors is None or not _is_reported_error(list(errors)[index]):
+                # Absent with no error recorded: the scorer declined the
+                # row rather than failing on it.
+                skipped += 1
+        if skipped:
+            warnings.append(
+                f"{scorer} judged {scored} of {scored + skipped} rows; "
+                f"{skipped} had nothing for it to score, so its mean covers "
+                "the rest"
+            )
+    return warnings
+
+
+def _result_frame(native_result: Any) -> Any:
+    frame = getattr(native_result, "result_df", None)
+    if frame is None:
+        tables = getattr(native_result, "tables", None)
+        if isinstance(tables, Mapping):
+            frame = tables.get("eval_results")
+    return frame
+
+
+def _is_populated_score(value: Any) -> bool:
+    """A recorded score, as opposed to a null cell.
+
+    NaN is how a declined row arrives, and NaN != NaN is the only check
+    that works without importing pandas.
+    """
+
+    if value is None:
+        return False
+    if isinstance(value, float) and value != value:
+        return False
+    return True
 
 
 def _is_reported_error(value: Any) -> bool:

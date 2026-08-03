@@ -588,3 +588,21 @@ def test_a_sample_records_the_dataset_it_was_drawn_from(tmp_path):
     # An unsampled dataset claims no parent.
     assert dataset.sampled_from is None
     assert smoke_sample(dataset, 50) is dataset
+
+
+def test_expectation_rows_record_each_row_alternative(tmp_path):
+    """The OR contract is a per-row question, so the shape keeps per-row data."""
+
+    rows = [
+        {"inputs": {"question": "a"}, "expectations": {"expected_response": "x"}},
+        {"inputs": {"question": "b"}, "expectations": {"expected_facts": ["y"]}},
+        {"inputs": {"question": "c"}, "expectations": {"expected_response": ""}},
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.expectation_rows == (("expected_response",), ("expected_facts",), ())
+    # The dataset-wide views are unchanged: nothing is on every row.
+    assert shape.expectation_keys == ()
+    assert shape.partial_expectation_keys == ("expected_facts", "expected_response")

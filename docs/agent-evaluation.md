@@ -90,6 +90,7 @@ has to memorise the contracts:
 | Row contains | Scorers added |
 |---|---|
 | `expectations.expected_response` | correctness, keyword coverage, refusal compliance |
+| `expectations.expected_facts` | correctness (it accepts either field) |
 | `expectations.guidelines` | per-row guideline adherence |
 | retrieval spans in the trace | groundedness, retrieval relevance, sufficiency |
 | tool-call spans in the trace | tool-call correctness and efficiency |
@@ -99,6 +100,21 @@ The inferred plan is printed before every run, along with what the judge calls
 will cost, and anything that *cannot* run is listed with the reason. A
 retrieval scorer needs retriever spans in a trace; recorded answers do not
 have those, so it is excluded and says so rather than silently scoring zero.
+
+Two details in that table are per row, not per dataset. A scorer whose
+contract is a *choice* — correctness reads `expected_response` **or**
+`expected_facts` — is satisfied when every row supplies one of them, so a
+suite may mix the two. A scorer that needs one specific field still needs it
+everywhere: a field on only some rows means the others would score as
+vacuously perfect, so the scorer is excluded and names the gap.
+
+Retrieval is the other. An agent that retrieves only when a question needs it
+produces rows with nothing to judge, and MLflow's retrieval scorers raise on
+those. The toolkit skips them instead: the row is left out of the mean rather
+than scored zero, which would punish an agent for correctly not retrieving.
+Because that makes the mean cover a subset, the run says so — "groundedness
+judged 8 of 20 rows" — so a partial number is never read as a whole-dataset
+one.
 
 ## The commands
 

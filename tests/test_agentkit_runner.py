@@ -68,10 +68,24 @@ JUDGED_METRICS = {
 
 
 def _builtin_fake(class_name):
-    def factory(**kwargs):
-        return SimpleNamespace(class_name=class_name, kwargs=kwargs)
+    """A stand-in for an MLflow builtin scorer *class*.
 
-    return factory
+    A factory function would be simpler, but the toolkit subclasses these
+    to skip rows a retrieval scorer cannot judge — and a fake that cannot
+    be subclassed lets that path pass untested, which is how the wrapper
+    reached review unexercised.
+    """
+
+    class _Fake:
+        def __init__(self, **kwargs):
+            self.class_name = class_name
+            self.kwargs = kwargs
+
+        def __call__(self, *, trace=None):
+            return []
+
+    _Fake.__name__ = class_name
+    return _Fake
 
 
 _BUILTIN_FAKES = {
@@ -1481,3 +1495,60 @@ def test_an_unsampled_smoke_run_still_catches_a_regression(tmp_path):
 
     assert code == EXIT_THRESHOLD_FAILED
     assert not any("set aside" in warning for warning in outcome.warnings)
+
+
+class _CoverageFrame:
+    """A result table with a scorer that declined some rows."""
+
+    def __init__(self, values, errors=None):
+        self._data = {"skipping/value": values}
+        if errors is not None:
+            self._data["skipping/error_message"] = errors
+        self.columns = list(self._data)
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+def test_a_scorer_that_declined_rows_reports_its_coverage():
+    """A mean over the retrieving rows must not read as a whole-dataset mean."""
+
+    from aai_core.agentkit.runner import _coverage_warnings
+
+    result = SimpleNamespace(
+        metrics={"skipping/mean": 1.0},
+        result_df=_CoverageFrame([1.0, float("nan"), 1.0, None]),
+    )
+
+    warnings = _coverage_warnings(result)
+
+    assert warnings == [
+        "skipping judged 2 of 4 rows; 2 had nothing for it to score, so its "
+        "mean covers the rest"
+    ]
+
+
+def test_a_failed_row_is_not_counted_as_declined():
+    """An error is a failure, not a skip — the gate already fails on those."""
+
+    from aai_core.agentkit.runner import _coverage_warnings
+
+    result = SimpleNamespace(
+        metrics={},
+        result_df=_CoverageFrame(
+            [1.0, float("nan"), 1.0, 1.0], errors=[None, "judge exploded", None, None]
+        ),
+    )
+
+    assert _coverage_warnings(result) == []
+
+
+def test_full_coverage_says_nothing():
+    from aai_core.agentkit.runner import _coverage_warnings
+
+    result = SimpleNamespace(metrics={}, result_df=_CoverageFrame([1.0, 0.5]))
+
+    assert _coverage_warnings(result) == []
