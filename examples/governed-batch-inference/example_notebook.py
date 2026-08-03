@@ -379,6 +379,18 @@ SOURCE_SNAPSHOT = gbi.SourceSnapshot(
 )
 print(f"evidence describes {SOURCE_TABLE} at version {SOURCE_SNAPSHOT.version}")
 
+# From this point the live table is never read again. Every count, draw
+# and probe below goes through one of these two, because evidence about
+# rows the run will not process — or missing rows it will — is not
+# evidence about the run. `PINNED_SOURCE` is the SQL spelling; the
+# `pinned_source()` reader is the DataFrame one.
+PINNED_SOURCE = f"{SOURCE_TABLE} VERSION AS OF {SOURCE_SNAPSHOT.version}"
+
+
+def pinned_source():
+    return spark.read.option("versionAsOf", SOURCE_SNAPSHOT.version).table(SOURCE_TABLE)
+
+
 # Pre-flight, before anything is paid for: every idempotence guarantee
 # here rests on key equality, and `NULL = NULL` is not true. A null-keyed
 # row would be re-inferred and re-inserted on every single run while the
@@ -397,8 +409,8 @@ print(
 CAD_PER_M_INPUT = 0.20  # placeholder — use your negotiated list price
 CAD_PER_M_OUTPUT = 0.60  # placeholder
 
-probe = spark.table(SOURCE_TABLE).limit(32).collect()
-row_count = spark.table(SOURCE_TABLE).count()
+probe = pinned_source().limit(32).collect()
+row_count = pinned_source().count()
 
 
 def estimate_for(spec) -> "gbi.CostEstimate":
@@ -483,7 +495,7 @@ except gbi.CostCeilingExceeded as refusal:
 
 population = {
     row["layout"]: row["count"]
-    for row in spark.table(SOURCE_TABLE).groupBy("layout").count().collect()
+    for row in pinned_source().groupBy("layout").count().collect()
 }
 LABELLING_BUDGET = 400
 allocation = gbi.allocate_stratified_sample(
@@ -508,7 +520,7 @@ display(comparison)
 # Deterministic draw: rank rows inside each stratum by a hash of the key
 # and keep the first `allocation[stratum]`. Re-running selects the same
 # rows, so labelling work is never invalidated by a re-run.
-spark.table(SOURCE_TABLE).createOrReplaceTempView("source_docs")
+pinned_source().createOrReplaceTempView("source_docs")
 # Stratum values are table data, not configuration, so they are escaped
 # rather than pasted between quotes — a value containing an apostrophe is
 # ordinary in real data and must not be able to reshape the statement.
@@ -853,12 +865,12 @@ for score in scores_v1:
 # COMMAND ----------
 
 naive_ids = spark.sql(f"""
-    SELECT doc_id FROM {SOURCE_TABLE}
+    SELECT doc_id FROM {PINNED_SOURCE}
     ORDER BY sha2(concat(doc_id, '|naive'), 256)
     LIMIT {LABELLING_BUDGET}
     """)
 naive_rows = (
-    spark.table(SOURCE_TABLE)
+    pinned_source()
     .join(naive_ids, "doc_id")
     .join(spark.table(GOLD_TABLE).drop("layout"), "doc_id")
     .collect()
@@ -1201,10 +1213,9 @@ release_predicate = f"""
         OR coalesce(done.ai_release_sequence, -1) > {spec_v2.release_sequence}
       )
 """
-# Pinned to the evidence's version, exactly like the generated statement:
-# counting pending rows against a moved table would report work the run
-# is not authorised to do.
-PINNED_SOURCE = f"{SOURCE_TABLE} VERSION AS OF {SOURCE_SNAPSHOT.version}"
+# Pinned like everything else since the snapshot was captured: counting
+# pending rows against a moved table would report work the run is not
+# authorised to do.
 pending_sql = f"""
     SELECT count(*) AS pending FROM {PINNED_SOURCE} AS source
     LEFT ANTI JOIN {TARGET_TABLE} AS done

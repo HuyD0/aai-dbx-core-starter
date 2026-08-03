@@ -114,11 +114,16 @@ abstention path) then passes the same gate on the same terms.
     derived from text that no longer exists. Stratum labels are row
     metadata rather than model output, so a corrected label is resynced by
     `resync_strata_sql` instead of triggering a paid re-run that would
-    regenerate identical values. It additionally treats a strictly newer
-    `release_sequence` as already done, and the MERGE updates a row only
-    when its sequence is not being lowered, so an old job resuming after a
-    newer release has landed cannot roll production back to its own stale
-    output. Matching on the key alone would let a newly gated release
+    regenerate identical values — and, like the MERGE, it refuses to
+    relabel a row a newer release owns. A strictly newer `release_sequence`
+    counts as done **on its own, before the content digest is considered**;
+    the MERGE separately updates a row only when its sequence is not being
+    lowered, so an old job resuming after a newer release has landed cannot
+    roll production back to its own stale output. The ordering inside that
+    predicate is not cosmetic: test the digest first and a row the newer
+    release landed from *edited* text stops matching, so the old job pays
+    for inference the MERGE then correctly discards — a second full bill
+    per edited document. Matching on the key alone would let a newly gated release
     report success while every row still carried the previous release's
     values and provenance;
     matching on model and prompt alone would do the same whenever the spec
@@ -139,21 +144,28 @@ abstention path) then passes the same gate on the same terms.
     through the precision gate. The same rule runs in evaluation and in
     execution (`apply_abstention_policy` and the generated SQL), so what
     was measured is what lands.
-12. **Persisted evidence is verified, not trusted.** Everything the gate
-    reads round-trips through MLflow as JSON, so each model re-derives what
-    it can: a `ConfidenceInterval` checks its bounds against its own counts,
-    a `FieldStratumScore` checks its intervals against the counts printed
-    beside them, and a `GateReport` derives its aggregate decision from its
-    field results and must judge every field in the spec. A truncated or
-    edited artifact fails to load rather than authorising a run.
+12. **Persisted evidence is verified, not trusted — all the way down.**
+    Everything the gate reads round-trips through MLflow as JSON, and a
+    report is what authorises a paid, table-mutating run, so nothing in it
+    is taken at its word. The chain reconstructs from the raw counts up:
 
-    The population-weighted row is the exception that proves it. Its
-    intervals are an effective sample size rather than a row count, so they
-    cannot be checked against one — and it is the only row a medium- or
-    low-criticality field is gated on, which makes it the row worth forging.
-    So it carries the population weights it used and is *recomputed* from
-    the physical strata before it is read. One function builds it, in
-    scoring and in verification alike, so the two cannot drift.
+    - a `ConfidenceInterval` is checked against its own successes and trials;
+    - a physical `FieldStratumScore`'s intervals against the counts printed
+      beside them;
+    - the population-weighted row by **recomputing** it from the physical
+      rows and the weights it carries — its intervals are an effective
+      sample size rather than a row count, so they cannot be checked
+      against one, and it is the only row a medium- or low-criticality
+      field is gated on, which makes it the row worth forging;
+    - each `FieldGateResult` by re-running the gate over those scores;
+    - and the report's aggregate `decision` from the field results.
+
+    `require_executable` closes the loop by binding those scores to the
+    spec — the one thing a self-contained report cannot know about itself —
+    and by checking the report judged every field. Each link is computed by
+    the *same* function that produced it (`_gate_field`, `_weighted_row`),
+    never a second implementation written for checking: two implementations
+    are two things to keep in sync, and the drift between them is the bug.
 13. **The run reads the Delta version the evidence describes.** Population,
     sample, gate and cost estimate are all computed against one snapshot of
     the source, and a tier 1 spec then waits for a human. `build_execute_sql`

@@ -123,6 +123,24 @@ def one_field_spec(criticality="high", tolerable_error_rate=0.05, **overrides):
     )
 
 
+def gate(spec, scores, **kwargs):
+    """`evaluate_gate`, supplying the snapshot gated evidence now requires.
+
+    Tiers 1 and 2 must record which source version their evidence
+    describes, so the run can be pinned to it. That is uninteresting to
+    most tests here, so it is defaulted; the tests that are *about* the
+    snapshot call `gbi.evaluate_gate` directly.
+    """
+    if spec.gate_required:
+        kwargs.setdefault("source_snapshot", snapshot_for(spec))
+    return gbi.evaluate_gate(spec, scores, **kwargs)
+
+
+def snapshot_for(spec, version=7):
+    """Gated evidence must record the source version it describes."""
+    return gbi.SourceSnapshot(table=spec.source_table, version=version)
+
+
 def adopting_report(spec, *, source_snapshot=None):
     """A passing gate report for `spec` — what execution now requires.
 
@@ -138,6 +156,8 @@ def adopting_report(spec, *, source_snapshot=None):
             predicted={field.name: "v" for field in spec.fields},
         )
     ] * 200
+    if source_snapshot is None and spec.gate_required:
+        source_snapshot = snapshot_for(spec)
     report = gbi.evaluate_gate(
         spec, score(records, spec), source_snapshot=source_snapshot
     )
@@ -361,7 +381,7 @@ standard: 795/800 correct (lower ~0.985). legacy_scan: 80/100
 
 def test_high_criticality_gates_on_the_worst_stratum_not_the_average():
     spec = one_field_spec(criticality="high")
-    report = gbi.evaluate_gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
+    report = gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
     assert report.decision == gbi.GateDecision.REJECT
     (result,) = report.fields
     assert result.decision == gbi.GateDecision.REJECT
@@ -372,7 +392,7 @@ def test_high_criticality_gates_on_the_worst_stratum_not_the_average():
 def test_medium_criticality_gates_on_the_population_weighted_estimate():
     """Same evidence, medium criticality: the all-strata estimate decides."""
     spec = one_field_spec(criticality="medium")
-    report = gbi.evaluate_gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
+    report = gate(spec, score(CENTRAL_LESSON_RECORDS, spec))
     assert report.decision == gbi.GateDecision.ADOPT
     (result,) = report.fields
     assert result.binding_stratum == gbi.WEIGHTED
@@ -399,7 +419,7 @@ def test_weighted_estimate_is_not_the_raw_pool_of_a_stratified_sample():
     )
     assert weighted.precision.point > 0.99
     assert weighted.precision.lower >= 0.90
-    assert gbi.evaluate_gate(spec, score(records, spec, population)).decision == (
+    assert gate(spec, score(records, spec, population)).decision == (
         gbi.GateDecision.ADOPT
     )
     # And the effective sample size never exceeds what was labelled.
@@ -425,7 +445,7 @@ def test_gate_compares_lower_bound_never_the_point_estimate():
     does not — it produced an encouraging number with too little evidence."""
     spec = one_field_spec(criticality="medium")
     scores = score(records_for("standard", correct=97, wrong=3), spec)
-    report = gbi.evaluate_gate(spec, scores)
+    report = gate(spec, scores)
     (result,) = report.fields
     assert result.binding_point_estimate >= 0.95
     assert result.binding_lower_bound < 0.95
@@ -438,7 +458,7 @@ def test_too_small_a_sample_is_inconclusive_not_a_rejection():
     ~0.886): the model was not shown to be bad — the sample was too small."""
     spec = one_field_spec(criticality="high")
     scores = score(records_for("legacy", correct=30), spec)
-    report = gbi.evaluate_gate(spec, scores)
+    report = gate(spec, scores)
     assert report.decision == gbi.GateDecision.INCONCLUSIVE
     (result,) = report.fields
     assert any("label more rows" in reason for reason in result.reasons)
@@ -455,7 +475,7 @@ def test_a_decisive_failure_is_rejected_even_at_the_same_small_size():
     interval = gbi.wilson_interval(0, 30, spec.confidence_level)
     assert interval.upper < 0.95  # decisive, despite n = 30
 
-    report = gbi.evaluate_gate(spec, score(records_for("legacy", wrong=30), spec))
+    report = gate(spec, score(records_for("legacy", wrong=30), spec))
     assert report.decision == gbi.GateDecision.REJECT
     (result,) = report.fields
     assert any("demonstrated failure" in reason for reason in result.reasons)
@@ -478,9 +498,9 @@ def test_gate_refuses_evidence_from_a_different_release():
     spec_v2 = spec_v1.model_copy(update={"prompt_version": "2.0.0"})
     scores_v1 = score(records_for("standard", correct=200), spec_v1)
 
-    assert gbi.evaluate_gate(spec_v1, scores_v1).decision == gbi.GateDecision.ADOPT
+    assert gate(spec_v1, scores_v1).decision == gbi.GateDecision.ADOPT
     with pytest.raises(gbi.EvidenceMismatch, match="prompt 1.0.0"):
-        gbi.evaluate_gate(spec_v2, scores_v1)
+        gate(spec_v2, scores_v1)
 
 
 def test_gate_refuses_a_model_version_change_on_stale_evidence():
@@ -488,7 +508,7 @@ def test_gate_refuses_a_model_version_change_on_stale_evidence():
     scores = score(records_for("standard", correct=200), spec)
     retrained = spec.model_copy(update={"model_version": "next-model-build"})
     with pytest.raises(gbi.EvidenceMismatch):
-        gbi.evaluate_gate(retrained, scores)
+        gate(retrained, scores)
 
 
 def test_gate_refuses_intervals_computed_at_another_confidence_level():
@@ -503,16 +523,14 @@ def test_gate_refuses_intervals_computed_at_another_confidence_level():
         s.model_copy(update={"confidence": 0.95}) for s in score(records, spec)
     )
     with pytest.raises(gbi.EvidenceMismatch, match="confidence"):
-        gbi.evaluate_gate(spec, mislabelled)
+        gate(spec, mislabelled)
     # Scored properly at the declared level, the same sample is rejected.
-    assert gbi.evaluate_gate(spec, score(records, spec)).decision == (
-        gbi.GateDecision.REJECT
-    )
+    assert gate(spec, score(records, spec)).decision == (gbi.GateDecision.REJECT)
 
 
 def test_gate_refuses_an_empty_evidence_set():
     with pytest.raises(gbi.EvidenceMismatch):
-        gbi.evaluate_gate(one_field_spec(), ())
+        gate(one_field_spec(), ())
 
 
 def test_gate_refuses_evidence_with_a_stratum_filtered_out():
@@ -524,11 +542,11 @@ def test_gate_refuses_evidence_with_a_stratum_filtered_out():
     """
     spec = one_field_spec(criticality="high")
     scores = score(CENTRAL_LESSON_RECORDS, spec)
-    assert gbi.evaluate_gate(spec, scores).decision == gbi.GateDecision.REJECT
+    assert gate(spec, scores).decision == gbi.GateDecision.REJECT
 
     without_the_bad_one = [s for s in scores if s.stratum != "legacy_scan"]
     with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
-        gbi.evaluate_gate(spec, without_the_bad_one)
+        gate(spec, without_the_bad_one)
 
 
 def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
@@ -542,12 +560,12 @@ def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
         )
     ] * 200
     scores = score(records, spec)
-    assert gbi.evaluate_gate(spec, scores).decision == gbi.GateDecision.ADOPT
+    assert gate(spec, scores).decision == gbi.GateDecision.ADOPT
 
     with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
-        gbi.evaluate_gate(spec, [s for s in scores if s.field != "account_id"])
+        gate(spec, [s for s in scores if s.field != "account_id"])
     with pytest.raises(gbi.EvidenceMismatch, match="incomplete"):
-        gbi.evaluate_gate(spec, [s for s in scores if s.stratum != gbi.WEIGHTED])
+        gate(spec, [s for s in scores if s.stratum != gbi.WEIGHTED])
 
 
 def test_scoring_refuses_records_produced_by_a_different_release():
@@ -649,7 +667,7 @@ def test_a_gate_report_cannot_claim_a_decision_its_fields_do_not_support():
     `require_executable` reads only the aggregate — so the aggregate is
     derived from the field results rather than trusted."""
     spec = one_field_spec(criticality="high")
-    honest = gbi.evaluate_gate(spec, score(records_for("s", correct=200), spec))
+    honest = gate(spec, score(records_for("s", correct=200), spec))
     assert honest.decision == gbi.GateDecision.ADOPT
 
     # A truncated artifact: no field results, confident verdict.
@@ -663,9 +681,7 @@ def test_a_gate_report_cannot_claim_a_decision_its_fields_do_not_support():
             decision=gbi.GateDecision.ADOPT,
         )
     # A rejecting field result relabelled as an adoption.
-    rejected = gbi.evaluate_gate(
-        spec, score(records_for("s", correct=80, wrong=20), spec)
-    )
+    rejected = gate(spec, score(records_for("s", correct=80, wrong=20), spec))
     assert rejected.decision == gbi.GateDecision.REJECT
     with pytest.raises(ValidationError, match="does not follow"):
         gbi.GateReport.model_validate(
@@ -687,7 +703,7 @@ def test_execution_needs_a_report_that_judged_every_field():
             predicted={"issuer_name": "v", "account_id": "v"},
         )
     ] * 200
-    report = gbi.evaluate_gate(spec, score(records, spec))
+    report = gate(spec, score(records, spec))
     gbi.require_executable(spec, report)
 
     partial = report.model_copy(
@@ -753,7 +769,7 @@ def test_the_weighted_row_is_recomputed_not_trusted():
         population,
     )
     # The physical strata disagree, and the honest aggregate reflects it.
-    assert gbi.evaluate_gate(spec, honest).decision == gbi.GateDecision.REJECT
+    assert gate(spec, honest).decision == gbi.GateDecision.REJECT
 
     weighted = next(s for s in honest if s.stratum == gbi.WEIGHTED)
     others = [s for s in honest if s.stratum != gbi.WEIGHTED]
@@ -762,13 +778,11 @@ def test_the_weighted_row_is_recomputed_not_trusted():
     strong = gbi.wilson_interval(200, 200, spec.confidence_level)
     forged = weighted.model_copy(update={"precision": strong, "recall": strong})
     with pytest.raises(gbi.EvidenceMismatch, match="does not follow from its stratum"):
-        gbi.evaluate_gate(spec, [*others, forged])
+        gate(spec, [*others, forged])
 
     # Forging the counts underneath it fails the same way.
     with pytest.raises(gbi.EvidenceMismatch, match="does not follow from its stratum"):
-        gbi.evaluate_gate(
-            spec, [*others, weighted.model_copy(update={"n_correct": 400})]
-        )
+        gate(spec, [*others, weighted.model_copy(update={"n_correct": 400})])
 
     # So does quietly dropping the failing stratum's weight, which would
     # otherwise re-weight the population around the passing rows.
@@ -776,13 +790,13 @@ def test_the_weighted_row_is_recomputed_not_trusted():
         update={"stratum_population": (("legacy_scan", 1), ("standard", 9000))}
     )
     with pytest.raises(gbi.EvidenceMismatch, match="does not follow from its stratum"):
-        gbi.evaluate_gate(spec, [*others, lightened])
+        gate(spec, [*others, lightened])
 
     # An honest set round-trips through JSON and still gates identically.
     revived = [
         gbi.FieldStratumScore.model_validate(s.model_dump(mode="json")) for s in honest
     ]
-    assert gbi.evaluate_gate(spec, revived).decision == gbi.GateDecision.REJECT
+    assert gate(spec, revived).decision == gbi.GateDecision.REJECT
 
 
 def test_the_weighted_row_must_carry_the_weights_it_used():
@@ -830,7 +844,7 @@ def test_execution_reads_the_delta_version_the_evidence_describes():
         gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(other))
     # Nor can evidence about one table pin a run over another.
     with pytest.raises(gbi.EvidenceMismatch, match="cannot pin a run"):
-        gbi.evaluate_gate(
+        gate(
             spec,
             score(
                 [
@@ -906,6 +920,107 @@ def test_an_unknown_abstention_sends_the_whole_row_to_the_queue():
     )
 
 
+def test_a_nested_field_verdict_cannot_be_flipped():
+    """Round 9 made the aggregate derived; the per-field verdicts under it
+    were still whatever the artifact said they were."""
+    spec = one_field_spec()
+    rejecting = gate(spec, score(records_for("s", correct=80, wrong=20), spec))
+    assert rejecting.decision == gbi.GateDecision.REJECT
+    assert rejecting.fields[0].decision == gbi.GateDecision.REJECT
+
+    # Flip the leaf and the aggregate together, so they agree with each
+    # other and disagree only with the evidence.
+    payload = rejecting.model_dump(mode="json")
+    for result in payload["fields"]:
+        result["decision"] = "adopt"
+    payload["decision"] = "adopt"
+    with pytest.raises(ValidationError, match="does not follow from the scores"):
+        gbi.GateReport.model_validate(payload)
+
+    # Raising the recorded bound instead is refused the same way: the
+    # verdict is recomputed from the scores, not read off the summary.
+    payload = rejecting.model_dump(mode="json")
+    payload["fields"][0]["binding_lower_bound"] = 0.99
+    with pytest.raises(ValidationError, match="does not follow from the scores"):
+        gbi.GateReport.model_validate(payload)
+
+    # An honest report survives the round trip intact.
+    assert gbi.GateReport.model_validate(rejecting.model_dump(mode="json")) == rejecting
+
+
+def test_execution_binds_the_reports_scores_to_the_spec():
+    """The report proves its verdicts follow from its scores; only the
+    caller knows whether those scores are about this release."""
+    spec = one_field_spec()
+    report = adopting_report(spec)
+    gbi.require_executable(spec, report)
+
+    # Scores from a different release, re-judged into an adopting report,
+    # cannot authorise this one even though that report is self-consistent.
+    other = one_field_spec(prompt_version="9.9.9")
+    smuggled = report.model_copy(
+        update={
+            "scores": adopting_report(other).scores,
+            "spec_digest": spec.spec_digest,
+        }
+    )
+    with pytest.raises(gbi.EvidenceMismatch):
+        gbi.require_executable(spec, smuggled)
+
+
+def test_gated_evidence_must_record_its_source_version():
+    """Pinning the run is worthless if the evidence need not say to what."""
+    spec = make_spec()
+    scores = score(
+        [
+            gbi.EvaluationRecord(
+                stratum="standard",
+                inference=PLACEHOLDER_INFERENCE,
+                gold={f.name: "v" for f in spec.fields},
+                predicted={f.name: "v" for f in spec.fields},
+            )
+        ]
+        * 200,
+        spec,
+    )
+    assert spec.gate_required
+    with pytest.raises(gbi.EvidenceMismatch, match="must record which version"):
+        gbi.evaluate_gate(spec, scores)
+
+    # Tier 3 is ungated, so there is no evidence to pin and none is asked for.
+    exploratory = make_spec(use_tier=3)
+    assert not exploratory.gate_required
+    assert (
+        gbi.evaluate_gate(exploratory, score_for(exploratory)).source_snapshot is None
+    )
+
+
+def score_for(spec):
+    return score(
+        [
+            gbi.EvaluationRecord(
+                stratum="standard",
+                inference=PLACEHOLDER_INFERENCE,
+                gold={f.name: "v" for f in spec.fields},
+                predicted={f.name: "v" for f in spec.fields},
+            )
+        ]
+        * 200,
+        spec,
+    )
+
+
+def test_the_strata_resync_will_not_relabel_a_newer_release():
+    """It runs from a pinned historical snapshot, so without the guard a
+    delayed job regresses the grouping monitoring depends on."""
+    spec = make_spec(release_sequence=3)
+    sql = gbi.resync_strata_sql(spec, snapshot_for(spec))
+    assert "coalesce(target.ai_release_sequence, -1) <= 3" in sql
+    # Still only touching strata — no inference, no value columns.
+    assert "ai_query" not in sql
+    assert "ai_" not in sql.split("THEN UPDATE SET")[1]
+
+
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
     spec = one_field_spec(criticality="high")
     records = [
@@ -947,10 +1062,7 @@ def test_a_policy_change_re_judges_the_same_predictions_without_re_inference():
 
     scores = gbi.score_extraction(records, consequential, population)
     assert all(score.release == consequential.release for score in scores)
-    assert (
-        gbi.evaluate_gate(consequential, scores).decision
-        == gbi.GateDecision.PENDING_APPROVAL
-    )
+    assert gate(consequential, scores).decision == gbi.GateDecision.PENDING_APPROVAL
 
     # But anything that changes the request still invalidates the records.
     for change in (
@@ -974,14 +1086,14 @@ def test_gate_refuses_intervals_computed_at_the_wrong_confidence():
     """
     spec = one_field_spec(criticality="high", confidence_level=0.99)
     scores = list(score(records_for("standard", correct=400), spec))
-    gbi.evaluate_gate(spec, scores)  # consistent evidence is fine
+    gate(spec, scores)  # consistent evidence is fine
 
     tampered = []
     for item in scores:
         relabelled = item.precision.model_copy(update={"confidence": 0.95})
         tampered.append(item.model_copy(update={"precision": relabelled}))
     with pytest.raises(gbi.EvidenceMismatch, match="precision interval"):
-        gbi.evaluate_gate(spec, tampered)
+        gate(spec, tampered)
 
 
 def test_gate_refuses_scores_spliced_from_two_scoring_runs():
@@ -989,7 +1101,7 @@ def test_gate_refuses_scores_spliced_from_two_scoring_runs():
     two_strata = score(CENTRAL_LESSON_RECORDS, spec)
     one_stratum = score(records_for("standard", correct=200), spec)
     with pytest.raises(gbi.EvidenceMismatch, match="disagree"):
-        gbi.evaluate_gate(spec, list(two_strata) + list(one_stratum))
+        gate(spec, list(two_strata) + list(one_stratum))
 
 
 def test_rejection_outranks_inconclusive_across_fields():
@@ -1024,7 +1136,7 @@ def test_rejection_outranks_inconclusive_across_fields():
     # 30 to make it under-evidenced.
     thin = [s for s in score(records[:30], spec) if s.field == "g"]
     combined = [s for s in scores if s.field == "f"] + thin
-    report = gbi.evaluate_gate(spec, combined)
+    report = gate(spec, combined)
     assert report.decision == gbi.GateDecision.REJECT
 
 
@@ -1035,7 +1147,7 @@ def test_tier_one_passing_gate_requires_a_named_human():
         "version and re-point consumers.",
     )
     scores = score(records_for("standard", correct=200), spec)
-    report = gbi.evaluate_gate(spec, scores)
+    report = gate(spec, scores)
     # Every check passed, and the decision is still not adopt.
     assert all(f.decision == gbi.GateDecision.ADOPT for f in report.fields)
     assert report.decision == gbi.GateDecision.PENDING_APPROVAL
@@ -1054,7 +1166,7 @@ def test_a_rejected_gate_cannot_be_approved_into_adoption():
         rollback_plan="Restore previous table version.",
     )
     scores = score(records_for("standard", correct=80, wrong=20), spec)
-    report = gbi.evaluate_gate(spec, scores)
+    report = gate(spec, scores)
     assert report.decision == gbi.GateDecision.REJECT
     with pytest.raises(gbi.GateNotPassed):
         gbi.approve_gate(report, "anyone")
@@ -1069,7 +1181,7 @@ def test_execution_guard_checks_tier_gate_and_spec_digest():
     exploratory = make_spec(use_tier=3, target_table="main.sandbox.scratch")
     gbi.require_executable(exploratory, None)  # tier 3: no gate to demand
     scores = score(records_for("standard", correct=200), spec)
-    report = gbi.evaluate_gate(spec, scores)
+    report = gate(spec, scores)
     assert report.decision == gbi.GateDecision.ADOPT
     drifted = spec.model_copy(update={"prompt_version": "2.0.0"})
     with pytest.raises(gbi.GateNotPassed, match="different spec revision"):
@@ -1200,7 +1312,7 @@ def test_cost_estimate_is_bound_to_the_release_it_measured(monkeypatch):
     assert estimate.release == spec_v1.release
 
     scores = score(records_for("standard", correct=200), spec_v2)
-    report = gbi.evaluate_gate(spec_v2, scores)
+    report = gate(spec_v2, scores)
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
     with pytest.raises(gbi.EvidenceMismatch, match="Re-estimate"):
@@ -1263,7 +1375,7 @@ def test_the_notebooks_own_wiring_scores_both_releases():
             for record in records_for("standard", correct=200)
         ]
         scores = gbi.score_extraction(records, spec, population)
-        assert gbi.evaluate_gate(spec, scores).decision == gbi.GateDecision.ADOPT
+        assert gate(spec, scores).decision == gbi.GateDecision.ADOPT
 
         # And the tier-1 demonstration re-judges those same predictions.
         tier1 = gbi.BatchInferenceSpec.model_validate(
@@ -1275,10 +1387,7 @@ def test_the_notebooks_own_wiring_scores_both_releases():
             }
         )
         tier1_scores = gbi.score_extraction(records, tier1, population)
-        assert (
-            gbi.evaluate_gate(tier1, tier1_scores).decision
-            == gbi.GateDecision.PENDING_APPROVAL
-        )
+        assert gate(tier1, tier1_scores).decision == gbi.GateDecision.PENDING_APPROVAL
 
 
 def test_an_older_release_cannot_overwrite_newer_output():
@@ -1294,9 +1403,17 @@ def test_an_older_release_cannot_overwrite_newer_output():
     new_sql = gbi.build_execute_sql(new, run_id="run-new", report=adopting_report(new))
 
     # The old job treats anything from a newer release as already done,
-    # so it never even pays to re-infer those rows.
-    assert "OR coalesce(done.ai_release_sequence, -1) > 1" in old_sql
-    assert "OR coalesce(done.ai_release_sequence, -1) > 2" in new_sql
+    # so it never even pays to re-infer those rows. The test is on the
+    # *ordering*: the sequence check stands alone, ahead of the content
+    # digest, so an edited document a newer release already landed is
+    # excluded rather than inferred and then thrown away by the MERGE.
+    assert "coalesce(done.ai_release_sequence, -1) > 1\n       OR (" in old_sql
+    assert "coalesce(done.ai_release_sequence, -1) > 2\n       OR (" in new_sql
+    for sql in (old_sql, new_sql):
+        anti_join = sql.split("scored AS")[0]
+        assert anti_join.index("ai_release_sequence") < anti_join.index(
+            "ai_source_digest"
+        )
     # And the MERGE refuses to lower a row's release sequence.
     guard = (
         "WHEN MATCHED\n  AND coalesce(target.ai_release_sequence, -1) <= "
@@ -1499,7 +1616,7 @@ def test_run_metadata_write_is_idempotent():
     every downstream join — a retry must not create one."""
     spec = make_spec()
     scores = score(records_for("standard", correct=200), one_field_spec())
-    report = gbi.evaluate_gate(one_field_spec(), scores)
+    report = gate(one_field_spec(), scores)
     sql = gbi.run_metadata_upsert_sql(
         spec,
         report,
@@ -1604,7 +1721,7 @@ def test_provenance_layers_are_generated():
     ] * 200
     insert = gbi.run_metadata_upsert_sql(
         spec,
-        gbi.evaluate_gate(spec, score(records, spec)),
+        gate(spec, score(records, spec)),
         run_id="run-123",
         projected_cost_cad=12.5,
         target_table_version=4,
@@ -1668,7 +1785,7 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
     approver = "j.reviewer@example.invalid"
     spec = one_field_spec(use_tier=1, rollback_plan="Restore prior version.")
     scores = score(records_for("standard", correct=200), spec)
-    approved = gbi.approve_gate(gbi.evaluate_gate(spec, scores), approver)
+    approved = gbi.approve_gate(gate(spec, scores), approver)
     estimate = gbi.estimate_cost(
         spec,
         row_count=10,

@@ -1375,12 +1375,26 @@ class FieldGateResult(BaseModel):
 class GateReport(BaseModel):
     """Immutable gate evidence for one spec + one evaluation sample.
 
-    ``decision`` is derived from ``fields``, so it is verified rather than
-    trusted. The report is a persisted artifact that later authorises a
-    paid, table-mutating run, and ``require_executable`` reads only the
-    aggregate — so a report reconstructed from a truncated artifact, with
-    no field results and an ``adopt`` verdict, would otherwise wave the
-    run through having evaluated nothing.
+    Nothing in this report is trusted; every verdict in it is *derived*
+    from the scores it carries. It is a persisted artifact that later
+    authorises a paid, table-mutating run, and ``require_executable``
+    reads only the aggregate, so anything left merely asserted here is
+    the whole gate's weakest point.
+
+    The chain reconstructs from the raw counts up, and each link is
+    checked where it can be:
+
+    - a ``ConfidenceInterval`` against its own successes and trials,
+    - a physical ``FieldStratumScore``'s intervals against the counts
+      printed beside them,
+    - the population-weighted row by recomputing it from the physical
+      rows and the weights it carries,
+    - each ``FieldGateResult`` by re-running ``_gate_field`` over those
+      scores,
+    - and ``decision`` from the field results.
+
+    ``require_executable`` closes it by binding ``scores`` to the spec —
+    the one thing a self-contained report cannot know about itself.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -1389,6 +1403,7 @@ class GateReport(BaseModel):
     spec_digest: str
     use_tier: UseTier
     confidence_level: float
+    scores: tuple[FieldStratumScore, ...] = Field(min_length=1)
     fields: tuple[FieldGateResult, ...] = Field(min_length=1)
     decision: GateDecision
     source_snapshot: SourceSnapshot | None = None
@@ -1396,7 +1411,23 @@ class GateReport(BaseModel):
     human_review_obligations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _decision_follows_from_the_fields(self) -> GateReport:
+    def _every_verdict_follows_from_the_scores(self) -> GateReport:
+        by_field: dict[str, list[FieldStratumScore]] = {}
+        for score in self.scores:
+            by_field.setdefault(score.field, []).append(score)
+        for result in self.fields:
+            recomputed = _gate_field(
+                result.field,
+                result.criticality,
+                result.required_rate,
+                by_field.get(result.field, ()),
+            )
+            if recomputed != result:
+                raise ValueError(
+                    f"the gate result for {result.field!r} does not follow "
+                    "from the scores in this report; re-running the gate over "
+                    "them reaches a different verdict"
+                )
         verdicts = {result.decision for result in self.fields}
         if GateDecision.REJECT in verdicts:
             implied = GateDecision.REJECT
@@ -1507,22 +1538,32 @@ def _gate_metric(
 
 
 def _gate_field(
-    field: FieldSpec,
+    name: str,
+    criticality: Criticality,
+    required: float,
     scores: Sequence[FieldStratumScore],
 ) -> FieldGateResult:
-    required = field.required_rate
+    """Judge one field from its scores.
+
+    Takes the three things it actually uses rather than a `FieldSpec`, so
+    that `GateReport` — which has a `FieldGateResult` recording exactly
+    those three, and no spec — can call this same function to recompute a
+    persisted verdict and compare. One implementation, two callers: a
+    second implementation written for verification would only be a second
+    thing to keep in sync.
+    """
     # criticality: high → every stratum must clear the bar on its own.
     # Aggregate performance is irrelevant if the failures concentrate in
     # the one stratum that matters, so no average appears here at all.
     # medium / low → the population-weighted estimate decides. Never the
     # raw pool of a stratified sample, which over-weights rare strata and
     # so estimates nothing about the population.
-    if field.criticality == Criticality.HIGH:
+    if criticality == Criticality.HIGH:
         considered = [score for score in scores if score.stratum != WEIGHTED]
     else:
         considered = [score for score in scores if score.stratum == WEIGHTED]
     if not considered:
-        raise ValueError(f"no scores supplied for field {field.name!r}")
+        raise ValueError(f"no scores supplied for field {name!r}")
 
     reasons: list[str] = []
     verdicts: list[GateDecision] = []
@@ -1548,8 +1589,8 @@ def _gate_field(
     else:
         decision = GateDecision.ADOPT
     return FieldGateResult(
-        field=field.name,
-        criticality=field.criticality,
+        field=name,
+        criticality=criticality,
         required_rate=required,
         decision=decision,
         binding_stratum=binding[1] if binding else None,
@@ -1711,13 +1752,27 @@ def evaluate_gate(
     satisfy a spec that declared 99%.
     """
     require_matching_evidence(spec, scores)
-    if source_snapshot is not None:
+    if source_snapshot is None:
+        if spec.gate_required:
+            raise EvidenceMismatch(
+                f"tier {spec.use_tier} evidence must record which version of "
+                f"{spec.source_table} it describes: the run is pinned to it, "
+                "and without one the gate certifies a table rather than a set "
+                "of rows. Capture it before sampling."
+            )
+    else:
         _source_relation(spec, source_snapshot)  # refuses a foreign table
     by_field: dict[str, list[FieldStratumScore]] = {}
     for score in scores:
         by_field.setdefault(score.field, []).append(score)
     results = tuple(
-        _gate_field(field, by_field.get(field.name, ())) for field in spec.fields
+        _gate_field(
+            field.name,
+            field.criticality,
+            field.required_rate,
+            by_field.get(field.name, ()),
+        )
+        for field in spec.fields
     )
     field_decisions = {result.decision for result in results}
     if GateDecision.REJECT in field_decisions:
@@ -1740,6 +1795,7 @@ def evaluate_gate(
         spec_digest=spec.spec_digest,
         use_tier=spec.use_tier,
         confidence_level=spec.confidence_level,
+        scores=tuple(scores),
         fields=results,
         decision=decision,
         source_snapshot=source_snapshot,
@@ -1781,6 +1837,11 @@ def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> N
             "gate report was produced for a different spec revision; "
             "re-evaluate against the current spec"
         )
+    # The report proved internally that its verdicts follow from its
+    # scores; it could not prove those scores are about *this* release,
+    # because it holds no spec. That is this function's to check, and it
+    # is what closes the loop from raw counts to authorisation.
+    require_matching_evidence(spec, report.scores)
     # A matching digest says the report describes this spec; it does not
     # say the report judged all of it. Verify the coverage too, so a
     # report missing a field cannot authorise a run over that field.
@@ -2047,10 +2108,18 @@ def resync_strata_sql(
     differs = "\n     OR ".join(
         f"NOT (target.{column} <=> source.{column})" for column in spec.strata
     )
+    # Same ordering rule the inference MERGE follows, and it is needed
+    # here for its own reason: this statement runs from a *pinned*
+    # snapshot, so a delayed older run would otherwise relabel rows a
+    # newer release has already landed — regressing exactly the grouping
+    # that monitoring and re-sampling depend on, while the model output
+    # beside it stayed current and made the row look healthy.
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
-WHEN MATCHED AND (
+WHEN MATCHED
+  AND coalesce(target.ai_release_sequence, -1) <= {int(spec.release_sequence)}
+  AND (
      {differs}
    ) THEN UPDATE SET
     {assignments}"""
@@ -2127,6 +2196,16 @@ def build_execute_sql(
       overlapping deploy. So ``release_sequence`` orders releases: the
       anti-join also treats a strictly newer sequence as done, and the
       MERGE updates a row only when its sequence is not being lowered.
+
+      A strictly newer sequence excludes the row **on its own**, before
+      content is considered. Testing the content digest first looks
+      equivalent and is not: when the newer release landed the key from
+      *edited* text, the digest disagrees, the row is no longer excluded,
+      and the old job pays ``ai_query`` for output the MERGE then
+      correctly refuses to write. Across two large overlapping releases
+      that is a second full bill for every edited document, with nothing
+      to show for it. Read the predicate as: newer wins outright;
+      otherwise this exact content by this exact release.
 
       The digest covers the spec, not this module's code. Bump
       ``spec_version`` when a code change alters what the pipeline
@@ -2217,14 +2296,14 @@ USING (
     FROM {source} AS source
     LEFT ANTI JOIN {spec.target_table} AS done
       ON source.{spec.key_column} = done.{spec.key_column}
-     AND done.ai_source_digest = sha2(source.{spec.document_column}, 256)
      AND (
-       (
-         done.ai_spec_digest = {digest_literal}
+       coalesce(done.ai_release_sequence, -1) > {sequence}
+       OR (
+         done.ai_source_digest = sha2(source.{spec.document_column}, 256)
+         AND done.ai_spec_digest = {digest_literal}
          AND done.ai_model_version = {model_literal}
          AND done.ai_prompt_version = {prompt_literal}
        )
-       OR coalesce(done.ai_release_sequence, -1) > {sequence}
      )
   ),
   scored AS (
