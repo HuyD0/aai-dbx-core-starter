@@ -105,8 +105,11 @@ def publish_evidence_run_id(root: Path | None = None) -> str | None:
         from databricks.sdk.runtime import dbutils
 
         dbutils.jobs.taskValues.set(key="evidence_run_id", value=run_id)
-    except Exception:  # noqa: BLE001 - not running as a Databricks job task
-        pass
+    except Exception as error:  # noqa: BLE001 - no task values outside a job
+        # Not fatal: the approval task falls back to searching for the run
+        # and says that is what it did. Worth a line in the job log, since
+        # it is why the approver sees the less exact message.
+        print(f"could not hand the run id to the approval task: {error}")
     return run_id
 
 
