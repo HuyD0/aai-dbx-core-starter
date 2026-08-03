@@ -1,0 +1,174 @@
+"""Application-owned routing, retrieval, reranking, and action boundary."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+
+from aai_core.providers import SearchResult
+from agentic_ops_rag.contracts import PipelineResult, QueryKind, RetrievalMode
+
+_IDENTIFIER = re.compile(r"\b(?:ERR|INC|OPS|RUN)-[A-Z0-9-]{2,}\b", re.IGNORECASE)
+_ACTION = re.compile(
+    r"\b(?:restart|recycle|fail[ -]?over|delete|disable|rotate|roll[ -]?back)\b",
+    re.IGNORECASE,
+)
+_SENSITIVE_REQUEST = re.compile(
+    r"\b(?:api key|client secret|password|private key|root credential|token)\b",
+    re.IGNORECASE,
+)
+
+
+def route_query(query: str) -> QueryKind:
+    if _SENSITIVE_REQUEST.search(query):
+        return QueryKind.SENSITIVE_REQUEST
+    if _ACTION.search(query):
+        return QueryKind.PROPOSE_ACTION
+    if _IDENTIFIER.search(query):
+        return QueryKind.EXACT_IDENTIFIER
+    return QueryKind.KNOWLEDGE
+
+
+class OperationsRAGPipeline:
+    """A deterministic shell around any SDK-compatible retriever.
+
+    The connected application swaps the retriever and answer generator. Access
+    scope, evidence shape, action approval, and release metrics remain stable.
+    """
+
+    def __init__(self, retriever) -> None:
+        self.retriever = retriever
+
+    def invoke(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        region: str,
+        allowed_groups: Sequence[str],
+        mode: RetrievalMode | str | None = None,
+        candidate_k: int = 8,
+        final_k: int = 3,
+        semantic_rerank: bool = False,
+    ) -> PipelineResult:
+        if not query.strip():
+            raise ValueError("query must not be blank")
+        if not 0 < final_k <= candidate_k:
+            raise ValueError("final_k must be positive and no larger than candidate_k")
+        query_kind = route_query(query)
+        selected_mode = RetrievalMode(mode or self._mode_for(query_kind))
+        if query_kind is QueryKind.SENSITIVE_REQUEST:
+            return PipelineResult(
+                query=query,
+                query_kind=query_kind,
+                retrieval_mode=selected_mode,
+                answer=(
+                    "I cannot retrieve or disclose credentials. Follow the approved "
+                    "secret-recovery and incident-escalation process."
+                ),
+                abstained=True,
+                latency_ms=4.0,
+            )
+        results = self.retriever.search(
+            query,
+            top_k=candidate_k,
+            filters={"tenant_id": tenant_id, "region": region},
+            mode=selected_mode.value,
+            provider_options={
+                "allowed_groups": tuple(allowed_groups),
+                "semantic_rerank": semantic_rerank,
+            },
+        )
+        ranked = self._application_rerank(query, results)[:final_k]
+        answerable = self._has_support(ranked)
+        proposed_action = None
+        requires_approval = False
+        if not answerable:
+            answer = (
+                "I could not find authorized, current runbook evidence for this "
+                "request. Escalate to the service owner."
+            )
+            citations: tuple[str, ...] = ()
+        else:
+            citations = tuple(result.document_id for result in ranked)
+            evidence = " ".join(result.content for result in ranked)
+            answer = f"{evidence} Sources: " + ", ".join(
+                f"[{document_id}]" for document_id in citations
+            )
+            if query_kind is QueryKind.PROPOSE_ACTION:
+                proposed_action = self._proposed_action(query)
+                requires_approval = True
+                answer += (
+                    " No operational change was executed; the proposed action "
+                    "requires an approved human checkpoint."
+                )
+        latency_ms = self._simulated_latency(
+            selected_mode,
+            candidate_count=len(results),
+            semantic_rerank=semantic_rerank,
+        )
+        return PipelineResult(
+            query=query,
+            query_kind=query_kind,
+            retrieval_mode=selected_mode,
+            answer=answer,
+            citations=citations,
+            retrieved_document_ids=tuple(result.document_id for result in ranked),
+            retrieved_tenants=tuple(
+                str(result.metadata.get("tenant_id", "")) for result in ranked
+            ),
+            abstained=not answerable,
+            proposed_action=proposed_action,
+            requires_approval=requires_approval,
+            latency_ms=latency_ms,
+        )
+
+    @staticmethod
+    def _mode_for(query_kind: QueryKind) -> RetrievalMode:
+        if query_kind is QueryKind.EXACT_IDENTIFIER:
+            return RetrievalMode.TEXT
+        return RetrievalMode.HYBRID
+
+    @staticmethod
+    def _application_rerank(
+        query: str, results: Sequence[SearchResult]
+    ) -> list[SearchResult]:
+        normalized = query.lower()
+
+        def score(result: SearchResult) -> tuple[float, str]:
+            provider_score = float(result.score or 0.0)
+            code = str(result.metadata.get("runbook_code", "")).lower()
+            freshness = str(result.metadata.get("effective_at", ""))
+            exact_bonus = 2.0 if code and code in normalized else 0.0
+            return provider_score + exact_bonus, freshness
+
+        return sorted(
+            results,
+            key=lambda result: (score(result)[0], score(result)[1], result.document_id),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _has_support(results: Sequence[SearchResult]) -> bool:
+        if not results:
+            return False
+        top = results[0]
+        lexical = float(top.metadata.get("lexical_score", 0.0))
+        semantic = float(top.metadata.get("semantic_score", 0.0))
+        return lexical >= 0.2 or semantic >= 0.18
+
+    @staticmethod
+    def _proposed_action(query: str) -> str:
+        match = _ACTION.search(query)
+        return match.group(0).lower() if match else "review runbook action"
+
+    @staticmethod
+    def _simulated_latency(
+        mode: RetrievalMode, *, candidate_count: int, semantic_rerank: bool
+    ) -> float:
+        base = {
+            RetrievalMode.TEXT: 18.0,
+            RetrievalMode.VECTOR: 27.0,
+            RetrievalMode.HYBRID: 43.0,
+        }[mode]
+        return base + (candidate_count * 0.75) + (12.0 if semantic_rerank else 0.0)
