@@ -177,9 +177,17 @@ abstention path) then passes the same gate on the same terms.
     the function that emits the paid statement, so it does not assume the
     caller checked first: it calls `require_executable` and
     `require_within_ceiling`, and requires an estimate measured for this
-    release *and* this snapshot. A guard that holds only because the
-    notebook happens to call things in the right order protects the
-    notebook, not the pipeline. The spec owns policy, the report owns
+    release *and* this snapshot, against the ceiling *the spec* declares.
+    A guard that holds only because the notebook happens to call things in
+    the right order protects the notebook, not the pipeline.
+
+    The estimate is evidence too, and is treated like the rest: a
+    `CostEstimate` recomputes its projection from the token counts, row
+    count and prices it records, so a persisted one cannot declare itself
+    free. And because every paid run reads a pinned snapshot, tier 3 —
+    which has no gate report to pin it — is pinned by its estimate
+    instead. Cost is that tier's only control, so an unpinned read would
+    let the table outgrow the projection that authorised the spend. The spec owns policy, the report owns
     outcomes: a persisted report that quietly lowers a high field's
     required rate, or relabels it medium so the gate stops being
     worst-stratum, derives `adopt` perfectly honestly from real evidence

@@ -904,13 +904,24 @@ def test_execution_reads_the_delta_version_the_evidence_describes():
         )
 
 
-def test_an_unpinned_run_still_reads_the_live_table():
-    """Tier 3 is ungated, so there is no evidence to pin it to."""
+def test_tier_three_is_pinned_by_its_estimate():
+    """Tier 3 has no gate to pin it, so the estimate does it instead.
+
+    Cost is the only control tier 3 has, and an unpinned read would let
+    the table grow past the projection that authorised the spend — the
+    control defeated by exactly the mechanism the gated tiers are
+    protected from.
+    """
     spec = make_spec(use_tier=3)
     assert not spec.gate_required
-    sql = gbi.build_execute_sql(spec, run_id="run-1", estimate=estimate_for(spec))
-    assert "FROM main.finance_docs.document_text AS source" in sql
-    assert "VERSION AS OF" not in sql
+    sql = gbi.build_execute_sql(
+        spec, run_id="run-1", estimate=estimate_for(spec, snapshot_for(spec, 5))
+    )
+    assert "FROM main.finance_docs.document_text VERSION AS OF 5 AS source" in sql
+
+    # And an estimate that names no snapshot cannot authorise a paid run.
+    with pytest.raises(gbi.EvidenceMismatch, match="pinned snapshot"):
+        gbi.build_execute_sql(spec, run_id="run-1", estimate=estimate_for(spec, None))
 
 
 def test_a_declined_field_the_spec_never_declared_is_refused():
@@ -1274,6 +1285,7 @@ def test_the_sql_builder_enforces_the_ceiling_itself():
                 probe_output_tokens=[5_000],
                 cad_per_million_input_tokens=7.0,
                 cad_per_million_output_tokens=21.0,
+                source_snapshot=snapshot_for(tier3),
             ),
         )
 
@@ -1312,6 +1324,62 @@ def test_the_resync_advances_the_version_it_compares():
     # Monday, arriving late, is now excluded by the version it wrote.
     monday = gbi.resync_strata_sql(spec, snapshot_for(spec, 10))
     assert "coalesce(target.ai_source_version, -1) <= 10" in monday
+
+
+def test_a_cost_estimate_cannot_declare_its_own_projection():
+    """Every other piece of evidence is recomputed; the budget was the
+    one still taken at its word."""
+    spec = one_field_spec()
+    honest = estimate_for(spec)
+    payload = honest.model_dump(mode="json")
+    assert gbi.CostEstimate.model_validate(payload) == honest
+
+    # Same release, same snapshot, same token counts — a free run.
+    with pytest.raises(ValidationError, match="does not follow from"):
+        gbi.CostEstimate.model_validate({**payload, "projected_cost_cad": 0.0})
+    # Or the same projection with the row count quietly reduced.
+    with pytest.raises(ValidationError, match="does not follow from"):
+        gbi.CostEstimate.model_validate({**payload, "row_count": 1})
+
+    # The ceiling is the spec's to set, so raising it in the artifact
+    # does not buy headroom either.
+    roomier = gbi.CostEstimate.model_validate(
+        {**payload, "cost_ceiling_cad": payload["cost_ceiling_cad"] * 1000}
+    )
+    assert roomier.within_ceiling
+    with pytest.raises(gbi.EvidenceMismatch, match="budget is the spec's"):
+        gbi.build_execute_sql(
+            spec, run_id="r", estimate=roomier, report=adopting_report(spec)
+        )
+
+
+def test_score_counts_cannot_exceed_the_rows_they_came_from():
+    """Tying an interval to its counts is worth nothing if the counts
+    themselves are impossible."""
+    spec = one_field_spec()
+    real = next(
+        s
+        for s in score(records_for("s", correct=200), spec)
+        if s.stratum != gbi.WEIGHTED
+    )
+    payload = real.model_dump(mode="json")
+    assert gbi.FieldStratumScore.model_validate(payload) == real
+
+    # One sampled document, two hundred correct answers, and intervals
+    # that agree with the counts all the way to an adopting gate.
+    with pytest.raises(ValidationError, match="cannot carry more than one"):
+        gbi.FieldStratumScore.model_validate({**payload, "n_rows": 1})
+    # The aggregate row's counts are sums of the physical rows, so the
+    # same inequality binds there.
+    weighted = next(
+        s
+        for s in score(records_for("s", correct=200), spec)
+        if s.stratum == gbi.WEIGHTED
+    )
+    with pytest.raises(ValidationError, match="cannot carry more than one"):
+        gbi.FieldStratumScore.model_validate(
+            {**weighted.model_dump(mode="json"), "n_rows": 2}
+        )
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():

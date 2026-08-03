@@ -509,6 +509,35 @@ class CostEstimate(BaseModel):
     def within_ceiling(self) -> bool:
         return self.projected_cost_cad <= self.cost_ceiling_cad
 
+    @model_validator(mode="after")
+    def _projection_follows_from_its_inputs(self) -> CostEstimate:
+        """`within_ceiling` compares two numbers the artifact supplies.
+
+        Every other piece of evidence here is recomputed rather than
+        read; the budget was the one still taken at its word. A
+        reconstructed estimate could keep an honest release, snapshot and
+        token counts while declaring a zero projection, and the ceiling
+        check would wave through a run those very token counts price in
+        the millions.
+        """
+        expected = (
+            self.safety_factor
+            * self.row_count
+            * (
+                self.mean_input_tokens_per_row * self.cad_per_million_input_tokens
+                + self.mean_output_tokens_per_row * self.cad_per_million_output_tokens
+            )
+            / 1_000_000.0
+        )
+        if not math.isclose(
+            self.projected_cost_cad, expected, rel_tol=1e-9, abs_tol=1e-9
+        ):
+            raise ValueError(
+                f"projected cost {self.projected_cost_cad} does not follow from "
+                f"the recorded inputs, which price this run at {expected}"
+            )
+        return self
+
 
 def estimate_tokens_from_text(text: str) -> int:
     """Cheap token estimate for probing; see ``CHARS_PER_TOKEN``."""
@@ -974,6 +1003,24 @@ class FieldStratumScore(BaseModel):
         weights it carries, in `require_matching_evidence`; that is why
         those weights are persisted rather than discarded after scoring.
         """
+        # Bounding the counts by the sample comes first, and applies to
+        # every row: tying an interval to its counts is worth nothing if
+        # the counts themselves are impossible. A row claiming one
+        # sampled document and two hundred correct answers, with matching
+        # 200/200 intervals, was internally consistent all the way to an
+        # adopting gate. On the WEIGHTED row these are sums of the
+        # physical rows, so the same inequalities hold.
+        if self.n_gold > self.n_rows or self.n_asserted > self.n_rows:
+            raise ValueError(
+                f"stratum {self.stratum!r} sampled {self.n_rows} row(s) but "
+                f"reports {self.n_gold} gold and {self.n_asserted} asserted "
+                "value(s); a row cannot carry more than one of either"
+            )
+        if self.n_correct > min(self.n_asserted, self.n_gold):
+            raise ValueError(
+                "n_correct cannot exceed the values asserted or the values "
+                "that exist"
+            )
         if self.stratum == WEIGHTED:
             if not self.stratum_population:
                 raise ValueError(
@@ -992,11 +1039,6 @@ class FieldStratumScore(BaseModel):
             raise ValueError(
                 f"stratum {self.stratum!r} is a physical stratum and carries "
                 "no population weights; only the aggregate row does"
-            )
-        if self.n_correct > min(self.n_asserted, self.n_gold):
-            raise ValueError(
-                "n_correct cannot exceed the values asserted or the values "
-                "that exist"
             )
         for metric, interval, denominator in (
             ("precision", self.precision, self.n_asserted),
@@ -2365,7 +2407,18 @@ def build_execute_sql(
     # builder unprotected. A guard that depends on being called in the
     # right order is not a guard.
     require_executable(spec, report)
-    snapshot = report.source_snapshot if report else None
+    # Gated runs are pinned by their evidence. Tier 3 has no evidence, so
+    # it is pinned by the thing that *is* its only control: the estimate.
+    # Leaving that path unpinned meant the one tier governed by cost alone
+    # was the one that could read a table which had grown since the
+    # projection — defeating the control by the same mechanism the gated
+    # tiers were protected from two rounds ago.
+    snapshot = report.source_snapshot if report else estimate.source_snapshot
+    if snapshot is None:
+        raise EvidenceMismatch(
+            "a paid run reads a pinned snapshot; this estimate does not name "
+            "one, so nothing bounds the rows the statement would process"
+        )
     # The same argument applies to money, and it applies at every tier —
     # tier 3 is *only* cost-controlled, so it is the tier where a missing
     # budget check matters most. An estimate is therefore not optional
@@ -2375,6 +2428,16 @@ def build_execute_sql(
         raise EvidenceMismatch(
             "the cost estimate was computed for a different release; "
             "re-estimate before authorising the spend"
+        )
+    # The projection is recomputed from its own inputs by the model, but
+    # the *ceiling* it is compared against is not that estimate's to
+    # choose. The spec declares the budget, exactly as it declares the
+    # gate policy; an artifact that raises its own ceiling clears itself.
+    if estimate.cost_ceiling_cad != spec.cost_ceiling_cad:
+        raise EvidenceMismatch(
+            f"the estimate was approved against a ceiling of "
+            f"{estimate.cost_ceiling_cad} CAD, but this spec declares "
+            f"{spec.cost_ceiling_cad} CAD. The budget is the spec's to set."
         )
     if estimate.source_snapshot != snapshot:
         raise EvidenceMismatch(
