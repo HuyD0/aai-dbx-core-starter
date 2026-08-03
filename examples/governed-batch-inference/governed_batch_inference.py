@@ -646,6 +646,7 @@ def source_preflight_sql(
     """
     source = _source_relation(spec, snapshot)
     return f"""SELECT
+  count(*) AS row_count,
   count_if({spec.key_column} IS NULL) AS null_keys,
   count(*) - count(DISTINCT {spec.key_column})
     - count_if({spec.key_column} IS NULL) AS duplicate_keys,
@@ -653,13 +654,53 @@ def source_preflight_sql(
 FROM {source}"""
 
 
+class SourcePreflight(BaseModel):
+    """Proof that a specific snapshot was measured and found usable.
+
+    This is the module's one measurement boundary, and naming it is the
+    point. Everything else here is recomputed from something else — the
+    projection from its token counts, the weighted row from the physical
+    rows, each verdict from the scores — but *how many rows a Delta
+    version contains* cannot be derived from anything; it has to be
+    counted by the warehouse. Recomputing the projection therefore proved
+    only that the arithmetic was honest, not that ``row_count`` was: an
+    estimate could halve the count and the price together and stay
+    perfectly self-consistent while the pinned snapshot held a million
+    rows.
+
+    So the count enters once, here, from the query the preflight ran, and
+    the estimate must agree with it. That does not make the number
+    unforgeable — nothing in a pure-Python module can — but it collapses
+    a diffuse "any caller may assert any row count" into a single object
+    with a single origin, which is the difference between a boundary and
+    a leak.
+
+    Holding one is also proof the usability checks passed: it is returned
+    by ``require_usable_source_rows`` and constructed nowhere else in the
+    normal flow, so ``build_execute_sql`` can require it instead of
+    hoping the caller ran the preflight first.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot: SourceSnapshot
+    row_count: int = Field(ge=0)
+
+
 def require_usable_source_rows(
     spec: BatchInferenceSpec,
     null_count: int,
     duplicate_count: int = 0,
     null_documents: int = 0,
-) -> None:
+    *,
+    snapshot: SourceSnapshot,
+    row_count: int,
+) -> SourcePreflight:
     """Refuse to run when the source rows cannot carry the landing contract.
+
+    Returns the ``SourcePreflight`` the builder requires, so that passing
+    this check is something a caller can *hold* rather than something
+    they are trusted to have done.
 
     Every idempotence guarantee in this pipeline rests on key equality,
     and ``NULL = NULL`` is not true. A null-keyed row therefore never
@@ -710,6 +751,12 @@ def require_usable_source_rows(
             "provenance join assumes. De-duplicate upstream, or add the "
             "column that makes the key unique."
         )
+    if snapshot.table != spec.source_table:
+        raise EvidenceMismatch(
+            f"the preflight measured {snapshot.table!r}, but this spec reads "
+            f"{spec.source_table!r}"
+        )
+    return SourcePreflight(snapshot=snapshot, row_count=row_count)
 
 
 def require_within_ceiling(estimate: CostEstimate) -> CostEstimate:
@@ -2304,6 +2351,7 @@ def build_execute_sql(
     *,
     run_id: str,
     estimate: CostEstimate,
+    preflight: SourcePreflight,
     report: GateReport | None = None,
 ) -> str:
     """The full-table execute statement: restartable *and* release-aware.
@@ -2444,6 +2492,27 @@ def build_execute_sql(
             f"the cost estimate describes {estimate.source_snapshot} but this "
             f"run reads {snapshot}. A projection over different rows cannot "
             "authorise this spend."
+        )
+    # The preflight is the third precondition this builder stopped
+    # trusting the caller to have met. Without it, a direct user gets a
+    # paid statement over a source with null keys, duplicate keys or null
+    # documents — each of which quietly breaks restart or the MERGE in a
+    # way that looks like it is working.
+    if preflight.snapshot != snapshot:
+        raise EvidenceMismatch(
+            f"the preflight measured {preflight.snapshot} but this run reads "
+            f"{snapshot}; the rows checked are not the rows to be processed"
+        )
+    # And it carries the only row count that came from the warehouse.
+    # Recomputing the projection proved the arithmetic was honest, not
+    # that its `row_count` was: halve the count and the price together
+    # and the estimate stays self-consistent while the pinned snapshot
+    # still holds a million rows.
+    if estimate.row_count != preflight.row_count:
+        raise EvidenceMismatch(
+            f"the estimate priced {estimate.row_count} row(s), but the "
+            f"preflight counted {preflight.row_count} in that snapshot. The "
+            "budget was approved for a different amount of work."
         )
     require_within_ceiling(estimate)
     source = _source_relation(spec, snapshot)

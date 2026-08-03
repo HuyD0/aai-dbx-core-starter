@@ -139,6 +139,22 @@ def gate(spec, scores, **kwargs):
     return gbi.evaluate_gate(spec, scores, **kwargs)
 
 
+ESTIMATED_ROWS = 1_000
+
+
+def preflight_for(spec, source_snapshot=_UNSET, row_count=ESTIMATED_ROWS):
+    """A clean preflight for the snapshot `estimate_for` prices.
+
+    Holding one is proof the usability checks passed, which is what the
+    builder now requires instead of trusting call order.
+    """
+    if source_snapshot is _UNSET:
+        source_snapshot = snapshot_for(spec) if spec.gate_required else None
+    return gbi.require_usable_source_rows(
+        spec, 0, 0, 0, snapshot=source_snapshot, row_count=row_count
+    )
+
+
 def estimate_for(spec, source_snapshot=_UNSET):
     """A within-ceiling estimate matching what `adopting_report` pins.
 
@@ -149,7 +165,7 @@ def estimate_for(spec, source_snapshot=_UNSET):
         source_snapshot = snapshot_for(spec) if spec.gate_required else None
     return gbi.estimate_cost(
         spec,
-        row_count=1_000,
+        row_count=ESTIMATED_ROWS,
         probe_input_tokens=[100],
         probe_output_tokens=[100],
         cad_per_million_input_tokens=0.1,
@@ -645,7 +661,11 @@ def test_execute_sql_uses_the_spec_prompt_and_takes_no_prompt_argument():
     do not describe, because there is nowhere else to supply one."""
     spec = make_spec(prompt_template="Read this slip.\n\nDOCUMENT:\n")
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     assert "concat('Read this slip.\\n\\nDOCUMENT:\\n', doc_text)" in sql
     with pytest.raises(TypeError):
@@ -657,7 +677,11 @@ def test_a_changed_source_document_becomes_pending_again():
     values derived from text that no longer exists."""
     spec = make_spec()
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     anti_join = sql.split("scored AS")[0]
     assert "done.ai_source_digest = sha2(source.doc_text, 256)" in anti_join
@@ -672,7 +696,11 @@ def test_release_sequence_comparisons_survive_migrated_null_rows():
     (and re-paying for) them."""
     spec = make_spec()
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     assert "coalesce(done.ai_release_sequence, -1) > 1" in sql
     # Both halves of the ordering pair coalesce, on both sides.
@@ -863,7 +891,11 @@ def test_execution_reads_the_delta_version_the_evidence_describes():
     assert report.source_snapshot == snapshot
 
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec, snapshot), report=report
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec, snapshot),
+        preflight=preflight_for(spec, snapshot),
+        report=report,
     )
     assert "FROM main.finance_docs.document_text VERSION AS OF 42 AS source" in sql
     # The strata resync and the preflight read the same pinned rows.
@@ -874,7 +906,12 @@ def test_execution_reads_the_delta_version_the_evidence_describes():
     # so the version can never come from somewhere the evidence did not.
     assert spec.gate_required
     with pytest.raises(gbi.GateNotPassed, match="report is required"):
-        gbi.build_execute_sql(spec, run_id="run-1", estimate=estimate_for(spec))
+        gbi.build_execute_sql(
+            spec,
+            run_id="run-1",
+            estimate=estimate_for(spec),
+            preflight=preflight_for(spec),
+        )
     # Nor from a report for a different spec revision.
     other = make_spec(prompt_version="9.9.9")
     with pytest.raises(gbi.EvidenceMismatch, match="different spec revision"):
@@ -882,6 +919,7 @@ def test_execution_reads_the_delta_version_the_evidence_describes():
             spec,
             run_id="run-1",
             estimate=estimate_for(spec),
+            preflight=preflight_for(spec),
             report=adopting_report(other),
         )
     # Nor can evidence about one table pin a run over another.
@@ -915,13 +953,21 @@ def test_tier_three_is_pinned_by_its_estimate():
     spec = make_spec(use_tier=3)
     assert not spec.gate_required
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec, snapshot_for(spec, 5))
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec, snapshot_for(spec, 5)),
+        preflight=preflight_for(spec, snapshot_for(spec, 5)),
     )
     assert "FROM main.finance_docs.document_text VERSION AS OF 5 AS source" in sql
 
     # And an estimate that names no snapshot cannot authorise a paid run.
     with pytest.raises(gbi.EvidenceMismatch, match="pinned snapshot"):
-        gbi.build_execute_sql(spec, run_id="run-1", estimate=estimate_for(spec, None))
+        gbi.build_execute_sql(
+            spec,
+            run_id="run-1",
+            estimate=estimate_for(spec, None),
+            preflight=preflight_for(spec, snapshot_for(spec, 5)),
+        )
 
 
 def test_a_declined_field_the_spec_never_declared_is_refused():
@@ -959,7 +1005,11 @@ def test_an_unknown_abstention_sends_the_whole_row_to_the_queue():
     anything from the response and routes it to the exception queue."""
     spec = make_spec()
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     unknown = (
         "coalesce(size(array_except(parsed.abstained_fields, "
@@ -1126,12 +1176,14 @@ def test_an_older_snapshot_cannot_overwrite_a_newer_one():
         spec,
         run_id="mon",
         estimate=estimate_for(spec, snapshot_for(spec, 10)),
+        preflight=preflight_for(spec, snapshot_for(spec, 10)),
         report=adopting_report(spec, source_snapshot=snapshot_for(spec, 10)),
     )
     tuesday = gbi.build_execute_sql(
         spec,
         run_id="tue",
         estimate=estimate_for(spec, snapshot_for(spec, 20)),
+        preflight=preflight_for(spec, snapshot_for(spec, 20)),
         report=adopting_report(spec, source_snapshot=snapshot_for(spec, 20)),
     )
     # Each run stamps the version it read.
@@ -1178,7 +1230,11 @@ def test_the_sql_builder_enforces_the_gate_itself():
 
     with pytest.raises(gbi.GateNotPassed, match="execution requires 'adopt'"):
         gbi.build_execute_sql(
-            spec, run_id="run-1", estimate=estimate_for(spec), report=rejecting
+            spec,
+            run_id="run-1",
+            estimate=estimate_for(spec),
+            preflight=preflight_for(spec),
+            report=rejecting,
         )
 
     # Tier 1 passing-but-unapproved is refused here too, not just by the
@@ -1188,12 +1244,20 @@ def test_the_sql_builder_enforces_the_gate_itself():
     assert pending.decision == gbi.GateDecision.PENDING_APPROVAL
     with pytest.raises(gbi.GateNotPassed):
         gbi.build_execute_sql(
-            tier1, run_id="run-1", estimate=estimate_for(tier1), report=pending
+            tier1,
+            run_id="run-1",
+            estimate=estimate_for(tier1),
+            preflight=preflight_for(tier1),
+            report=pending,
         )
     # Signed off, it builds.
     approved = gbi.approve_gate(pending, "governance-board")
     assert "ai_query" in gbi.build_execute_sql(
-        tier1, run_id="run-1", estimate=estimate_for(tier1), report=approved
+        tier1,
+        run_id="run-1",
+        estimate=estimate_for(tier1),
+        preflight=preflight_for(tier1),
+        report=approved,
     )
 
 
@@ -1262,14 +1326,26 @@ def test_the_sql_builder_enforces_the_ceiling_itself():
     )
     assert not over.within_ceiling
     with pytest.raises(gbi.CostCeilingExceeded):
-        gbi.build_execute_sql(spec, run_id="r", estimate=over, report=report)
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=over,
+            preflight=preflight_for(spec, report.source_snapshot, over.row_count),
+            report=report,
+        )
 
     # An estimate over different rows cannot authorise this spend either,
     # however cheap it is.
     elsewhere = estimate_for(spec, snapshot_for(spec, 999))
     assert elsewhere.within_ceiling
     with pytest.raises(gbi.EvidenceMismatch, match="different rows"):
-        gbi.build_execute_sql(spec, run_id="r", estimate=elsewhere, report=report)
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=elsewhere,
+            preflight=preflight_for(spec, snapshot_for(spec, 999)),
+            report=report,
+        )
 
     # Tier 3 has no gate at all, so the ceiling is its only control — and
     # it is still enforced here.
@@ -1287,6 +1363,7 @@ def test_the_sql_builder_enforces_the_ceiling_itself():
                 cad_per_million_output_tokens=21.0,
                 source_snapshot=snapshot_for(tier3),
             ),
+            preflight=preflight_for(tier3, snapshot_for(tier3), 100_000_000),
         )
 
 
@@ -1308,7 +1385,11 @@ def test_a_report_cannot_relabel_its_own_tier():
     # And so the builder will not read the live table on its say-so.
     with pytest.raises(gbi.GateNotPassed, match="claims tier"):
         gbi.build_execute_sql(
-            spec, run_id="r", estimate=estimate_for(spec, None), report=unpinned
+            spec,
+            run_id="r",
+            estimate=estimate_for(spec, None),
+            preflight=preflight_for(spec),
+            report=unpinned,
         )
 
 
@@ -1349,7 +1430,11 @@ def test_a_cost_estimate_cannot_declare_its_own_projection():
     assert roomier.within_ceiling
     with pytest.raises(gbi.EvidenceMismatch, match="budget is the spec's"):
         gbi.build_execute_sql(
-            spec, run_id="r", estimate=roomier, report=adopting_report(spec)
+            spec,
+            run_id="r",
+            estimate=roomier,
+            preflight=preflight_for(spec),
+            report=adopting_report(spec),
         )
 
 
@@ -1379,6 +1464,64 @@ def test_score_counts_cannot_exceed_the_rows_they_came_from():
     with pytest.raises(ValidationError, match="cannot carry more than one"):
         gbi.FieldStratumScore.model_validate(
             {**weighted.model_dump(mode="json"), "n_rows": 2}
+        )
+
+
+def test_the_builder_requires_proof_the_preflight_ran():
+    """Null keys, duplicate keys and null documents each break restart or
+    the MERGE in a way that looks like it is working — so passing the
+    check is something the caller holds, not something they are trusted
+    to have done."""
+    spec = one_field_spec()
+    report = adopting_report(spec)
+
+    # The preflight has to describe the rows this run will process.
+    with pytest.raises(gbi.EvidenceMismatch, match="not the rows to be processed"):
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=estimate_for(spec),
+            preflight=preflight_for(spec, snapshot_for(spec, 4321)),
+            report=report,
+        )
+    # It cannot be minted for a table this spec does not read.
+    with pytest.raises(gbi.EvidenceMismatch, match="preflight measured"):
+        gbi.require_usable_source_rows(
+            spec,
+            0,
+            0,
+            0,
+            snapshot=gbi.SourceSnapshot(table="main.other.docs", version=7),
+            row_count=10,
+        )
+
+
+def test_the_priced_row_count_must_be_the_counted_one():
+    """Recomputing the projection proved the arithmetic, not the inputs:
+    halve the row count and the price together and the estimate stays
+    perfectly self-consistent."""
+    spec = one_field_spec()
+    report = adopting_report(spec)
+    cheap = gbi.estimate_cost(
+        spec,
+        row_count=1,  # the snapshot really holds ESTIMATED_ROWS
+        probe_input_tokens=[100],
+        probe_output_tokens=[100],
+        cad_per_million_input_tokens=0.1,
+        cad_per_million_output_tokens=0.1,
+        source_snapshot=report.source_snapshot,
+    )
+    # Internally consistent, correctly stamped, and within ceiling.
+    assert gbi.CostEstimate.model_validate(cheap.model_dump(mode="json")) == cheap
+    assert cheap.within_ceiling
+
+    with pytest.raises(gbi.EvidenceMismatch, match="priced 1 row"):
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=cheap,
+            preflight=preflight_for(spec),
+            report=report,
         )
 
 
@@ -1694,18 +1837,28 @@ def test_unusable_source_keys_are_refused_before_the_paid_query():
     assert "count_if(doc_id IS NULL) AS null_keys" in check
     assert "count(DISTINCT doc_id)" in check
     assert "count_if(doc_text IS NULL) AS null_documents" in check
+    assert "count(*) AS row_count" in check
     assert "FROM main.finance_docs.document_text" in check
 
-    gbi.require_usable_source_rows(spec, 0, 0, 0)  # the clean case proceeds
+    snap = snapshot_for(spec)
+
+    def check_rows(nulls=0, dupes=0, null_docs=0):
+        return gbi.require_usable_source_rows(
+            spec, nulls, dupes, null_docs, snapshot=snap, row_count=500
+        )
+
+    # The clean case proceeds — and hands back the proof the builder wants.
+    clean = check_rows()
+    assert clean == gbi.SourcePreflight(snapshot=snap, row_count=500)
     with pytest.raises(gbi.UnusableSourceRows, match="3 row"):
-        gbi.require_usable_source_rows(spec, 3, 0)
+        check_rows(nulls=3)
     with pytest.raises(gbi.UnusableSourceRows, match="2 duplicate"):
-        gbi.require_usable_source_rows(spec, 0, 2)
+        check_rows(dupes=2)
     # A null document breaks the same contract a third way: sha2(NULL) is
     # NULL, so the anti-join can never match the row and every run pays to
     # infer over an empty request again.
     with pytest.raises(gbi.UnusableSourceRows, match="4 row.*null doc_text"):
-        gbi.require_usable_source_rows(spec, 0, 0, 4)
+        check_rows(null_docs=4)
     # And the preflight reads the same pinned snapshot the run will use.
     pinned = gbi.source_preflight_sql(
         spec, gbi.SourceSnapshot(table=spec.source_table, version=17)
@@ -1761,10 +1914,18 @@ def test_an_older_release_cannot_overwrite_newer_output():
     old = make_spec(prompt_version="1.0.0", release_sequence=1)
     new = make_spec(prompt_version="2.0.0", release_sequence=2)
     old_sql = gbi.build_execute_sql(
-        old, run_id="run-old", estimate=estimate_for(old), report=adopting_report(old)
+        old,
+        run_id="run-old",
+        estimate=estimate_for(old),
+        preflight=preflight_for(old),
+        report=adopting_report(old),
     )
     new_sql = gbi.build_execute_sql(
-        new, run_id="run-new", estimate=estimate_for(new), report=adopting_report(new)
+        new,
+        run_id="run-new",
+        estimate=estimate_for(new),
+        preflight=preflight_for(new),
+        report=adopting_report(new),
     )
 
     # The old job treats anything from a newer release as already done,
@@ -1848,6 +2009,7 @@ def test_execute_sql_is_idempotent_and_carries_row_provenance():
         spec,
         run_id="run-123",
         estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
         report=adopting_report(spec),
     )
     assert "LEFT ANTI JOIN main.finance_docs.document_entities" in sql
@@ -1872,7 +2034,11 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     """
     spec = make_spec(prompt_version="2.0.0", model_version="model-b")
     sql = gbi.build_execute_sql(
-        spec, run_id="run-9", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-9",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     anti_join = sql.split("scored AS")[0]
     assert "ON source.doc_id = done.doc_id" in anti_join
@@ -1888,6 +2054,7 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
         edited,
         run_id="run-9",
         estimate=estimate_for(edited),
+        preflight=preflight_for(edited),
         report=adopting_report(edited),
     )
     assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
@@ -1902,7 +2069,11 @@ def test_merge_source_projects_exactly_the_target_columns():
     used to build the prompt must not leak into the output table."""
     spec = make_spec(strata=("layout", "doc_type"))
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     head = sql[: sql.index("\n  FROM parsed")]
     projection = head[head.index("\n", head.rindex("SELECT\n")) :]
@@ -1960,7 +2131,11 @@ def test_abstained_and_low_confidence_values_are_never_landed():
     assert abstained == frozenset()
 
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     for name in ("issuer_name", "account_id"):
         assert f"array_contains(parsed.abstained_fields, '{name}')" in sql
@@ -1991,7 +2166,11 @@ def test_a_confidence_outside_zero_to_one_is_declined_not_trusted():
     assert abstained == frozenset()
 
     sql = gbi.build_execute_sql(
-        spec, run_id="run-1", estimate=estimate_for(spec), report=adopting_report(spec)
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
     )
     for name in ("issuer_name", "account_id"):
         assert f"NOT (coalesce(parsed.{name}_confidence, -1) BETWEEN 0.7 AND 1)" in sql

@@ -396,9 +396,21 @@ def pinned_source():
 # row would be re-inferred and re-inserted on every single run while the
 # restart logic appeared to work. A null document does the same via its
 # null content digest, and pays an endpoint to read nothing each time.
+#
+# It returns a `SourcePreflight`, which `build_execute_sql` requires: it
+# is the module's one measurement boundary. How many rows a Delta version
+# holds cannot be derived from anything — the warehouse has to count them
+# — so the count enters here, once, and the cost estimate must agree with
+# it. Otherwise an estimate could price one row, stay perfectly
+# self-consistent, and authorise a million-row run.
 rows = spark.sql(gbi.source_preflight_sql(spec_v1, SOURCE_SNAPSHOT)).first()
-gbi.require_usable_source_rows(
-    spec_v1, rows.null_keys, rows.duplicate_keys, rows.null_documents
+PREFLIGHT = gbi.require_usable_source_rows(
+    spec_v1,
+    rows.null_keys,
+    rows.duplicate_keys,
+    rows.null_documents,
+    snapshot=SOURCE_SNAPSHOT,
+    row_count=rows.row_count,
 )
 print(
     f"source rows usable: {rows.null_keys} null and "
@@ -410,7 +422,9 @@ CAD_PER_M_INPUT = 0.20  # placeholder — use your negotiated list price
 CAD_PER_M_OUTPUT = 0.60  # placeholder
 
 probe = pinned_source().limit(32).collect()
-row_count = pinned_source().count()
+# From the preflight, not a second count: the estimate has to be priced
+# against the same number the builder will check it against.
+row_count = PREFLIGHT.row_count
 
 
 def estimate_for(spec) -> "gbi.CostEstimate":
@@ -1210,7 +1224,11 @@ for statement in migration.statements:
 # since are not lost; they are the next cycle's work, with evidence of
 # their own.
 execute_sql = gbi.build_execute_sql(
-    spec_v2, run_id=RUN_ID, estimate=estimate_v2, report=report_v2
+    spec_v2,
+    run_id=RUN_ID,
+    estimate=estimate_v2,
+    preflight=PREFLIGHT,
+    report=report_v2,
 )
 print(execute_sql[:1200] + "\n…")
 

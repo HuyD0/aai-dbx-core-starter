@@ -184,7 +184,16 @@ abstention path) then passes the same gate on the same terms.
     The estimate is evidence too, and is treated like the rest: a
     `CostEstimate` recomputes its projection from the token counts, row
     count and prices it records, so a persisted one cannot declare itself
-    free. And because every paid run reads a pinned snapshot, tier 3 —
+    free. That proves the arithmetic, not the inputs — halve the row count
+    and the price together and it stays self-consistent — so the count is
+    bound to a `SourcePreflight`, which the builder also requires. **That
+    object is this module's one measurement boundary, and naming it is the
+    point:** how many rows a Delta version holds cannot be derived from
+    anything, only counted, so it enters once, from the preflight query,
+    and everything downstream must agree with it. Holding the object is
+    equally proof that the null-key, duplicate-key and null-document
+    checks passed — a precondition the caller carries rather than one they
+    are trusted to have met. And because every paid run reads a pinned snapshot, tier 3 —
     which has no gate report to pin it — is pinned by its estimate
     instead. Cost is that tier's only control, so an unpinned read would
     let the table outgrow the projection that authorised the spend. The spec owns policy, the report owns
