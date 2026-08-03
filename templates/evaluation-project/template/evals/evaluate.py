@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from aai_core.agentkit.cli import main
 
@@ -79,5 +80,37 @@ def build_arguments(argv: list[str] | None = None) -> list[str]:
     return arguments
 
 
+def publish_evidence_run_id(root: Path | None = None) -> str | None:
+    """Hand the approval task the exact run this evaluation recorded.
+
+    The approval task needs to name the run whose evidence supports it.
+    Searching MLflow for the newest run against this model version would
+    pick up a concurrent or manual evaluation of the same version instead,
+    and point a reviewer at a different dataset, config, or gate. The run
+    id travels as a Databricks task value, which is exact.
+
+    Best effort on the *write* only: outside a job there is no task value
+    to set, and a laptop run must not fail because of it. The approval
+    task falls back to a search when the value is absent, and says so.
+    """
+
+    from aai_core.agentkit.results import load_latest_results
+
+    directory = (root or Path.cwd()) / ".aai" / "agentkit" / "results"
+    loaded = load_latest_results(directory)
+    run_id = loaded[0].run_id if loaded else None
+    if not run_id:
+        return None
+    try:
+        from databricks.sdk.runtime import dbutils
+
+        dbutils.jobs.taskValues.set(key="evidence_run_id", value=run_id)
+    except Exception:  # noqa: BLE001 - not running as a Databricks job task
+        pass
+    return run_id
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(build_arguments(sys.argv[1:])))
+    code = main(build_arguments(sys.argv[1:]))
+    publish_evidence_run_id()
+    raise SystemExit(code)

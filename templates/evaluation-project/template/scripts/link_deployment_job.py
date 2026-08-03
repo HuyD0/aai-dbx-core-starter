@@ -40,7 +40,9 @@ def link(model_name: str, job_id: str) -> int:
 
 
 def await_approval(
-    model_name: str | None = None, model_version: str | None = None
+    model_name: str | None = None,
+    model_version: str | None = None,
+    evidence_run: str | None = None,
 ) -> int:
     """The approval gate task.
 
@@ -55,12 +57,25 @@ def await_approval(
         "the approval tag on the model version. The first run of a new "
         "model version always stops here by design."
     )
-    run_id = _evaluation_run_id(model_name, model_version)
+    # The evaluation task hands its own run id over as a task value, which
+    # is exact. Searching is the fallback, and it can pick up a concurrent
+    # or manual evaluation of the same version instead of this job's — so
+    # when that is what happened, the message says so.
+    run_id = (evidence_run or "").strip() or None
+    exact = run_id is not None
+    if run_id is None:
+        run_id = _evaluation_run_id(model_name, model_version)
     if run_id:
         print(
             "Promotion evidence for this version, from any machine:\n"
             f"    agentkit evidence --run {run_id}"
         )
+        if not exact:
+            print(
+                "  (found by searching for the newest run against this model "
+                "version, not handed over by the evaluation task - confirm "
+                "it is this job's run before relying on it.)"
+            )
     else:
         print(
             "Promotion evidence: the evaluation task printed an "
@@ -111,12 +126,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model", help="<catalog>.<schema>.<model>")
     parser.add_argument("--model-version", help="the model version under review")
     parser.add_argument("--job-id", help="the deployment job id")
+    parser.add_argument(
+        "--evidence-run",
+        default=None,
+        help="the evaluation task's MLflow run id, passed as a task value.",
+    )
     parser.add_argument("--await-approval", action="store_true")
     parser.add_argument("--report-deployment", action="store_true")
     arguments = parser.parse_args(argv)
 
     if arguments.await_approval:
-        return await_approval(arguments.model, arguments.model_version)
+        return await_approval(
+            arguments.model, arguments.model_version, arguments.evidence_run
+        )
     if arguments.report_deployment:
         return report_deployment()
     if not arguments.model or not arguments.job_id:

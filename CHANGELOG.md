@@ -126,6 +126,21 @@ All notable changes to `aai-core` are documented here.
   zero, and the run reports how many rows each scorer actually judged so a
   subset mean is never read as a whole-dataset one.
 
+  A recorded run whose results record cannot be attached to it now fails
+  instead of warning. The deployment-job gate scores on an ephemeral job
+  cluster, so the run is the only durable copy and the approval task would
+  otherwise ask a human to approve evidence `agentkit evidence --run` cannot
+  retrieve. That approval task also receives the evaluation task's exact run
+  id as a Databricks task value rather than searching MLflow for the newest
+  run against the model version, which a concurrent or manual evaluation
+  could win; when it does fall back to the search, it says so. The judge-cost
+  estimate counts the retrieved context and response a trace carries, so a
+  trace-backed retrieval run no longer reports a near-zero token estimate for
+  the runs that cost the most. And a suite whose rows are split between
+  `expected_response` and `expected_facts` no longer reads as "no
+  expectations", which had been adding a thresholded relevance judge nobody
+  asked for.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

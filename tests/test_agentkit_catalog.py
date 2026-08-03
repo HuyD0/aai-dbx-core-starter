@@ -651,3 +651,38 @@ def test_the_plan_says_retrieval_coverage_varies_per_row():
     )
     assert "vary per row" in reason
     assert "skip" not in reason
+
+
+def test_a_split_expectation_suite_does_not_also_buy_relevance():
+    """Every row has expectations; none of them is on every row.
+
+    Reading the empty intersection as "no expectations" would add the
+    thresholded relevance judge on top of correctness — judge calls
+    nobody asked for, on a gate that fails closed.
+    """
+
+    plan = select_scorers(
+        _shape(
+            expectation_keys=(),
+            partial_expectation_keys=("expected_facts", "expected_response"),
+            expectation_rows=(("expected_response",), ("expected_facts",)),
+        ),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "correctness" in names
+    assert "relevance" not in names
+
+
+def test_a_dataset_with_no_expectations_still_selects_relevance():
+    plan = select_scorers(
+        _shape(expectation_keys=(), partial_expectation_keys=()),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    assert "relevance" in _selected_names(plan)

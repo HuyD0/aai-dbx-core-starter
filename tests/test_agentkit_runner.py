@@ -17,6 +17,7 @@ from aai_core.agentkit.errors import (
     BaselineIncomparableError,
     BaselineMissingError,
     BudgetExceededError,
+    EvidenceMissingError,
 )
 from aai_core.agentkit.gate import EXIT_ERROR, EXIT_PASS, EXIT_THRESHOLD_FAILED
 from aai_core.agentkit.results import load_latest_results
@@ -912,7 +913,15 @@ def test_recorded_run_attaches_its_results_record(tmp_path):
     )
 
 
-def test_publish_failure_warns_without_failing_the_run(tmp_path):
+def test_unpublishable_evidence_fails_the_run(tmp_path):
+    """A run whose evidence cannot be reached is not promotion evidence.
+
+    The deployment-job gate scores on an ephemeral job cluster: the run is
+    the only durable copy of the results record, and the approval task
+    depends on this task succeeding. Warning here would let a human be
+    asked to approve evidence that `agentkit evidence --run` cannot find.
+    """
+
     project = _project(tmp_path)
     mlflow = FakeMlflow()
 
@@ -921,17 +930,45 @@ def test_publish_failure_warns_without_failing_the_run(tmp_path):
 
     mlflow.MlflowClient = _broken
 
+    with pytest.raises(EvidenceMissingError) as excinfo:
+        run_scoring(
+            project,
+            command="compare",
+            establish_baseline=True,
+            assume_yes=True,
+            mlflow_module=mlflow,
+            environ={},
+        )
+
+    message = str(excinfo.value)
+    assert "could not attach the results record" in message
+    # The verdict is not hidden by the failure that follows it.
+    assert "gate passed" in message
+
+
+def test_local_scoring_needs_no_publication(tmp_path):
+    """Smoke opens no run, so there is nothing to publish and no failure."""
+
+    project = _project(tmp_path)
+    mlflow = FakeMlflow()
+    mlflow.MlflowClient = _unreachable_client
+
     outcome, code = run_scoring(
         project,
-        command="compare",
-        establish_baseline=True,
+        command="smoke",
+        judges_enabled=False,
+        require_baseline=False,
+        mode="answer-sheet",
         assume_yes=True,
         mlflow_module=mlflow,
-        environ={},
     )
 
     assert code == EXIT_PASS
-    assert any("could not attach the results record" in w for w in outcome.warnings)
+    assert outcome.results.run_id is None
+
+
+def _unreachable_client(*args, **kwargs):
+    raise RuntimeError("tracking store unavailable")
 
 
 def test_partial_traces_do_not_select_trace_mode(tmp_path):

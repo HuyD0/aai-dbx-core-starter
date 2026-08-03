@@ -510,6 +510,46 @@ def _trace_document(trace: Any) -> Mapping[str, Any] | None:
     return None
 
 
+def trace_judge_text(trace: Any) -> str:
+    """The part of a recorded trace a judge is actually shown.
+
+    A trace-backed row can carry no ``inputs``/``outputs`` of its own while
+    the trace holds the request, the response, and every retrieved chunk —
+    which is precisely what the retrieval judges are handed. Estimating
+    tokens from the row alone reports nearly nothing for exactly the runs
+    that cost the most, so the cost estimate reads this instead.
+
+    Span ids, timestamps, and attributes are left out: they are not sent to
+    a judge, and counting them would replace an under-estimate with an
+    over-estimate.
+    """
+
+    document = _trace_document(trace)
+    if document is None:
+        return ""
+    parts: list[Any] = []
+    request = _trace_request(trace)
+    if request is not None:
+        parts.append(request)
+    info = document.get("info")
+    if isinstance(info, Mapping):
+        for key in ("response_preview", "response"):
+            value = info.get(key)
+            if _is_populated(value):
+                parts.append(_plain(value))
+                break
+    for span in _spans(trace):
+        if _is_retriever(span):
+            for key in ("outputs", "output"):
+                value = span.get(key)
+                if _is_populated(value):
+                    parts.append(_plain(value))
+                    break
+    if not parts:
+        return ""
+    return json.dumps(parts, default=str)
+
+
 def _spans(trace: Any) -> list[Mapping[str, Any]]:
     """The span records a trace carries, whatever form it arrived in.
 

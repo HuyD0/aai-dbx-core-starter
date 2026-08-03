@@ -220,6 +220,12 @@ guessing. Where the rows carry traces the count is exact, whether they arrive
 as objects, as dicts, or as the JSON strings MLflow puts in a dataframe's
 `trace` column.
 
+The token side reads the trace too. A row scored as a trace may carry no
+`outputs` of its own while the trace holds the response and every retrieved
+chunk — which is exactly what the retrieval judges are shown — so those are
+counted. Span ids, timestamps, and attributes are not: they never reach a
+judge, and counting them would trade an under-estimate for an over-estimate.
+
 ## What the gate refuses
 
 `agentkit gate` is the promotion check, and it says no in three situations:

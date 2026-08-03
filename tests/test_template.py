@@ -492,3 +492,87 @@ def test_requirements_ci_uses_pip_source():
     for template in TEMPLATES:
         content = (template / "template" / "requirements-ci.txt.tmpl").read_text()
         assert "aai-core @ {{.aai_core_pip_source}}" in content
+
+
+def _template_script(name):
+    """Load one of the evaluation-project scripts as a module.
+
+    They are plain .py files (not .tmpl), so they can be exercised without
+    rendering a project — and the deployment gate's correctness is worth
+    testing directly rather than only through a render.
+    """
+
+    import importlib.util
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "templates"
+        / "evaluation-project"
+        / "template"
+        / name
+    )
+    spec = importlib.util.spec_from_file_location(f"_tmpl_{path.stem}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_approval_prefers_the_run_the_evaluation_task_handed_over(capsys):
+    """A concurrent evaluation of the same version must not win.
+
+    The search is by model version and start time, so another manual or
+    automated run finishing first would send the reviewer to evidence from
+    a different dataset, config, or gate.
+    """
+
+    script = _template_script("scripts/link_deployment_job.py")
+    searched = []
+    script._evaluation_run_id = lambda *args: searched.append(args) or "wrong-run"
+
+    script.await_approval("main.eval.agent", "7", "the-exact-run")
+
+    output = capsys.readouterr().out
+    assert "agentkit evidence --run the-exact-run" in output
+    assert "wrong-run" not in output
+    assert searched == []
+
+
+def test_approval_falls_back_to_the_search_and_says_so(capsys):
+    script = _template_script("scripts/link_deployment_job.py")
+    script._evaluation_run_id = lambda *args: "found-by-search"
+
+    script.await_approval("main.eval.agent", "7", "   ")
+
+    output = capsys.readouterr().out
+    assert "agentkit evidence --run found-by-search" in output
+    assert "not handed over by the evaluation task" in output
+
+
+def test_the_evaluation_shim_publishes_the_run_it_recorded(tmp_path):
+    script = _template_script("evals/evaluate.py")
+    results = tmp_path / ".aai" / "agentkit" / "results"
+    results.mkdir(parents=True)
+    (results / "20260803T000000Z-eval.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "command": "eval",
+                "recorded_at": "2026-08-03T00:00:00Z",
+                "run_id": "run-from-this-job",
+                "agent": "models:/main.eval.agent/7",
+                "mode": "live",
+                "dataset": {"ref": "d.json", "digest": "abc123", "rows": 12},
+                "scope": {"mode": "full", "rows": 12},
+                "metrics": {},
+                "versions": {"agent": "a", "aai_core": "0.4.0"},
+                "decision": "inconclusive",
+                "change_id": "abc",
+                "gate_passed": True,
+            }
+        )
+    )
+
+    # No dbutils outside a Databricks job: the write is best effort, the
+    # returned id is what the test pins.
+    assert script.publish_evidence_run_id(tmp_path) == "run-from-this-job"
+    assert script.publish_evidence_run_id(tmp_path / "empty") is None

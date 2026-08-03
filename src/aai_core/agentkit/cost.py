@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import Field, field_serializer, field_validator
 
 from aai_core.agentkit.catalog import JudgeFanout, ScorerPlan
-from aai_core.agentkit.datasets import retrieval_fanout
+from aai_core.agentkit.datasets import retrieval_fanout, trace_judge_text
 from aai_core.agentkit.errors import BudgetExceededError
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 
@@ -164,4 +164,9 @@ def _mean_row_tokens(rows: Sequence[Mapping[str, Any]]) -> int:
             "outputs": row.get("outputs"),
         }
         total_characters += len(json.dumps(payload, default=str))
+        # A trace-backed row carries its answer and its retrieved context
+        # in the trace, and those are what the judge is shown. Counting
+        # only the row's own fields reports a near-zero estimate for the
+        # runs that cost the most.
+        total_characters += len(trace_judge_text(row.get("trace")))
     return round(total_characters / len(rows) / _CHARS_PER_TOKEN)

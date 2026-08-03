@@ -224,3 +224,41 @@ def test_serialized_traces_are_counted_like_mappings():
     assert from_string.fanout_counted is True
     assert dict(from_string.calls_by_scorer) == dict(from_mapping.calls_by_scorer)
     assert dict(from_string.calls_by_scorer)["retrieval_relevance"] == 12
+
+
+def test_trace_backed_rows_count_the_context_the_judge_sees():
+    """A trace-only row's tokens live in the trace, not in the row."""
+
+    from aai_core.agentkit.datasets import trace_judge_text
+
+    chunk = "Contributions vest after two years of continuous service. " * 40
+    trace = {
+        "info": {
+            "request_preview": "when do contributions vest?",
+            "response_preview": "After two years.",
+        },
+        "data": {
+            "spans": [
+                {
+                    "span_id": "1",
+                    "type": "RETRIEVER",
+                    "outputs": [{"page_content": chunk}],
+                }
+            ]
+        },
+    }
+    bare = [{"inputs": {}, "trace": trace}]
+    plan = _rag_plan(mode="traces")
+
+    counted = estimate(bare, plan)
+
+    assert len(trace_judge_text(trace)) > len(chunk)
+    # The retrieved context dominates, so the estimate is not near-zero.
+    assert counted.mean_row_tokens > len(chunk) // 4
+
+
+def test_a_row_without_a_trace_is_unchanged():
+    from aai_core.agentkit.datasets import trace_judge_text
+
+    assert trace_judge_text(None) == ""
+    assert trace_judge_text({"data": {"spans": []}}) == ""

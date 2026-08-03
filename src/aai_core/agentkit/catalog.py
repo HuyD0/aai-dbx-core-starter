@@ -490,7 +490,12 @@ def _auto_reason(
             return True, "expectations.guidelines present"
         return False, ""
     if spec.name == "relevance":
-        if not expectation_keys:
+        # `available`, not the intersection: a suite whose rows are split
+        # between expected_response and expected_facts has expectations on
+        # every row while sharing no single key, and reading that as "no
+        # expectations" would buy a thresholded relevance judge nobody
+        # asked for on top of the correctness one.
+        if not available:
             return True, "no expectations; scoring relevance to the query"
         return False, ""
     if spec.name == "safety":

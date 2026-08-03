@@ -51,6 +51,7 @@ from aai_core.agentkit.errors import (
     BaselineIncomparableError,
     BaselineMissingError,
     ConfigError,
+    EvidenceMissingError,
     missing_extra,
 )
 from aai_core.agentkit.gate import (
@@ -481,11 +482,26 @@ def run_scoring(
         # cannot reach, so the record travels with the run.
         failure = publish_results(mlflow, run_id, results_path)
         if failure:
-            warnings.append(failure)
-        else:
-            outcome.messages.append(
-                f"Evidence for this run: agentkit evidence --run {run_id}"
+            # This used to be a warning, on the reasoning that the record
+            # was already on disk and the gate already decided. That
+            # reasoning does not survive the deployment-job gate: there the
+            # disk is an ephemeral job cluster, the run is the only durable
+            # copy, and the approval task would otherwise proceed with
+            # evidence nobody can retrieve. A scored run whose evidence is
+            # unreachable is not promotion evidence, so it fails closed.
+            raise EvidenceMissingError(
+                f"{failure}\nThe run was scored (gate "
+                f"{'passed' if gate.passed else 'FAILED'}) but its results "
+                "record could not be attached, so `agentkit evidence --run "
+                f"{run_id}` would find nothing.",
+                remediation=(
+                    "Check MLflow artifact permissions for this experiment, "
+                    "then run the evaluation again."
+                ),
             )
+        outcome.messages.append(
+            f"Evidence for this run: agentkit evidence --run {run_id}"
+        )
 
     if establish_baseline:
         write_baseline(

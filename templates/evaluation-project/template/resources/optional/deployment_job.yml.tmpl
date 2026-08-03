@@ -72,6 +72,13 @@ resources:
               # So the approval message can name the evaluation run whose
               # evidence supports it. The run holds the results record; this
               # cluster's filesystem does not outlive the job.
+              #
+              # The run id comes from the evaluation task itself, as a task
+              # value: searching MLflow for the newest run against this model
+              # version would pick up a concurrent or manual evaluation and
+              # point the reviewer at a different dataset, config, or gate.
+              - "--evidence-run"
+              - "{{"{{"}}tasks.evaluation.values.evidence_run_id{{"}}"}}"
               - "--model"
               - "{{"{{"}}job.parameters.model_name{{"}}"}}"
               - "--model-version"
