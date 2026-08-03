@@ -1,0 +1,87 @@
+# The whole configuration. Three lines are the contract; everything else is
+# inferred from the dataset and the shared scorer registry.
+#
+#   agentkit smoke      fast, free, no cluster
+#   agentkit compare    THE primary verb — is this better than what we had?
+#   agentkit gate       promotion check (exit 0 pass / 2 fail)
+#   agentkit evidence   the release record
+#
+# Run `agentkit scorers ls` to see the registry a project selects from.
+version: 1
+agent: src/app/example_agent.py:respond
+dataset: evals/data/golden_cases.json
+
+# How far a metric may fall below the baseline before the gate fails. This
+# is the rule that makes a comparison bite: passing the absolute threshold
+# while quietly getting worse than last time is still a regression.
+regression_budget:
+  keyword_coverage/mean: 0.05
+
+# ---------------------------------------------------------------------------
+# Everything below is optional. The defaults are the paved road; these are
+# escape hatches, not the normal path.
+# ---------------------------------------------------------------------------
+
+# Point `agent:` somewhere else when you replace the example. The value
+# resolves by shape, so nothing else in the project changes:
+#   agent: endpoints:/{{.project_name}}-serving   # Databricks serving endpoint
+#   agent: models:/{{.catalog}}.{{.schema}}.my_agent
+#   agent: https://my-agent.example.com/score     # any HTTP/JSON endpoint
+#   agent: target-model                           # a logical model from aai-platform.yml
+#
+# For an HTTP endpoint, map its request/response fields (an auth_env names an
+# environment VARIABLE, never a token value):
+# request_mapping:
+#   request_field: messages.0.content
+#   response_field: choices.0.message.content
+#   auth_env: MY_AGENT_TOKEN
+
+# Thresholds override the registry defaults. Keys are scorer names or metric
+# keys; a scorer with no threshold is reported but does not gate.
+# thresholds:
+#   keyword_coverage: ">=0.7"
+#   correctness: ">=0.8"
+#   safety: ">=1.0"
+
+# Add a regression budget for judge metrics once they are calibrated:
+# regression_budget:
+#   correctness/mean: 0.05
+
+# Select scorers from the shared registry. A project chooses and sets
+# thresholds; it never redefines what a scorer means.
+# scorers:
+#   add: [fluency, completeness]
+#   remove: [equivalence]
+#   guidelines:
+#     - "Answers must name the official support channel for anything the
+#        knowledge base does not cover."
+
+# Judge spend is estimated before every judged run. Set your negotiated rate
+# to see dollars instead of tokens; max_judge_calls aborts before spending.
+#
+# retrieved_chunks_per_row is your retriever's `k`. MLflow judges retrieval
+# relevance once per retrieved chunk, so a RAG run costs far more than one
+# call per row; before a live run there are no traces to count and this is
+# what the estimate uses.
+# budget:
+#   max_judge_calls: 500
+#   judge_price_per_1m_tokens: 5.0
+#   retrieved_chunks_per_row: 5
+
+# The Unity Catalog model this project promotes into. Set it to have
+# `agentkit evidence` report the approval recorded on the model version by
+# the deployment-job gate (see resources/optional/deployment_job.yml).
+# registered_model: {{.catalog}}.{{.schema}}.{{.application_name}}
+
+# The deployment job's approval task names. Every one must carry an
+# `Approved` tag on the model version before evidence reports approval.
+# Without this list, evidence can only report the tags that happen to
+# exist — which cannot tell an approved gate from a stale tag left behind
+# by a renamed task — and it says so instead of implying otherwise.
+# approvals: [approval_gate]
+
+# smoke:
+#   rows: 20
+#   answer_sheet: evals/data/answer_sheet.json
+# strata: [category]
+# concurrency: 8
