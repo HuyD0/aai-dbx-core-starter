@@ -168,8 +168,18 @@ abstention path) then passes the same gate on the same terms.
 
     `require_executable` closes the loop by binding those scores to the
     spec — the one thing a self-contained report cannot know about itself —
-    by checking the report judged every field, and by checking it judged
-    them under *this* spec's policy. The spec owns policy, the report owns
+    by checking the report judged every field, by checking the report's
+    tier is this run's tier (tier selects which invariants the report's own
+    validator enforced, so a relabelled tier switches the source pin off),
+    and by checking it judged them under *this* spec's policy.
+
+    **`build_execute_sql` re-runs all of it, plus the cost ceiling.** It is
+    the function that emits the paid statement, so it does not assume the
+    caller checked first: it calls `require_executable` and
+    `require_within_ceiling`, and requires an estimate measured for this
+    release *and* this snapshot. A guard that holds only because the
+    notebook happens to call things in the right order protects the
+    notebook, not the pipeline. The spec owns policy, the report owns
     outcomes: a persisted report that quietly lowers a high field's
     required rate, or relabels it medium so the gate stops being
     worst-stratum, derives `adopt` perfectly honestly from real evidence

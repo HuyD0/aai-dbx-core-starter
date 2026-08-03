@@ -1181,6 +1181,10 @@ print(
 
 # COMMAND ----------
 
+# Shown here because it is the step worth seeing — but this call is not
+# what protects the run. `build_execute_sql` re-runs both this and the
+# ceiling check itself, so a caller who skips this cell, or who uses the
+# builder from their own code, gets the same refusal.
 gbi.require_executable(spec_v2, report_v2)  # raises unless the gate adopted
 
 spark.sql(gbi.create_target_table_sql(spec_v2))
@@ -1205,7 +1209,9 @@ for statement in migration.statements:
 # table has become while the gate was being reviewed. Rows that landed
 # since are not lost; they are the next cycle's work, with evidence of
 # their own.
-execute_sql = gbi.build_execute_sql(spec_v2, run_id=RUN_ID, report=report_v2)
+execute_sql = gbi.build_execute_sql(
+    spec_v2, run_id=RUN_ID, estimate=estimate_v2, report=report_v2
+)
 print(execute_sql[:1200] + "\n…")
 
 # "Pending" is release-aware: a row is done if this release landed it

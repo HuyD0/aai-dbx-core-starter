@@ -1868,6 +1868,18 @@ def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> N
             "gate report was produced for a different spec revision; "
             "re-evaluate against the current spec"
         )
+    # The report's own tier decides which invariants its validator
+    # enforced — most importantly whether a source snapshot was required
+    # at all. Relabelling an operational report exploratory therefore
+    # switches off the pin and lets the run read the live table, with the
+    # operational digest and real scores still attached. The spec says
+    # what tier this run is; the report only claims one.
+    if report.use_tier != spec.use_tier:
+        raise GateNotPassed(
+            f"the gate report claims tier {report.use_tier}, but this run is "
+            f"tier {spec.use_tier}. Tier selects which controls apply, so a "
+            "report from another tier cannot authorise it."
+        )
     # The report proved internally that its verdicts follow from its
     # scores; it could not prove those scores are about *this* release,
     # because it holds no spec. That is this function's to check, and it
@@ -2155,8 +2167,21 @@ def resync_strata_sql(
     This statement updates the labels directly instead. Run it before the
     execute stage; it is cheap and touches only stratum columns.
     """
+    sequence = int(spec.release_sequence)
+    version = snapshot.version if snapshot else -1
+    # The update advances `ai_source_version` along with the labels.
+    # Without that the guard above never moves: a corrected label with
+    # unchanged document text is skipped by inference (the row really is
+    # done), so the column keeps the version of whichever run last
+    # *inferred* it, and a delayed older resync still satisfies `<=` and
+    # restores the stale label. Writing it here makes the column mean
+    # "the newest snapshot whose content and labels this row reflects",
+    # which is what both orderings actually need it to mean — and it
+    # stays correct for inference, where a bumped version only ever
+    # excludes older runs from touching the row.
     assignments = ",\n    ".join(
-        f"target.{column} = source.{column}" for column in spec.strata
+        [f"target.{column} = source.{column}" for column in spec.strata]
+        + [f"target.ai_source_version = {version}"]
     )
     differs = "\n     OR ".join(
         f"NOT (target.{column} <=> source.{column})" for column in spec.strata
@@ -2169,8 +2194,6 @@ def resync_strata_sql(
     # current and made the row look healthy. Comparing the release
     # sequence alone is not enough, because two cycles of one unchanged
     # spec tie there and differ only in which snapshot they read.
-    sequence = int(spec.release_sequence)
-    version = snapshot.version if snapshot else -1
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
@@ -2238,6 +2261,7 @@ def build_execute_sql(
     spec: BatchInferenceSpec,
     *,
     run_id: str,
+    estimate: CostEstimate,
     report: GateReport | None = None,
 ) -> str:
     """The full-table execute statement: restartable *and* release-aware.
@@ -2342,6 +2366,23 @@ def build_execute_sql(
     # right order is not a guard.
     require_executable(spec, report)
     snapshot = report.source_snapshot if report else None
+    # The same argument applies to money, and it applies at every tier —
+    # tier 3 is *only* cost-controlled, so it is the tier where a missing
+    # budget check matters most. An estimate is therefore not optional
+    # here: without one this function will happily emit a full-table
+    # ai_query over a hundred million rows.
+    if estimate.release != spec.release:
+        raise EvidenceMismatch(
+            "the cost estimate was computed for a different release; "
+            "re-estimate before authorising the spend"
+        )
+    if estimate.source_snapshot != snapshot:
+        raise EvidenceMismatch(
+            f"the cost estimate describes {estimate.source_snapshot} but this "
+            f"run reads {snapshot}. A projection over different rows cannot "
+            "authorise this spend."
+        )
+    require_within_ceiling(estimate)
     source = _source_relation(spec, snapshot)
     source_version = snapshot.version if snapshot else -1
     restart = restart_predicate_sql(spec, snapshot)
