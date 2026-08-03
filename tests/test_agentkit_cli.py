@@ -559,3 +559,20 @@ def test_fetch_results_explains_a_run_without_a_record():
         fetch_results("run-missing", mlflow_module=fake)
     assert "no agentkit results record" in str(excinfo.value)
     assert "smoke" in str(excinfo.value)
+
+
+def test_confirmation_refuses_without_a_tty_and_names_the_flag(capsys, monkeypatch):
+    """A CI job missing --yes must not silently proceed or silently pass.
+
+    `_confirm` declines rather than blocking on `input()`, and the runner
+    turns that decline into exit 1 (see
+    test_declined_confirmation_scores_nothing) so a run that scored
+    nothing is never reported as a pass.
+    """
+
+    from aai_core.agentkit.cli import _confirm
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+
+    assert _confirm("Proceed?") is False
+    assert "--yes" in capsys.readouterr().err

@@ -18,7 +18,7 @@ from aai_core.agentkit.errors import (
     BaselineMissingError,
     BudgetExceededError,
 )
-from aai_core.agentkit.gate import EXIT_PASS, EXIT_THRESHOLD_FAILED
+from aai_core.agentkit.gate import EXIT_ERROR, EXIT_PASS, EXIT_THRESHOLD_FAILED
 from aai_core.agentkit.results import load_latest_results
 from aai_core.agentkit.runner import (
     SCORER_WORKERS_ENV,
@@ -412,6 +412,13 @@ def test_judged_run_records_the_governed_judge_endpoint(tmp_path):
 
 
 def test_declined_confirmation_scores_nothing(tmp_path):
+    """A cancelled run is not a passed run.
+
+    The usual cause is a CI job on a non-interactive stream with no
+    `--yes`; exit 0 there would report success for an evaluation that
+    never happened.
+    """
+
     project = _project(tmp_path)
     fake = FakeMlflow()
 
@@ -425,10 +432,11 @@ def test_declined_confirmation_scores_nothing(tmp_path):
         mlflow_module=fake,
     )
 
-    assert code == EXIT_PASS
+    assert code == EXIT_ERROR
     assert outcome.declined
     assert fake.evaluate_calls == []
     assert not project.baseline_path.exists()
+    assert any("--yes" in message for message in outcome.messages)
 
 
 def test_budget_stops_the_run_before_any_call(tmp_path):
@@ -1130,3 +1138,198 @@ def test_a_full_run_records_a_full_scope(tmp_path):
     )
 
     assert mlflow.tags["aai.scope_mode"] == "full"
+
+
+def _with_prompt_judge(tmp_path):
+    """A project whose plan includes the prompt-judge scorer."""
+
+    _project(tmp_path)
+    (tmp_path / "agentkit.yaml").write_text(
+        "version: 1\n"
+        "agent: src/app/example_agent.py:respond\n"
+        "dataset: evals/data/golden_cases.json\n"
+        "scorers:\n"
+        "  add: [pension_domain_policy]\n"
+    )
+    return ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+
+
+def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatch):
+    """A moved alias means a different judge scored the baseline."""
+
+    from aai_core.agentkit import runner as runner_module
+
+    project = _with_prompt_judge(tmp_path)
+    monkeypatch.setattr(
+        runner_module,
+        "_resolved_prompt_versions",
+        lambda plan, project_, mlflow: {
+            "pension_domain_policy": "prompts:/cat.sch.p/3"
+        },
+    )
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    monkeypatch.setattr(
+        runner_module,
+        "_resolved_prompt_versions",
+        lambda plan, project_, mlflow: {
+            "pension_domain_policy": "prompts:/cat.sch.p/4"
+        },
+    )
+    mlflow = FakeMlflow()
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        run_scoring(
+            project,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert "judge prompt moved" in str(excinfo.value)
+    # Refused before the run opened and before a single judge call.
+    assert mlflow.evaluate_calls == []
+
+
+def test_an_unchanged_judge_prompt_compares_cleanly(tmp_path, monkeypatch):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _with_prompt_judge(tmp_path)
+    monkeypatch.setattr(
+        runner_module,
+        "_resolved_prompt_versions",
+        lambda plan, project_, mlflow: {
+            "pension_domain_policy": "prompts:/cat.sch.p/3"
+        },
+    )
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    outcome, _ = run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert not any("judge prompt" in warning for warning in outcome.warnings)
+
+
+def test_prompt_drift_can_be_overridden_and_is_recorded(tmp_path, monkeypatch):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _with_prompt_judge(tmp_path)
+    monkeypatch.setattr(
+        runner_module,
+        "_resolved_prompt_versions",
+        lambda plan, project_, mlflow: {
+            "pension_domain_policy": "prompts:/cat.sch.p/3"
+        },
+    )
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_resolved_prompt_versions",
+        lambda plan, project_, mlflow: {
+            "pension_domain_policy": "prompts:/cat.sch.p/4"
+        },
+    )
+
+    outcome, _ = run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        allow_baseline_drift=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert any("judge prompt moved" in warning for warning in outcome.warnings)
+
+
+def test_a_removed_scorer_refuses_the_comparison(tmp_path):
+    """Removing a scorer removes its threshold; the gate must not shrug."""
+
+    project = _project(tmp_path)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+    (tmp_path / "agentkit.yaml").write_text(
+        "version: 1\n"
+        "agent: src/app/example_agent.py:respond\n"
+        "dataset: evals/data/golden_cases.json\n"
+        "scorers:\n"
+        "  remove: [safety]\n"
+    )
+    reduced = ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+    mlflow = FakeMlflow()
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        run_scoring(
+            reduced,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert "the baseline scored safety but this run does not" in str(excinfo.value)
+    assert mlflow.evaluate_calls == []
+
+
+def test_smoke_still_compares_against_a_judged_baseline(tmp_path):
+    """The fast loop must survive the scorer-set check.
+
+    `smoke` is judge-free by design, so the baseline's judge scorers are
+    not a mismatch — otherwise every smoke run after a `compare` baseline
+    would be refused.
+    """
+
+    project = _project(tmp_path)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        judges_enabled=False,
+        require_baseline=False,
+        mode="answer-sheet",
+        assume_yes=True,
+    )
+
+    assert code == EXIT_PASS
+    assert not any("baseline scored" in warning for warning in outcome.warnings)

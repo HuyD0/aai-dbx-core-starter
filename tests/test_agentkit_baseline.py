@@ -205,18 +205,127 @@ def test_a_changed_scorer_version_is_not_comparable():
     )
 
     assert any("keyword_coverage is v2" in failure for failure in failures)
-    # A scorer the baseline never ran is not a mismatch; it simply has no
-    # baseline value, which the gate already handles.
+
+
+def test_a_scorer_the_baseline_never_ran_is_not_comparable():
+    """An added scorer has no baseline score to compare against."""
+
+    failures = comparability_failures(
+        _record(),
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        scorers={"keyword_coverage": 1, "safety": 1},
+    )
+
+    assert any("this run scores safety" in failure for failure in failures)
+
+
+def test_a_removed_scorer_is_not_comparable():
+    """Removing a scorer also removes its threshold from the policy.
+
+    That is a control disappearing because someone edited config, so the
+    comparison must not quietly proceed without the evidence.
+    """
+
+    failures = comparability_failures(
+        _record(),
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        scorers={},
+    )
+
+    assert any(
+        "the baseline scored keyword_coverage but this run does not" in failure
+        for failure in failures
+    )
+
+
+def test_a_judge_free_run_is_not_punished_for_skipping_judges():
+    """`smoke` runs code scorers only by design.
+
+    A scorer missing because of the mode is not the same as one removed by
+    configuration, and refusing here would break the fast loop entirely.
+    """
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1, "safety": 1, "correctness": 1},
+            judge_model="endpoints:/judge",
+            aai_core="0.4.0",
+        )
+    )
+
     assert (
         comparability_failures(
-            _record(),
+            record,
             dataset=_dataset(),
             mode="full",
             rows=10,
-            scorers={"keyword_coverage": 1, "safety": 1},
+            scorers={"keyword_coverage": 1},
+            judges_enabled=False,
         )
         == []
     )
+    # With judges on, the same missing judges ARE a mismatch.
+    assert comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        scorers={"keyword_coverage": 1},
+        judges_enabled=True,
+    )
+
+
+def test_a_legacy_baseline_records_no_scorers_to_compare(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"metrics": {"m": 1.0}}))
+    record, _ = load_baseline(path)
+
+    assert (
+        comparability_failures(
+            record,
+            dataset=_dataset(),
+            mode="full",
+            rows=0,
+            scorers={"keyword_coverage": 1},
+        )
+        == []
+    )
+
+
+def test_a_moved_judge_prompt_is_not_comparable():
+    """A moved alias is a different judge, so the delta is not evidence."""
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/3"},
+            aai_core="0.4.0",
+        )
+    )
+
+    moved = comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/4"},
+    )
+    assert any("judge prompt moved" in failure for failure in moved)
+
+    unchanged = comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/3"},
+    )
+    assert unchanged == []
 
 
 def test_a_changed_judge_model_is_not_comparable():

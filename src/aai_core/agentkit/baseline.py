@@ -180,16 +180,20 @@ def comparability_failures(
     rows: int,
     scorers: Mapping[str, int] | None = None,
     judge_model: str | None = None,
+    judge_prompts: Mapping[str, str] | None = None,
+    judges_enabled: bool = True,
 ) -> list[str]:
     """Why this baseline cannot be the reference for this run.
 
     A delta is only evidence when both sides measured the same rows with
-    the same scorers. Change the dataset, the scope, or a scorer version
-    and the number still subtracts cleanly while meaning nothing — which
-    is worse than no comparison, because it looks like one.
+    the same scorers. Change the dataset, the scope, the scorer set, a
+    scorer version, the judge model, or a judge prompt, and the number
+    still subtracts cleanly while meaning nothing — which is worse than no
+    comparison, because it looks like one.
 
-    Everything here is checkable before the first judge call. Judge
-    *prompt* versions resolve during the run, so they stay warnings.
+    Everything here is checkable before the first judge call. The prompt
+    map arrives on a second pass, because resolving it needs MLflow, but
+    that still happens before the run opens.
     """
 
     failures: list[str] = []
@@ -203,16 +207,77 @@ def comparability_failures(
             f"the baseline scored {record.scope.mode}/{record.scope.rows} "
             f"rows but this run scores {mode}/{rows}"
         )
-    for name, version in sorted(dict(scorers or {}).items()):
+    current = dict(scorers or {})
+    for name, version in sorted(current.items()):
         recorded = record.versions.scorers.get(name)
         if recorded is not None and recorded != version:
             failures.append(
                 f"scorer {name} is v{version} but the baseline used "
                 f"v{recorded}, so the two scores do not mean the same thing"
             )
+    if scorers is not None:
+        # A caller that names no scorers has said nothing about membership;
+        # only a caller that supplies the plan can have one compared.
+        failures.extend(_membership_failures(record, current, judges_enabled))
     recorded_judge = record.versions.judge_model
     if judge_model and recorded_judge and recorded_judge != judge_model:
         failures.append(f"the judge model changed ({recorded_judge} -> {judge_model})")
+    for name, resolved in sorted(dict(judge_prompts or {}).items()):
+        was = record.versions.judge_prompts.get(name)
+        if was and was != resolved:
+            failures.append(
+                f"the {name} judge prompt moved ({was} -> {resolved}), so it "
+                "is not the same judge that scored the baseline"
+            )
+    return failures
+
+
+def _membership_failures(
+    record: BaselineRecord,
+    current: Mapping[str, int],
+    judges_enabled: bool,
+) -> list[str]:
+    """Scorers one side ran and the other did not.
+
+    Comparing versions alone misses the bigger change: removing a scorer
+    also removes its registry-default threshold from the policy, so the
+    comparison passes without that evidence and nothing says so.
+
+    A judge-free run is not a mismatch, though. ``smoke`` runs code
+    scorers only by design, so a baseline's judge scorers are ignored when
+    judges are off — a scorer missing because of the *mode* is different
+    from one removed by *configuration*, and only the latter is a control
+    being weakened.
+    """
+
+    from aai_core.agentkit.catalog import get_spec
+    from aai_core.agentkit.errors import UnknownScorerError
+
+    recorded = dict(record.versions.scorers)
+    if not recorded:
+        # A legacy baseline records no scorers; nothing to compare against.
+        return []
+
+    def _judged(name: str) -> bool:
+        try:
+            return get_spec(name).judge is not None
+        except UnknownScorerError:
+            return False
+
+    expected = {name for name in recorded if judges_enabled or not _judged(name)}
+    failures = []
+    missing = sorted(expected - set(current))
+    added = sorted(set(current) - set(recorded))
+    if missing:
+        failures.append(
+            f"the baseline scored {', '.join(missing)} but this run does "
+            "not, so the comparison would be missing that evidence"
+        )
+    if added:
+        failures.append(
+            f"this run scores {', '.join(added)} but the baseline never "
+            "did, so there is nothing to compare it against"
+        )
     return failures
 
 

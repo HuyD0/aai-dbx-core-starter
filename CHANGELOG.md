@@ -85,6 +85,16 @@ All notable changes to `aai-core` are documented here.
   real messages list instead of `{"0": ...}` and preserves what
   `extra_body` already placed there.
 
+  A cancelled run exits 1 rather than 0 — the usual cause is a CI job on a
+  non-interactive stream with no `--yes`, and exit 0 there reported success
+  for an evaluation that never happened. Comparability covers the scorer set
+  as well as scorer versions, since removing a scorer also removes its
+  threshold from the policy; a judge-free run such as `agentkit smoke` is not
+  treated as a mismatch for skipping judges. A judge prompt whose alias has
+  moved is a different judge, so it now blocks the comparison, and the check
+  runs before any judge call rather than being reported alongside the
+  results.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

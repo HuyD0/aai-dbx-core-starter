@@ -217,8 +217,20 @@ as objects, as dicts, or as the JSON strings MLflow puts in a dataframe's
 `compare` and `eval` refuse earlier still, before any judge call, when the
 recorded baseline measured something else. A delta is only evidence when both
 sides scored the same rows with the same scorers, so a changed dataset digest,
-a changed scope (full versus sample), a changed scorer version, or a changed
-judge model stops the run and asks you to re-establish the baseline. The
+a changed scope (full versus sample), a changed or missing scorer, a changed
+judge model, or a judge prompt whose alias has moved stops the run and asks you
+to re-establish the baseline.
+
+Two of those are worth spelling out. **Removing a scorer also removes its
+threshold**, so `scorers.remove` would otherwise let a comparison pass without
+that evidence and say nothing — the scorer set has to match, not just the
+versions. A judge-free run is not a mismatch, though: `agentkit smoke` runs
+code scorers only by design, so a baseline's judge scorers are ignored when
+judges are off. And **when the platform team moves a judge prompt's
+`production` alias, every project's next comparison stops** and asks for a new
+baseline. That is the correct answer to "the judge changed" — the old scores
+were produced by different instructions — and it is worth knowing as the cost
+of moving an alias. The
 number would still subtract cleanly; it just would not mean anything, which
 is worse than no comparison because it looks like one.
 

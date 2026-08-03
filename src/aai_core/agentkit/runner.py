@@ -54,6 +54,7 @@ from aai_core.agentkit.errors import (
     missing_extra,
 )
 from aai_core.agentkit.gate import (
+    EXIT_ERROR,
     EXIT_PASS,
     EXIT_THRESHOLD_FAILED,
     build_policy,
@@ -267,6 +268,7 @@ def run_scoring(
                     rows=dataset.shape.row_count,
                     plan=plan,
                     judge_model=judge_model_uri,
+                    judges_enabled=judges_enabled,
                     allow_drift=allow_baseline_drift,
                 )
             )
@@ -274,9 +276,16 @@ def run_scoring(
     enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
     if cost.judge_calls and not assume_yes:
         if confirm is None or not confirm("Proceed?"):
+            # Nothing was scored, so this cannot be a pass. The usual cause
+            # is a CI job on a non-interactive stream with no --yes, and
+            # exit 0 there would report success for an evaluation that
+            # never happened.
             outcome.declined = True
-            outcome.messages.append("Cancelled - nothing was scored.")
-            return outcome, EXIT_PASS
+            outcome.messages.append(
+                "Cancelled - nothing was scored. Pass --yes to run without "
+                "the confirmation prompt."
+            )
+            return outcome, EXIT_ERROR
 
     set_concurrency_env(config.concurrency, environ)
     # A code-scorer-only run over recorded answers needs nothing from
@@ -292,6 +301,29 @@ def run_scoring(
             "scored locally: a code-scorer-only run does not open an MLflow "
             "run. Use `agentkit compare` to record the comparison."
         )
+    # Prompt versions resolve only once MLflow is in hand, so this is the
+    # earliest the check can run — still before the run opens and before a
+    # single judge call is paid for. A judge prompt whose alias has moved
+    # is a different judge, and reporting that alongside the results would
+    # be reporting it too late.
+    judge_prompts: dict[str, str] = {}
+    if judges_enabled and mlflow is not None:
+        judge_prompts = _resolved_prompt_versions(plan, project, mlflow)
+        if baseline is not None:
+            warnings.extend(
+                _enforce_comparability(
+                    baseline,
+                    dataset=dataset,
+                    mode="sample" if sampled else "full",
+                    rows=dataset.shape.row_count,
+                    plan=plan,
+                    judge_model=judge_model_uri,
+                    judge_prompts=judge_prompts,
+                    judges_enabled=judges_enabled,
+                    allow_drift=allow_baseline_drift,
+                    only_prompts=True,
+                )
+            )
 
     change_id = _change_id()
     purpose = RunPurpose.BASELINE if establish_baseline else RunPurpose.RESULT
@@ -307,7 +339,6 @@ def run_scoring(
         baseline_run_id=baseline.run_id if baseline else None,
     )
     recorded_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    judge_prompts: dict[str, str] = {}
     run_id: str | None = None
     experiment_id: str | None = None
     experiment_name: str | None = None
@@ -362,7 +393,6 @@ def run_scoring(
                 scorers=scorers,
                 predict_fn=predict_fn,
             )
-            judge_prompts = _resolved_prompt_versions(plan, project, mlflow)
             tags = {
                 "aai.agentkit_version": _version(),
                 "aai.scorer_versions": plan.scorer_versions_tag(),
@@ -510,18 +540,38 @@ def _enforce_comparability(
     rows: int,
     plan: ScorerPlan,
     judge_model: str | None,
-    allow_drift: bool,
+    judge_prompts: Mapping[str, str] | None = None,
+    judges_enabled: bool = True,
+    allow_drift: bool = False,
+    only_prompts: bool = False,
 ) -> list[str]:
-    """Refuse a baseline that measured something else — or record the override."""
+    """Refuse a baseline that measured something else — or record the override.
 
-    failures = comparability_failures(
-        baseline,
-        dataset=dataset,
-        mode=mode,
-        rows=rows,
-        scorers={spec.name: spec.version for spec in plan.specs},
-        judge_model=judge_model,
-    )
+    ``only_prompts`` is the second pass. Judge prompt versions resolve
+    only once MLflow is in hand, which is after the first pass has already
+    cleared everything checkable offline; running the whole check again
+    would report those same failures twice.
+    """
+
+    if only_prompts:
+        failures = comparability_failures(
+            baseline,
+            dataset=dataset,
+            mode=mode,
+            rows=rows,
+            judge_prompts=judge_prompts,
+        )
+        failures = [failure for failure in failures if "judge prompt" in failure]
+    else:
+        failures = comparability_failures(
+            baseline,
+            dataset=dataset,
+            mode=mode,
+            rows=rows,
+            scorers={spec.name: spec.version for spec in plan.specs},
+            judge_model=judge_model,
+            judges_enabled=judges_enabled,
+        )
     if not failures:
         return []
     listed = "\n".join(f"  - {failure}" for failure in failures)
