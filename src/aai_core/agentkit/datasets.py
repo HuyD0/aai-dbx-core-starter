@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +54,12 @@ class LoadedDataset:
     rows: tuple[Mapping[str, Any], ...]
     digest: str
     shape: DatasetShape
+    # The digest of the dataset this one was sampled from, when it was.
+    # A sample asks a subset of the same questions, so a baseline recorded
+    # on the whole file is still a baseline for the same *data* — only the
+    # scope differs. Without this the comparability check reports "the
+    # dataset changed", which is both a refusal and a false statement.
+    sampled_from: str | None = None
 
 
 def load_dataset(
@@ -181,7 +187,14 @@ def smoke_sample(
         rng.shuffle(indices)
         selected = sorted(indices[:n])
     rows = [dataset.rows[index] for index in selected]
-    return _build_dataset(dataset.ref, f"{dataset.source}+sample", rows)
+    return _build_dataset(
+        dataset.ref,
+        f"{dataset.source}+sample",
+        rows,
+        # Carry the parent identity: a sample of this dataset is the same
+        # questions asked of fewer rows, not different data.
+        sampled_from=dataset.sampled_from or dataset.digest,
+    )
 
 
 def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDataset:
@@ -234,7 +247,12 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             f"row(s): {listed}",
             remediation=("Re-record the answer sheet so it covers every dataset row."),
         )
-    return _build_dataset(dataset.ref, f"{dataset.source}+answers", rows)
+    return _build_dataset(
+        dataset.ref,
+        f"{dataset.source}+answers",
+        rows,
+        sampled_from=dataset.sampled_from,
+    )
 
 
 def validate_dataset(
@@ -270,7 +288,10 @@ def validate_dataset(
 
 
 def _build_dataset(
-    ref: str, source: str, rows: Sequence[Mapping[str, Any]]
+    ref: str,
+    source: str,
+    rows: Sequence[Mapping[str, Any]],
+    sampled_from: str | None = None,
 ) -> LoadedDataset:
     frozen_rows = tuple(rows)
     return LoadedDataset(
@@ -279,6 +300,7 @@ def _build_dataset(
         rows=frozen_rows,
         digest=dataset_digest(frozen_rows),
         shape=_infer_shape(frozen_rows),
+        sampled_from=sampled_from,
     )
 
 
@@ -361,8 +383,9 @@ def _is_populated(value: Any) -> bool:
     return True
 
 
-_RETRIEVAL_SPAN_MARKERS = ("RETRIEVER", '"retriever"')
-_TOOL_SPAN_MARKERS = ("TOOL", '"tool"', "tool_calls")
+_RETRIEVER_SPAN_TYPE = "RETRIEVER"
+_TOOL_SPAN_TYPE = "TOOL"
+_SPAN_TYPE_KEYS = ("type", "span_type", "spanType")
 
 
 def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
@@ -370,22 +393,49 @@ def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
 
     Retrieval judges need RETRIEVER spans and tool judges need tool spans;
     selecting both because a trace merely exists spends judge calls on
-    scorers whose contract was never present. Detection is deliberately
-    tolerant of trace shape, and unknown shapes report neither — a scorer
+    scorers whose contract was never present.
+
+    The span types are read from the spans, not from the serialized trace
+    text. Scanning the payload for "retriever" or "tool" matches an answer
+    that happens to use the word, and an LLM-only trace about retrieval
+    tools then buys both sets of judges — which cannot score it, so the
+    calls are wasted and the scorer errors fail the gate.
+
+    Nesting does not matter here, only presence: MLflow judges top-level
+    retriever spans, and a nested retriever always has one above it. A
+    trace whose structure cannot be read reports neither kind — a scorer
     the toolkit cannot prove is applicable is not auto-selected.
     """
 
-    subject: Any = _trace_document(trace)
-    if subject is None:
-        subject = _plain(trace)
-    try:
-        payload = json.dumps(subject, default=str)
-    except (TypeError, ValueError):  # pragma: no cover - exotic trace objects
-        payload = str(trace)
-    upper = payload.upper()
-    retrieval = any(marker.upper() in upper for marker in _RETRIEVAL_SPAN_MARKERS)
-    tools = any(marker.upper() in upper for marker in _TOOL_SPAN_MARKERS)
-    return retrieval, tools
+    types = _span_types(_spans(trace))
+    return _RETRIEVER_SPAN_TYPE in types, _TOOL_SPAN_TYPE in types
+
+
+def _span_types(spans: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The upper-cased span types these spans declare."""
+
+    found: set[str] = set()
+    for span in spans:
+        for key in _SPAN_TYPE_KEYS:
+            value = span.get(key)
+            if isinstance(value, str) and value.strip():
+                found.add(_span_type_name(value))
+        attributes = span.get("attributes")
+        if isinstance(attributes, Mapping):
+            value = attributes.get("mlflow.spanType")
+            if isinstance(value, str) and value.strip():
+                found.add(_span_type_name(value))
+    return found
+
+
+def _span_type_name(value: str) -> str:
+    """``"RETRIEVER"``, ``'"RETRIEVER"'`` and ``SpanType.RETRIEVER`` alike.
+
+    MLflow stores the span type as a JSON-encoded attribute value, so the
+    quotes are part of the string; an enum repr arrives dotted.
+    """
+
+    return value.strip().strip('"').rpartition(".")[2].upper()
 
 
 @dataclass(frozen=True)
@@ -451,6 +501,28 @@ def _trace_document(trace: Any) -> Mapping[str, Any] | None:
     return None
 
 
+def _spans(trace: Any) -> list[Mapping[str, Any]]:
+    """The span records a trace carries, whatever form it arrived in.
+
+    ``Trace.to_dict()`` nests them under ``data``; some payloads carry them
+    at the top level. A shape with neither yields nothing, which is what
+    makes every span question answerable without guessing from text.
+    """
+
+    document = _trace_document(trace)
+    if document is None:
+        return []
+    spans: Any = None
+    data = document.get("data")
+    if isinstance(data, Mapping):
+        spans = data.get("spans")
+    if spans is None:
+        spans = document.get("spans")
+    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
+        return []
+    return [span for span in spans if isinstance(span, Mapping)]
+
+
 def _retriever_spans(trace: Any) -> list[Mapping[str, Any]]:
     """Top-level retriever spans, mirroring what MLflow actually judges.
 
@@ -459,31 +531,13 @@ def _retriever_spans(trace: Any) -> list[Mapping[str, Any]]:
     the fan-out for a trace that retrieves inside a retriever.
     """
 
-    document = _trace_document(trace)
-    spans: Any = None
-    if document is not None:
-        data = document.get("data")
-        if isinstance(data, Mapping):
-            spans = data.get("spans")
-        if spans is None:
-            spans = document.get("spans")
-    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
-        return []
+    spans = _spans(trace)
     by_id: dict[Any, Mapping[str, Any]] = {}
     for span in spans:
-        if isinstance(span, Mapping):
-            identifier = span.get("span_id", span.get("spanId"))
-            if identifier is not None:
-                by_id[identifier] = span
-    found = []
-    for span in spans:
-        if (
-            isinstance(span, Mapping)
-            and _is_retriever(span)
-            and not _nested(span, by_id)
-        ):
-            found.append(span)
-    return found
+        identifier = span.get("span_id", span.get("spanId"))
+        if identifier is not None:
+            by_id[identifier] = span
+    return [span for span in spans if _is_retriever(span) and not _nested(span, by_id)]
 
 
 def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> bool:
@@ -503,16 +557,7 @@ def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> 
 
 
 def _is_retriever(span: Mapping[str, Any]) -> bool:
-    for key in ("type", "span_type", "spanType"):
-        value = span.get(key)
-        if isinstance(value, str) and value.upper() == "RETRIEVER":
-            return True
-    attributes = span.get("attributes")
-    if isinstance(attributes, Mapping):
-        value = attributes.get("mlflow.spanType")
-        if isinstance(value, str) and "RETRIEVER" in value.upper():
-            return True
-    return False
+    return _RETRIEVER_SPAN_TYPE in _span_types([span])
 
 
 def _chunk_count(span: Mapping[str, Any]) -> int:

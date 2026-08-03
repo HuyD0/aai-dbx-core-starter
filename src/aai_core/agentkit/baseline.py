@@ -197,7 +197,13 @@ def comparability_failures(
     """
 
     failures: list[str] = []
-    if record.dataset.digest not in {dataset.digest, _LEGACY_PLACEHOLDER}:
+    # A sample carries the digest of the dataset it was drawn from, and a
+    # baseline recorded on that whole dataset is a baseline for the same
+    # questions. Only the scope differs — which the next check reports, and
+    # reports truthfully. Rejecting the sample as "changed data" would be a
+    # refusal for a reason that is not the case.
+    same_data = {dataset.digest, dataset.sampled_from, _LEGACY_PLACEHOLDER}
+    if record.dataset.digest not in same_data:
         failures.append(
             "the dataset changed since the baseline was recorded (digest "
             f"{record.dataset.digest} -> {dataset.digest})"
@@ -222,13 +228,46 @@ def comparability_failures(
     recorded_judge = record.versions.judge_model
     if judge_model and recorded_judge and recorded_judge != judge_model:
         failures.append(f"the judge model changed ({recorded_judge} -> {judge_model})")
-    for name, resolved in sorted(dict(judge_prompts or {}).items()):
-        was = record.versions.judge_prompts.get(name)
-        if was and was != resolved:
-            failures.append(
-                f"the {name} judge prompt moved ({was} -> {resolved}), so it "
-                "is not the same judge that scored the baseline"
-            )
+    if judge_prompts is not None:
+        failures.extend(_prompt_failures(record, dict(judge_prompts)))
+    return failures
+
+
+def _prompt_failures(record: BaselineRecord, current: Mapping[str, str]) -> list[str]:
+    """How this run's judge instructions differ from the baseline's.
+
+    Both directions count. A registered prompt whose alias is deleted stops
+    resolving, so the scorer quietly falls back to its bundled
+    instructions — the judge changed, and comparing only the names this run
+    resolved would never look at it. The reverse, a judge that gained a
+    registered prompt since the baseline, is the same change in the other
+    direction.
+
+    A baseline that recorded no prompts at all says nothing about
+    membership — legacy records and judge-free runs both look like that —
+    so only shared names are version-compared there.
+    """
+
+    recorded = dict(record.versions.judge_prompts)
+    failures = [
+        f"the {name} judge prompt moved ({recorded[name]} -> {current[name]}), "
+        "so it is not the same judge that scored the baseline"
+        for name in sorted(set(recorded) & set(current))
+        if recorded[name] != current[name]
+    ]
+    if not recorded:
+        return failures
+    for name in sorted(set(recorded) - set(current)):
+        failures.append(
+            f"the {name} judge prompt {recorded[name]} no longer resolves, so "
+            "that judge now scores with its bundled instructions instead of "
+            "the ones the baseline used"
+        )
+    for name in sorted(set(current) - set(recorded)):
+        failures.append(
+            f"the {name} judge prompt is now {current[name]}, but the "
+            "baseline scored with that judge's bundled instructions"
+        )
     return failures
 
 
@@ -321,11 +360,15 @@ def _baseline_from_run(
         ) from error
     tags = dict(getattr(run.data, "tags", {}) or {})
     metrics = dict(getattr(run.data, "metrics", {}) or {})
-    scorers: dict[str, int] = {}
-    for pair in tags.get("aai.scorer_versions", "").split(","):
-        name, _, version = pair.partition("=")
-        if name and version.isdigit():
-            scorers[name] = int(version)
+    scorers = {
+        name: int(version)
+        for name, version in _tag_pairs(tags.get("aai.scorer_versions"))
+        if version.isdigit()
+    }
+    # The run recorded which judge instructions it used; not reading them
+    # back would leave every run-fetched baseline with an empty prompt map,
+    # and a check that cannot fire is not a check.
+    judge_prompts = dict(_tag_pairs(tags.get("aai.judge_prompt_versions")))
     return BaselineRecord(
         schema_version=1,
         run_id=run_id,
@@ -348,8 +391,24 @@ def _baseline_from_run(
             agent=tags.get("aai.agent_target", _LEGACY_PLACEHOLDER),
             scorers=scorers,
             judge_model=tags.get("aai.judge_model"),
+            judge_prompts=judge_prompts,
             aai_core=tags.get("aai.agentkit_version", _LEGACY_PLACEHOLDER),
         ),
         recorded_by=origin,
         change_id=tags.get("aai.change_id", _LEGACY_PLACEHOLDER),
     )
+
+
+def _tag_pairs(value: str | None) -> list[tuple[str, str]]:
+    """``"a=1,b=2"`` as pairs — the shape both version tags are written in.
+
+    A prompt URI (``prompts:/name/3``) contains no ``=``, so partitioning on
+    the first one keeps the whole value.
+    """
+
+    pairs = []
+    for item in (value or "").split(","):
+        name, _, recorded = item.partition("=")
+        if name.strip() and recorded.strip():
+            pairs.append((name.strip(), recorded.strip()))
+    return pairs

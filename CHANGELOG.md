@@ -95,6 +95,26 @@ All notable changes to `aai-core` are documented here.
   runs before any judge call rather than being reported alongside the
   results.
 
+  The comparability refusal belongs to the promotion-grade commands.
+  `agentkit smoke` scores a deterministic sample, so its scope is narrower
+  than the committed baseline by design; blocking there stopped the
+  credential-free pull-request gate working as soon as a suite outgrew
+  `smoke.rows`. `smoke` now sets an incomparable baseline aside, prints every
+  reason, and gates on absolute thresholds, while `compare` and `eval` still
+  refuse. A sample also carries the digest of the dataset it was drawn from,
+  so it is reported as a narrower scope rather than as changed data — which
+  is both the accurate reason and the one a developer can act on. Judge
+  prompts are compared as a set as well as by version: an alias that stops
+  resolving swaps in bundled instructions without raising, and a judge that
+  gains a registered prompt is the same change reversed. A baseline fetched
+  by run id now restores its recorded prompt versions, without which that
+  check could never fire on that path. Trace span kinds are read from the
+  spans rather than by scanning the serialized trace, so an answer that
+  mentions a retriever or a tool no longer buys judges that cannot score it.
+  An HTTP target configured with `request_mapping.auth_env` must use
+  `https://` (or loopback): the bearer token would otherwise travel in
+  cleartext.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

@@ -414,3 +414,142 @@ def test_a_run_baseline_without_scope_tags_reads_as_full(tmp_path):
 
     assert record.scope.mode == "full"
     assert record.scope.rows == 10
+
+
+def _prompt_record():
+    return _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/3"},
+            aai_core="0.4.0",
+        )
+    )
+
+
+def test_a_judge_prompt_that_stopped_resolving_is_not_comparable():
+    """A deleted alias silently swaps in the bundled instructions.
+
+    Nothing raises: the scorer keeps working, with different instructions.
+    Comparing only the prompts this run resolved would never look at the
+    entry that disappeared, so the judge changes and the delta is still
+    accepted as evidence.
+    """
+
+    failures = comparability_failures(
+        _prompt_record(),
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={},
+    )
+
+    assert any("no longer resolves" in failure for failure in failures)
+    assert all("judge prompt" in failure for failure in failures)
+
+
+def test_a_newly_registered_judge_prompt_is_not_comparable():
+    """The same change in the other direction."""
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_prompts={"other": "prompts:/cat.sch.other/1"},
+            aai_core="0.4.0",
+        )
+    )
+
+    failures = comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={
+            "other": "prompts:/cat.sch.other/1",
+            "pension_domain_policy": "prompts:/cat.sch.p/3",
+        },
+    )
+
+    assert any("bundled instructions" in failure for failure in failures)
+
+
+def test_a_baseline_with_no_recorded_prompts_still_compares():
+    """A legacy or judge-free baseline says nothing about prompt membership."""
+
+    failures = comparability_failures(
+        _record(),
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/3"},
+    )
+
+    assert failures == []
+
+
+def test_a_sample_of_the_recorded_dataset_is_not_a_changed_dataset():
+    """Only the scope differs, and only the scope is reported."""
+
+    sample = LoadedDataset(
+        ref="golden.json",
+        source="local-json+sample",
+        rows=tuple({"inputs": {"q": str(i)}} for i in range(4)),
+        digest="sampledigest",
+        shape=DatasetShape(
+            row_count=4,
+            input_keys=("q",),
+            has_outputs=False,
+            expectation_keys=(),
+            has_traces=False,
+            strata_values={},
+        ),
+        sampled_from="abc123",
+    )
+
+    failures = comparability_failures(_record(), dataset=sample, mode="sample", rows=4)
+
+    assert all("the dataset changed" not in failure for failure in failures)
+    assert any("full/10 rows but this run scores sample/4" in f for f in failures)
+
+
+def test_a_run_baseline_restores_its_judge_prompt_versions():
+    """The prompt drift check is dead without this."""
+
+    run = SimpleNamespace(
+        info=SimpleNamespace(experiment_id="42"),
+        data=SimpleNamespace(
+            metrics={"keyword_coverage/mean": 0.7},
+            tags={
+                "aai.dataset": "golden.json",
+                "aai.dataset_digest": "abc123",
+                "aai.dataset_rows": "10",
+                "aai.scorer_versions": "keyword_coverage=1",
+                "aai.judge_prompt_versions": (
+                    "pension_domain_policy=prompts:/cat.sch.p/3"
+                ),
+            },
+        ),
+    )
+    mlflow = SimpleNamespace(get_run=lambda run_id: run)
+
+    record, _ = select_baseline(
+        baseline_path=None,
+        flag_run_id="run-abc",
+        config_run_id=None,
+        mlflow_module=mlflow,
+    )
+
+    assert dict(record.versions.judge_prompts) == {
+        "pension_domain_policy": "prompts:/cat.sch.p/3"
+    }
+    assert any(
+        "judge prompt moved" in failure
+        for failure in comparability_failures(
+            record,
+            dataset=_dataset(),
+            mode="full",
+            rows=10,
+            judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/9"},
+        )
+    )

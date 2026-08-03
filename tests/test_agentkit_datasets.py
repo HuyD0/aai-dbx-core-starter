@@ -506,3 +506,85 @@ def test_trace_only_rows_fall_back_to_the_root_span_inputs(tmp_path):
         load_dataset("a.json", root=tmp_path).digest
         != load_dataset("b.json", root=tmp_path).digest
     )
+
+
+def test_span_kinds_come_from_the_spans_not_the_text(tmp_path):
+    """An answer about retriever tools does not buy retriever judges.
+
+    Scanning the serialized trace for "retriever" or "tool" matches the
+    words wherever they appear, including in the question and the answer.
+    The retrieval and tool judges cannot score an LLM-only trace, so the
+    calls are spent and then reported as scorer errors that fail the gate.
+    """
+
+    rows = [
+        {
+            "inputs": {"question": "which retriever tool should I use?"},
+            "outputs": "Use the retriever tool with tool_calls enabled.",
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "type": "LLM",
+                            "name": "answer",
+                            "outputs": "Use the retriever tool.",
+                        }
+                    ]
+                }
+            },
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_traces
+    assert not shape.has_retrieval_spans
+    assert not shape.has_tool_spans
+
+
+def test_span_kinds_read_mlflow_attribute_span_types(tmp_path):
+    """MLflow stores the span type as a JSON-quoted attribute value."""
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "name": "search",
+                            "attributes": {"mlflow.spanType": '"RETRIEVER"'},
+                        },
+                        {
+                            "name": "lookup",
+                            "attributes": {"mlflow.spanType": '"TOOL"'},
+                        },
+                    ]
+                }
+            },
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_retrieval_spans and shape.has_tool_spans
+
+
+def test_a_sample_records_the_dataset_it_was_drawn_from(tmp_path):
+    """Provenance is what keeps a sample from looking like changed data."""
+
+    _write_dataset(tmp_path, _rows(10))
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    sample = smoke_sample(dataset, 4)
+
+    assert sample.shape.row_count == 4
+    assert sample.digest != dataset.digest
+    assert sample.sampled_from == dataset.digest
+    # A sample of a sample still names the original.
+    assert smoke_sample(sample, 2).sampled_from == dataset.digest
+    # An unsampled dataset claims no parent.
+    assert dataset.sampled_from is None
+    assert smoke_sample(dataset, 50) is dataset

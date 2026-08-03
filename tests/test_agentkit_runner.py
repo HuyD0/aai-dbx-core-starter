@@ -1333,3 +1333,151 @@ def test_smoke_still_compares_against_a_judged_baseline(tmp_path):
 
     assert code == EXIT_PASS
     assert not any("baseline scored" in warning for warning in outcome.warnings)
+
+
+def test_smoke_keeps_gating_once_the_dataset_outgrows_the_sample(tmp_path):
+    """The credential-free pull-request gate has to survive a growing suite.
+
+    `validate_dataset` tells projects to grow toward 150+ rows, and
+    `smoke` scores a deterministic sample of them (20 by default). That
+    sample is a narrower scope than the committed baseline, so a blocking
+    comparability check would refuse the run and the fast loop would stop
+    working exactly as a project matures.
+    """
+
+    project = _project(tmp_path, rows=40)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        rows_limit=20,
+        judges_enabled=False,
+        require_baseline=False,
+        mode="answer-sheet",
+        assume_yes=True,
+    )
+
+    assert code == EXIT_PASS
+    warnings = "\n".join(outcome.warnings)
+    # Set aside, and said so — the reason names the scope, not the data.
+    assert "set aside" in warnings
+    assert "full/40 rows but this run scores sample/20" in warnings
+    assert "the dataset changed" not in warnings
+    assert outcome.results.baseline_run_id is None
+
+
+def test_compare_still_refuses_a_scope_the_baseline_never_measured(tmp_path):
+    """Promotion-grade commands keep the refusal: the delta is the point."""
+
+    project = _project(tmp_path, rows=40)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+    mlflow = FakeMlflow()
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        run_scoring(
+            project,
+            rows_limit=20,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    message = str(excinfo.value)
+    assert "full/40 rows but this run scores sample/20" in message
+    assert "the dataset changed" not in message
+    assert mlflow.evaluate_calls == []
+
+
+def test_a_sample_of_the_same_dataset_is_not_a_different_dataset(tmp_path):
+    """A sampled baseline compares cleanly against the same sample.
+
+    The scope matches, and the digest check has to see through the sample
+    to the dataset it was drawn from — otherwise the one comparison that
+    is exactly reproducible would be refused.
+    """
+
+    project = _project(tmp_path, rows=40)
+    run_scoring(
+        project,
+        establish_baseline=True,
+        rows_limit=20,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    outcome, code = run_scoring(
+        project,
+        rows_limit=20,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert not outcome.warnings
+
+
+def test_an_unsampled_smoke_run_still_catches_a_regression(tmp_path):
+    """Below the sample size nothing changes: smoke still compares."""
+
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: src/app/example_agent.py:respond\n"
+            "dataset: evals/data/golden_cases.json\n"
+            "regression_budget:\n"
+            "  keyword_coverage/mean: 0.05\n"
+        ),
+    )
+    run_scoring(
+        project,
+        command="smoke",
+        rows_limit=20,
+        judges_enabled=False,
+        require_baseline=False,
+        establish_baseline=True,
+        mode="answer-sheet",
+        assume_yes=True,
+    )
+    sheet = tmp_path / "evals" / "data" / "answer_sheet.json"
+    sheet.write_text(
+        json.dumps(
+            [
+                {"question": f"question {index}", "answer": "unrelated"}
+                for index in range(12)
+            ]
+        )
+    )
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        rows_limit=20,
+        judges_enabled=False,
+        require_baseline=False,
+        mode="answer-sheet",
+        assume_yes=True,
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert not any("set aside" in warning for warning in outcome.warnings)

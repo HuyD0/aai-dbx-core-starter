@@ -260,18 +260,20 @@ def run_scoring(
                     rows=dataset.shape.row_count,
                 )
             )
-            warnings.extend(
-                _enforce_comparability(
-                    baseline,
-                    dataset=dataset,
-                    mode="sample" if sampled else "full",
-                    rows=dataset.shape.row_count,
-                    plan=plan,
-                    judge_model=judge_model_uri,
-                    judges_enabled=judges_enabled,
-                    allow_drift=allow_baseline_drift,
-                )
+            comparability, comparable = _enforce_comparability(
+                baseline,
+                dataset=dataset,
+                mode="sample" if sampled else "full",
+                rows=dataset.shape.row_count,
+                plan=plan,
+                judge_model=judge_model_uri,
+                judges_enabled=judges_enabled,
+                allow_drift=allow_baseline_drift,
+                blocking=require_baseline,
             )
+            warnings.extend(comparability)
+            if not comparable:
+                baseline = None
 
     enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
     if cost.judge_calls and not assume_yes:
@@ -310,20 +312,22 @@ def run_scoring(
     if judges_enabled and mlflow is not None:
         judge_prompts = _resolved_prompt_versions(plan, project, mlflow)
         if baseline is not None:
-            warnings.extend(
-                _enforce_comparability(
-                    baseline,
-                    dataset=dataset,
-                    mode="sample" if sampled else "full",
-                    rows=dataset.shape.row_count,
-                    plan=plan,
-                    judge_model=judge_model_uri,
-                    judge_prompts=judge_prompts,
-                    judges_enabled=judges_enabled,
-                    allow_drift=allow_baseline_drift,
-                    only_prompts=True,
-                )
+            prompt_drift, comparable = _enforce_comparability(
+                baseline,
+                dataset=dataset,
+                mode="sample" if sampled else "full",
+                rows=dataset.shape.row_count,
+                plan=plan,
+                judge_model=judge_model_uri,
+                judge_prompts=judge_prompts,
+                judges_enabled=judges_enabled,
+                allow_drift=allow_baseline_drift,
+                blocking=require_baseline,
+                only_prompts=True,
             )
+            warnings.extend(prompt_drift)
+            if not comparable:
+                baseline = None
 
     change_id = _change_id()
     purpose = RunPurpose.BASELINE if establish_baseline else RunPurpose.RESULT
@@ -543,9 +547,25 @@ def _enforce_comparability(
     judge_prompts: Mapping[str, str] | None = None,
     judges_enabled: bool = True,
     allow_drift: bool = False,
+    blocking: bool = True,
     only_prompts: bool = False,
-) -> list[str]:
-    """Refuse a baseline that measured something else — or record the override.
+) -> tuple[list[str], bool]:
+    """Refuse a baseline that measured something else — or set it aside.
+
+    Returns the warnings to record and whether the baseline survives.
+
+    ``blocking`` is what separates the two speeds. `compare` and `eval`
+    produce promotion evidence, so an incomparable baseline is a refusal:
+    the delta is the deliverable, and a delta that measures nothing is
+    worse than none. `smoke` is the fast threshold gate — it runs a
+    deterministic sample of the dataset on every commit, which is by
+    definition a narrower scope than the baseline's — so there the
+    baseline is set aside and the run reports absolute scores, exactly as
+    it does before any baseline exists. Refusing there would break the
+    credential-free pull-request gate as soon as a suite outgrows
+    ``smoke.rows``, and comparing anyway would fail pull requests on
+    sampling noise. Neither is silent: every reason is printed and lands
+    in the results record.
 
     ``only_prompts`` is the second pass. Judge prompt versions resolve
     only once MLflow is in hand, which is after the first pass has already
@@ -573,14 +593,21 @@ def _enforce_comparability(
             judges_enabled=judges_enabled,
         )
     if not failures:
-        return []
+        return [], True
     listed = "\n".join(f"  - {failure}" for failure in failures)
     if allow_drift:
         # Overriding is a decision someone made; the evidence has to say so.
         return [
             "compared against a baseline that is not directly comparable "
             "(--allow-baseline-drift):\n" + listed
-        ]
+        ], True
+    if not blocking:
+        return [
+            "the recorded baseline does not describe this run, so it is set "
+            "aside and this run reports absolute scores only:\n"
+            + listed
+            + "\nRun `agentkit compare` to compare against the baseline."
+        ], False
     raise BaselineIncomparableError(
         "the recorded baseline cannot be compared against this run:\n" + listed,
         remediation=(

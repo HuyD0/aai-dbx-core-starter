@@ -9,6 +9,7 @@ import pytest
 
 from aai_core.agentkit.config import AgentkitConfig, ProjectContext
 from aai_core.agentkit.errors import (
+    ConfigError,
     MissingExtraError,
     TargetContractError,
     TargetInvocationError,
@@ -332,3 +333,59 @@ def test_request_mapping_builds_a_list_without_extra_body(tmp_path):
     predict(question="hello")
 
     assert captured["body"] == {"messages": [{"content": "hello"}]}
+
+
+def _http_predict(tmp_path, url, transport, **mapping):
+    project = _project(tmp_path, request_mapping=mapping)
+    return build_predict_fn(
+        resolve_target(url, root=tmp_path),
+        project=project,
+        transport=transport,
+        mlflow_module=FAKE_MLFLOW,
+    )
+
+
+def test_a_token_is_never_sent_over_cleartext_http(tmp_path, monkeypatch):
+    """An http:// target plus a token puts the credential on the wire.
+
+    `resolve_target` accepts http:// because an unauthenticated local stub
+    is a real target shape. Adding request_mapping.auth_env changes what a
+    plain hop costs: the bearer token is readable by anyone on the path.
+    """
+
+    monkeypatch.setenv("AGENT_TOKEN", "token-value")
+    calls = []
+
+    with pytest.raises(ConfigError) as excinfo:
+        _http_predict(
+            tmp_path,
+            "http://agent.internal/score",
+            lambda request: calls.append(request) or b"{}",
+            auth_env="AGENT_TOKEN",
+        )
+
+    message = str(excinfo.value)
+    assert "unencrypted" in message
+    assert "token-value" not in message
+    # Refused where the call is built, so nothing was ever sent.
+    assert calls == []
+
+
+def test_cleartext_is_allowed_without_a_token_and_on_loopback(tmp_path, monkeypatch):
+    """Only the credential needs the encrypted hop."""
+
+    monkeypatch.setenv("AGENT_TOKEN", "token-value")
+
+    def transport(request):
+        return json.dumps({"output": "ok"}).encode("utf-8")
+
+    unauthenticated = _http_predict(tmp_path, "http://agent.internal/score", transport)
+    loopback = _http_predict(
+        tmp_path,
+        "http://localhost:8000/score",
+        transport,
+        auth_env="AGENT_TOKEN",
+    )
+
+    assert unauthenticated(question="q") == "ok"
+    assert loopback(question="q") == "ok"

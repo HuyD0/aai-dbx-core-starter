@@ -16,6 +16,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from typing import Any
 
 from aai_core.agentkit.config import ProjectContext, RequestMapping
 from aai_core.agentkit.errors import (
+    ConfigError,
     TargetContractError,
     TargetInvocationError,
     TargetResolutionError,
@@ -228,12 +230,47 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
     return call
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _require_encrypted_transport(target: Target, auth_env: str) -> None:
+    """A bearer token does not travel in the clear.
+
+    ``resolve_target`` accepts ``http://`` because an unauthenticated local
+    stub is a legitimate target. Adding ``request_mapping.auth_env`` changes
+    that: the token goes into an ``Authorization`` header, and on a plain
+    HTTP hop anyone on the path can read it. Loopback stays allowed —
+    development against a local stub never leaves the machine.
+
+    Checked where the call is built, so it fails before the first request
+    and before ``mlflow.genai.evaluate`` spends anything.
+    """
+
+    parts = urllib.parse.urlsplit(target.normalized)
+    if parts.scheme == "https":
+        return
+    host = (parts.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS or host.endswith(".localhost"):
+        return
+    raise ConfigError(
+        f"agent {target.ref!r} uses {parts.scheme}://, but "
+        f"request_mapping.auth_env names {auth_env!r} - the token would be "
+        "sent unencrypted",
+        remediation=(
+            "Point `agent:` at the https:// URL for this endpoint, or drop "
+            "request_mapping.auth_env if it needs no token."
+        ),
+    )
+
+
 def _http_call(
     target: Target,
     mapping: RequestMapping,
     transport: Callable[[urllib.request.Request], bytes] | None,
 ) -> Callable[[Mapping[str, Any]], Any]:
     send = transport or _urllib_transport
+    if mapping.auth_env:
+        _require_encrypted_transport(target, mapping.auth_env)
 
     def call(inputs: Mapping[str, Any]) -> Any:
         body: dict[str, Any] = thaw_value(mapping.extra_body)

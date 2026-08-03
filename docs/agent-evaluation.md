@@ -138,6 +138,10 @@ function today and a deployed endpoint tomorrow with a one-line change:
 
 Execution can sit anywhere. The record stays in one place, which is the point.
 
+An HTTP target that needs a token — `request_mapping.auth_env` names the
+environment variable, never the value — has to be `https://`. Loopback is the
+exception, because a local stub never puts the credential on a network.
+
 ### Where the answers come from
 
 A scoring run needs an answer for every row, and there are three honest ways
@@ -230,9 +234,23 @@ judges are off. And **when the platform team moves a judge prompt's
 `production` alias, every project's next comparison stops** and asks for a new
 baseline. That is the correct answer to "the judge changed" — the old scores
 were produced by different instructions — and it is worth knowing as the cost
-of moving an alias. The
-number would still subtract cleanly; it just would not mean anything, which
-is worse than no comparison because it looks like one.
+of moving an alias. The same applies when an alias is *deleted*: the judge
+falls back to its bundled instructions without raising, so a prompt the
+baseline used and this run cannot resolve counts as drift in its own right.
+The number would still subtract cleanly; it just would not mean anything,
+which is worse than no comparison because it looks like one.
+
+**`smoke` is a threshold gate, not a comparison**, and it is not refused.
+It scores a deterministic sample — 20 rows by default, of a suite you are
+told to grow past 150 — so its scope is narrower than the committed baseline
+by design. When the baseline does not describe the sample, `smoke` sets it
+aside, prints every reason, and reports absolute scores, exactly as it does
+on a project that has no baseline yet. Refusing would break the
+credential-free pull-request gate as a suite matures; comparing a 20-row
+mean against a 150-row one would fail pull requests on sampling noise.
+Regression belongs to `compare` and `eval`, which score the whole dataset.
+Below the sample size nothing is sampled, so a small suite keeps its
+regression check in `smoke` too.
 
 The dataset digest identifies the *questions* a dataset asks. Answers are
 excluded — both the `outputs` an answer sheet supplies and the `trace` a
