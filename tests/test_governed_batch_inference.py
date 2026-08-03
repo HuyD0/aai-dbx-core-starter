@@ -647,19 +647,22 @@ def test_release_sequence_comparisons_survive_migrated_null_rows():
     spec = make_spec()
     sql = gbi.build_execute_sql(spec, run_id="run-1", report=adopting_report(spec))
     assert "coalesce(done.ai_release_sequence, -1) > 1" in sql
-    assert (
-        "coalesce(target.ai_release_sequence, -1) <= source.ai_release_sequence" in sql
-    )
+    # Both halves of the ordering pair coalesce, on both sides.
+    for column in ("ai_release_sequence", "ai_source_version"):
+        assert f"coalesce(done.{column}, -1)" in sql
+        assert f"coalesce(target.{column}, -1)" in sql
 
-    legacy = [
-        name for name, _ in gbi.target_columns(spec) if name != "ai_release_sequence"
-    ]
-    migration = gbi.plan_target_migration(spec, legacy)
-    assert any("ADD COLUMNS" in statement for statement in migration.statements)
-    assert any(
-        statement.startswith(f"UPDATE {spec.target_table} SET ai_release_sequence = -1")
-        for statement in migration.statements
-    )
+    # Either ordering column arriving by migration is backfilled, so a
+    # legacy row sorts below every real run instead of poisoning the
+    # comparison with NULL.
+    for column in ("ai_release_sequence", "ai_source_version"):
+        legacy = [name for name, _ in gbi.target_columns(spec) if name != column]
+        migration = gbi.plan_target_migration(spec, legacy)
+        assert any("ADD COLUMNS" in statement for statement in migration.statements)
+        assert any(
+            statement.startswith(f"UPDATE {spec.target_table} SET {column} = -1")
+            for statement in migration.statements
+        )
 
 
 def test_a_gate_report_cannot_claim_a_decision_its_fields_do_not_support():
@@ -1019,6 +1022,87 @@ def test_the_strata_resync_will_not_relabel_a_newer_release():
     # Still only touching strata — no inference, no value columns.
     assert "ai_query" not in sql
     assert "ai_" not in sql.split("THEN UPDATE SET")[1]
+
+
+def test_a_report_cannot_bring_its_own_gate_policy():
+    """The verdicts are derived from the scores — but the bar they are
+    derived against was still whatever the artifact claimed."""
+    spec = one_field_spec(criticality="high", tolerable_error_rate=0.02)
+    honest = adopting_report(spec)
+    gbi.require_executable(spec, honest)
+
+    def with_policy(criticality, required):
+        """A report with honest, correctly stamped scores — and a
+        different bar applied to them. It validates: the verdict really
+        does follow from these scores at the policy it states."""
+        result = gbi._gate_field("f", criticality, required, honest.scores)
+        return gbi.GateReport.model_validate(
+            {
+                **honest.model_dump(mode="json"),
+                "fields": [result.model_dump(mode="json")],
+            }
+        )
+
+    # A lowered bar. Nothing here is inconsistent; it simply certifies a
+    # policy other than the one this run executes under.
+    loosened = with_policy(gbi.Criticality.HIGH, 0.5)
+    assert loosened.decision == gbi.GateDecision.ADOPT
+    with pytest.raises(gbi.GateNotPassed, match="certifies a policy"):
+        gbi.require_executable(spec, loosened)
+
+    # Downgrading criticality is the same attack by another route: it
+    # silently swaps worst-stratum gating for the population-weighted row.
+    downgraded = with_policy(gbi.Criticality.MEDIUM, spec.fields[0].required_rate)
+    with pytest.raises(gbi.GateNotPassed, match="certifies a policy"):
+        gbi.require_executable(spec, downgraded)
+
+
+def test_an_older_snapshot_cannot_overwrite_a_newer_one():
+    """`release_sequence` orders what ran, not which rows it ran over. A
+    nightly job unchanged for months ties with itself on sequence alone."""
+    spec = make_spec(release_sequence=4)
+    monday = gbi.build_execute_sql(
+        spec,
+        run_id="mon",
+        report=adopting_report(spec, source_snapshot=snapshot_for(spec, 10)),
+    )
+    tuesday = gbi.build_execute_sql(
+        spec,
+        run_id="tue",
+        report=adopting_report(spec, source_snapshot=snapshot_for(spec, 20)),
+    )
+    # Each run stamps the version it read.
+    assert "10 AS ai_source_version" in monday
+    assert "20 AS ai_source_version" in tuesday
+    # Monday, resuming late, treats Tuesday's rows as done rather than
+    # re-inferring them and writing its older content over the top.
+    assert "coalesce(done.ai_source_version, -1) > 10" in monday
+    assert "coalesce(done.ai_source_version, -1) > 20" in tuesday
+    # And if it gets that far, the MERGE will not lower the version.
+    assert (
+        "coalesce(target.ai_source_version, -1) <= source.ai_source_version" in monday
+    )
+    assert ("ai_source_version", "BIGINT") in gbi.target_columns(spec)
+
+
+def test_the_notebook_pins_every_gate_call():
+    """A source-level check, because CI cannot execute the notebook.
+
+    Making the snapshot mandatory broke four call sites at once and
+    nothing caught it: `compile()` only parses, and the wiring test below
+    mirrors the notebook's derivation rather than reading it. Two of the
+    four were `try/except EvidenceMismatch` demonstrations, which would
+    have gone on printing a refusal while proving nothing.
+    """
+    source = (
+        ROOT / "examples" / "governed-batch-inference" / "example_notebook.py"
+    ).read_text()
+    calls = source.split("gbi.evaluate_gate(")[1:]
+    assert len(calls) >= 5
+    for call in calls:
+        # The kwarg must appear before the call closes.
+        head = call[: call.index(")\n")]
+        assert "source_snapshot=" in head, head[:120]
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -1407,8 +1491,8 @@ def test_an_older_release_cannot_overwrite_newer_output():
     # *ordering*: the sequence check stands alone, ahead of the content
     # digest, so an edited document a newer release already landed is
     # excluded rather than inferred and then thrown away by the MERGE.
-    assert "coalesce(done.ai_release_sequence, -1) > 1\n       OR (" in old_sql
-    assert "coalesce(done.ai_release_sequence, -1) > 2\n       OR (" in new_sql
+    assert "coalesce(done.ai_release_sequence, -1) > 1\n        OR (" in old_sql
+    assert "coalesce(done.ai_release_sequence, -1) > 2\n        OR (" in new_sql
     for sql in (old_sql, new_sql):
         anti_join = sql.split("scored AS")[0]
         assert anti_join.index("ai_release_sequence") < anti_join.index(
@@ -1416,8 +1500,13 @@ def test_an_older_release_cannot_overwrite_newer_output():
         )
     # And the MERGE refuses to lower a row's release sequence.
     guard = (
-        "WHEN MATCHED\n  AND coalesce(target.ai_release_sequence, -1) <= "
-        "source.ai_release_sequence\n  THEN UPDATE SET *"
+        "coalesce(target.ai_release_sequence, -1) < source.ai_release_sequence\n"
+        "    OR (\n"
+        "      coalesce(target.ai_release_sequence, -1) "
+        "= source.ai_release_sequence\n"
+        "      AND coalesce(target.ai_source_version, -1) "
+        "<= source.ai_source_version\n"
+        "    )"
     )
     assert guard in old_sql and guard in new_sql
     assert "WHEN MATCHED THEN UPDATE SET *" not in old_sql

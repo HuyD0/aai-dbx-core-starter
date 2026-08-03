@@ -69,6 +69,13 @@ PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ai_model_version", "STRING"),
     ("ai_prompt_version", "STRING"),
     ("ai_release_sequence", "BIGINT"),
+    #: Delta version of the source this row was produced from, or -1 when
+    #: the run was not pinned. `release_sequence` orders application
+    #: releases and says nothing about which *data* a run saw, so two
+    #: cycles of one release over different snapshots would otherwise tie
+    #: — and the older one could overwrite the newer. Ordering is on the
+    #: pair.
+    ("ai_source_version", "BIGINT"),
     #: Digest of the document text this row was derived from, so an
     #: edit-in-place makes the row pending instead of silently stale.
     ("ai_source_digest", "STRING"),
@@ -1852,6 +1859,27 @@ def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> N
             f"gate report does not judge {unjudged}; it cannot authorise a "
             "run that writes those fields"
         )
+    # The report derives each verdict from its scores, but the *policy*
+    # that derivation applies — the bar, and which strata must clear it —
+    # is recorded in the report and would otherwise be whatever the
+    # artifact says. Lower a high field's required rate and the
+    # recomputation honestly reaches 'adopt' on real evidence; relabel it
+    # medium and the gate quietly stops being worst-stratum. The spec owns
+    # policy, the report owns outcomes, and this is where they meet.
+    by_name = {result.field: result for result in report.fields}
+    for field in spec.fields:
+        result = by_name[field.name]
+        if (result.criticality, result.required_rate) != (
+            field.criticality,
+            field.required_rate,
+        ):
+            raise GateNotPassed(
+                f"the gate report judged {field.name!r} as "
+                f"{result.criticality.value} at {result.required_rate}, but "
+                f"the spec declares {field.criticality.value} at "
+                f"{field.required_rate}. It certifies a policy this run does "
+                "not run under."
+            )
     if report.decision != GateDecision.ADOPT:
         raise GateNotPassed(
             f"gate decision is {report.decision.value!r}; execution requires " "'adopt'"
@@ -2029,14 +2057,15 @@ def plan_target_migration(
     if add:
         columns = ", ".join(f"{name} {sql_type}" for name, sql_type in add)
         statements.append(f"ALTER TABLE {spec.target_table} ADD COLUMNS ({columns})")
-    if any(name == "ai_release_sequence" for name, _ in add):
-        # Rows that predate sequencing get -1 rather than NULL. The SQL
-        # comparisons coalesce anyway, but a real value keeps the column
-        # honest for anyone reading the table directly.
-        statements.append(
-            f"UPDATE {spec.target_table} SET ai_release_sequence = -1 "
-            "WHERE ai_release_sequence IS NULL"
-        )
+    for ordering_column in ("ai_release_sequence", "ai_source_version"):
+        if any(name == ordering_column for name, _ in add):
+            # Rows that predate sequencing get -1 rather than NULL. The SQL
+            # comparisons coalesce anyway, but a real value keeps the column
+            # honest for anyone reading the table directly.
+            statements.append(
+                f"UPDATE {spec.target_table} SET {ordering_column} = -1 "
+                f"WHERE {ordering_column} IS NULL"
+            )
     for column in stale:
         # Emitted for a human to run deliberately, never executed for them.
         statements.append(
@@ -2142,6 +2171,35 @@ def target_columns(spec: BatchInferenceSpec) -> tuple[tuple[str, str], ...]:
     return tuple(columns)
 
 
+def restart_predicate_sql(
+    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+) -> str:
+    """The "already done" test, as SQL, for a ``done`` / ``source`` pair.
+
+    Exposed because anything that *counts* pending rows has to agree with
+    what the run will actually process, and a hand-copied mirror of this
+    predicate drifts the moment the real one changes — it silently did,
+    twice, while the ordering rules were being worked out. One string,
+    every caller.
+    """
+    sequence = int(spec.release_sequence)
+    version = snapshot.version if snapshot else -1
+    return f"""
+      AND (
+        coalesce(done.ai_release_sequence, -1) > {sequence}
+        OR (
+          coalesce(done.ai_release_sequence, -1) = {sequence}
+          AND coalesce(done.ai_source_version, -1) > {version}
+        )
+        OR (
+          done.ai_source_digest = sha2(source.{spec.document_column}, 256)
+          AND done.ai_spec_digest = {sql_string_literal(spec.spec_digest)}
+          AND done.ai_model_version = {sql_string_literal(spec.model_version)}
+          AND done.ai_prompt_version = {sql_string_literal(spec.prompt_version)}
+        )
+      )"""
+
+
 def build_execute_sql(
     spec: BatchInferenceSpec,
     *,
@@ -2197,6 +2255,18 @@ def build_execute_sql(
       anti-join also treats a strictly newer sequence as done, and the
       MERGE updates a row only when its sequence is not being lowered.
 
+      **Ordering is on the pair ``(release_sequence, source_version)``.**
+      The release sequence orders *what ran*; it says nothing about
+      *which rows it ran over*. Two cycles of the same spec — a nightly
+      job, unchanged for months — snapshot different source versions and
+      therefore tie on sequence alone, and a delayed Monday run finishing
+      after Tuesday's would overwrite Tuesday's output for every document
+      edited in between: the changed digest makes those rows pending, so
+      they are re-inferred and written straight over newer content. The
+      source version breaks that tie in both directions — the anti-join
+      treats a newer snapshot of the same release as done, and the MERGE
+      refuses to lower it.
+
       A strictly newer sequence excludes the row **on its own**, before
       content is considered. Testing the content digest first looks
       equivalent and is not: when the newer release landed the key from
@@ -2226,7 +2296,10 @@ def build_execute_sql(
             "the report was produced for a different spec revision; its "
             "source snapshot does not describe this run"
         )
-    source = _source_relation(spec, report.source_snapshot if report else None)
+    snapshot = report.source_snapshot if report else None
+    source = _source_relation(spec, snapshot)
+    source_version = snapshot.version if snapshot else -1
+    restart = restart_predicate_sql(spec, snapshot)
     # The abstention rule from `apply_abstention_policy`, expressed in SQL
     # so that what the gate measured is exactly what lands: a field the
     # model listed as abstained, or answered below the declared threshold,
@@ -2295,16 +2368,7 @@ USING (
     SELECT source.{spec.key_column}, source.{spec.document_column}{pending_strata}
     FROM {source} AS source
     LEFT ANTI JOIN {spec.target_table} AS done
-      ON source.{spec.key_column} = done.{spec.key_column}
-     AND (
-       coalesce(done.ai_release_sequence, -1) > {sequence}
-       OR (
-         done.ai_source_digest = sha2(source.{spec.document_column}, 256)
-         AND done.ai_spec_digest = {digest_literal}
-         AND done.ai_model_version = {model_literal}
-         AND done.ai_prompt_version = {prompt_literal}
-       )
-     )
+      ON source.{spec.key_column} = done.{spec.key_column}{restart}
   ),
   scored AS (
     SELECT
@@ -2342,13 +2406,20 @@ USING (
     {model_literal} AS ai_model_version,
     {prompt_literal} AS ai_prompt_version,
     {sequence} AS ai_release_sequence,
+    {source_version} AS ai_source_version,
     {source_digest} AS ai_source_digest,
     current_timestamp() AS ai_executed_at
   FROM parsed
 ) AS source
 ON target.{spec.key_column} = source.{spec.key_column}
 WHEN MATCHED
-  AND coalesce(target.ai_release_sequence, -1) <= source.ai_release_sequence
+  AND (
+    coalesce(target.ai_release_sequence, -1) < source.ai_release_sequence
+    OR (
+      coalesce(target.ai_release_sequence, -1) = source.ai_release_sequence
+      AND coalesce(target.ai_source_version, -1) <= source.ai_source_version
+    )
+  )
   THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *"""
 

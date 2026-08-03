@@ -115,7 +115,13 @@ abstention path) then passes the same gate on the same terms.
     metadata rather than model output, so a corrected label is resynced by
     `resync_strata_sql` instead of triggering a paid re-run that would
     regenerate identical values — and, like the MERGE, it refuses to
-    relabel a row a newer release owns. A strictly newer `release_sequence`
+    relabel a row a newer release owns. Ordering is on the **pair**
+    `(release_sequence, source_version)`: the release says *what* ran, the
+    source version says *over which rows*, and neither alone orders two
+    runs. A nightly job unchanged for months ties with itself on sequence,
+    so without the version a delayed Monday run finishing after Tuesday's
+    would write its older content over Tuesday's for every document edited
+    in between. A strictly newer `release_sequence`
     counts as done **on its own, before the content digest is considered**;
     the MERGE separately updates a row only when its sequence is not being
     lowered, so an old job resuming after a newer release has landed cannot
@@ -162,7 +168,12 @@ abstention path) then passes the same gate on the same terms.
 
     `require_executable` closes the loop by binding those scores to the
     spec — the one thing a self-contained report cannot know about itself —
-    and by checking the report judged every field. Each link is computed by
+    by checking the report judged every field, and by checking it judged
+    them under *this* spec's policy. The spec owns policy, the report owns
+    outcomes: a persisted report that quietly lowers a high field's
+    required rate, or relabels it medium so the gate stops being
+    worst-stratum, derives `adopt` perfectly honestly from real evidence
+    and is refused here rather than by any internal check. Each link is computed by
     the *same* function that produced it (`_gate_field`, `_weighted_row`),
     never a second implementation written for checking: two implementations
     are two things to keep in sync, and the drift between them is the bug.

@@ -930,7 +930,7 @@ display(naive_aggregate)
 
 mlflow.set_experiment("/Shared/governed-batch-inference-demo")
 
-report_v1 = gbi.evaluate_gate(spec_v1, scores_v1)
+report_v1 = gbi.evaluate_gate(spec_v1, scores_v1, source_snapshot=SOURCE_SNAPSHOT)
 with mlflow.start_run(run_name=f"{spec_v1.name}-prompt-1.0.0-gate"):
     gbi.log_gate_evidence(spec_v1, estimate_v1, allocation, scores_v1, report_v1)
 
@@ -1052,8 +1052,12 @@ display(
 
 # COMMAND ----------
 
+# Both refusals below pass the snapshot deliberately. Omitting it would
+# also raise EvidenceMismatch — for the wrong reason — and these cells
+# would still print a refusal while demonstrating nothing.
 try:
-    gbi.evaluate_gate(spec_v2, scores_v1)  # v1's numbers, v2's spec
+    # v1's numbers, v2's spec
+    gbi.evaluate_gate(spec_v2, scores_v1, source_snapshot=SOURCE_SNAPSHOT)
 except gbi.EvidenceMismatch as refusal:
     print(f"EvidenceMismatch: {refusal}\n")
 
@@ -1061,7 +1065,7 @@ except gbi.EvidenceMismatch as refusal:
 # refused on the same principle.
 mislabelled = (scores_v2[0].model_copy(update={"confidence": 0.99}),) + scores_v2[1:]
 try:
-    gbi.evaluate_gate(spec_v2, mislabelled)
+    gbi.evaluate_gate(spec_v2, mislabelled, source_snapshot=SOURCE_SNAPSHOT)
 except gbi.EvidenceMismatch as refusal:
     print(f"EvidenceMismatch: {refusal}")
 
@@ -1095,7 +1099,9 @@ spec_tier1 = gbi.BatchInferenceSpec.model_validate(
 # Same labelled sample, same model outputs, different spec revision — so
 # the scores are re-derived for the release actually being gated.
 tier1_report = gbi.evaluate_gate(
-    spec_tier1, gbi.score_extraction(records_v2, spec_tier1, population)
+    spec_tier1,
+    gbi.score_extraction(records_v2, spec_tier1, population),
+    source_snapshot=SOURCE_SNAPSHOT,
 )
 print(f"tier 1 decision with fully passing evidence: {tier1_report.decision.value}")
 for obligation in tier1_report.human_review_obligations:
@@ -1195,24 +1201,14 @@ for statement in migration.statements:
 execute_sql = gbi.build_execute_sql(spec_v2, run_id=RUN_ID, report=report_v2)
 print(execute_sql[:1200] + "\n…")
 
-# "Pending" is release-aware: rows already landed *by this release* are
-# done; rows landed by an older prompt or model are not.
-# Mirrors the builder's predicate: a row is done if this release landed
-# it, or if a *newer* release already did — an older job must never claim
-# newer rows as unprocessed and overwrite them.
-release_predicate = f"""
-      AND done.ai_source_digest = sha2(source.doc_text, 256)
-      AND (
-        (
-          done.ai_spec_digest = {gbi.sql_string_literal(spec_v2.spec_digest)}
-          AND done.ai_model_version =
-            {gbi.sql_string_literal(spec_v2.model_version)}
-          AND done.ai_prompt_version =
-            {gbi.sql_string_literal(spec_v2.prompt_version)}
-        )
-        OR coalesce(done.ai_release_sequence, -1) > {spec_v2.release_sequence}
-      )
-"""
+# "Pending" is release-aware: a row is done if this release landed it
+# from this content, or if a newer release — or a newer snapshot of this
+# one — already did. Taken from the module rather than restated here, so
+# the count always describes the set the run will actually process. A
+# hand-written copy of this predicate drifted from the real one twice
+# while these ordering rules were being settled.
+release_predicate = gbi.restart_predicate_sql(spec_v2, SOURCE_SNAPSHOT)
+
 # Pinned like everything else since the snapshot was captured: counting
 # pending rows against a moved table would report work the run is not
 # authorised to do.
@@ -1280,6 +1276,9 @@ else:
         record["ai_model_version"] = spec_v2.model_version
         record["ai_prompt_version"] = spec_v2.prompt_version
         record["ai_release_sequence"] = spec_v2.release_sequence
+        # Ordering is on the pair: the release says what ran, this says
+        # over which rows. Two cycles of one release tie without it.
+        record["ai_source_version"] = SOURCE_SNAPSHOT.version
         # Matches Spark's sha2(col, 256): both hash the UTF-8 bytes.
         record["ai_source_digest"] = hashlib.sha256(
             row.doc_text.encode("utf-8")
@@ -1308,8 +1307,16 @@ else:
         USING simulated_scored AS source
         ON target.doc_id = source.doc_id
         WHEN MATCHED
-          AND coalesce(target.ai_release_sequence, -1)
-              <= source.ai_release_sequence
+          AND (
+            coalesce(target.ai_release_sequence, -1)
+                < source.ai_release_sequence
+            OR (
+              coalesce(target.ai_release_sequence, -1)
+                  = source.ai_release_sequence
+              AND coalesce(target.ai_source_version, -1)
+                  <= source.ai_source_version
+            )
+          )
           THEN UPDATE SET *
         WHEN NOT MATCHED THEN INSERT *
         """)
