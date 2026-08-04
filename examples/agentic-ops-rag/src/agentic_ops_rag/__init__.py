@@ -10,7 +10,11 @@ from agentic_ops_rag.contracts import (
 )
 from agentic_ops_rag.evaluation import benchmark, release_gate
 from agentic_ops_rag.offline import OfflineOperationsRetriever, load_documents
-from agentic_ops_rag.pipeline import OperationsRAGPipeline, route_query
+from agentic_ops_rag.pipeline import (
+    OperationsRAGPipeline,
+    authorized_search,
+    route_query,
+)
 
 __all__ = [
     "EvaluationCase",
@@ -21,6 +25,7 @@ __all__ = [
     "QueryKind",
     "RetrievalMode",
     "benchmark",
+    "authorized_search",
     "load_documents",
     "release_gate",
     "route_query",

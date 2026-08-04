@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from aai_core.providers import SearchResult
+
 ROOT = Path(__file__).resolve().parents[1]
 COURSE = ROOT / "examples" / "agentic-ops-rag"
 SOURCE = COURSE / "src"
@@ -48,6 +50,7 @@ from agentic_ops_rag import (  # noqa: E402
     benchmark,
     load_documents,
     route_query,
+    structural_chunks,
 )
 from agentic_ops_rag.evaluation import load_cases, release_gate  # noqa: E402
 
@@ -76,6 +79,10 @@ def test_configuration_is_portable_keyless_and_provider_swappable():
         databricks["providers"]["retrievers"]["operations-knowledge"]["provider"]
         == "databricks_ai_search"
     )
+    assert (
+        "allowed_groups"
+        in databricks["providers"]["retrievers"]["operations-knowledge"]["columns"]
+    )
     combined = azure_path.read_text() + databricks_path.read_text()
     assert "replace-with" in combined
     assert "api_key:" not in combined
@@ -95,6 +102,9 @@ def test_default_session_is_safe_offline_and_requires_connected_opt_in():
         assert "disabled" in str(error)
     else:
         raise AssertionError("connected providers must require explicit opt-in")
+
+    assert setup._contains_placeholder({"index": "replace_with_index"})
+    assert setup._contains_placeholder({"index": "replace-with-index"})
 
 
 def test_synthetic_corpus_has_access_scope_provenance_and_decoys():
@@ -122,6 +132,15 @@ def test_routing_access_scope_secret_refusal_and_action_boundary():
         allowed_groups=("ops-payments",),
     )
     assert "other-payments-503" not in scoped.retrieved_document_ids
+
+    unscoped = pipeline.invoke(
+        "Explain ERR-PAY-503",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=(),
+    )
+    assert unscoped.abstained
+    assert not unscoped.retrieved_document_ids
 
     secret = pipeline.invoke(
         "What is the root password?",
@@ -157,6 +176,57 @@ def test_normalized_results_have_mlflow_retriever_document_fields():
         assert document["page_content"]
         assert document["metadata"]["doc_uri"].startswith("synthetic://")
         assert document["metadata"]["chunk_id"]
+
+
+def test_connected_provider_uses_access_prefilter_and_normalized_score():
+    class ConnectedRetriever:
+        provider = "azure_ai_search"
+
+        def __init__(self) -> None:
+            self.options = None
+
+        def search(self, query, **options):
+            self.options = options
+            return [
+                SearchResult(
+                    document_id="connected-result",
+                    content="Authorized connected evidence.",
+                    score=0.42,
+                    source_uri="synthetic://connected/result",
+                    chunk_id="connected-chunk",
+                    metadata={"tenant_id": "tenant-alpha"},
+                    provider=self.provider,
+                )
+            ]
+
+    retriever = ConnectedRetriever()
+    result = OperationsRAGPipeline(retriever).invoke(
+        "Explain the connected result",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
+    )
+
+    assert not result.abstained
+    assert result.citations == ("connected-result",)
+    assert retriever.options["filters"] is None
+    security_filter = retriever.options["provider_options"]["filter"]
+    assert "allowed_groups/any" in security_filter
+    assert "ops-payments" in security_filter
+
+
+def test_structural_chunking_bounds_a_single_oversized_paragraph():
+    markdown = "# Recovery\n\n" + " ".join(f"step-{index}" for index in range(80))
+    chunks = structural_chunks(
+        markdown,
+        document_id="runbook",
+        doc_uri="synthetic://runbook",
+        max_characters=100,
+    )
+
+    assert len(chunks) > 1
+    assert all(len(chunk.page_content) <= 100 for chunk in chunks)
+    assert " ".join(chunk.page_content for chunk in chunks).split() == markdown.split()
 
 
 def test_fixed_cases_cover_retrieval_abstention_access_and_action_policy():
@@ -228,6 +298,18 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
                 "exec",
                 flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
             )
+
+    evaluation_notebook = json.loads(
+        (
+            COURSE / "notebooks" / "04_mlflow_tracing_guardrails_and_evaluation.ipynb"
+        ).read_text(encoding="utf-8")
+    )
+    evaluation_source = "\n".join(
+        _source(cell) for cell in evaluation_notebook["cells"]
+    )
+    assert "retrieved = authorized_search(" in evaluation_source
+    assert "allowed_groups=allowed_groups" in evaluation_source
+    assert '"allowed_groups": list(case.allowed_groups)' in evaluation_source
 
 
 def test_all_default_notebook_paths_execute_without_network_or_credentials():

@@ -218,9 +218,7 @@ class OfflineOperationsRetriever:
             expected = filters.get(field_name)
             if expected is not None and getattr(document, field_name) != expected:
                 return False
-        return not allowed_groups or bool(
-            set(document.allowed_groups).intersection(allowed_groups)
-        )
+        return bool(set(document.allowed_groups).intersection(allowed_groups))
 
     @staticmethod
     def _semantic_rerank(

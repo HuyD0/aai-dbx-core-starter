@@ -62,7 +62,12 @@ def structural_chunks(
 
 
 def _bounded_parts(text: str, maximum: int) -> list[str]:
-    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph]
+    paragraphs = [
+        part
+        for paragraph in text.split("\n\n")
+        if paragraph.strip()
+        for part in _split_oversized_paragraph(paragraph.strip(), maximum)
+    ]
     parts: list[str] = []
     current = ""
     for paragraph in paragraphs:
@@ -75,3 +80,26 @@ def _bounded_parts(text: str, maximum: int) -> list[str]:
     if current:
         parts.append(current)
     return parts or [text]
+
+
+def _split_oversized_paragraph(paragraph: str, maximum: int) -> list[str]:
+    """Split one long block at a stable whitespace boundary when possible."""
+
+    parts: list[str] = []
+    remaining = paragraph
+    while len(remaining) > maximum:
+        boundary = max(
+            remaining.rfind("\n", 0, maximum + 1),
+            remaining.rfind(" ", 0, maximum + 1),
+        )
+        if boundary <= 0:
+            boundary = maximum
+        part = remaining[:boundary].rstrip()
+        if not part:
+            part = remaining[:maximum]
+            boundary = maximum
+        parts.append(part)
+        remaining = remaining[boundary:].lstrip()
+    if remaining:
+        parts.append(remaining)
+    return parts

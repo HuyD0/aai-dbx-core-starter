@@ -74,6 +74,14 @@ not enter ranking, tracing, or generation. Stable security trimming uses
 filterable identity/scope fields. Native document ACL enforcement continues to
 have preview surfaces and requires a separate platform decision.
 
+This workshop's connected helper maps that policy explicitly. Azure AI Search
+uses `allowed_groups/any(...search.in(...))` over a filterable string
+collection. Databricks AI Search standard endpoints support `ARRAY<STRING>`
+contains-any filters. Storage-optimized endpoints do not currently support
+array filtering, so the helper fails closed until the platform publishes a
+compatible scalar ACL field; it never falls back to post-filtering retrieved
+content in application code.
+
 The stable 2026 API also supports query-time integrated vectorization through a
 configured vectorizer. This SDK currently uses an explicit client-side query
 embedding. A future adapter may add a typed `VectorizableTextQuery` mode, but it
@@ -88,6 +96,7 @@ References:
 - [Vector filtering](https://learn.microsoft.com/en-us/azure/search/vector-search-filters)
 - [Security trimming](https://learn.microsoft.com/en-us/azure/search/search-security-trimming-for-azure-search)
 - [Keyless client authentication](https://learn.microsoft.com/en-us/azure/search/search-security-rbac-client-code)
+- [Databricks AI Search filtering](https://docs.databricks.com/aws/en/ai-search/filtering-guide)
 
 Agentic retrieval adds query planning and knowledge-base capabilities, but parts
 of the end-to-end experience still depend on preview APIs. Treat it as an

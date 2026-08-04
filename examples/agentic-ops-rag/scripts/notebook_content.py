@@ -725,13 +725,18 @@ mlflow_run_id
 `mlflow.genai.evaluate()` is distinct from classic model evaluation. The RAG
 judges need real traces; RetrievalSufficiency also needs expectations. The judge
 is explicitly routed to a governed Databricks endpoint. Run this only after the
-dataset, trace policy, model, index, and cost owner are approved.
+dataset, trace policy, model, index, and cost owner are approved. The connected
+path uses the same fail-closed authorization helper as the application: Azure
+uses an OData collection security filter, while Databricks standard endpoints
+use an ARRAY filter. Storage-optimized Databricks indexes must expose a
+platform-approved scalar ACL field before this lab can run.
 """),
         c("""
 RUN_CONNECTED = False
 connected_evaluation = None
 if RUN_CONNECTED:
     import mlflow
+    from agentic_ops_rag import authorized_search
     from mlflow.genai.scorers import (
         RetrievalGroundedness,
         RetrievalRelevance,
@@ -741,12 +746,20 @@ if RUN_CONNECTED:
 
     resources = session.connected_components(allow_network=True)
 
-    def predict_fn(question: str) -> str:
-        retrieved = resources["retriever"].search(
+    def predict_fn(
+        question: str,
+        tenant_id: str,
+        region: str,
+        allowed_groups: list[str],
+    ) -> str:
+        retrieved = authorized_search(
+            resources["retriever"],
             question,
+            tenant_id=tenant_id,
+            region=region,
+            allowed_groups=allowed_groups,
             mode="hybrid",
             top_k=8,
-            filters={"tenant_id": "tenant-alpha", "region": "eastus"},
         )
         context = mlflow_documents(retrieved)
         response = resources["model"].generate(
@@ -761,7 +774,12 @@ if RUN_CONNECTED:
     judge_model = "endpoints:/replace-with-governed-judge-endpoint"
     evaluation_data = [
         {
-            "inputs": {"question": case.question},
+            "inputs": {
+                "question": case.question,
+                "tenant_id": case.tenant_id,
+                "region": case.region,
+                "allowed_groups": list(case.allowed_groups),
+            },
             "expectations": {
                 "expected_document_ids": list(case.expected_document_ids),
             },

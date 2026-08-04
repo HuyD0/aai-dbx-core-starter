@@ -13,7 +13,7 @@ from aai_core import PlatformContext, bootstrap
 _LOGICAL_MODEL = "operations-chat"
 _LOGICAL_EMBEDDING = "operations-embedding"
 _LOGICAL_RETRIEVER = "operations-knowledge"
-_PLACEHOLDER = "replace-with"
+_PLACEHOLDERS = ("replace-with", "replace_with")
 
 
 @dataclass(frozen=True)
@@ -137,4 +137,6 @@ def _contains_placeholder(value: Any) -> bool:
         return any(_contains_placeholder(item) for item in value.values())
     if isinstance(value, list | tuple):
         return any(_contains_placeholder(item) for item in value)
-    return isinstance(value, str) and _PLACEHOLDER in value
+    return isinstance(value, str) and any(
+        placeholder in value.lower() for placeholder in _PLACEHOLDERS
+    )

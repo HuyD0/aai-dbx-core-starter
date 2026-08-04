@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from aai_core.providers import SearchResult
+from aai_core.providers import SearchResult, UnsupportedCapabilityError
 from agentic_ops_rag.contracts import PipelineResult, QueryKind, RetrievalMode
 
 _IDENTIFIER = re.compile(r"\b(?:ERR|INC|OPS|RUN)-[A-Z0-9-]{2,}\b", re.IGNORECASE)
@@ -17,6 +17,97 @@ _SENSITIVE_REQUEST = re.compile(
     r"\b(?:api key|client secret|password|private key|root credential|token)\b",
     re.IGNORECASE,
 )
+
+
+def authorized_search(
+    retriever,
+    query: str,
+    *,
+    tenant_id: str,
+    region: str,
+    allowed_groups: Sequence[str],
+    mode: RetrievalMode | str,
+    top_k: int,
+    semantic_rerank: bool = False,
+) -> list[SearchResult]:
+    """Search with a provider-native, fail-closed authorization pre-filter."""
+
+    groups = tuple(
+        dict.fromkeys(
+            str(group).strip() for group in allowed_groups if str(group).strip()
+        )
+    )
+    if not groups:
+        return []
+
+    selected_mode = RetrievalMode(mode).value
+    provider = str(getattr(retriever, "provider", ""))
+    filters: dict[str, object] = {"tenant_id": tenant_id, "region": region}
+
+    if provider == "offline_fixture":
+        return retriever.search(
+            query,
+            top_k=top_k,
+            filters=filters,
+            mode=selected_mode,
+            provider_options={
+                "allowed_groups": groups,
+                "semantic_rerank": semantic_rerank,
+            },
+        )
+
+    if semantic_rerank:
+        raise UnsupportedCapabilityError(
+            "semantic_rerank is an offline teaching option; configure a "
+            "provider-native reranker explicitly for connected retrieval"
+        )
+
+    if provider == "azure_ai_search":
+        return retriever.search(
+            query,
+            top_k=top_k,
+            filters=None,
+            mode=selected_mode,
+            provider_options={
+                "filter": _azure_access_filter(tenant_id, region, groups)
+            },
+        )
+
+    if provider == "databricks_ai_search":
+        # ARRAY filters are supported by standard AI Search endpoints. A
+        # storage-optimized endpoint rejects this expression, which is a safe
+        # failure until the platform supplies a compatible scalar ACL field.
+        filters["allowed_groups"] = list(groups)
+        return retriever.search(
+            query,
+            top_k=top_k,
+            filters=filters,
+            mode=selected_mode,
+        )
+
+    raise UnsupportedCapabilityError(
+        f"Retriever provider {provider or '<unknown>'!r} has no approved access "
+        "filter mapping; refusing connected retrieval"
+    )
+
+
+def _azure_access_filter(
+    tenant_id: str, region: str, allowed_groups: Sequence[str]
+) -> str:
+    delimiter = "|"
+    if any(delimiter in group for group in allowed_groups):
+        raise ValueError(f"allowed group identifiers must not contain {delimiter!r}")
+    group_values = delimiter.join(allowed_groups)
+    return (
+        f"tenant_id eq {_odata_literal(tenant_id)} and "
+        f"region eq {_odata_literal(region)} and "
+        "allowed_groups/any(group:search.in("
+        f"group, {_odata_literal(group_values)}, {_odata_literal(delimiter)}))"
+    )
+
+
+def _odata_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def route_query(query: str) -> QueryKind:
@@ -69,15 +160,15 @@ class OperationsRAGPipeline:
                 abstained=True,
                 latency_ms=4.0,
             )
-        results = self.retriever.search(
+        results = authorized_search(
+            self.retriever,
             query,
+            tenant_id=tenant_id,
+            region=region,
+            allowed_groups=allowed_groups,
             top_k=candidate_k,
-            filters={"tenant_id": tenant_id, "region": region},
             mode=selected_mode.value,
-            provider_options={
-                "allowed_groups": tuple(allowed_groups),
-                "semantic_rerank": semantic_rerank,
-            },
+            semantic_rerank=semantic_rerank,
         )
         ranked = self._application_rerank(query, results)[:final_k]
         answerable = self._has_support(ranked)
@@ -153,9 +244,22 @@ class OperationsRAGPipeline:
         if not results:
             return False
         top = results[0]
-        lexical = float(top.metadata.get("lexical_score", 0.0))
-        semantic = float(top.metadata.get("semantic_score", 0.0))
-        return lexical >= 0.2 or semantic >= 0.18
+        if "lexical_score" in top.metadata or "semantic_score" in top.metadata:
+            lexical = float(top.metadata.get("lexical_score", 0.0))
+            semantic = float(top.metadata.get("semantic_score", 0.0))
+            return lexical >= 0.2 or semantic >= 0.18
+
+        # Connected provider scores are ranking signals with provider-specific
+        # scales, so zero is treated only as missing support—not as a portable
+        # quality threshold. Requiring normalized evidence fields keeps the
+        # result usable by MLflow retriever spans and downstream judges.
+        return (
+            top.score is not None
+            and float(top.score) > 0.0
+            and bool(top.content.strip())
+            and bool(top.source_uri)
+            and bool(top.chunk_id)
+        )
 
     @staticmethod
     def _proposed_action(query: str) -> str:
