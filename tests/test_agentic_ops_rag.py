@@ -105,6 +105,12 @@ def test_default_session_is_safe_offline_and_requires_connected_opt_in():
 
     assert setup._contains_placeholder({"index": "replace_with_index"})
     assert setup._contains_placeholder({"index": "replace-with-index"})
+    try:
+        session.judge_model_uri()
+    except RuntimeError as error:
+        assert "placeholder" in str(error)
+    else:
+        raise AssertionError("judge endpoint placeholders must fail before evaluation")
 
 
 def test_synthetic_corpus_has_access_scope_provenance_and_decoys():
@@ -289,6 +295,7 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
         assert "!pip" not in source
         assert "curl |" not in source
         assert "getpass" not in source
+        assert 'resources["retriever"].search(' not in source
         for position, cell in enumerate(code_cells):
             assert cell["execution_count"] is None
             assert cell["outputs"] == []
@@ -310,6 +317,7 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "retrieved = authorized_search(" in evaluation_source
     assert "allowed_groups=allowed_groups" in evaluation_source
     assert '"allowed_groups": list(case.allowed_groups)' in evaluation_source
+    assert "judge_model = session.judge_model_uri()" in evaluation_source
 
 
 def test_all_default_notebook_paths_execute_without_network_or_credentials():

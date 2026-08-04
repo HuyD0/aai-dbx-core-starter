@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from aai_core.providers import SearchResult, UnsupportedCapabilityError
 from agentic_ops_rag.contracts import PipelineResult, QueryKind, RetrievalMode
@@ -29,6 +29,7 @@ def authorized_search(
     mode: RetrievalMode | str,
     top_k: int,
     semantic_rerank: bool = False,
+    provider_options: Mapping[str, object] | None = None,
 ) -> list[SearchResult]:
     """Search with a provider-native, fail-closed authorization pre-filter."""
 
@@ -43,17 +44,27 @@ def authorized_search(
     selected_mode = RetrievalMode(mode).value
     provider = str(getattr(retriever, "provider", ""))
     filters: dict[str, object] = {"tenant_id": tenant_id, "region": region}
+    native_options = dict(provider_options or {})
+    controlled = {"filter", "filters"}.intersection(native_options)
+    if controlled:
+        raise ValueError(
+            "provider_options cannot override authorization filters: "
+            + ", ".join(sorted(controlled))
+        )
 
     if provider == "offline_fixture":
+        native_options.update(
+            {
+                "allowed_groups": groups,
+                "semantic_rerank": semantic_rerank,
+            }
+        )
         return retriever.search(
             query,
             top_k=top_k,
             filters=filters,
             mode=selected_mode,
-            provider_options={
-                "allowed_groups": groups,
-                "semantic_rerank": semantic_rerank,
-            },
+            provider_options=native_options,
         )
 
     if semantic_rerank:
@@ -63,14 +74,13 @@ def authorized_search(
         )
 
     if provider == "azure_ai_search":
+        native_options["filter"] = _azure_access_filter(tenant_id, region, groups)
         return retriever.search(
             query,
             top_k=top_k,
             filters=None,
             mode=selected_mode,
-            provider_options={
-                "filter": _azure_access_filter(tenant_id, region, groups)
-            },
+            provider_options=native_options,
         )
 
     if provider == "databricks_ai_search":
@@ -83,6 +93,7 @@ def authorized_search(
             top_k=top_k,
             filters=filters,
             mode=selected_mode,
+            provider_options=native_options or None,
         )
 
     raise UnsupportedCapabilityError(

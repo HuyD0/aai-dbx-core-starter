@@ -71,6 +71,23 @@ class WorkshopSession:
             "retriever": self.context.providers.retriever(_LOGICAL_RETRIEVER),
         }
 
+    def judge_model_uri(self) -> str:
+        """Resolve the optional MLflow judge URI from its logical resource."""
+
+        config = self.context.settings.models.get("judge-model")
+        if config is None:
+            raise RuntimeError("Workshop configuration is missing logical judge-model")
+        if _contains_placeholder(config):
+            raise RuntimeError(
+                "Logical judge-model still contains a placeholder deployment"
+            )
+        if config.get("provider") != "databricks":
+            raise RuntimeError("MLflow judges require a governed Databricks endpoint")
+        deployment = str(config.get("deployment", "")).strip()
+        if not deployment:
+            raise RuntimeError("Logical judge-model has no deployment")
+        return f"endpoints:/{deployment}"
+
 
 def find_course_root(start: str | Path | None = None) -> Path:
     base = Path(start or Path.cwd()).resolve()

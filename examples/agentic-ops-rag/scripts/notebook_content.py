@@ -238,22 +238,27 @@ action.model_dump(mode="json")
         m("""
 ## Connected provider path
 
-The real adapter builds a pre-retrieval tenant filter and emits normalized
-MLflow retriever documents. More complex group filters are provider-specific;
-use the native client escape hatch only after the security contract is reviewed.
-This app runs as its service principal and does not pretend to verify a user's
-own access.
+The connected helper builds a pre-retrieval tenant, region, and group filter and
+emits normalized MLflow retriever documents. It maps the common authorization
+contract to each supported provider and fails closed for unsupported filter
+shapes. This app runs as its service principal and does not pretend to verify a
+developer's own access.
 """),
         c("""
 RUN_CONNECTED = False
 cloud_results = None
 if RUN_CONNECTED:
+    from agentic_ops_rag import authorized_search
+
     resources = session.connected_components(allow_network=True)
-    cloud_results = resources["retriever"].search(
+    cloud_results = authorized_search(
+        resources["retriever"],
         "Explain ERR-PAY-503",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
         mode="hybrid",
         top_k=8,
-        filters={"tenant_id": "tenant-alpha", "region": "eastus"},
     )
 cloud_results
 """),
@@ -557,12 +562,17 @@ an optional platform-reviewed extension while parts of it are preview.
 RUN_CONNECTED = False
 azure_context = None
 if RUN_CONNECTED:
+    from agentic_ops_rag import authorized_search
+
     resources = session.connected_components(allow_network=True)
-    candidates = resources["retriever"].search(
+    candidates = authorized_search(
+        resources["retriever"],
         "Checkout went down after a deployment",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
         mode="hybrid",
         top_k=candidate_k,
-        filters={"tenant_id": "tenant-alpha", "region": "eastus"},
         provider_options={
             "query_type": "semantic",
             "semantic_configuration_name": "operations-semantic",
@@ -771,7 +781,7 @@ if RUN_CONNECTED:
         )
         return response.content
 
-    judge_model = "endpoints:/replace-with-governed-judge-endpoint"
+    judge_model = session.judge_model_uri()
     evaluation_data = [
         {
             "inputs": {
