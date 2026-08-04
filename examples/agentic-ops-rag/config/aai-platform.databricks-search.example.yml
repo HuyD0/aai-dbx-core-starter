@@ -1,0 +1,47 @@
+platform:
+  application: operations-rag-assistant
+  project: agentic-ops-rag-workshop
+  environment: dev
+  team: platform-ai-learning
+  owner_group: group:platform-ai-learning-owners
+  cost_center: CC-LEARNING
+  data_classification: internal
+  lifecycle: experimental
+  repository: replace-with-owner/replace-with-repository
+  release: workshop-dev
+  tag_schema_version: "1"
+  catalog: replace_with_catalog
+  schema: agentic_ops_rag
+  experiment_name: /Shared/agentic-ops-rag-retrieval-release
+  azure_identity: azure_cli
+
+providers:
+  models:
+    operations-chat:
+      provider: databricks
+      deployment: replace-with-chat-serving-endpoint
+      capabilities:
+        tool_calling: true
+        structured_output: true
+    judge-model:
+      provider: databricks
+      deployment: replace-with-governed-judge-endpoint
+  embeddings:
+    operations-embedding:
+      provider: databricks
+      deployment: replace-with-embedding-serving-endpoint
+      dimensions: 1536
+  retrievers:
+    operations-knowledge:
+      provider: databricks_ai_search
+      endpoint: replace-with-vector-search-endpoint
+      index: replace_with_catalog.agentic_ops_rag.replace_with_index
+      id_field: id
+      content_field: content
+      source_uri_field: source_uri
+      chunk_id_field: chunk_id
+      columns: [id, content, source_uri, chunk_id, tenant_id, region, service, allowed_groups]
+      embedding: operations-embedding
+
+# Secret references only. The workshop needs none by default.
+secrets: {}
