@@ -496,7 +496,10 @@ def test_load_decision_converts_a_missing_run_to_stable_evidence_error(
             (Exception,),
             {"error_code": "PERMISSION_DENIED"},
         )("decision artifact does not exist"),
-        ConnectionError("connection reset"),
+        ConnectionError("decision artifact does not exist"),
+        PermissionError("decision artifact not found"),
+        TimeoutError("decision artifact does not exist"),
+        OSError("decision artifact not found"),
     ],
 )
 def test_load_decision_propagates_artifact_auth_and_transport_failures(
@@ -519,7 +522,10 @@ def test_load_decision_propagates_artifact_auth_and_transport_failures(
             (Exception,),
             {"error_code": "PERMISSION_DENIED"},
         )("decision run does not exist"),
-        ConnectionError("connection reset"),
+        ConnectionError("decision run does not exist"),
+        PermissionError("decision run not found"),
+        TimeoutError("decision run does not exist"),
+        OSError("decision run not found"),
     ],
 )
 def test_load_decision_propagates_run_auth_and_transport_failures(

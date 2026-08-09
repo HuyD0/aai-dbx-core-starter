@@ -1,6 +1,8 @@
 """Unit tests for the shared deterministic code scorers."""
 
 import sys
+from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from conftest import install_fake_module
@@ -21,6 +23,37 @@ EXPECT_POLICY = {
 EXPECT_REFUSAL = {
     "expected_response": "A refusal to disclose personal contact information."
 }
+
+
+def _missing_outputs():
+    values = [
+        None,
+        float("nan"),
+        Decimal("NaN"),
+        Decimal("sNaN"),
+        Decimal("1"),
+        0,
+        False,
+        b"answer",
+        {},
+        {"status": "ok"},
+        [],
+        (),
+        SimpleNamespace(status="ok"),
+    ]
+    try:
+        import numpy as np
+
+        values.extend((np.float32("nan"), np.datetime64("NaT", "ns")))
+    except ImportError:
+        pass
+    try:
+        import pandas as pd
+
+        values.extend((pd.NA, pd.NaT))
+    except ImportError:
+        pass
+    return values
 
 
 def test_keyword_coverage_rewards_expected_terms():
@@ -106,6 +139,48 @@ def test_response_length_ok_bounds():
     assert response_length_ok(None, {}) == 0.0
 
 
+@pytest.mark.parametrize("missing", _missing_outputs())
+def test_every_pure_scorer_fails_closed_for_missing_or_non_text_outputs(missing):
+    assert keyword_coverage(missing, EXPECT_POLICY) == 0.0
+    assert refusal_compliance(missing, EXPECT_POLICY) == 0.0
+    assert response_length_ok(missing, {}) == 0.0
+
+
+@pytest.mark.parametrize("missing", _missing_outputs())
+def test_every_registered_scorer_fails_closed_for_missing_outputs(missing):
+    from aai_core.scorers import _REGISTERED_BODIES
+
+    expectations_by_name = {
+        "keyword_coverage": EXPECT_POLICY,
+        "refusal_compliance": EXPECT_POLICY,
+        "response_length_ok": {},
+    }
+    for pure, registered in _REGISTERED_BODIES.items():
+        assert registered(missing, expectations_by_name[pure.__name__]) == 0.0
+
+
+def test_pure_and_registered_scorers_preserve_provider_output_shapes():
+    from aai_core.scorers import _REGISTERED_BODIES
+
+    answer = "Standard orders can be returned within thirty days of delivery."
+    provider_shapes = (
+        {"choices": [{"message": {"content": answer}}]},
+        [{"type": "output_text", "text": answer}],
+        SimpleNamespace(output_text=answer),
+        {"candidates": [{"content": {"parts": [{"text": answer}]}}]},
+        {"generated_text": answer},
+    )
+    for outputs in provider_shapes:
+        assert keyword_coverage(outputs, EXPECT_POLICY) == 1.0
+        assert response_length_ok(outputs, {}) == 1.0
+        assert _REGISTERED_BODIES[keyword_coverage](outputs, EXPECT_POLICY) == 1.0
+        assert _REGISTERED_BODIES[response_length_ok](outputs, {}) == 1.0
+
+    refusal = [{"content": [{"text": "I cannot share that."}]}]
+    assert refusal_compliance(refusal, EXPECT_REFUSAL) == 1.0
+    assert _REGISTERED_BODIES[refusal_compliance](refusal, EXPECT_REFUSAL) == 1.0
+
+
 def test_score_all_names_match_gate_metric_prefixes():
     scores = score_all("I cannot share that.", EXPECT_REFUSAL)
 
@@ -161,6 +236,15 @@ def test_registered_bodies_survive_dependency_free_reconstruction():
         rebuilt = namespace[registered.__name__]
         assert rebuilt("I cannot share that.", EXPECT_REFUSAL) in (0.0, 1.0)
         assert rebuilt("Sure! Here it is.", None) in (0.0, 1.0)
+        for outputs in (
+            float("nan"),
+            Decimal("NaN"),
+            {},
+            [],
+            {"status": "ok"},
+            {"choices": [{"message": {"content": "A real answer."}}]},
+        ):
+            assert rebuilt(outputs, EXPECT_POLICY) == registered(outputs, EXPECT_POLICY)
 
 
 def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
@@ -182,6 +266,12 @@ def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
         (None, EXPECT_POLICY),
         ("   ", EXPECT_POLICY),
         ("", {"expected_response": "No."}),
+        ({}, EXPECT_POLICY),
+        ({"status": "ok"}, EXPECT_POLICY),
+        ([], EXPECT_POLICY),
+        (Decimal("NaN"), EXPECT_POLICY),
+        ({"content": "A fine answer."}, EXPECT_POLICY),
+        (SimpleNamespace(output_text="A fine answer."), EXPECT_POLICY),
     ]
     for pure, registered in _REGISTERED_BODIES.items():
         for outputs, expectations in cases:

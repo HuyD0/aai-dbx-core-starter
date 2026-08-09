@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import mlflow
@@ -25,9 +24,9 @@ from aai_core.evaluation import (
     GatePolicy,
     MetricRule,
     apply_gate,
+    judge_model_uri,
 )
 from aai_core.prompts import prompt_digest
-from aai_core.providers.types import ProviderConfigurationError
 from aai_core.tracing import TraceIntegration
 from app.agent import ToolAgent
 from app.config import DATASET_NAME, PROMPT_NAME
@@ -67,6 +66,7 @@ def main() -> None:
         parser.error("--prompt-version must be a positive integer")
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     context.configure_tracing(integration=TraceIntegration.SDK)
     version = args.prompt_version
     cases = json.loads(
@@ -75,7 +75,6 @@ def main() -> None:
 
     thresholds = load_thresholds()
     baseline = load_baseline()
-    judge_model = _judge_model_uri(context.settings)
     policy = GatePolicy(
         rules=tuple(thresholds),
         allow_missing_regression_baseline=args.update_baseline and not baseline,
@@ -173,18 +172,6 @@ def main() -> None:
         }
     )
     report.require_passed()
-
-
-def _judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
-    deployment = config.get("deployment")
-    if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError("judge-model requires a deployment")
-    return f"endpoints:/{deployment.strip()}"
 
 
 if __name__ == "__main__":

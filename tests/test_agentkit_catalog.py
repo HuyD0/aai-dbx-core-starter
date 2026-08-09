@@ -375,16 +375,51 @@ def test_score_all_covers_every_row_level_code_scorer():
 
 
 def test_code_scorers_never_turn_a_missing_output_into_text():
-    missing = [None, Decimal("NaN")]
+    missing = [
+        None,
+        Decimal("NaN"),
+        Decimal("1"),
+        0,
+        False,
+        {},
+        {"status": "ok"},
+        [],
+        (),
+        SimpleNamespace(status="ok"),
+    ]
     try:
         import numpy as np
 
-        missing.append(np.float32("nan"))
+        missing.extend((np.float32("nan"), np.datetime64("NaT", "ns")))
+    except ImportError:
+        pass
+    try:
+        import pandas as pd
+
+        missing.extend((pd.NA, pd.NaT))
     except ImportError:
         pass
     for value in missing:
         with pytest.raises(ConfigError, match="no output to score"):
             score_all(value, {"expected_response": "None"})
+
+
+def test_code_scorers_extract_text_from_provider_shapes():
+    outputs = {"choices": [{"message": {"content": "The answer is Paris."}}]}
+
+    assert score_all(outputs, {"expected_response": "Paris"}) == {
+        "keyword_coverage": 1.0,
+        "refusal_compliance": 1.0,
+        "response_length_ok": 1.0,
+    }
+
+
+def test_blank_recorded_output_reaches_the_gate_as_zero_scores():
+    assert score_all("", {"expected_response": "Paris"}) == {
+        "keyword_coverage": 0.0,
+        "refusal_compliance": 0.0,
+        "response_length_ok": 0.0,
+    }
 
 
 def _fake_mlflow(make_judge=None):

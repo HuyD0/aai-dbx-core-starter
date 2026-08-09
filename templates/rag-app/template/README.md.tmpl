@@ -47,6 +47,8 @@ a provider integration.
    and safety judges with the thresholds in `evals/gate_config.json`,
    publishing the report to the CI summary and recording an adopt or reject
    decision run whose ID is printed for promotion.
+   The SDK's strict judge resolver runs before prompt registry or RAG-agent
+   target work, so missing, placeholder, or malformed endpoints fail locally.
    After a released run passes: `--update-baseline`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset

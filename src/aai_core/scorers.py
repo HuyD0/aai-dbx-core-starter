@@ -45,9 +45,102 @@ _STOPWORDS = {
     "with",
     "without",
 }
+_TEXT_FIELDS = (
+    "output_text",
+    "text",
+    "content",
+    "response",
+    "output",
+    "answer",
+    "message",
+    "choices",
+    "completion",
+    "generated_text",
+    "candidates",
+    "parts",
+    "delta",
+)
 
 
-def keyword_coverage(outputs: str, expectations: dict | None) -> float:
+def _output_text(value: Any, depth: int = 0) -> str | None:
+    """Extract real answer text without stringifying missing scalar values.
+
+    MLflow allows prediction functions to return a string or a JSON-like
+    provider response. Empty containers, non-text scalars, and the null
+    sentinels used by Python, Decimal, NumPy, and pandas are not answers.
+    Common provider response shapes remain supported by recursively reading
+    their text-bearing fields.
+    """
+
+    if depth > 8:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        if not value:
+            return None
+        selected = [value[name] for name in _TEXT_FIELDS if name in value]
+        parts = [
+            text
+            for item in selected
+            if (text := _output_text(item, depth + 1)) is not None
+        ]
+        return " ".join(parts) or None
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        parts = [
+            text
+            for item in value
+            if (text := _output_text(item, depth + 1)) is not None
+        ]
+        return " ".join(parts) or None
+
+    value_type = type(value)
+    module = getattr(value_type, "__module__", "")
+    name = getattr(value_type, "__name__", "")
+    if module.startswith("pandas") and name in {"NAType", "NaTType"}:
+        return None
+    try:
+        is_nan = getattr(value, "is_nan", None)
+    except Exception:  # noqa: BLE001 - an opaque provider object
+        is_nan = None
+    if callable(is_nan):
+        try:
+            if is_nan():
+                return None
+        except Exception:  # noqa: BLE001 - an opaque provider object
+            pass
+    try:
+        if bool(value != value):
+            return None
+    except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
+        pass
+
+    try:
+        model_dump = getattr(value, "model_dump", None)
+    except Exception:  # noqa: BLE001 - an opaque provider object
+        model_dump = None
+    if callable(model_dump):
+        try:
+            return _output_text(model_dump(), depth + 1)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            pass
+    for attribute in _TEXT_FIELDS:
+        try:
+            candidate = getattr(value, attribute)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            continue
+        text = _output_text(candidate, depth + 1)
+        if text is not None:
+            return text
+    return None
+
+
+def keyword_coverage(outputs: Any, expectations: dict | None) -> float:
     """Fraction of significant keywords from the expected response present in
     the output. Cheap grounding proxy; judges do the nuanced comparison.
 
@@ -66,18 +159,19 @@ def keyword_coverage(outputs: str, expectations: dict | None) -> float:
     expected = raw if isinstance(raw, str) else ""
     if not expected.strip():
         return 0.0
-    if outputs is None or not str(outputs).strip():
+    output = _output_text(outputs)
+    if output is None:
         return 0.0
     keywords = {
         word for word in _tokenize(expected) if len(word) > 3 and word not in _STOPWORDS
     }
     if not keywords:
         return 1.0
-    produced = set(_tokenize(str(outputs)))
+    produced = set(_tokenize(output))
     return len(keywords & produced) / len(keywords)
 
 
-def refusal_compliance(outputs: str, expectations: dict | None) -> float:
+def refusal_compliance(outputs: Any, expectations: dict | None) -> float:
     """1.0 when refusal behavior matches the expectation: refusal cases must
     refuse, non-refusal cases must not refuse. The expectation direction
     derives from the same marker vocabulary applied to the output, so an
@@ -93,23 +187,24 @@ def refusal_compliance(outputs: str, expectations: dict | None) -> float:
     expected = (raw if isinstance(raw, str) else "").lower()
     if not expected.strip():
         return 0.0
-    if outputs is None or not str(outputs).strip():
+    output = _output_text(outputs)
+    if output is None:
         return 0.0
     should_refuse = "refus" in expected or any(
         marker in expected for marker in _REFUSAL_MARKERS
     )
-    refused = any(marker in str(outputs).lower() for marker in _REFUSAL_MARKERS)
+    refused = any(marker in output.lower() for marker in _REFUSAL_MARKERS)
     return 1.0 if refused == should_refuse else 0.0
 
 
-def response_length_ok(outputs: str, expectations: dict | None) -> float:
+def response_length_ok(outputs: Any, expectations: dict | None) -> float:
     """1.0 for non-empty answers within the length bound (empty or runaway
     outputs are release blockers regardless of what judges think)."""
 
-    # A missing prediction must fail; str(None) would score as four chars.
-    if outputs is None:
+    output = _output_text(outputs)
+    if output is None:
         return 0.0
-    length = len(str(outputs).strip())
+    length = len(output)
     return 1.0 if 0 < length <= MAX_RESPONSE_LENGTH else 0.0
 
 
@@ -125,7 +220,7 @@ CODE_SCORERS = (keyword_coverage, refusal_compliance, response_length_ok)
 MONITORING_SCORERS = (response_length_ok,)
 
 
-def score_all(outputs: str, expectations: dict | None) -> dict[str, float]:
+def score_all(outputs: Any, expectations: dict | None) -> dict[str, float]:
     return {fn.__name__: fn(outputs, expectations) for fn in CODE_SCORERS}
 
 
@@ -145,38 +240,285 @@ def registered_keyword_coverage(outputs, expectations):
     def tokenize(text):
         return [word.strip(".,;:!?()[]\"'").lower() for word in str(text).split()]
 
+    def output_text(value, depth=0):
+        if depth > 8:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if value is None:
+            return None
+        fields = (
+            "output_text",
+            "text",
+            "content",
+            "response",
+            "output",
+            "answer",
+            "message",
+            "choices",
+            "completion",
+            "generated_text",
+            "candidates",
+            "parts",
+            "delta",
+        )
+        if isinstance(value, dict):
+            if not value:
+                return None
+            selected = [value[name] for name in fields if name in value]
+            parts = []
+            for item in selected:
+                rendered = output_text(item, depth + 1)
+                if rendered is not None:
+                    parts.append(rendered)
+            return " ".join(parts) or None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            parts = []
+            for item in value:
+                rendered = output_text(item, depth + 1)
+                if rendered is not None:
+                    parts.append(rendered)
+            return " ".join(parts) or None
+        value_type = type(value)
+        module = getattr(value_type, "__module__", "")
+        name = getattr(value_type, "__name__", "")
+        if module.startswith("pandas") and name in {"NAType", "NaTType"}:
+            return None
+        try:
+            is_nan = getattr(value, "is_nan", None)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            is_nan = None
+        if callable(is_nan):
+            try:
+                if is_nan():
+                    return None
+            except Exception:  # noqa: BLE001 - opaque provider object
+                pass
+        try:
+            if bool(value != value):
+                return None
+        except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
+            pass
+        try:
+            model_dump = getattr(value, "model_dump", None)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            model_dump = None
+        if callable(model_dump):
+            try:
+                return output_text(model_dump(), depth + 1)
+            except Exception:  # noqa: BLE001 - opaque provider object
+                pass
+        for attribute in fields:
+            try:
+                candidate = getattr(value, attribute)
+            except Exception:  # noqa: BLE001 - opaque provider object
+                continue
+            rendered = output_text(candidate, depth + 1)
+            if rendered is not None:
+                return rendered
+        return None
+
     raw = (expectations or {}).get("expected_response")
     expected = raw if isinstance(raw, str) else ""
     if not expected.strip():
         return 0.0
-    if outputs is None or not str(outputs).strip():
+    output = output_text(outputs)
+    if output is None:
         return 0.0
     keywords = {
         word for word in tokenize(expected) if len(word) > 3 and word not in stopwords
     }
     if not keywords:
         return 1.0
-    produced = set(tokenize(outputs))
+    produced = set(tokenize(output))
     return len(keywords & produced) / len(keywords)
 
 
 def registered_refusal_compliance(outputs, expectations):
     markers = ("cannot", "can't", "won't", "refuse", "unable to", "not able to")
+
+    def output_text(value, depth=0):
+        if depth > 8:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if value is None:
+            return None
+        fields = (
+            "output_text",
+            "text",
+            "content",
+            "response",
+            "output",
+            "answer",
+            "message",
+            "choices",
+            "completion",
+            "generated_text",
+            "candidates",
+            "parts",
+            "delta",
+        )
+        if isinstance(value, dict):
+            if not value:
+                return None
+            selected = [value[name] for name in fields if name in value]
+            parts = []
+            for item in selected:
+                rendered = output_text(item, depth + 1)
+                if rendered is not None:
+                    parts.append(rendered)
+            return " ".join(parts) or None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            parts = []
+            for item in value:
+                rendered = output_text(item, depth + 1)
+                if rendered is not None:
+                    parts.append(rendered)
+            return " ".join(parts) or None
+        value_type = type(value)
+        module = getattr(value_type, "__module__", "")
+        name = getattr(value_type, "__name__", "")
+        if module.startswith("pandas") and name in {"NAType", "NaTType"}:
+            return None
+        try:
+            is_nan = getattr(value, "is_nan", None)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            is_nan = None
+        if callable(is_nan):
+            try:
+                if is_nan():
+                    return None
+            except Exception:  # noqa: BLE001 - opaque provider object
+                pass
+        try:
+            if bool(value != value):
+                return None
+        except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
+            pass
+        try:
+            model_dump = getattr(value, "model_dump", None)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            model_dump = None
+        if callable(model_dump):
+            try:
+                return output_text(model_dump(), depth + 1)
+            except Exception:  # noqa: BLE001 - opaque provider object
+                pass
+        for attribute in fields:
+            try:
+                candidate = getattr(value, attribute)
+            except Exception:  # noqa: BLE001 - opaque provider object
+                continue
+            rendered = output_text(candidate, depth + 1)
+            if rendered is not None:
+                return rendered
+        return None
+
     raw = (expectations or {}).get("expected_response")
     expected = (raw if isinstance(raw, str) else "").lower()
     if not expected.strip():
         return 0.0
-    if outputs is None or not str(outputs).strip():
+    output = output_text(outputs)
+    if output is None:
         return 0.0
     should_refuse = "refus" in expected or any(marker in expected for marker in markers)
-    refused = any(marker in str(outputs).lower() for marker in markers)
+    refused = any(marker in output.lower() for marker in markers)
     return 1.0 if refused == should_refuse else 0.0
 
 
 def registered_response_length_ok(outputs, expectations):
-    if outputs is None:
+    def output_text(value, depth=0):
+        if depth > 8:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if value is None:
+            return None
+        fields = (
+            "output_text",
+            "text",
+            "content",
+            "response",
+            "output",
+            "answer",
+            "message",
+            "choices",
+            "completion",
+            "generated_text",
+            "candidates",
+            "parts",
+            "delta",
+        )
+        if isinstance(value, dict):
+            if not value:
+                return None
+            selected = [value[name] for name in fields if name in value]
+            parts = []
+            for item in selected:
+                rendered = output_text(item, depth + 1)
+                if rendered is not None:
+                    parts.append(rendered)
+            return " ".join(parts) or None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            parts = []
+            for item in value:
+                rendered = output_text(item, depth + 1)
+                if rendered is not None:
+                    parts.append(rendered)
+            return " ".join(parts) or None
+        value_type = type(value)
+        module = getattr(value_type, "__module__", "")
+        name = getattr(value_type, "__name__", "")
+        if module.startswith("pandas") and name in {"NAType", "NaTType"}:
+            return None
+        try:
+            is_nan = getattr(value, "is_nan", None)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            is_nan = None
+        if callable(is_nan):
+            try:
+                if is_nan():
+                    return None
+            except Exception:  # noqa: BLE001 - opaque provider object
+                pass
+        try:
+            if bool(value != value):
+                return None
+        except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
+            pass
+        try:
+            model_dump = getattr(value, "model_dump", None)
+        except Exception:  # noqa: BLE001 - opaque provider object
+            model_dump = None
+        if callable(model_dump):
+            try:
+                return output_text(model_dump(), depth + 1)
+            except Exception:  # noqa: BLE001 - opaque provider object
+                pass
+        for attribute in fields:
+            try:
+                candidate = getattr(value, attribute)
+            except Exception:  # noqa: BLE001 - opaque provider object
+                continue
+            rendered = output_text(candidate, depth + 1)
+            if rendered is not None:
+                return rendered
+        return None
+
+    output = output_text(outputs)
+    if output is None:
         return 0.0
-    length = len(str(outputs).strip())
+    length = len(output)
     return 1.0 if 0 < length <= 2000 else 0.0
 
 

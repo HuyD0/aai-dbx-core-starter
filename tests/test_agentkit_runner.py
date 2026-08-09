@@ -1673,7 +1673,9 @@ def _prompt_lookup_failures():
             ),
             id="invalid-parameter-alias-near-miss",
         ),
-        pytest.param(ConnectionError("connection reset"), id="transport"),
+        pytest.param(ConnectionError("prompt does not exist"), id="transport"),
+        pytest.param(PermissionError("prompt not found"), id="builtin-permission"),
+        pytest.param(TimeoutError("prompt does not exist"), id="builtin-timeout"),
     )
 
 

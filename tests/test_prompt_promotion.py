@@ -183,6 +183,7 @@ def test_is_missing_prompt_error_recognizes_only_absence():
 
     assert is_missing_prompt_error(RegistryError("x", error_code="NOT_FOUND"))
     assert is_missing_prompt_error(RegistryError("prompt does not exist"))
+    assert is_missing_prompt_error(FileNotFoundError("prompt does not exist"))
     # Any structured non-absence code is authoritative. Falling through to
     # message wording here would swallow a real provider failure.
     assert not is_missing_prompt_error(
@@ -208,6 +209,15 @@ def test_is_missing_prompt_error_recognizes_only_absence():
     assert not is_missing_prompt_error(
         RegistryError("prompt does not exist", error_code="PERMISSION_DENIED")
     )
+    for provider_error in (
+        PermissionError("prompt does not exist"),
+        ConnectionError("prompt not found"),
+        TimeoutError("RESOURCE_DOES_NOT_EXIST"),
+        OSError("prompt does not exist"),
+        type("AuthenticationError", (RuntimeError,), {})("prompt not found"),
+        type("TransportError", (RuntimeError,), {})("prompt does not exist"),
+    ):
+        assert not is_missing_prompt_error(provider_error)
     assert not is_missing_prompt_error(RegistryError("401 unauthorized"))
     assert not is_missing_prompt_error(RegistryError("connection reset"))
 
@@ -675,6 +685,8 @@ def test_promote_reports_a_missing_decision_run_as_blocked_evidence(tmp_path):
             {"error_code": "PERMISSION_DENIED"},
         )("decision run does not exist"),
         ConnectionError("connection reset"),
+        PermissionError("decision run does not exist"),
+        TimeoutError("decision run not found"),
     ],
 )
 def test_promote_propagates_decision_run_auth_and_transport_failures(

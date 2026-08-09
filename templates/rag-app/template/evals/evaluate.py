@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import mlflow
@@ -27,9 +26,9 @@ from aai_core.evaluation import (
     GatePolicy,
     MetricRule,
     apply_gate,
+    judge_model_uri,
 )
 from aai_core.prompts import prompt_digest
-from aai_core.providers.types import ProviderConfigurationError
 from app.config import DATASET_NAME
 from app.rag import RAGAgent
 
@@ -83,6 +82,7 @@ def main() -> None:
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     version = resolve_version(context, args.prompt_version)
     agent = RAGAgent(context, prompt_version=version)
 
@@ -95,7 +95,6 @@ def main() -> None:
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
-    judge_model = _judge_model_uri(context.settings)
     baseline = load_baseline()
     policy = GatePolicy(
         rules=tuple(load_thresholds()),
@@ -179,18 +178,6 @@ def main() -> None:
         }
     )
     report.require_passed()
-
-
-def _judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
-    deployment = config.get("deployment")
-    if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError("judge-model requires a deployment")
-    return f"endpoints:/{deployment.strip()}"
 
 
 if __name__ == "__main__":

@@ -23,10 +23,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
-from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError, missing_extra
 from aai_core.contracts import ContractModel
 from aai_core.scorers import (
+    _output_text,
     keyword_coverage,
     refusal_compliance,
     response_length_ok,
@@ -719,7 +719,11 @@ CODE_SCORER_FUNCTIONS: Mapping[str, Callable[[str, Mapping[str, Any]], float]] =
 def _require_output_text(outputs: Any) -> str:
     """Normalise a real output without turning absence into the word ``None``."""
 
-    if is_missing_scalar(outputs):
+    # An explicitly recorded blank string is still a real prediction row: the
+    # code scorers must return zero so the release gate can reject it. Missing
+    # and non-text objects are malformed answer-sheet data and stay errors.
+    text = outputs if isinstance(outputs, str) else _output_text(outputs)
+    if text is None:
         raise ConfigError(
             "code scorers received no output to score",
             remediation=(
@@ -727,7 +731,7 @@ def _require_output_text(outputs: Any) -> str:
                 "answer sheet before running the gate."
             ),
         )
-    return str(outputs)
+    return text
 
 
 def score_all(outputs: Any, expectations: Mapping[str, Any]) -> dict[str, float]:

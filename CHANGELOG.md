@@ -40,7 +40,10 @@ All notable changes to `aai-core` are documented here.
   record's bounded fields).
 - Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
   the single resolver for the approved judge endpoint (it had been duplicated
-  across five template sites) and rejects setup-placeholder deployments
+  across five template sites); the agent, prompt, RAG, and analytics evaluation
+  entry points and the agent monitoring notebook now call it before prompt,
+  warehouse, tracing, agent, or judge work. It rejects setup-placeholder
+  deployments
   (`replace-with-*`, `unset`, `<angle-bracket>` markers, …) as well as
   values outside the serving-endpoint name character set (alphanumerics,
   dashes, underscores — a pasted URI or display label would otherwise fail
@@ -90,13 +93,16 @@ All notable changes to `aai-core` are documented here.
   gates an unsafe compliant answer, and both reference-based scorers fail
   a missing, blank, null, or non-string expected response — or an
   entirely absent expectations mapping — outright in pure and registered
-  forms alike; both likewise fail a missing or blank output — an absent
-  answer exhibits no refusal behavior to verify and covers no keywords,
-  while `str(None)` would otherwise read as a compliant non-refusal,
-  take the nothing-to-cover branch, or even match an expected keyword
-  "none". A dataset defect or absent answer must never inflate a
-  release gate. Template copies are unchanged until
-  each template's next version.
+  forms alike. Pure, AgentKit, and registered forms extract legitimate
+  strings and common provider response shapes, while missing or non-text
+  outputs — Python/Decimal/NumPy/pandas null and NaN/NA/NaT sentinels,
+  numeric scalars, and empty mappings or sequences — fail closed instead of
+  being stringified. An absent answer exhibits no refusal behavior to verify
+  and covers no keywords, while `str(None)` would otherwise read as a
+  compliant non-refusal, take the nothing-to-cover branch, or even match an
+  expected keyword "none". A dataset defect or absent answer must never inflate
+  a release gate. Template copies are unchanged until each template's next
+  version.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with a required assessment `source_id` namespaced by source kind
   (`group:` for human review, `judge:`/`code:` for automated scorers) so
@@ -139,8 +145,11 @@ All notable changes to `aai-core` are documented here.
   or first promotion can distinguish an absent prompt or alias from
   authentication, permission, and transient registry failures instead of
   catching broadly; structured non-missing codes override "does not
-  exist" message wording, the common non-disclosure phrasing, and the
-  same shared predicate guards the dataset helper's create path.
+  exist" message wording, the common non-disclosure phrasing. Built-in and
+  provider authentication, permission, connection, timeout, transport, and
+  non-file OSError types are likewise authoritative even when their message
+  deliberately says a protected prompt was not found. The same shared
+  predicate guards the dataset helper's create path.
   `promote()` verifies the target version through `get_prompt_version()`,
   the only fetch with no lineage side effects — every `load_prompt`
   flavor, the client-level one included, links the loaded version to
@@ -431,7 +440,10 @@ All notable changes to `aai-core` are documented here.
   against the live warehouse with cost-coverage enforcement. The platform
   console offers the template, and `docs/analytics-lifecycle.md` documents
   the lifecycle, eval-set design, tokenomics, and context engineering.
-  `aai-core` itself is unchanged.
+  Its 1.1.0 template release uses the SDK's canonical, strict judge resolver
+  before constructing the live warehouse target. The `experiment-starter`
+  template advances to 1.2.0 so its provenance and certified SDK projection
+  record the 0.4.0 contract consistently.
 - Made `platform-identifiers.json` the only file a clone edits for environment
   identifiers. `scripts/sync_template_shared.py` now stamps the four
   platform-controlled defaults in every template schema and the identifier

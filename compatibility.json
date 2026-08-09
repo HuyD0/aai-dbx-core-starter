@@ -20,7 +20,7 @@
       "dependency_lock_format": "universal-transitive-v1"
     },
     "analytics-app": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
@@ -30,7 +30,7 @@
       "dependency_lock_format": "universal-transitive-v1"
     },
     "experiment-starter": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },

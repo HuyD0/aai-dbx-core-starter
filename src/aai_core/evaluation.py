@@ -610,6 +610,8 @@ def _is_missing_registry_error(error: Exception) -> bool:
     considered only when the exception exposes no structured code at all.
     """
 
+    if _is_authoritative_non_absence_exception(error):
+        return False
     raw_error_code = getattr(error, "error_code", None)
     error_code = "" if raw_error_code is None else str(raw_error_code).strip().upper()
     if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
@@ -630,6 +632,39 @@ def _is_missing_registry_error(error: Exception) -> bool:
     return any(
         marker in message
         for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    )
+
+
+def _is_authoritative_non_absence_exception(error: Exception) -> bool:
+    """Recognize authentication and transport failures by their type.
+
+    These failures often have no provider ``error_code`` and may deliberately
+    use not-found wording to avoid disclosing a protected resource. Their type
+    is still authoritative: callers must propagate them, never create or fall
+    back as if the registry object were absent.
+    """
+
+    # FileNotFoundError is the one OSError subclass whose type itself denotes
+    # absence. Keep allowing its code-less registry-shaped message below.
+    if isinstance(error, OSError) and not isinstance(error, FileNotFoundError):
+        return True
+    markers = (
+        "auth",
+        "permission",
+        "forbidden",
+        "connection",
+        "connecterror",
+        "timeout",
+        "transport",
+        "network",
+        "socket",
+        "sslerror",
+        "tlserror",
+    )
+    return any(
+        any(marker in error_type.__name__.lower() for marker in markers)
+        for error_type in type(error).__mro__
+        if error_type not in {Exception, BaseException, object}
     )
 
 

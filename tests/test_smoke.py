@@ -142,6 +142,11 @@ def test_advanced_notebooks_preserve_release_guardrails():
     assert "max_metric_calls" in optimization
     assert "set_prompt_alias" not in optimization
 
+    operations = sources["14_platform_llm_operations.ipynb"]
+    assert '\\"template_version\\": \\"1.2.0\\"' in operations
+    assert '\\"sdk\\": \\"0.4.0\\"' in operations
+    assert '\\"sdk\\": \\"0.3.0\\"' not in operations
+
 
 def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
     sources = {

@@ -74,6 +74,9 @@ provider integration.
    `evals/gate_config.json` and baseline regression. After a released run,
    append `EVALUATE_ARGS=--update-baseline`. The gate records an adopt or
    reject decision run and prints its `decision_run_id`.
+   Evaluation and the monitoring notebook use `aai-core`'s strict judge
+   resolver before tracing, loading a prompt, or constructing an agent; a
+   missing, placeholder, non-Databricks, or malformed endpoint fails locally.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset
    by name.
