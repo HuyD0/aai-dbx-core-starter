@@ -47,7 +47,17 @@ def test_detection_table(tmp_path):
 
     cases = [
         ("endpoints:/serving", TargetKind.SERVING_ENDPOINT, "endpoints:/serving"),
-        ("models:/main.eval.agent", TargetKind.UC_MODEL, "models:/main.eval.agent"),
+        ("models:/main.eval.agent/7", TargetKind.UC_MODEL, "models:/main.eval.agent/7"),
+        (
+            "models:/main.eval.agent@champion",
+            TargetKind.UC_MODEL,
+            "models:/main.eval.agent@champion",
+        ),
+        (
+            "models:/m-0123456789abcdef",
+            TargetKind.UC_MODEL,
+            "models:/m-0123456789abcdef",
+        ),
         ("https://host/score", TargetKind.HTTP, "https://host/score"),
         ("agent.py:respond", TargetKind.LOCAL_CALLABLE, "agent.py:respond"),
         ("json.tool:main", TargetKind.LOCAL_CALLABLE, "json.tool:main"),
@@ -85,6 +95,23 @@ def test_unresolvable_reference_lists_supported_shapes(tmp_path):
     assert "endpoints:/" in message
     assert "models:/" in message
     assert "answer sheet" in message
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "models:/main.eval.agent",
+        "models:/main.eval.agent/",
+        "models:/main.eval.agent@",
+    ),
+)
+def test_uc_model_requires_a_non_empty_version_or_alias(tmp_path, reference):
+    with pytest.raises(TargetResolutionError) as excinfo:
+        resolve_target(reference, root=tmp_path)
+
+    message = str(excinfo.value)
+    assert "/7" in message
+    assert "@champion" in message
 
 
 @pytest.mark.parametrize(
@@ -513,6 +540,79 @@ def test_http_adapter_maps_request_and_response(tmp_path, monkeypatch):
         "version": 2,
     }
     assert captured["headers"].get("Authorization") == "Bearer token-value"
+
+
+def test_http_adapter_preserves_every_multi_field_input(tmp_path):
+    captured = {}
+
+    def transport(request):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"output": "ok"}).encode("utf-8")
+
+    project = _project(
+        tmp_path,
+        request_mapping={
+            "request_field": "payload",
+            "extra_body": {"mode": "agent"},
+        },
+    )
+    target = resolve_target("https://host/score", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=project, transport=transport, mlflow_module=FAKE_MLFLOW
+    )
+
+    assert (
+        predict(
+            question="what is my balance",
+            context=["prior turn"],
+            tenant="tenant-a",
+        )
+        == "ok"
+    )
+    assert captured["body"] == {
+        "mode": "agent",
+        "payload": {
+            "question": "what is my balance",
+            "context": ["prior turn"],
+            "tenant": "tenant-a",
+        },
+    }
+
+
+def test_chat_adapter_rejects_multi_field_input_even_with_a_preferred_key(
+    tmp_path, monkeypatch
+):
+    class FakeModel:
+        def generate(self, messages):  # pragma: no cover - must not be invoked
+            raise AssertionError(messages)
+
+    class FakeProviders:
+        def model(self, name):
+            return FakeModel()
+
+    class FakeContext:
+        providers = FakeProviders()
+
+    monkeypatch.setattr(
+        "aai_core.context.PlatformContext", lambda settings: FakeContext()
+    )
+    settings = dev_settings(
+        models={"target-model": {"provider": "databricks", "deployment": "x"}}
+    )
+    project = ProjectContext(
+        config=AgentkitConfig(
+            version=1,
+            agent="target-model",
+            dataset="evals/data/golden_cases.json",
+        ),
+        settings=settings,
+        root=tmp_path,
+    )
+    target = resolve_target("target-model", root=tmp_path, settings=settings)
+    predict = build_predict_fn(target, project=project, mlflow_module=FAKE_MLFLOW)
+
+    with pytest.raises(TargetContractError, match="single text input"):
+        predict(question="q", tenant="tenant-a")
 
 
 def test_http_adapter_missing_auth_env(tmp_path, monkeypatch):

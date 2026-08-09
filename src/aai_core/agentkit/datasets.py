@@ -8,6 +8,7 @@ names exactly which rows it scored.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import random
@@ -195,12 +196,11 @@ def _trace_response(trace: Any) -> Any:
 
 
 def _root_spans(trace: Any) -> list[Mapping[str, Any]]:
-    """Spans with no parent, from either trace layout.
+    """Spans with no parent from the MLflow v2/v3 data envelope.
 
-    Goes through ``_spans`` rather than reading ``data.spans`` directly:
-    that helper already handles the top-level ``spans`` layout, and a
-    second reader that handles only one of them is how the full inputs
-    stayed invisible while the truncated preview got used instead.
+    Going through ``_spans`` keeps the v2/v3 span parsing decision in one
+    place and prevents an ignored top-level field from changing identity or
+    cost calculations.
     """
 
     return [span for span in _spans(trace) if _is_root_span(span)]
@@ -209,7 +209,10 @@ def _root_spans(trace: Any) -> list[Mapping[str, Any]]:
 def _is_root_span(span: Mapping[str, Any]) -> bool:
     """Whether a span has no populated parent identifier."""
 
-    parent = span.get("parent_span_id", span.get("parentSpanId"))
+    parent = span.get(
+        "parent_span_id",
+        span.get("parentSpanId", span.get("parent_id")),
+    )
     return not _is_populated(parent)
 
 
@@ -469,39 +472,17 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     the evaluation frame. Require the local reader to decode the value and to
     recover either a request or a root span before treating the row as traced.
     The latter preserves recorded traces whose authored ``inputs`` column is
-    already present while accepting both supported span layouts.
+    already present while accepting MLflow's supported v2 and v3 envelopes.
     """
 
     document = _trace_document(trace)
-    if document is None:
+    if document is None or not _trace_envelope_is_deserializable(document):
         return False
 
-    # A valid request must not hide a malformed span representation. Both
-    # layouts are supported, and when either is supplied its value must be
-    # exactly the collection of mapping spans the local readers expect.
-    data = document.get("data")
-    nested_supplied = isinstance(data, Mapping) and "spans" in data
-    top_level_supplied = "spans" in document
-    representations = (
-        [data["spans"]] if nested_supplied and data["spans"] is not None else []
-    ) + ([document["spans"]] if top_level_supplied else [])
-    for representation in representations:
-        if not isinstance(representation, Sequence) or isinstance(
-            representation, (str, bytes)
-        ):
-            return False
-        if not all(isinstance(span, Mapping) for span in representation):
-            return False
-
-    # Match `_spans` exactly: a non-null nested representation wins, and the
-    # top-level layout is only its fallback. Merging them lets an ignored root
-    # make an unusable effective trace look valid.
-    if nested_supplied and data["spans"] is not None:
-        spans = list(data["spans"])
-    elif top_level_supplied:
-        spans = list(document["spans"])
-    else:
-        spans = []
+    # Trace.from_dict supports the v2 and v3 envelopes in the same layout:
+    # info plus data.spans. A top-level `spans` key is ignored by MLflow and
+    # must never rescue an empty or malformed data section locally.
+    spans = _spans(document)
 
     # Read the trace-info request directly. Going through `_trace_inputs`
     # would let the inputs on an id-less mapping masquerading as a root span
@@ -520,22 +501,13 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
                 info_has_request = True
                 break
 
-    # With no span representation, a usable trace-info request is the whole
-    # supported trace shape. Once spans are supplied, validate their roots
-    # before allowing that request to satisfy the row.
-    if not (nested_supplied or top_level_supplied):
-        return info_has_request
-
     roots = [span for span in spans if _is_root_span(span)]
     if not roots:
-        # MLflow accepts traces fetched with an explicitly empty span list,
-        # but a non-empty graph made only of children has a dangling parent
-        # chain rather than an omitted root.
+        # MLflow accepts a complete envelope with an empty span list. It still
+        # needs a recoverable request to represent an evaluation row. A
+        # non-empty graph made only of children has a dangling parent chain.
         return not spans and info_has_request
-    identified_roots = bool(roots) and all(
-        _is_populated(span.get("span_id")) or _is_populated(span.get("spanId"))
-        for span in roots
-    )
+    identified_roots = all(_is_populated(_span_identifier(span)) for span in roots)
     if not identified_roots:
         return False
     # A span id proves structure, not that the row has a question to score.
@@ -553,6 +525,171 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
         and bool(request)
         for root in roots
     )
+
+
+def _trace_envelope_is_deserializable(document: Mapping[str, Any]) -> bool:
+    """Whether MLflow can deserialize this complete v2/v3 trace envelope.
+
+    MLflow is an optional dependency of the SDK, so the base package cannot
+    import it at module load. A conservative structural check keeps that base
+    path dependency-free. When the evaluation extra is installed, the pinned
+    ``Trace.from_dict`` implementation is the final authority; this catches
+    malformed ids, timestamps, locations, assessments, and span variants
+    before planning or confirmation rather than inside a paid evaluation.
+    """
+
+    info = document.get("info")
+    data = document.get("data")
+    if not isinstance(info, Mapping) or not isinstance(data, Mapping):
+        return False
+    spans = data.get("spans", [])
+    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
+        return False
+    if not _complete_trace_info(info) or not all(
+        isinstance(span, Mapping) and _complete_span(span) for span in spans
+    ):
+        return False
+
+    try:
+        from mlflow.entities import Trace
+    except ModuleNotFoundError as error:
+        # The SDK's base install intentionally has no MLflow dependency. A
+        # broken installed MLflow is different from an absent optional extra
+        # and fails closed.
+        return error.name == "mlflow"
+    except ImportError:
+        return False
+
+    try:
+        Trace.from_dict(copy.deepcopy(_plain(document)))
+    except Exception:
+        return False
+    return True
+
+
+def _complete_trace_info(info: Mapping[str, Any]) -> bool:
+    assessments = info.get("assessments", [])
+    if not isinstance(assessments, Sequence) or isinstance(assessments, (str, bytes)):
+        return False
+    if not all(_complete_assessment(item) for item in assessments):
+        return False
+
+    if "request_id" in info:  # MLflow trace-info v2
+        return (
+            all(
+                _is_populated(info.get(key))
+                for key in ("request_id", "experiment_id", "status")
+            )
+            and info.get("status")
+            in {"TRACE_STATUS_UNSPECIFIED", "OK", "ERROR", "IN_PROGRESS"}
+            and "timestamp_ms" in info
+            and "execution_time_ms" in info
+        )
+
+    if not all(
+        _is_populated(info.get(key)) for key in ("trace_id", "trace_location", "state")
+    ) or info.get("state") not in {
+        "STATE_UNSPECIFIED",
+        "OK",
+        "ERROR",
+        "IN_PROGRESS",
+    }:
+        return False
+    request_time = info.get("request_time")
+    if not (
+        request_time == 0
+        or (isinstance(request_time, str) and bool(request_time.strip()))
+    ):
+        return False
+    location = info.get("trace_location")
+    if not isinstance(location, Mapping):
+        return False
+    location_type = location.get("type")
+    location_fields = {
+        "MLFLOW_EXPERIMENT": ("mlflow_experiment", ("experiment_id",)),
+        "INFERENCE_TABLE": ("inference_table", ("full_table_name",)),
+        "UC_SCHEMA": ("uc_schema", ("catalog_name", "schema_name")),
+        "UC_TABLE_PREFIX": (
+            "uc_table_prefix",
+            ("catalog_name", "schema_name"),
+        ),
+    }
+    if location_type == "TRACE_LOCATION_TYPE_UNSPECIFIED":
+        return True
+    field_spec = location_fields.get(location_type)
+    if field_spec is None:
+        return False
+    field, required_location_keys = field_spec
+    details = location.get(field)
+    return isinstance(details, Mapping) and all(
+        _is_populated(details.get(key)) for key in required_location_keys
+    )
+
+
+def _complete_assessment(assessment: Any) -> bool:
+    if not isinstance(assessment, Mapping):
+        return False
+    required = ("assessment_name", "source", "create_time", "last_update_time")
+    if not all(_is_populated(assessment.get(key)) for key in required):
+        return False
+    source = assessment.get("source")
+    if not isinstance(source, Mapping) or not _is_populated(source.get("source_type")):
+        return False
+    return any(
+        isinstance(assessment.get(kind), Mapping)
+        for kind in ("expectation", "feedback", "issue")
+    )
+
+
+def _complete_span(span: Mapping[str, Any]) -> bool:
+    attributes = span.get("attributes")
+    if not isinstance(attributes, Mapping) or not _is_populated(
+        attributes.get("mlflow.traceRequestId")
+    ):
+        return False
+    if "context" in span:  # MLflow span v2
+        context = span.get("context")
+        required = (
+            "parent_id",
+            "name",
+            "start_time",
+            "end_time",
+            "status_code",
+            "status_message",
+            "events",
+        )
+        return (
+            isinstance(context, Mapping)
+            and _is_populated(context.get("trace_id"))
+            and _is_populated(context.get("span_id"))
+            and all(key in span for key in required)
+            and isinstance(span.get("events"), Sequence)
+        )
+
+    required = (
+        "trace_id",
+        "span_id",
+        "parent_span_id",
+        "name",
+        "start_time_unix_nano",
+        "status",
+    )
+    status = span.get("status")
+    return (
+        all(key in span for key in required)
+        and _is_populated(span.get("trace_id"))
+        and _is_populated(span.get("span_id"))
+        and isinstance(status, Mapping)
+        and _is_populated(status.get("code"))
+        and isinstance(span.get("events", []), Sequence)
+    )
+
+
+def _span_identifier(span: Mapping[str, Any]) -> Any:
+    context = span.get("context")
+    if isinstance(context, Mapping):
+        return context.get("span_id")
+    return span.get("span_id", span.get("spanId"))
 
 
 def _trace_expectations(trace: Any) -> dict[str, Any]:
@@ -1092,20 +1229,16 @@ def trace_judge_text(trace: Any) -> str:
 def _spans(trace: Any) -> list[Mapping[str, Any]]:
     """The span records a trace carries, whatever form it arrived in.
 
-    ``Trace.to_dict()`` nests them under ``data``; some payloads carry them
-    at the top level. A shape with neither yields nothing, which is what
-    makes every span question answerable without guessing from text.
+    Both MLflow v2 and v3 ``Trace.to_dict()`` envelopes nest them under
+    ``data``. A top-level ``spans`` field is not a supported alternative:
+    pinned MLflow ignores it during ``Trace.from_dict``.
     """
 
     document = _trace_document(trace)
     if document is None:
         return []
-    spans: Any = None
     data = document.get("data")
-    if isinstance(data, Mapping):
-        spans = data.get("spans")
-    if spans is None:
-        spans = document.get("spans")
+    spans: Any = data.get("spans") if isinstance(data, Mapping) else None
     if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
         return []
     return [span for span in spans if isinstance(span, Mapping)]
@@ -1122,7 +1255,7 @@ def _retriever_spans(trace: Any) -> list[Mapping[str, Any]]:
     spans = _spans(trace)
     by_id: dict[Any, Mapping[str, Any]] = {}
     for span in spans:
-        identifier = span.get("span_id", span.get("spanId"))
+        identifier = _span_identifier(span)
         if identifier is not None:
             by_id[identifier] = span
     return [span for span in spans if _is_retriever(span) and not _nested(span, by_id)]
@@ -1132,7 +1265,10 @@ def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> 
     """True when an ancestor of ``span`` is itself a retriever span."""
 
     seen: set[Any] = set()
-    parent_id = span.get("parent_span_id", span.get("parentSpanId"))
+    parent_id = span.get(
+        "parent_span_id",
+        span.get("parentSpanId", span.get("parent_id")),
+    )
     while parent_id is not None and parent_id not in seen:
         seen.add(parent_id)
         parent = by_id.get(parent_id)
@@ -1140,7 +1276,10 @@ def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> 
             return False
         if _is_retriever(parent):
             return True
-        parent_id = parent.get("parent_span_id", parent.get("parentSpanId"))
+        parent_id = parent.get(
+            "parent_span_id",
+            parent.get("parentSpanId", parent.get("parent_id")),
+        )
     return False
 
 

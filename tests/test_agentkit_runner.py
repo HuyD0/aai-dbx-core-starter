@@ -5,6 +5,7 @@ fake mirrors the surface the runner actually uses (see
 tests/test_experiment_helpers.py for the same pattern).
 """
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,73 @@ JUDGED_METRICS = {
     "correctness/mean": 0.9,
     "safety/mean": 1.0,
 }
+
+
+def _trace_id(value, width):
+    return base64.b64encode(int(value).to_bytes(width, "big")).decode("ascii")
+
+
+def _trace_expectation(index, name, value):
+    return {
+        "assessment_id": f"a-{index:032x}",
+        "assessment_name": name,
+        "trace_id": f"tr-{index:032x}",
+        "source": {"source_type": "HUMAN", "source_id": "test"},
+        "create_time": "2026-08-09T00:00:00Z",
+        "last_update_time": "2026-08-09T00:00:00Z",
+        "expectation": {"value": value},
+    }
+
+
+def _serialized_trace(
+    index,
+    *,
+    question=None,
+    output="answer",
+    span_type="LLM",
+    assessments=(),
+):
+    """A complete MLflow 3.14 Trace.to_dict-compatible v3 envelope."""
+
+    question = question or f"question {index}"
+    request_id = f"tr-{index:032x}"
+    return {
+        "info": {
+            "trace_id": request_id,
+            "trace_location": {
+                "type": "MLFLOW_EXPERIMENT",
+                "mlflow_experiment": {"experiment_id": "0"},
+            },
+            "request_time": "2026-08-09T00:00:00Z",
+            "state": "OK",
+            "request_preview": json.dumps({"question": question}),
+            "response_preview": json.dumps(output),
+            "trace_metadata": {},
+            "tags": {},
+            "assessments": list(assessments),
+        },
+        "data": {
+            "spans": [
+                {
+                    "trace_id": _trace_id(index + 1, 16),
+                    "span_id": _trace_id(index + 1, 8),
+                    "parent_span_id": None,
+                    "name": "agent",
+                    "start_time_unix_nano": 1_786_000_000_000_000_000 + index,
+                    "end_time_unix_nano": 1_786_000_000_001_000_000 + index,
+                    "events": [],
+                    "status": {"code": "STATUS_CODE_OK", "message": ""},
+                    "attributes": {
+                        "mlflow.traceRequestId": json.dumps(request_id),
+                        "mlflow.spanType": json.dumps(span_type),
+                        "mlflow.spanInputs": json.dumps({"question": question}),
+                        "mlflow.spanOutputs": json.dumps(output),
+                    },
+                    "links": [],
+                }
+            ]
+        },
+    }
 
 
 def _builtin_fake(class_name):
@@ -619,6 +687,41 @@ def test_local_target_preflight_precedes_cloud_reads_confirmation_and_spend(
     assert "latest evaluation attempt" in gate_message
 
 
+def test_suffixless_uc_model_is_rejected_before_dataset_or_spend(tmp_path, monkeypatch):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: models:/main.evaluation.agent\n"
+            "dataset: main.evaluation.golden_cases\n"
+        ),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "load_dataset",
+        lambda *args, **kwargs: pytest.fail("remote dataset was read"),
+    )
+    asked = []
+    mlflow = FakeMlflow()
+
+    with pytest.raises(TargetResolutionError, match="incomplete Unity Catalog"):
+        run_scoring(
+            project,
+            establish_baseline=True,
+            mode="live",
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
+            mlflow_module=mlflow,
+            environ={},
+        )
+
+    assert asked == []
+    assert mlflow.experiment is None
+    assert mlflow.evaluate_calls == []
+
+
 def test_http_auth_preflight_precedes_identity_confirmation_and_transport(
     tmp_path, monkeypatch
 ):
@@ -1098,18 +1201,11 @@ TRACE_ROWS = [
     {
         "inputs": {"question": f"question {index}"},
         "expectations": {"expected_response": f"answer {index} about pensions"},
-        "trace": {
-            "data": {
-                "spans": [
-                    {
-                        "span_id": f"root-{index}",
-                        "type": "RETRIEVER",
-                        "name": "search",
-                        "outputs": [{"page_content": "policy text"}],
-                    }
-                ]
-            }
-        },
+        "trace": _serialized_trace(
+            index,
+            output=[{"page_content": "policy text"}],
+            span_type="RETRIEVER",
+        ),
     }
     for index in range(12)
 ]
@@ -2359,24 +2455,7 @@ def _traced_project(tmp_path, *, trace, rows=12):
     project = _project(tmp_path, rows=rows)
     cases = json.loads((tmp_path / "evals" / "data" / "golden_cases.json").read_text())
     for index, case in enumerate(cases):
-        value = trace(index)
-        # TraceInfo-only shorthand used by these tests is not a complete
-        # serialized MLflow trace. Give it the root span a real Trace.to_dict
-        # payload carries so local structural validation tests the intended
-        # mode behavior rather than rejecting the fixture itself.
-        if isinstance(value, dict) and "info" in value and "data" not in value:
-            value = {
-                **value,
-                "data": {
-                    "spans": [
-                        {
-                            "span_id": f"root-{index}",
-                            "inputs": dict(case["inputs"]),
-                        }
-                    ]
-                },
-            }
-        case["trace"] = value
+        case["trace"] = trace(index)
     (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
     return project
 
@@ -2421,7 +2500,7 @@ def test_a_live_run_does_not_hand_mlflow_a_stored_trace(tmp_path):
     outputs and expectations from the traces before predict_fn is touched.
     """
 
-    project = _traced_project(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+    project = _traced_project(tmp_path, trace=_serialized_trace)
     fake = FakeMlflow()
 
     run_scoring(
@@ -2464,7 +2543,7 @@ def test_a_nullable_trace_column_still_scores(tmp_path):
 
 
 def test_a_traces_run_still_carries_its_traces(tmp_path):
-    project = _traced_project(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+    project = _traced_project(tmp_path, trace=_serialized_trace)
     fake = FakeMlflow()
 
     run_scoring(
@@ -2484,17 +2563,10 @@ def test_a_traces_run_still_carries_its_traces(tmp_path):
 def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
     project = _traced_project(
         tmp_path,
-        trace=lambda i: {
-            "info": {
-                "trace_id": f"t{i}",
-                "assessments": [
-                    {
-                        "assessment_name": "expected_response",
-                        "expectation": {"value": "other"},
-                    }
-                ],
-            }
-        },
+        trace=lambda i: _serialized_trace(
+            i,
+            assessments=[_trace_expectation(i, "expected_response", "other")],
+        ),
     )
     fake = FakeMlflow()
 
@@ -2523,19 +2595,11 @@ def test_a_live_run_prices_the_fanout_it_will_actually_have(tmp_path):
 
     project = _traced_project(
         tmp_path,
-        trace=lambda i: {
-            "data": {
-                "spans": [
-                    {
-                        "span_id": f"root-{i}",
-                        "parent_span_id": None,
-                        "span_type": "RETRIEVER",
-                        "inputs": {"question": f"question {i}"},
-                        "outputs": [{"page_content": "one chunk"}],
-                    }
-                ]
-            }
-        },
+        trace=lambda i: _serialized_trace(
+            i,
+            span_type="RETRIEVER",
+            output=[{"page_content": "one chunk"}],
+        ),
     )
     fake = FakeMlflow()
 
@@ -2556,19 +2620,11 @@ def test_a_live_run_prices_the_fanout_it_will_actually_have(tmp_path):
 def test_a_traces_run_still_counts_the_fanout_it_will_judge(tmp_path):
     project = _traced_project(
         tmp_path,
-        trace=lambda i: {
-            "data": {
-                "spans": [
-                    {
-                        "span_id": f"root-{i}",
-                        "parent_span_id": None,
-                        "span_type": "RETRIEVER",
-                        "inputs": {"question": f"question {i}"},
-                        "outputs": [{"page_content": "one chunk"}],
-                    }
-                ]
-            }
-        },
+        trace=lambda i: _serialized_trace(
+            i,
+            span_type="RETRIEVER",
+            output=[{"page_content": "one chunk"}],
+        ),
     )
     fake = FakeMlflow()
 
@@ -2592,22 +2648,7 @@ def test_a_trace_only_dataset_can_still_be_re_run_live(tmp_path):
     """
 
     project = _project(tmp_path)
-    cases = [
-        {
-            "trace": {
-                "data": {
-                    "spans": [
-                        {
-                            "span_id": f"root-{index}",
-                            "parent_span_id": None,
-                            "inputs": {"question": f"question {index}"},
-                        }
-                    ]
-                }
-            }
-        }
-        for index in range(12)
-    ]
+    cases = [{"trace": _serialized_trace(index)} for index in range(12)]
     (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
     fake = FakeMlflow()
 
@@ -2657,16 +2698,11 @@ def test_a_trace_replaced_expectation_removes_the_scorer_it_fed(tmp_path):
 
     def trace(index):
         assessments = (
-            [
-                {
-                    "assessment_name": "expected_response",
-                    "expectation": {"value": "from the trace"},
-                }
-            ]
+            [_trace_expectation(index, "expected_response", "from the trace")]
             if index == 0
             else []
         )
-        return {"info": {"trace_id": f"t{index}", "assessments": assessments}}
+        return _serialized_trace(index, assessments=assessments)
 
     project = _traced_project(tmp_path, trace=trace)
     fake = FakeMlflow()
