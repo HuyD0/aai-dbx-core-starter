@@ -154,6 +154,26 @@ All notable changes to `aai-core` are documented here.
   absent: a nullable `trace` column had made every row look traced, which
   selects a mode that supplies no predict_fn.
 
+  An authenticated HTTP target no longer follows a redirect to another
+  origin. urllib copies every header onto the redirected request, so a
+  301/302/303 elsewhere hands the bearer token to whoever answers there;
+  the run refuses instead, because a target that redirects away is no
+  longer the target the project named. `scorers.remove` now conflicts with
+  `regression_budget` as well as `thresholds` — a budget is a gate rule
+  too, so removing its scorer meant paying for every judge and then failing
+  on a metric that was never going to appear. Gate policy-drift folds in
+  the current `scorers.add`/`remove`, so adding a thresholded scorer no
+  longer lets a record that predates it exit 0. The judge-cost estimate
+  assumes retrieval only for rows whose trace it could not read: a traced
+  row that retrieved nothing is a counted zero, matching the scorers that
+  skip it, so a conditionally retrieving agent is not refused by
+  `budget.max_judge_calls` for calls the run never makes. And dataset
+  identity is taken from a trace's root-span inputs before its
+  `request_preview`, which MLflow documents as truncatable — two different
+  long questions sharing a prefix could otherwise share a digest and pass
+  comparability. Trace-only baselines recorded before this change will
+  report a digest difference once and need re-establishing.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

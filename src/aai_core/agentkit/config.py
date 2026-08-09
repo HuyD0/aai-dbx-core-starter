@@ -388,10 +388,21 @@ def _validate_scorer_references(config: AgentkitConfig) -> None:
     metric_by_name = {spec.name: spec.metric for spec in CATALOG}
     for name in config.scorers.remove:
         metric = metric_by_name.get(name)
-        for key in config.thresholds:
-            if key == name or key == metric:
-                raise ConfigError(
-                    f"scorers.remove drops {name!r} but thresholds still "
-                    f"gates {key!r}",
-                    remediation=("Remove the threshold or keep the scorer selected."),
-                )
+        # A regression budget is a gate rule too: `build_policy` turns it
+        # into one whether or not the scorer still runs, so a budget on a
+        # removed scorer means paying for every judge and then failing on
+        # the metric that was never going to appear.
+        for field_name, keys in (
+            ("thresholds", config.thresholds),
+            ("regression_budget", config.regression_budget),
+        ):
+            for key in keys:
+                if key == name or key == metric:
+                    raise ConfigError(
+                        f"scorers.remove drops {name!r} but {field_name} "
+                        f"still gates {key!r}",
+                        remediation=(
+                            f"Remove the {field_name} entry or keep the "
+                            "scorer selected."
+                        ),
+                    )

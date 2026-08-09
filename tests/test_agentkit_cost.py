@@ -262,3 +262,54 @@ def test_a_row_without_a_trace_is_unchanged():
 
     assert trace_judge_text(None) == ""
     assert trace_judge_text({"data": {"spans": []}}) == ""
+
+
+def test_a_traced_row_that_retrieved_nothing_costs_nothing():
+    """Since retrieval scorers skip those rows, the budget must too.
+
+    Charging an assumed span and a page of chunks for a row the run will
+    not judge lets `budget.max_judge_calls` refuse a conditionally
+    retrieving agent whose real run is far inside its budget.
+    """
+
+    retrieving = {
+        "inputs": {"question": "policy?"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {
+                        "span_id": "1",
+                        "type": "RETRIEVER",
+                        "outputs": [{"page_content": "a"}, {"page_content": "b"}],
+                    }
+                ]
+            }
+        },
+    }
+    conversational = {
+        "inputs": {"question": "hi"},
+        "trace": {"data": {"spans": [{"span_id": "1", "type": "LLM"}]}},
+    }
+    plan = _rag_plan(mode="traces")
+
+    cost = estimate([retrieving] + [conversational] * 4, plan, chunks_per_row=10)
+
+    calls = dict(cost.calls_by_scorer)
+    # One retriever span and two chunks in the whole dataset, not five
+    # rows' worth of assumption.
+    assert calls["retrieval_groundedness"] == 1
+    assert calls["retrieval_relevance"] == 2
+    # Every row's trace was readable, so nothing was assumed.
+    assert cost.fanout_counted is True
+
+
+def test_an_unreadable_trace_still_gets_the_assumption():
+    """Unknown is not zero: rounding a budget down is what breaks it."""
+
+    opaque = {"inputs": {"question": "q"}, "trace": "not-json-at-all"}
+    plan = _rag_plan(mode="traces")
+
+    cost = estimate([opaque] * 3, plan, chunks_per_row=10)
+
+    assert dict(cost.calls_by_scorer)["retrieval_relevance"] == 30
+    assert cost.fanout_counted is False

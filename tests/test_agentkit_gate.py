@@ -364,3 +364,51 @@ def test_records_without_recorded_rules_fall_back_and_say_so(tmp_path):
     assert code == EXIT_THRESHOLD_FAILED
     assert report.policy_note is not None
     assert "predate recorded gate rules" in report.policy_note
+
+
+def test_a_newly_added_thresholded_scorer_is_drift(tmp_path):
+    """Adding a scorer to config must not let a stale record pass.
+
+    `run_gate` supplies no plan, so the live policy used to be derived
+    from the scorers the *old run* recorded. A scorer added since then
+    contributed its registry-default rule to neither side of the
+    comparison, so a record with no metric for it exited 0 — the gate
+    reporting a pass on evidence that predates the requirement.
+    """
+
+    from aai_core.agentkit.gate import _policy_drift
+
+    project = _project(tmp_path, scorers={"add": ["correctness"]})
+    results = _results(
+        policy_rules=build_policy(project, scorer_names=("keyword_coverage",)).rules
+    )
+
+    drift = _policy_drift(project, results, None)
+
+    assert drift is not None
+    assert "correctness/mean" in drift
+
+
+def test_a_removed_scorer_is_drift(tmp_path):
+    from aai_core.agentkit.gate import _policy_drift
+
+    recorded = build_policy(
+        _project(tmp_path), scorer_names=("keyword_coverage",)
+    ).rules
+    project = _project(tmp_path, scorers={"remove": ["keyword_coverage"]})
+
+    drift = _policy_drift(project, _results(policy_rules=recorded), None)
+
+    assert drift is not None
+    assert "keyword_coverage/mean" in drift
+
+
+def test_an_unchanged_selection_is_not_drift(tmp_path):
+    from aai_core.agentkit.gate import _policy_drift
+
+    project = _project(tmp_path)
+    results = _results(
+        policy_rules=build_policy(project, scorer_names=("keyword_coverage",)).rules
+    )
+
+    assert _policy_drift(project, results, None) is None

@@ -715,3 +715,49 @@ def test_serialized_span_outputs_reach_the_token_estimate(tmp_path):
     assert trace_judge_text(serialized) == trace_judge_text(plain)
     assert _chunk_count(serialized["data"]["spans"][0]) == 2
     assert _chunk_count(plain["data"]["spans"][0]) == 2
+
+
+def test_dataset_identity_uses_full_inputs_not_a_truncated_preview(tmp_path):
+    """MLflow documents request_preview as truncatable.
+
+    Two different long questions sharing a prefix would then land on one
+    digest, and the comparability check would accept a run that scored
+    different questions than the baseline did — the one thing the digest
+    exists to prevent.
+    """
+
+    prefix = "What is the vesting rule for " + "x" * 300
+
+    def _row(tail):
+        return {
+            "trace": {
+                "info": {"request_preview": prefix},
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": "1",
+                            "type": "LLM",
+                            "inputs": {"question": prefix + tail},
+                        }
+                    ]
+                },
+            }
+        }
+
+    _write_dataset(tmp_path, [_row(" part-time staff?")] * 10, name="a.json")
+    _write_dataset(tmp_path, [_row(" seasonal staff?")] * 10, name="b.json")
+
+    first = load_dataset("a.json", root=tmp_path)
+    second = load_dataset("b.json", root=tmp_path)
+
+    assert first.digest != second.digest
+
+
+def test_the_preview_is_still_used_when_there_are_no_spans(tmp_path):
+    """A trace without spans still needs an identity."""
+
+    from aai_core.agentkit.datasets import _trace_request
+
+    assert _trace_request({"info": {"request_preview": "the question"}}) == (
+        "the question"
+    )

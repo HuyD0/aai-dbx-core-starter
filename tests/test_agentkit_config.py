@@ -225,3 +225,50 @@ def test_yaml_lists_and_integers_coerce_cleanly(tmp_path):
     assert config.strata == ("category",)
     assert config.budget.judge_price_per_1m_tokens == 5.0
     assert dict(config.regression_budget) == {"quality/mean": 1.0}
+
+
+def test_a_regression_budget_on_a_removed_scorer_is_refused(tmp_path):
+    """A budget is a gate rule, so removing its scorer is a contradiction.
+
+    `build_policy` builds a rule from `regression_budget` whether or not
+    the scorer still runs, so the run pays for every judge and then fails
+    on a metric that was never going to appear. The template's default
+    budget names keyword_coverage, so this is reachable by editing one
+    line of generated config.
+    """
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            _write(
+                tmp_path,
+                "version: 1\n"
+                "agent: src/app/agent.py:respond\n"
+                "dataset: evals/data/golden_cases.json\n"
+                "scorers:\n"
+                "  remove: [keyword_coverage]\n"
+                "regression_budget:\n"
+                "  keyword_coverage/mean: 0.05\n",
+            )
+        )
+
+    message = str(excinfo.value)
+    assert "regression_budget" in message
+    assert "keyword_coverage" in message
+
+
+def test_a_threshold_on_a_removed_scorer_is_still_refused(tmp_path):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            _write(
+                tmp_path,
+                "version: 1\n"
+                "agent: src/app/agent.py:respond\n"
+                "dataset: evals/data/golden_cases.json\n"
+                "scorers:\n"
+                "  remove: [keyword_coverage]\n"
+                "thresholds:\n"
+                "  keyword_coverage: '>=0.6'\n",
+            )
+        )
+
+    assert "thresholds" in str(excinfo.value)

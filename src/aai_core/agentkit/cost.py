@@ -75,7 +75,12 @@ def estimate(
     mean_row_tokens = _mean_row_tokens(rows)
     needs_fanout = any(spec.fanout is not JudgeFanout.ROW for spec in judge_specs)
     counted = retrieval_fanout(rows) if needs_fanout else None
-    uncounted_rows = row_count - (counted.rows_counted if counted else 0)
+    # Only rows with no readable trace need an assumption. A traced row
+    # that retrieved nothing is a counted zero: the retrieval scorers skip
+    # it, so charging it an assumed span and a page of chunks would let
+    # `max_judge_calls` refuse a conditionally retrieving agent whose real
+    # run is far inside its budget.
+    uncounted_rows = row_count - (counted.rows_with_traces if counted else 0)
     fanout_counted = not needs_fanout or uncounted_rows == 0
     spans = chunks = 0
     if counted is not None:

@@ -139,36 +139,45 @@ def _row_identity(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _trace_request(trace: Any) -> Any:
-    """The question a recorded trace answered, if it can be recovered."""
+    """The question a recorded trace answered, if it can be recovered.
+
+    The root span's inputs come first, and ``request_preview`` last.
+    MLflow documents the preview as "equivalent to the input of the root
+    span but JSON-encoded and **can be truncated**", so two different long
+    questions sharing a prefix would land on one dataset digest — and the
+    comparability check would then wave through a run that scored
+    different questions than the baseline did. The preview stays as a last
+    resort because a trace without spans still needs an identity, and a
+    truncated one beats none.
+    """
 
     document = _trace_document(trace)
     if document is None:
         return None
+    data = document.get("data")
+    spans = data.get("spans") if isinstance(data, Mapping) else None
+    if isinstance(spans, Sequence) and not isinstance(spans, (str, bytes)):
+        for span in spans:
+            if not isinstance(span, Mapping):
+                continue
+            if span.get("parent_span_id", span.get("parentSpanId")) is not None:
+                continue
+            for candidate in (
+                span.get("inputs"),
+                (
+                    (span.get("attributes") or {}).get("mlflow.spanInputs")
+                    if isinstance(span.get("attributes"), Mapping)
+                    else None
+                ),
+            ):
+                if _is_populated(candidate):
+                    return _plain(candidate)
     info = document.get("info")
     if isinstance(info, Mapping):
-        for key in ("request_preview", "request"):
+        for key in ("request", "request_preview"):
             value = info.get(key)
             if _is_populated(value):
                 return _plain(value)
-    data = document.get("data")
-    spans = data.get("spans") if isinstance(data, Mapping) else None
-    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
-        return None
-    for span in spans:
-        if not isinstance(span, Mapping):
-            continue
-        if span.get("parent_span_id", span.get("parentSpanId")) is not None:
-            continue
-        for candidate in (
-            span.get("inputs"),
-            (
-                (span.get("attributes") or {}).get("mlflow.spanInputs")
-                if isinstance(span.get("attributes"), Mapping)
-                else None
-            ),
-        ):
-            if _is_populated(candidate):
-                return _plain(candidate)
     return None
 
 
@@ -481,16 +490,26 @@ class RetrievalFanout:
     rows_counted: int = 0
     retriever_spans: int = 0
     retrieved_chunks: int = 0
+    # Rows whose trace could be read at all. A traced row with no
+    # retriever span is *counted as zero*, not unknown: the retrieval
+    # scorers skip it, so assuming a span and a page of chunks for it
+    # would refuse a budget the real run comes in well under.
+    rows_with_traces: int = 0
 
 
 def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
     """Count retriever spans and retrieved chunks in the rows' traces."""
 
-    rows_counted = spans = chunks = 0
+    rows_counted = spans = chunks = traced = 0
     for row in rows:
         trace = row.get("trace") if isinstance(row, Mapping) else None
         if _is_missing(trace):
             continue
+        # Readable structure is what makes "no retrieval here" a fact
+        # rather than a guess; an unparseable trace still gets the
+        # assumption, because rounding a budget down is what breaks it.
+        if _spans(trace):
+            traced += 1
         row_spans = _retriever_spans(trace)
         if not row_spans:
             continue
@@ -498,7 +517,10 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         spans += len(row_spans)
         chunks += sum(_chunk_count(span) for span in row_spans)
     return RetrievalFanout(
-        rows_counted=rows_counted, retriever_spans=spans, retrieved_chunks=chunks
+        rows_counted=rows_counted,
+        retriever_spans=spans,
+        retrieved_chunks=chunks,
+        rows_with_traces=traced,
     )
 
 

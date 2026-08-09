@@ -318,10 +318,20 @@ def _policy_drift(
 ) -> str | None:
     """How the project's current rules differ from the recorded ones."""
 
+    # The recorded scorers say what the run measured; `scorers.add` and
+    # `scorers.remove` say what the project asks for *now*. Deriving the
+    # live policy from the recorded names alone hides exactly the change
+    # this check exists to catch: adding a thresholded catalog scorer
+    # leaves its registry-default rule out of both sides, so a stale
+    # record with no metric for it passes. Auto-selection is not folded
+    # in — that depends on the dataset, which the recorded run already
+    # reflects, and reading it here would make `agentkit gate` load data.
+    selection = set(results.versions.scorers) | set(project.config.scorers.add)
+    selection -= set(project.config.scorers.remove)
     current = build_policy(
         project,
         plan=plan,
-        scorer_names=tuple(results.versions.scorers),
+        scorer_names=tuple(sorted(selection)),
         allow_missing_regression_baseline=(results.allow_missing_regression_baseline),
     )
     recorded = {rule.metric: rule for rule in results.policy_rules}

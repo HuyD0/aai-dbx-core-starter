@@ -402,8 +402,45 @@ def _uc_model_call(target: Target, mlflow: Any) -> Callable[[Mapping[str, Any]],
     return call
 
 
+class _CredentialSafeRedirects(urllib.request.HTTPRedirectHandler):
+    """Never carry the bearer token to a different origin.
+
+    urllib copies every header onto a redirected request, so a 301/302/303
+    to another host hands the ``Authorization`` value to whoever answers
+    there — and an endpoint that can be misconfigured can also be
+    compromised. Refusing rather than stripping is the honest option: a
+    target that redirects elsewhere is no longer the target the project
+    configured, so scoring whatever answers would produce evidence about
+    something nobody named.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None or not req.get_header("Authorization"):
+            return redirected
+        if _origin(req.full_url) != _origin(redirected.full_url):
+            raise TargetInvocationError(
+                f"{req.full_url} redirected to a different origin "
+                f"({_origin(redirected.full_url)}) while carrying the token "
+                f"from request_mapping.auth_env",
+                remediation=(
+                    "Point `agent:` at the endpoint that answers directly, or "
+                    "drop request_mapping.auth_env if it needs no token."
+                ),
+            )
+        return redirected
+
+
+def _origin(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+_OPENER = urllib.request.build_opener(_CredentialSafeRedirects)
+
+
 def _urllib_transport(request: urllib.request.Request) -> bytes:
-    with urllib.request.urlopen(  # noqa: S310 - https target configured by user
+    with _OPENER.open(  # noqa: S310 - https target configured by user
         request, timeout=_HTTP_TIMEOUT_SECONDS
     ) as response:
         return response.read()

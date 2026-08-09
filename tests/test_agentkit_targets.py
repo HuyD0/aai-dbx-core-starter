@@ -3,6 +3,7 @@
 import json
 import sys
 import urllib.error
+import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -389,3 +390,57 @@ def test_cleartext_is_allowed_without_a_token_and_on_loopback(tmp_path, monkeypa
 
     assert unauthenticated(question="q") == "ok"
     assert loopback(question="q") == "ok"
+
+
+def _redirect(from_url, to_url, *, authorization=None):
+    """Ask the redirect handler what it would do, without a network."""
+
+    from aai_core.agentkit.targets import _CredentialSafeRedirects
+
+    headers = {"Authorization": authorization} if authorization else {}
+    request = urllib.request.Request(from_url, headers=headers, method="POST")
+    fp = SimpleNamespace(read=lambda: b"")
+    return _CredentialSafeRedirects().redirect_request(
+        request, fp, 302, "Found", {}, to_url
+    )
+
+
+def test_a_token_never_follows_a_redirect_to_another_origin():
+    """urllib copies every header onto the redirected request.
+
+    A 301/302/303 to another host therefore hands the bearer token to
+    whoever answers there, and an endpoint that can be misconfigured can
+    also be compromised.
+    """
+
+    with pytest.raises(TargetInvocationError) as excinfo:
+        _redirect(
+            "https://agent.internal/score",
+            "https://attacker.example/collect",
+            authorization="Bearer token-value",
+        )
+
+    message = str(excinfo.value)
+    assert "different origin" in message
+    assert "attacker.example" in message
+    # The token itself is never echoed into the error.
+    assert "token-value" not in message
+
+
+def test_a_same_origin_redirect_still_follows_with_the_token():
+    redirected = _redirect(
+        "https://agent.internal/score",
+        "https://agent.internal/v2/score",
+        authorization="Bearer token-value",
+    )
+
+    assert redirected is not None
+    assert redirected.full_url == "https://agent.internal/v2/score"
+
+
+def test_an_unauthenticated_redirect_is_not_our_business():
+    """No credential, nothing to leak."""
+
+    redirected = _redirect("https://agent.internal/score", "https://cdn.example/score")
+
+    assert redirected is not None
