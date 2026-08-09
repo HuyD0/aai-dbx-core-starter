@@ -1362,15 +1362,13 @@ def test_a_cost_estimate_is_bound_to_the_rows_it_measured(monkeypatch):
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
     # Matching snapshots log fine.
-    gbi.log_gate_evidence(
-        spec, estimate_over(report.source_snapshot, 100), {"s": 200}, report
-    )
+    gbi.log_gate_evidence(spec, estimate_over(report.source_snapshot, 100), report)
     # A projection made over an older, smaller snapshot cannot authorise
     # a run gated on a newer one, however cheap it claims to be.
     stale = estimate_over(snapshot_for(spec, 1), 10)
     assert stale.release == report.scores[0].release
     with pytest.raises(gbi.EvidenceMismatch, match="different rows"):
-        gbi.log_gate_evidence(spec, stale, {"s": 200}, report)
+        gbi.log_gate_evidence(spec, stale, report)
 
 
 def test_the_sql_builder_enforces_the_ceiling_itself():
@@ -1842,7 +1840,7 @@ def test_logged_evidence_comes_from_the_report(monkeypatch):
     report = gate(spec, score(records_for("s", correct=200), spec))
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
-    gbi.log_gate_evidence(spec, estimate_matching(report, spec), {"s": 200}, report)
+    gbi.log_gate_evidence(spec, estimate_matching(report, spec), report)
     # Every logged interval traces to a score the report carries.
     logged = {key for key in recorder.metrics if key.endswith("_lower")}
     assert logged
@@ -2084,9 +2082,7 @@ def test_a_forged_adoption_never_reaches_the_durable_record(monkeypatch):
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
     with pytest.raises(gbi.EvidenceMismatch, match="does not satisfy its own"):
-        gbi.log_gate_evidence(
-            spec, estimate_matching(rejecting, spec), {"s": 200}, forged
-        )
+        gbi.log_gate_evidence(spec, estimate_matching(rejecting, spec), forged)
     assert not recorder.tags  # nothing was written before the refusal
 
     # Approval is a boundary too: a forged pending_approval cannot be
@@ -2097,6 +2093,67 @@ def test_a_forged_adoption_never_reaches_the_durable_record(monkeypatch):
     ).model_copy(update={"decision": gbi.GateDecision.PENDING_APPROVAL})
     with pytest.raises(gbi.GateNotPassed, match="does not satisfy its own"):
         gbi.approve_gate(bad_pending, "board")
+
+
+def test_the_durable_record_revalidates_every_artifact(monkeypatch):
+    """Naming the round trip and applying it to reports was meant to end
+    this class; the estimate at the same boundary was missed in that same
+    change, so the loop runs over the arguments now."""
+    spec = one_field_spec(cost_ceiling_cad=1.0)
+    report = adopting_report(spec)
+    over = gbi.estimate_cost(
+        spec,
+        row_count=ADOPTING_ROWS,
+        probe_input_tokens=[5_000],
+        probe_output_tokens=[5_000],
+        cad_per_million_input_tokens=7.0,
+        cad_per_million_output_tokens=21.0,
+        source_snapshot=report.source_snapshot,
+    )
+    assert not over.within_ceiling
+    free = over.model_copy(update={"projected_cost_cad": 0.0})
+    assert free.within_ceiling  # model_copy skipped the arithmetic check
+
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    with pytest.raises(gbi.EvidenceMismatch, match="does not satisfy its own"):
+        gbi.log_gate_evidence(spec, free, report)
+    assert not recorder.metrics  # refused before anything was written
+
+
+def test_the_logged_sample_is_the_one_the_evidence_used(monkeypatch):
+    """A stale allocation could claim 20 rows beside intervals computed
+    from 200 — the record contradicting its own numbers."""
+    spec = one_field_spec()
+    report = gate(spec, score(records_for("s", correct=200), spec))
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    gbi.log_gate_evidence(spec, estimate_matching(report, spec), report)
+    logged = recorder.dicts["governed_batch_inference/sample_allocation.json"]
+    assert logged == {"s": 200}  # derived, so it cannot disagree
+
+
+def test_a_run_id_reused_for_a_later_snapshot_is_caught_before_spending():
+    """Identity alone accepts a nightly job's next cycle under the same
+    id; the clash would then surface only after the production write."""
+    spec = make_spec()
+    check = gbi.run_metadata_conflict_sql(
+        spec, run_id="run-1", source_snapshot=snapshot_for(spec, 20)
+    )
+    assert "source_table_version <=> 20" in check
+    # No target version is knowable before execution, so it is not compared.
+    assert "target_table_version <>" not in check
+    # The reservation records it, so there is something to compare against.
+    assert "source_table_version BIGINT" in gbi.create_run_metadata_table_sql(spec)
+    report = adopting_report(spec)
+    reserve = gbi.run_metadata_reserve_sql(
+        spec,
+        report,
+        run_id="run-1",
+        estimate=estimate_matching(report, spec),
+        preflight=preflight_matching(report, spec),
+    )
+    assert f"{report.source_snapshot.version} AS source_table_version" in reserve
 
 
 def test_a_right_name_with_the_wrong_type_blocks_the_release():
@@ -2136,12 +2193,10 @@ def test_logged_evidence_is_bound_to_the_spec_it_records(monkeypatch):
     # Refused because the carried scores are v1's; had they somehow been
     # v2's, the digest comparison below catches it on the next line.
     with pytest.raises(gbi.EvidenceMismatch, match="Re-score|one release"):
-        gbi.log_gate_evidence(
-            v2, estimate_matching(report_v1, v2), {"s": 200}, report_v1
-        )
+        gbi.log_gate_evidence(v2, estimate_matching(report_v1, v2), report_v1)
     # Its own report logs fine.
     report_v2 = gate(v2, score(records_for("s", correct=200), v2))
-    gbi.log_gate_evidence(v2, estimate_matching(report_v2, v2), {"s": 200}, report_v2)
+    gbi.log_gate_evidence(v2, estimate_matching(report_v2, v2), report_v2)
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -2442,7 +2497,7 @@ def test_cost_estimate_is_bound_to_the_release_it_measured(monkeypatch):
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
     with pytest.raises(gbi.EvidenceMismatch, match="Re-estimate"):
-        gbi.log_gate_evidence(spec_v2, estimate, {"standard": 200}, report)
+        gbi.log_gate_evidence(spec_v2, estimate, report)
     # The mismatch is caught before anything is written.
     assert not recorder.params
 
@@ -3020,7 +3075,7 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
 
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
-    gbi.log_gate_evidence(spec, estimate, {"standard": 200}, approved)
+    gbi.log_gate_evidence(spec, estimate, approved)
 
     assert approver not in json.dumps(recorder.tags)
     assert approver not in json.dumps(recorder.params)

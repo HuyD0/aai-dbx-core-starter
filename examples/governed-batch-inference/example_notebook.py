@@ -967,7 +967,7 @@ mlflow.set_experiment("/Shared/governed-batch-inference-demo")
 
 report_v1 = gbi.evaluate_gate(spec_v1, scores_v1, source_snapshot=SOURCE_SNAPSHOT)
 with mlflow.start_run(run_name=f"{spec_v1.name}-prompt-1.0.0-gate"):
-    gbi.log_gate_evidence(spec_v1, estimate_v1, allocation, report_v1)
+    gbi.log_gate_evidence(spec_v1, estimate_v1, report_v1)
 
 print(f"gate decision for prompt 1.0.0: {report_v1.decision.value}\n")
 for field_result in report_v1.fields:
@@ -1051,7 +1051,7 @@ report_v2 = gbi.evaluate_gate(spec_v2, scores_v2, source_snapshot=SOURCE_SNAPSHO
 
 gate_run = mlflow.start_run(run_name=f"{spec_v2.name}-prompt-2.0.0-gate")
 RUN_ID = gate_run.info.run_id  # provenance key for everything downstream
-gbi.log_gate_evidence(spec_v2, estimate_v2, allocation, report_v2)
+gbi.log_gate_evidence(spec_v2, estimate_v2, report_v2)
 
 print(f"gate decision for prompt 2.0.0: {report_v2.decision.value}")
 display(
@@ -1312,10 +1312,13 @@ spark.sql(
 gbi.require_unique_run_id(
     spec_v2,
     spark.sql(
-        # Identity only: this run has not produced a version yet, and a
-        # placeholder here would flag every same-id retry that already
-        # reached stage 7 as a conflict.
-        gbi.run_metadata_conflict_sql(spec_v2, run_id=RUN_ID)
+        # No target version yet — a placeholder there would flag every
+        # same-id retry that already reached stage 7. The *source*
+        # snapshot is knowable now, and it is what distinguishes two
+        # cycles of one unchanged spec sharing a run id.
+        gbi.run_metadata_conflict_sql(
+            spec_v2, run_id=RUN_ID, source_snapshot=SOURCE_SNAPSHOT
+        )
     ).count(),
 )
 
