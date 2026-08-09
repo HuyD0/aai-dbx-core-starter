@@ -1057,6 +1057,55 @@ def test_empty_parent_identifier_is_a_valid_root(tmp_path, parent_key, parent_va
 
 
 @pytest.mark.parametrize(
+    "nested_spans",
+    [
+        [],
+        [{"span_id": "child", "parent_span_id": "missing-root"}],
+    ],
+    ids=("empty-nested", "child-only-nested"),
+)
+def test_nested_spans_cannot_borrow_a_top_level_root(tmp_path, nested_spans):
+    _write_dataset(
+        tmp_path,
+        [
+            {
+                "trace": {
+                    "data": {"spans": nested_spans},
+                    "spans": [
+                        {
+                            "span_id": "ignored-root",
+                            "inputs": {"question": "q"},
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
+
+
+def test_consistent_dual_span_layout_uses_the_nested_root(tmp_path):
+    root = {"span_id": "root", "inputs": {"question": "q"}}
+    _write_dataset(
+        tmp_path,
+        [{"trace": {"data": {"spans": [root]}, "spans": [dict(root)]}}],
+    )
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert validate_dataset(dataset, minimum_rows=1) == []
+    assert effective_dataset(dataset, mode="live").rows[0]["inputs"] == {
+        "question": "q"
+    }
+
+
+@pytest.mark.parametrize(
     "trace",
     [
         {
