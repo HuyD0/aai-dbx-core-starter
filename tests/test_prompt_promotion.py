@@ -183,9 +183,9 @@ def test_is_missing_prompt_error_recognizes_only_absence():
 
     assert is_missing_prompt_error(RegistryError("x", error_code="NOT_FOUND"))
     assert is_missing_prompt_error(RegistryError("prompt does not exist"))
-    # MlflowException defaults to INTERNAL_ERROR even for message-only
-    # raises, so a non-authoritative code still falls through to markers.
-    assert is_missing_prompt_error(
+    # Any structured non-absence code is authoritative. Falling through to
+    # message wording here would swallow a real provider failure.
+    assert not is_missing_prompt_error(
         RegistryError("prompt does not exist", error_code="INTERNAL_ERROR")
     )
     # The file/SQL registries report a missing alias as

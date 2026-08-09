@@ -146,6 +146,26 @@ class GateResult(ContractModel):
         )
 
 
+def gate_enforces_release_rule(gate: GateResult) -> bool:
+    """Whether a passing gate actually constrained a release decision.
+
+    An absolute threshold always applies. A regression-only rule applies only
+    when the gate carried the corresponding baseline metric; when missing
+    baselines are waived, such a rule is deliberately skipped. A zero cost
+    coverage threshold rejects nothing and therefore does not count.
+    """
+
+    policy = gate.policy
+    if policy is None:
+        return False
+    baseline = gate.baseline_metrics or {}
+    return bool(policy.minimum_cost_coverage) or any(
+        rule.required is not None
+        or (rule.max_regression is not None and rule.metric in baseline)
+        for rule in policy.rules
+    )
+
+
 class EvaluationGateError(AaiCoreError):
     code = "aai_core.evaluation.gate_failed"
 
@@ -580,42 +600,37 @@ def _dataset_qualifier(role: str, value: str) -> str:
     return qualifier
 
 
-# Structured codes that are authoritatively NOT absence: registries often
-# word a permission denial as "does not exist" to avoid disclosing
-# inaccessible resources, so these codes override message markers.
-_NON_MISSING_ERROR_CODES = {
-    "PERMISSION_DENIED",
-    "UNAUTHENTICATED",
-    "UNAUTHORIZED",
-    "TEMPORARILY_UNAVAILABLE",
-    "REQUEST_LIMIT_EXCEEDED",
-}
-
-
 def _is_missing_registry_error(error: Exception) -> bool:
     """Shared absence test for registry errors (datasets and prompts alike).
 
-    Message markers are consulted only when no authoritative structured
-    code says otherwise; ``MlflowException`` defaults to ``INTERNAL_ERROR``
-    on message-only raises, so markers must survive non-authoritative
-    codes.
+    Any structured code outside the provider's two absence codes is
+    authoritative, even when its message uses non-disclosure wording such as
+    ``does not exist``. The one provider-specific exception is MLflow's exact
+    missing-alias shape under ``INVALID_PARAMETER_VALUE``. Message markers are
+    considered only when the exception exposes no structured code at all.
     """
 
-    error_code = str(getattr(error, "error_code", "")).strip().upper()
+    raw_error_code = getattr(error, "error_code", None)
+    error_code = "" if raw_error_code is None else str(raw_error_code).strip().upper()
     if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
         return True
-    if error_code in _NON_MISSING_ERROR_CODES:
+    message = str(error).strip().upper()
+    missing_alias = (
+        fullmatch(
+            r"(?:INVALID_PARAMETER_VALUE: )?"
+            r"(?:REGISTERED MODEL|PROMPT) ALIAS [\w-]+ NOT FOUND\.?",
+            message,
+        )
+        is not None
+    )
+    if missing_alias and error_code in {"", "INVALID_PARAMETER_VALUE"}:
+        return True
+    if error_code:
         return False
-    message = str(error).upper()
-    if any(
+    return any(
         marker in message
         for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
-    ):
-        return True
-    # The file and SQL registries report a missing alias as
-    # INVALID_PARAMETER_VALUE with "Registered model alias ... not found."
-    # — recognized narrowly so unrelated parameter errors stay errors.
-    return "ALIAS" in message and "NOT FOUND" in message
+    )
 
 
 def _is_missing_dataset(error: Exception) -> bool:

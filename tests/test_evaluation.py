@@ -490,15 +490,21 @@ def _dataset_mlflow(datasets):
     return SimpleNamespace(genai=SimpleNamespace(datasets=datasets))
 
 
-def test_dataset_helper_propagates_denials_worded_as_missing():
-    # A permission denial phrased as "does not exist" must propagate, not
-    # trigger the mutating create_dataset() call.
-    class DeniedError(Exception):
-        error_code = "PERMISSION_DENIED"
+@pytest.mark.parametrize(
+    "error_code",
+    ("PERMISSION_DENIED", "INTERNAL_ERROR", "INVALID_PARAMETER_VALUE"),
+)
+def test_dataset_helper_propagates_structured_errors_worded_as_missing(error_code):
+    # Any non-absence structured code is authoritative, even when the provider
+    # uses non-disclosure wording. It must not trigger create_dataset().
+    class RegistryError(Exception):
+        def __init__(self, message):
+            super().__init__(message)
+            self.error_code = error_code
 
-    registry = FakeDatasetApi(get_error=DeniedError("dataset does not exist"))
+    registry = FakeDatasetApi(get_error=RegistryError("dataset does not exist"))
 
-    with pytest.raises(DeniedError):
+    with pytest.raises(RegistryError):
         get_or_create_evaluation_dataset(
             name="regression_v1",
             catalog="main",

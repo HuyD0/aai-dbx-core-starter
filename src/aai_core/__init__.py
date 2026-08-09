@@ -8,7 +8,7 @@ from aai_core.runtime import PlatformSettings
 try:
     __version__ = version("aai-core")
 except PackageNotFoundError:  # Running directly from a source checkout.
-    __version__ = "0.3.0"
+    __version__ = "0.4.0"
 
 __all__ = [
     "PlatformContext",

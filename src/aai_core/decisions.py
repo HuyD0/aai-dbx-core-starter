@@ -26,6 +26,7 @@ from aai_core.evaluation import (
     GateResult,
     _is_missing_registry_error,
     _is_placeholder,
+    gate_enforces_release_rule,
 )
 from aai_core.exceptions import AaiCoreError
 from aai_core.experiments import (
@@ -155,26 +156,13 @@ class DecisionRecord(ContractModel):
                     "metrics; an empty gate result proves no evaluation "
                     "rule was applied"
                 )
-            policy = self.gate.policy
-            if policy is None:
+            if self.gate.policy is None:
                 raise ValueError(
                     "An adopt decision requires gate evidence that records "
                     "the applied release policy; produce the gate with "
                     "apply_gate() so the policy travels with the result"
                 )
-            # A rule only constrains the release if it was actually
-            # applied: an absolute threshold always is, a positive
-            # cost-coverage minimum always is, but a regression-only rule
-            # is skipped by _evaluate_policy when the baseline lacks its
-            # metric and the policy waives missing baselines — evidence
-            # from such a gate proves nothing was checked.
-            baseline = self.gate.baseline_metrics or {}
-            enforced = bool(policy.minimum_cost_coverage) or any(
-                rule.required is not None
-                or (rule.max_regression is not None and rule.metric in baseline)
-                for rule in policy.rules
-            )
-            if not enforced:
+            if not gate_enforces_release_rule(self.gate):
                 raise ValueError(
                     "An adopt decision requires gate evidence whose applied "
                     "policy enforced at least one substantive release rule; "

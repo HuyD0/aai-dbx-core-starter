@@ -6,6 +6,10 @@ resources:
         - task_key: evaluate
           spark_python_task:
             python_file: ../evals/evaluate.py
+            # Bundle jobs are non-interactive. Local callers omit this and
+            # see the estimated judge spend before confirming.
+            parameters:
+              - "--yes"
           job_cluster_key: default
           libraries:
             - whl: ../dist/*.whl

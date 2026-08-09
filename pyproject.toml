@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aai-core"
-version = "0.3.0"
+version = "0.4.0"
 description = "Paved-road SDK for AI and ML applications on Azure Databricks."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -72,6 +72,7 @@ dev = [
 
 [project.scripts]
 aai-core = "aai_core.diagnostics:main"
+agentkit = "aai_core.agentkit.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aai_core"]
