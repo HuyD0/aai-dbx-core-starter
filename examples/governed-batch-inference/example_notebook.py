@@ -1225,8 +1225,16 @@ spark.sql(gbi.create_target_table_sql(spec_v2))
 # data and may itself be a governance event, so a human decides — and the
 # refusal names the statements rather than failing later inside a SQL
 # error that never mentions releases.
+# Names *and* types. Matching names alone declares the table ready when
+# a confidence column is STRING rather than DOUBLE, and `UPDATE SET *`
+# then casts silently — leaving the advertised schema wrong — or fails
+# inside the paid statement instead of before it.
 migration = gbi.require_migrated_target(
-    spec_v2, [field.name for field in spark.table(TARGET_TABLE).schema.fields]
+    spec_v2,
+    {
+        field.name: field.dataType.simpleString().upper()
+        for field in spark.table(TARGET_TABLE).schema.fields
+    },
 )
 for statement in migration.statements:
     spark.sql(statement)
@@ -1262,6 +1270,20 @@ pending_sql = f"""
     LEFT ANTI JOIN {TARGET_TABLE} AS done
       ON source.doc_id = done.doc_id{release_predicate}
 """
+# Stamp this run id into every Delta commit from here on. Stage 7 needs
+# the version *this run* produced, and history position cannot supply it:
+# the latest entry is whatever committed most recently, and the earliest
+# entry after an anchor is another writer's commit if one landed in
+# between — both misattribute during exactly the overlapping cycles this
+# example supports. `userMetadata` goes into the commit record, so the
+# entries can be identified rather than inferred.
+#
+# It is set here, before the *first* target mutation rather than before
+# the execute statement: a policy-only release mutates the table through
+# the resyncs and may produce no execute commit at all, which would leave
+# stage 7 with nothing of its own to find.
+spark.conf.set("spark.databricks.delta.commitInfo.userMetadata", RUN_ID)
+
 # Strata are row metadata, not model output. If a document's `layout` was
 # corrected while its text stayed the same, the restart predicate rightly
 # calls the row done — but the landed label would stay wrong forever, and
@@ -1306,17 +1328,14 @@ spark.sql(
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
-# Stamp this run id into the Delta commit itself. Stage 7 needs the
-# version *this run* produced, and history position cannot supply it:
-# the latest entry is whatever committed most recently, and the earliest
-# entry after an anchor is another writer's commit if one landed in
-# between — both misattribute during exactly the overlapping cycles this
-# example supports. `userMetadata` is written into the commit record, so
-# the entry can be identified rather than inferred.
-spark.conf.set("spark.databricks.delta.commitInfo.userMetadata", RUN_ID)
 
+# Spark returns the MERGE's own metrics, which is the only count that
+# describes *this attempt*. Filtering the target on `ai_run_id` looked
+# right but is not: an idempotent retry reuses the run id, so a second
+# attempt that finds nothing pending would report the first attempt's
+# rows as its own.
 if not SIMULATED:
-    spark.sql(execute_sql)
+    merge_metrics = spark.sql(execute_sql).first().asDict()
 else:
     # Simulated mode writes the identical schema through the identical
     # discipline — release-aware anti-join, then MERGE — with the
@@ -1394,7 +1413,7 @@ else:
     # last predicate a job whose pending set was collected before a newer
     # release committed would write its older output over the newer rows —
     # the teaching path has to carry the discipline it teaches.
-    spark.sql(f"""
+    merge_metrics = spark.sql(f"""
         MERGE INTO {TARGET_TABLE} AS target
         USING simulated_scored AS source
         ON target.doc_id = source.doc_id
@@ -1411,7 +1430,7 @@ else:
           )
           THEN UPDATE SET *
         WHEN NOT MATCHED THEN INSERT *
-        """)
+        """).first().asDict()
 
 print(f"pending after run:  {spark.sql(pending_sql).first().pending:,}")
 print("re-running the same statement now would be a no-op — that is the restart")
@@ -1495,13 +1514,14 @@ gbi.require_unique_run_id(
 )
 
 mlflow.log_metric("target_table_version", int(target_version))
-# Rows *this run* wrote, not the table's population. A retry whose
-# anti-join finds nothing pending writes zero, and logging the whole
-# table would report a throughput this run did not have — inconsistent
-# with the cost and version recorded beside it.
+# Rows this *attempt* wrote, taken from the MERGE's own metrics. A retry
+# that finds nothing pending reports zero, which is the truth, where both
+# the table population and a filter on `ai_run_id` would report work this
+# attempt did not do.
 mlflow.log_metric(
     "rows_landed",
-    spark.table(TARGET_TABLE).filter(F.col("ai_run_id") == F.lit(RUN_ID)).count(),
+    int(merge_metrics.get("num_updated_rows", 0))
+    + int(merge_metrics.get("num_inserted_rows", 0)),
 )
 mlflow.end_run()
 

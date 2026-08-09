@@ -2069,6 +2069,49 @@ def test_a_tuple_standing_in_for_a_mapping_enforces_unique_keys():
         )
 
 
+def test_a_right_name_with_the_wrong_type_blocks_the_release():
+    """`UPDATE SET *` would cast silently, leaving the advertised schema
+    wrong, or fail inside the paid statement instead of before it."""
+    spec = one_field_spec()
+    correct = {name: sql_type for name, sql_type in gbi.target_columns(spec)}
+    assert not gbi.require_migrated_target(spec, correct).blocking
+
+    confidence = gbi.ai_column("f") + "_confidence"
+    assert correct[confidence] == "DOUBLE"
+    wrong = {**correct, confidence: "STRING"}
+    with pytest.raises(gbi.TargetSchemaMismatch):
+        gbi.require_migrated_target(spec, wrong)
+    migration = gbi.plan_target_migration(spec, wrong)
+    assert migration.mistyped == ((confidence, "STRING", "DOUBLE"),)
+    assert confidence in migration.blocking
+    # Changing a landed column's type rewrites values, so it is reported
+    # for a human rather than executed.
+    assert any(
+        statement.startswith("-- review before running") and confidence in statement
+        for statement in migration.statements
+    )
+    # A plain list of names still works and skips the type check.
+    assert not gbi.require_migrated_target(spec, list(correct)).blocking
+
+
+def test_logged_evidence_is_bound_to_the_spec_it_records(monkeypatch):
+    """The notebook holds two reports for one snapshot by design, so the
+    mistake is available rather than hypothetical."""
+    v1 = one_field_spec(prompt_version="1.0.0")
+    v2 = one_field_spec(prompt_version="2.0.0")
+    report_v1 = gate(v1, score(records_for("s", correct=200), v1))
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+
+    with pytest.raises(gbi.EvidenceMismatch, match="one release and the decision"):
+        gbi.log_gate_evidence(
+            v2, estimate_matching(report_v1, v2), {"s": 200}, report_v1
+        )
+    # Its own report logs fine.
+    report_v2 = gate(v2, score(records_for("s", correct=200), v2))
+    gbi.log_gate_evidence(v2, estimate_matching(report_v2, v2), {"s": 200}, report_v2)
+
+
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
     spec = one_field_spec(criticality="high")
     records = [

@@ -2386,12 +2386,17 @@ class TargetMigration(BaseModel):
     add: tuple[tuple[str, str], ...] = ()
     stale: tuple[str, ...] = ()
     foreign: tuple[str, ...] = ()
+    #: (column, found type, expected type) for columns that exist under
+    #: the right name and the wrong type. Not fixable by this pipeline:
+    #: changing a column's type rewrites landed values, which is a
+    #: governance event, so it blocks and a human decides.
+    mistyped: tuple[tuple[str, str, str], ...] = ()
     statements: tuple[str, ...] = ()
 
     @property
     def blocking(self) -> tuple[str, ...]:
         """Columns a human must resolve before the release can execute."""
-        return self.stale + self.foreign
+        return self.stale + self.foreign + tuple(name for name, _, _ in self.mistyped)
 
     @property
     def required(self) -> bool:
@@ -2399,7 +2404,8 @@ class TargetMigration(BaseModel):
 
 
 def plan_target_migration(
-    spec: BatchInferenceSpec, existing_columns: Sequence[str]
+    spec: BatchInferenceSpec,
+    existing_columns: Sequence[str] | Mapping[str, str],
 ) -> TargetMigration:
     """Diff the target table against the columns this release produces.
 
@@ -2415,10 +2421,30 @@ def plan_target_migration(
     *reported, not dropped*: deleting a column is destructive and losing
     the old values may itself be a governance event, so a human decides.
     Comparison is case-insensitive, like Spark identifiers.
+
+    Pass a ``{name: type}`` mapping to have the *types* checked too.
+    Matching names alone declares the table ready when a confidence
+    column is STRING rather than DOUBLE, or an ordering column is not a
+    BIGINT: ``UPDATE SET *`` then either casts silently, leaving the
+    advertised schema wrong, or fails inside the paid statement instead
+    of before it. A plain sequence of names still works, and skips the
+    type check, for callers that genuinely only have names.
     """
+    declared_types = (
+        {name.casefold(): sql_type for name, sql_type in existing_columns.items()}
+        if isinstance(existing_columns, Mapping)
+        else {}
+    )
     existing = {column.casefold() for column in existing_columns}
     expected = target_columns(spec)
     expected_names = {name.casefold() for name, _ in expected}
+
+    mistyped = tuple(
+        (name, declared_types[name.casefold()], sql_type)
+        for name, sql_type in expected
+        if name.casefold() in declared_types
+        and declared_types[name.casefold()].casefold() != sql_type.casefold()
+    )
 
     add = tuple(
         (name, sql_type)
@@ -2464,13 +2490,24 @@ def plan_target_migration(
             "produced by this pipeline at all; move it to its own table or "
             f"drop it\n-- ALTER TABLE {spec.target_table} DROP COLUMN {column}"
         )
+    for column, found, expected_type in mistyped:
+        statements.append(
+            f"-- review before running: {spec.target_table}.{column} is "
+            f"{found}, but this release writes {expected_type}. Changing it "
+            "rewrites landed values, so decide deliberately."
+        )
     return TargetMigration(
-        add=add, stale=stale, foreign=foreign, statements=tuple(statements)
+        add=add,
+        stale=stale,
+        foreign=foreign,
+        mistyped=mistyped,
+        statements=tuple(statements),
     )
 
 
 def require_migrated_target(
-    spec: BatchInferenceSpec, existing_columns: Sequence[str]
+    spec: BatchInferenceSpec,
+    existing_columns: Sequence[str] | Mapping[str, str],
 ) -> TargetMigration:
     """Refuse to execute against a target that still has unresolved columns.
 
@@ -3248,6 +3285,25 @@ def log_gate_evidence(
     """
     import mlflow
 
+    # The report is what the decision came from, so it has to belong to
+    # the release being recorded. Checking only the snapshot let
+    # `log_gate_evidence(spec_v2, estimate_v2, allocation, report_v1)`
+    # write v2's parameters and YAML beside v1's decision and intervals —
+    # and this notebook holds both reports for one snapshot by design, so
+    # the mistake is available rather than hypothetical. Same binding the
+    # reserve helper does; it was simply not swept here.
+    if report.spec_digest != spec.spec_digest:
+        raise EvidenceMismatch(
+            f"the gate report describes spec digest "
+            f"{report.spec_digest[:12]}… but this run records "
+            f"{spec.spec_digest[:12]}…. The evidence would name one release "
+            "and the decision another."
+        )
+    if report.use_tier != spec.use_tier:
+        raise EvidenceMismatch(
+            f"the gate report claims tier {report.use_tier}, but this run is "
+            f"tier {spec.use_tier}"
+        )
     # The estimate is what authorised the spend, so it has to belong to
     # the release being recorded. A longer prompt is a different budget.
     if estimate.release != spec.release:
