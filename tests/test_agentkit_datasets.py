@@ -1253,6 +1253,124 @@ def test_traces_mode_plans_against_the_expectations_mlflow_will_use(tmp_path):
     assert scored.shape.partial_expectation_keys == ("expected_response",)
 
 
+def test_traces_mode_decodes_serialized_expected_facts_for_plan_and_digest(tmp_path):
+    """MLflow serializes non-scalar expectation values inside the trace."""
+
+    from aai_core.agentkit.catalog import select_scorers
+    from aai_core.agentkit.config import AgentkitConfig
+
+    def _rows_with(facts):
+        return [
+            {
+                "inputs": {"question": "What is the vesting rule?"},
+                "expectations": {"expected_facts": ["authored fallback"]},
+                "trace": {
+                    "info": {
+                        "trace_id": "tr-realistic",
+                        "assessments": [
+                            {
+                                "assessment_name": "expected_facts",
+                                "expectation": {
+                                    # Trace.to_dict leaves the scalar arm
+                                    # empty when the serialized arm is used.
+                                    "value": None,
+                                    "serialized_value": {
+                                        "value": json.dumps(facts),
+                                        "serialization_format": "JSON",
+                                    },
+                                },
+                            },
+                            {
+                                "assessment_name": "expected_response",
+                                "expectation": {"value": "Direct scalar value."},
+                            },
+                            {
+                                "assessment_name": "guidelines",
+                                "expectation": "Direct bare scalar.",
+                            },
+                        ],
+                    },
+                    "data": {
+                        "spans": [
+                            {
+                                "span_id": "search",
+                                "type": "RETRIEVER",
+                                "outputs": [{"page_content": "Policy context."}],
+                            }
+                        ]
+                    },
+                },
+            }
+        ]
+
+    _write_dataset(
+        tmp_path, _rows_with(["Two years.", "Continuous service."]), "a.json"
+    )
+    _write_dataset(tmp_path, _rows_with(["Three years."]), "b.json")
+    first = load_dataset("a.json", root=tmp_path)
+    second = load_dataset("b.json", root=tmp_path)
+
+    # Trace behaviour remains absent from authored identity.
+    assert first.digest == second.digest
+    scored = effective_dataset(first, mode="traces")
+
+    assert scored.rows[0]["expectations"] == {
+        "expected_facts": ["Two years.", "Continuous service."],
+        "expected_response": "Direct scalar value.",
+        "guidelines": "Direct bare scalar.",
+    }
+    assert scored.digest != effective_dataset(second, mode="traces").digest
+    plan = select_scorers(
+        scored.shape,
+        AgentkitConfig(
+            version=1,
+            agent="agent.py:respond",
+            dataset="golden.json",
+            scorers={"add": ["retrieval_sufficiency"]},
+        ),
+        mode="traces",
+        judges_enabled=True,
+    )
+    selected = {spec.name for spec in plan.specs}
+    assert {"correctness", "retrieval_sufficiency"} <= selected
+
+
+@pytest.mark.parametrize(
+    "serialized_value",
+    [None, {}, {"value": ["not", "json"]}, {"value": "[not valid JSON"}],
+)
+def test_malformed_serialized_trace_expectation_fails_closed(
+    tmp_path, serialized_value
+):
+    rows = [
+        {
+            "inputs": {"question": "What is the vesting rule?"},
+            "trace": {
+                "info": {
+                    "assessments": [
+                        {
+                            "assessment_name": "expected_facts",
+                            "expectation": {
+                                "value": None,
+                                "serialized_value": serialized_value,
+                            },
+                        }
+                    ]
+                }
+            },
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+
+    with pytest.raises(
+        ConfigError,
+        match="trace expectation 'expected_facts' is malformed",
+    ):
+        # Runner computes the effective dataset before scorer selection,
+        # budget confirmation, or any provider call.
+        effective_dataset(load_dataset("golden.json", root=tmp_path), mode="traces")
+
+
 def test_curated_expectations_survive_traces_without_assessments(tmp_path):
     dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
 

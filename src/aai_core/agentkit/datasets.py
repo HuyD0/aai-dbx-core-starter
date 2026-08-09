@@ -458,11 +458,15 @@ def _trace_inputs(trace: Any) -> Mapping[str, Any] | None:
 
 
 def _trace_expectations(trace: Any) -> dict[str, Any]:
+    return dict(_trace_expectation_items(trace))
+
+
+def _trace_expectation_items(trace: Any) -> tuple[tuple[str, Any], ...]:
     document = _trace_document(trace)
     info = document.get("info") if document is not None else None
     if not isinstance(info, Mapping):
-        return {}
-    expectations: dict[str, Any] = {}
+        return ()
+    expectations: list[tuple[str, Any]] = []
     for assessment in info.get("assessments") or ():
         if not isinstance(assessment, Mapping):
             continue
@@ -472,13 +476,66 @@ def _trace_expectations(trace: Any) -> dict[str, Any]:
         name = assessment.get("assessment_name") or assessment.get("name")
         if not name:
             continue
-        value = (
-            expectation.get("value")
-            if isinstance(expectation, Mapping)
-            else expectation
+        expectations.append(
+            (str(name), _expectation_value(expectation, name=str(name)))
         )
-        expectations[str(name)] = value
-    return expectations
+    return tuple(expectations)
+
+
+def _expectation_value(expectation: Any, *, name: str) -> Any:
+    """Decode the expectation shapes emitted by MLflow ``Trace.to_dict``.
+
+    Scalar expectations arrive directly or under ``value``. Non-scalars
+    such as ``expected_facts`` lists use
+    ``serialized_value.value`` containing JSON. Treating that wrapper like
+    a direct value returns ``None`` and silently removes the scorer contract
+    after MLflow replaces the authored expectations column, so malformed
+    wrappers fail before planning or spend.
+    """
+
+    if not isinstance(expectation, Mapping):
+        return _plain(expectation)
+
+    direct = expectation.get("value")
+    if not _is_missing(direct):
+        return _plain(direct)
+
+    serialized = expectation.get("serialized_value")
+    if not isinstance(serialized, Mapping) or "value" not in serialized:
+        raise _malformed_trace_expectation(
+            name,
+            "expected a direct value or serialized_value.value",
+        )
+    encoded = serialized["value"]
+    if not isinstance(encoded, str):
+        raise _malformed_trace_expectation(
+            name,
+            "serialized_value.value must be a JSON string",
+        )
+    try:
+        value = json.loads(encoded)
+    except (TypeError, ValueError) as error:
+        raise _malformed_trace_expectation(
+            name,
+            "serialized_value.value is not valid JSON",
+        ) from error
+    if _is_missing(value):
+        raise _malformed_trace_expectation(
+            name,
+            "serialized_value.value decoded to a missing value",
+        )
+    return _plain(value)
+
+
+def _malformed_trace_expectation(name: str, detail: str) -> ConfigError:
+    return ConfigError(
+        f"trace expectation {name!r} is malformed: {detail}",
+        remediation=(
+            "Re-record the trace expectation with MLflow 3.14 or provide a "
+            "direct scalar value; do not run a gate after ground truth could "
+            "not be decoded."
+        ),
+    )
 
 
 def trace_expectation_overrides(dataset: LoadedDataset) -> tuple[str, ...]:
@@ -501,21 +558,11 @@ def trace_expectation_overrides(dataset: LoadedDataset) -> tuple[str, ...]:
 
 
 def _trace_expectation_names(trace: Any) -> tuple[str, ...]:
-    document = _trace_document(trace)
-    info = document.get("info") if document is not None else None
-    if not isinstance(info, Mapping):
-        return ()
-    names: list[str] = []
-    for assessment in info.get("assessments") or ():
-        if not isinstance(assessment, Mapping):
-            continue
-        if not _is_populated(assessment.get("expectation")):
-            continue
-        # `Trace.to_dict()` writes `assessment_name`; the in-memory entity
-        # attribute is `name`, and a row can arrive as either.
-        name = assessment.get("assessment_name") or assessment.get("name")
-        names.append(str(name or "an expectation"))
-    return tuple(names)
+    # Use the same strict reader as `_trace_expectations`: a malformed value
+    # must not count as an override here and then disappear when the effective
+    # rows are built. `Trace.to_dict()` writes `assessment_name`; the
+    # in-memory entity attribute is `name`, and the shared reader accepts both.
+    return tuple(name for name, _ in _trace_expectation_items(trace))
 
 
 def validate_dataset(
