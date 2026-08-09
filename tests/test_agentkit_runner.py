@@ -147,6 +147,15 @@ def _serialized_trace(
     }
 
 
+def _malformed_serialized_trace():
+    trace = _serialized_trace(0)
+    # JSON-valid, but TraceState and the dependency-free validator both
+    # require a scalar enum value. This used to raise an ungoverned TypeError
+    # in one environment and pass the shallow fallback in another.
+    trace["info"]["state"] = ["OK"]
+    return trace
+
+
 def _builtin_fake(class_name):
     """A stand-in for an MLflow builtin scorer *class*.
 
@@ -2460,7 +2469,10 @@ def _traced_project(tmp_path, *, trace, rows=12):
     return project
 
 
-@pytest.mark.parametrize("trace", ["not-json", {"unrelated": "object"}])
+@pytest.mark.parametrize(
+    "trace",
+    ["not-json", {"unrelated": "object"}, _malformed_serialized_trace()],
+)
 def test_malformed_traces_fail_before_plan_confirmation_or_evaluation(
     tmp_path, monkeypatch, trace
 ):
