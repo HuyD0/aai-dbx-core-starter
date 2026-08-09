@@ -737,6 +737,93 @@ def test_invalid_uc_model_is_rejected_before_dataset_or_spend(
     assert mlflow.evaluate_calls == []
 
 
+def test_live_answer_sheet_target_is_rejected_before_every_run_phase(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: evals/data/answer_sheet.json\n"
+            "dataset: evals/data/golden_cases.json\n"
+        ),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "preflight_target",
+        lambda *args, **kwargs: pytest.fail("target preflight ran"),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "load_dataset",
+        lambda *args, **kwargs: pytest.fail("dataset was read"),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "load_baseline",
+        lambda *args, **kwargs: pytest.fail("baseline was read"),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "estimate",
+        lambda *args, **kwargs: pytest.fail("budget was estimated"),
+    )
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: pytest.fail("endpoint identity was resolved"),
+    )
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: pytest.fail("prompt registry was read"),
+    )
+    asked = []
+    mlflow = FakeMlflow()
+
+    with pytest.raises(ConfigError, match="live mode cannot use an answer-sheet"):
+        run_scoring(
+            project,
+            mode="live",
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
+            mlflow_module=mlflow,
+            environ={},
+        )
+
+    assert asked == []
+    assert mlflow.experiment is None
+    assert mlflow.evaluate_calls == []
+
+
+@pytest.mark.parametrize("mode", [None, "answer-sheet"], ids=("auto", "explicit"))
+def test_answer_sheet_target_uses_answer_sheet_mode(tmp_path, mode):
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: evals/data/answer_sheet.json\n"
+            "dataset: evals/data/golden_cases.json\n"
+        ),
+    )
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        mode=mode,
+        judges_enabled=False,
+        require_baseline=False,
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.mode == "answer-sheet"
+
+
 def test_http_auth_preflight_precedes_identity_confirmation_and_transport(
     tmp_path, monkeypatch
 ):

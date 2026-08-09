@@ -241,6 +241,26 @@ def test_compare_without_a_baseline_reports_the_refusal(project_dir, capsys):
     assert "--establish-baseline" in error
 
 
+def test_cli_rejects_live_mode_with_an_answer_sheet_target(project_dir, capsys):
+    code = main(
+        [
+            "compare",
+            "--mode",
+            "live",
+            "--agent",
+            "evals/data/answer_sheet.json",
+            "--yes",
+            "--establish-baseline",
+            *_config_flag(project_dir),
+        ]
+    )
+
+    assert code == 1
+    error = capsys.readouterr().err
+    assert "live mode cannot use an answer-sheet" in error
+    assert "--mode answer-sheet" in error
+
+
 def test_invalid_config_exits_one(project_dir, capsys):
     (project_dir / "agentkit.yaml").write_text("version: 1\nagent: a\n")
 
