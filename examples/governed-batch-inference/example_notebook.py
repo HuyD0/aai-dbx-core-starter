@@ -967,7 +967,7 @@ mlflow.set_experiment("/Shared/governed-batch-inference-demo")
 
 report_v1 = gbi.evaluate_gate(spec_v1, scores_v1, source_snapshot=SOURCE_SNAPSHOT)
 with mlflow.start_run(run_name=f"{spec_v1.name}-prompt-1.0.0-gate"):
-    gbi.log_gate_evidence(spec_v1, estimate_v1, allocation, scores_v1, report_v1)
+    gbi.log_gate_evidence(spec_v1, estimate_v1, allocation, report_v1)
 
 print(f"gate decision for prompt 1.0.0: {report_v1.decision.value}\n")
 for field_result in report_v1.fields:
@@ -1051,7 +1051,7 @@ report_v2 = gbi.evaluate_gate(spec_v2, scores_v2, source_snapshot=SOURCE_SNAPSHO
 
 gate_run = mlflow.start_run(run_name=f"{spec_v2.name}-prompt-2.0.0-gate")
 RUN_ID = gate_run.info.run_id  # provenance key for everything downstream
-gbi.log_gate_evidence(spec_v2, estimate_v2, allocation, scores_v2, report_v2)
+gbi.log_gate_evidence(spec_v2, estimate_v2, allocation, report_v2)
 
 print(f"gate decision for prompt 2.0.0: {report_v2.decision.value}")
 display(
@@ -1271,6 +1271,28 @@ spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT))
 # A release that changes only judgment produces the predictions already
 # landed, so restart leaves those rows alone — but the table would still
 # name the older policy. This corrects the stamp without inference.
+# The run record has to exist before any row points at it. Landed rows
+# carry `ai_run_id`, and the resync below writes `ai_policy_run_id`; if
+# the record were written at the end, an interruption here would strand
+# those references permanently, because nothing revisits them.
+spark.sql(gbi.create_run_metadata_table_sql(spec_v2))
+spark.sql(
+    gbi.run_metadata_reserve_sql(
+        spec_v2,
+        report_v2,
+        run_id=RUN_ID,
+        projected_cost_cad=estimate_v2.projected_cost_cad,
+    )
+)
+# Insert-only, so a reused run id leaves the *original* record standing
+# while this run's rows point at it. Silent, unless someone looks.
+gbi.require_unique_run_id(
+    spec_v2,
+    spark.sql(
+        gbi.run_metadata_conflict_sql(spec_v2, run_id=RUN_ID, target_table_version=-1)
+    ).count(),
+)
+
 spark.sql(gbi.resync_policy_sql(spec_v2, SOURCE_SNAPSHOT, run_id=RUN_ID))
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
@@ -1422,20 +1444,14 @@ target_version = spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1").first()[
     "version"
 ]
 
-spark.sql(gbi.create_run_metadata_table_sql(spec_v2))
+# The record was reserved before execution; all that was unknown then is
+# the version the write produced. It is set once, and only from NULL, so
+# a retry after a later commit changes nothing.
 spark.sql(
-    gbi.run_metadata_upsert_sql(
-        spec_v2,
-        report_v2,
-        run_id=RUN_ID,
-        projected_cost_cad=estimate_v2.projected_cost_cad,
-        target_table_version=int(target_version),
+    gbi.run_metadata_finalize_sql(
+        spec_v2, run_id=RUN_ID, target_table_version=int(target_version)
     )
 )
-# The write is insert-only, so a retry is a no-op and the record can
-# never be rewritten — which means a reused run id leaves the *original*
-# record standing while this run's rows point at it. Silent, unless
-# someone looks.
 gbi.require_unique_run_id(
     spec_v2,
     spark.sql(

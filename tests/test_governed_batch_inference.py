@@ -146,6 +146,8 @@ def gate(spec, scores, **kwargs):
 
 
 ESTIMATED_ROWS = 1_000
+#: `adopting_report` scores this many rows in one stratum.
+ADOPTING_ROWS = 200
 
 
 def preflight_matching(report, spec, row_count=ESTIMATED_ROWS):
@@ -163,6 +165,21 @@ def preflight_matching(report, spec, row_count=ESTIMATED_ROWS):
     )
 
 
+def estimate_matching(report, spec):
+    """An estimate priced for exactly the rows `preflight_matching` counts."""
+    return estimate_for(
+        spec, report.source_snapshot or snapshot_for(spec), rows=_report_rows(report)
+    )
+
+
+def _report_rows(report):
+    weights: dict[str, int] = {}
+    for score in report.scores:
+        if score.stratum == gbi.WEIGHTED:
+            weights.update(dict(score.stratum_population))
+    return sum(weights.values()) or ADOPTING_ROWS
+
+
 def preflight_for(
     spec, source_snapshot=_UNSET, row_count=ESTIMATED_ROWS, population=None
 ):
@@ -176,10 +193,10 @@ def preflight_for(
         # describes the table, and tier does not change that.
         source_snapshot = snapshot_for(spec)
     if population is None:
-        # Weighted evidence is checked against measured counts, so a
-        # preflight needs a population that matches the strata the
-        # evidence covers. Both sample builders here use 200 rows.
-        population = {"standard": 200}
+        # Weighted evidence is checked against measured counts, and the
+        # counts must account for every row in the snapshot.
+        population = {"standard": ADOPTING_ROWS}
+    row_count = sum(population.values())
     return gbi.require_usable_source_rows(
         spec,
         0,
@@ -191,7 +208,7 @@ def preflight_for(
     )
 
 
-def estimate_for(spec, source_snapshot=_UNSET):
+def estimate_for(spec, source_snapshot=_UNSET, rows=ADOPTING_ROWS):
     """A within-ceiling estimate matching what `adopting_report` pins.
 
     The builder emits a paid statement, so it now requires an approved
@@ -201,7 +218,7 @@ def estimate_for(spec, source_snapshot=_UNSET):
         source_snapshot = snapshot_for(spec)
     return gbi.estimate_cost(
         spec,
-        row_count=ESTIMATED_ROWS,
+        row_count=rows,
         probe_input_tokens=[100],
         probe_output_tokens=[100],
         cad_per_million_input_tokens=0.1,
@@ -1278,7 +1295,7 @@ def test_the_sql_builder_enforces_the_gate_itself():
         gbi.build_execute_sql(
             spec,
             run_id="run-1",
-            estimate=estimate_for(spec),
+            estimate=estimate_matching(rejecting, spec),
             preflight=preflight_matching(rejecting, spec),
             report=rejecting,
         )
@@ -1292,7 +1309,7 @@ def test_the_sql_builder_enforces_the_gate_itself():
         gbi.build_execute_sql(
             tier1,
             run_id="run-1",
-            estimate=estimate_for(tier1),
+            estimate=estimate_matching(pending, tier1),
             preflight=preflight_matching(pending, tier1),
             report=pending,
         )
@@ -1301,7 +1318,7 @@ def test_the_sql_builder_enforces_the_gate_itself():
     assert "ai_query" in gbi.build_execute_sql(
         tier1,
         run_id="run-1",
-        estimate=estimate_for(tier1),
+        estimate=estimate_matching(approved, tier1),
         preflight=preflight_matching(approved, tier1),
         report=approved,
     )
@@ -1346,14 +1363,14 @@ def test_a_cost_estimate_is_bound_to_the_rows_it_measured(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
     # Matching snapshots log fine.
     gbi.log_gate_evidence(
-        spec, estimate_over(report.source_snapshot, 100), {"s": 200}, scores, report
+        spec, estimate_over(report.source_snapshot, 100), {"s": 200}, report
     )
     # A projection made over an older, smaller snapshot cannot authorise
     # a run gated on a newer one, however cheap it claims to be.
     stale = estimate_over(snapshot_for(spec, 1), 10)
     assert stale.release == report.scores[0].release
     with pytest.raises(gbi.EvidenceMismatch, match="different rows"):
-        gbi.log_gate_evidence(spec, stale, {"s": 200}, scores, report)
+        gbi.log_gate_evidence(spec, stale, {"s": 200}, report)
 
 
 def test_the_sql_builder_enforces_the_ceiling_itself():
@@ -1361,9 +1378,11 @@ def test_the_sql_builder_enforces_the_ceiling_itself():
     every tier, since tier 3 is controlled by cost alone."""
     spec = one_field_spec(cost_ceiling_cad=1.0)
     report = adopting_report(spec)
+    # Priced over exactly the rows the evidence covers, so the ceiling —
+    # not the population check — is what refuses this.
     over = gbi.estimate_cost(
         spec,
-        row_count=100_000_000,
+        row_count=ADOPTING_ROWS,
         probe_input_tokens=[5_000],
         probe_output_tokens=[5_000],
         cad_per_million_input_tokens=7.0,
@@ -1376,7 +1395,7 @@ def test_the_sql_builder_enforces_the_ceiling_itself():
             spec,
             run_id="r",
             estimate=over,
-            preflight=preflight_for(spec, report.source_snapshot, over.row_count),
+            preflight=preflight_matching(report, spec),
             report=report,
         )
 
@@ -1409,7 +1428,11 @@ def test_the_sql_builder_enforces_the_ceiling_itself():
                 cad_per_million_output_tokens=21.0,
                 source_snapshot=snapshot_for(tier3),
             ),
-            preflight=preflight_for(tier3, snapshot_for(tier3), 100_000_000),
+            preflight=preflight_for(
+                tier3,
+                snapshot_for(tier3),
+                population={"standard": 100_000_000},
+            ),
         )
 
 
@@ -1589,7 +1612,7 @@ def test_model_copy_cannot_smuggle_a_decision_past_the_validators():
         gbi.build_execute_sql(
             spec,
             run_id="r",
-            estimate=estimate_for(spec),
+            estimate=estimate_matching(rejecting, spec),
             preflight=preflight_matching(rejecting, spec),
             report=flipped,
         )
@@ -1755,11 +1778,76 @@ def test_a_reused_run_id_is_found_rather_than_silently_overwritten():
     check = gbi.run_metadata_conflict_sql(spec, run_id="run-1", target_table_version=7)
     assert "WHERE run_id = 'run-1'" in check
     assert f"spec_digest <=> '{spec.spec_digest}'" in check
-    assert "target_table_version <=> 7" in check
+    assert "target_table_version <> 7" in check
+    # A still-NULL version is this run's own reserved record, not a clash.
+    assert "target_table_version IS NOT NULL" in check
 
     gbi.require_unique_run_id(spec, 0)  # the clean case proceeds
     with pytest.raises(gbi.EvidenceMismatch, match="already holds a different run"):
         gbi.require_unique_run_id(spec, 1)
+
+
+def test_measured_strata_must_account_for_every_row():
+    """An omitted group is invisible: the sample is drawn from the same
+    mapping, the weighted row is computed from it, and the report and
+    preflight then agree with each other while rows go ungated."""
+    snapshot = gbi.SourceSnapshot(table="main.finance_docs.document_text", version=1)
+    gbi.SourcePreflight(
+        snapshot=snapshot,
+        row_count=300,
+        stratum_population=(("legacy_scan", 100), ("standard", 200)),
+    )
+    with pytest.raises(ValidationError, match="belong to no stratum"):
+        gbi.SourcePreflight(
+            snapshot=snapshot,
+            row_count=300,
+            stratum_population=(("standard", 200),),
+        )
+    with pytest.raises(ValidationError, match="negative number of rows"):
+        gbi.SourcePreflight(
+            snapshot=snapshot,
+            row_count=100,
+            stratum_population=(("standard", 200), ("legacy_scan", -100)),
+        )
+
+
+def test_logged_evidence_comes_from_the_report(monkeypatch):
+    """The notebook holds two evaluations at once by design, so taking
+    the scores separately let one run show v1's metrics beside v2's
+    adoption."""
+    spec = one_field_spec()
+    report = gate(spec, score(records_for("s", correct=200), spec))
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    gbi.log_gate_evidence(spec, estimate_matching(report, spec), {"s": 200}, report)
+    # Every logged interval traces to a score the report carries.
+    logged = {key for key in recorder.metrics if key.endswith("_lower")}
+    assert logged
+    for score_row in report.scores:
+        if score_row.precision is not None:
+            assert (
+                f"{gbi.metric_key(score_row.field, score_row.stratum, 'precision')}"
+                "_lower" in logged
+            )
+
+
+def test_the_run_record_exists_before_any_row_points_at_it():
+    """Rows carry ai_run_id and ai_policy_run_id, so writing the record
+    last leaves an interruption window that strands them permanently."""
+    spec = one_field_spec()
+    report = adopting_report(spec)
+    reserve = gbi.run_metadata_reserve_sql(
+        spec, report, run_id="run-1", projected_cost_cad=1.0
+    )
+    # Reserved with the one unknowable field left open.
+    assert "CAST(NULL AS BIGINT) AS target_table_version" in reserve
+    assert "WHEN MATCHED" not in reserve
+
+    finalize = gbi.run_metadata_finalize_sql(
+        spec, run_id="run-1", target_table_version=9
+    )
+    assert "SET target_table_version = 9" in finalize
+    assert "AND target_table_version IS NULL" in finalize
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -2060,7 +2148,7 @@ def test_cost_estimate_is_bound_to_the_release_it_measured(monkeypatch):
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
     with pytest.raises(gbi.EvidenceMismatch, match="Re-estimate"):
-        gbi.log_gate_evidence(spec_v2, estimate, {"standard": 200}, scores, report)
+        gbi.log_gate_evidence(spec_v2, estimate, {"standard": 200}, report)
     # The mismatch is caught before anything is written.
     assert not recorder.params
 
@@ -2445,12 +2533,11 @@ def test_run_metadata_write_is_idempotent():
     spec = make_spec()
     scores = score(records_for("standard", correct=200), one_field_spec())
     report = gate(one_field_spec(), scores)
-    sql = gbi.run_metadata_upsert_sql(
+    sql = gbi.run_metadata_reserve_sql(
         spec,
         report,
         run_id="run-1",
         projected_cost_cad=12.5,
-        target_table_version=4,
     )
     assert sql.startswith("MERGE INTO main.finance_docs.batch_inference_runs")
     assert "ON target.run_id = source.run_id" in sql
@@ -2552,16 +2639,22 @@ def test_provenance_layers_are_generated():
         )
         for i in range(200)
     ]
-    insert = gbi.run_metadata_upsert_sql(
+    insert = gbi.run_metadata_reserve_sql(
         spec,
         gate(spec, score(records, spec)),
         run_id="run-123",
         projected_cost_cad=12.5,
-        target_table_version=4,
     )
     assert "'run-123' AS run_id" in insert
     assert "12.5 AS projected_cost_cad" in insert
-    assert "4 AS target_table_version" in insert
+    # Reserved with the version still open — it is not knowable yet.
+    assert "CAST(NULL AS BIGINT) AS target_table_version" in insert
+    finalize = gbi.run_metadata_finalize_sql(
+        spec, run_id="run-123", target_table_version=4
+    )
+    assert "SET target_table_version = 4" in finalize
+    # Set once, and only from NULL: a later retry changes nothing.
+    assert "AND target_table_version IS NULL" in finalize
 
 
 def test_sql_string_literal_escapes_quotes_and_backslashes():
@@ -2631,7 +2724,7 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
 
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
-    gbi.log_gate_evidence(spec, estimate, {"standard": 200}, scores, approved)
+    gbi.log_gate_evidence(spec, estimate, {"standard": 200}, approved)
 
     assert approver not in json.dumps(recorder.tags)
     assert approver not in json.dumps(recorder.params)
@@ -2640,11 +2733,10 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
     report_artifact = recorder.dicts["governed_batch_inference/gate_report.json"]
     assert report_artifact["approved_by"] == approver
 
-    metadata_sql = gbi.run_metadata_upsert_sql(
+    metadata_sql = gbi.run_metadata_reserve_sql(
         spec,
         approved,
         run_id="run-1",
         projected_cost_cad=1.0,
-        target_table_version=1,
     )
     assert approver in metadata_sql

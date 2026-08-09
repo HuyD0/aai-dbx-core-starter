@@ -723,6 +723,29 @@ class SourcePreflight(BaseModel):
     #: that makes those weights mean anything.
     stratum_population: tuple[tuple[str, int], ...] = ()
 
+    @model_validator(mode="after")
+    def _strata_account_for_every_row(self) -> SourcePreflight:
+        """The parts must add up to the whole they were measured beside.
+
+        A mapping that omits a group is not obviously wrong anywhere: the
+        sample is drawn from it, the weighted row is computed from it, and
+        the report/preflight comparison then agrees with itself — while
+        the omitted rows are executed and priced without ever reaching the
+        gate that certified the run.
+        """
+        if not self.stratum_population:
+            return self
+        counts = [count for _, count in self.stratum_population]
+        if any(count < 0 for count in counts):
+            raise ValueError("a stratum cannot contain a negative number of rows")
+        if sum(counts) != self.row_count:
+            raise ValueError(
+                f"the measured strata hold {sum(counts)} row(s) but the "
+                f"snapshot holds {self.row_count}. Some rows belong to no "
+                "stratum, so they would be processed without being gated."
+            )
+        return self
+
 
 def require_usable_source_rows(
     spec: BatchInferenceSpec,
@@ -2919,13 +2942,12 @@ def create_run_metadata_table_sql(spec: BatchInferenceSpec) -> str:
 )"""
 
 
-def run_metadata_upsert_sql(
+def run_metadata_reserve_sql(
     spec: BatchInferenceSpec,
     report: GateReport,
     *,
     run_id: str,
     projected_cost_cad: float,
-    target_table_version: int,
 ) -> str:
     """Write the run record, keyed on ``run_id`` so a retry cannot duplicate it.
 
@@ -2942,8 +2964,19 @@ def run_metadata_upsert_sql(
     spec, gate, cost and table version that the rows carrying that
     ``ai_run_id`` were produced under, silently repointing them at a
     release they never ran. Insert-only makes the retry a true no-op and
-    the record immutable; ``require_run_metadata_consistent`` is how a
+    the record immutable; ``run_metadata_conflict_sql`` is how a
     conflicting reuse is *found*, because SQL cannot raise here.
+
+    **Run this before execution, not after.** Every landed row carries
+    ``ai_run_id``, and the policy resync writes ``ai_policy_run_id``, so
+    writing the record last leaves a window where an interruption strands
+    rows pointing at a run that does not exist — permanently, since
+    nothing revisits them. Reserving it first closes that window.
+
+    ``target_table_version`` is left NULL here: it is the one fact that
+    genuinely cannot be known until the write has happened.
+    ``run_metadata_finalize_sql`` fills it in exactly once, and only from
+    NULL, so nothing already recorded is ever revised.
     """
     approved = sql_string_literal(report.approved_by) if report.approved_by else "NULL"
     return f"""MERGE INTO {spec.run_metadata_table} AS target
@@ -2961,11 +2994,31 @@ USING (
     {approved} AS approved_by,
     {float(projected_cost_cad)} AS projected_cost_cad,
     {sql_string_literal(spec.target_table)} AS target_table,
-    {int(target_table_version)} AS target_table_version,
+    CAST(NULL AS BIGINT) AS target_table_version,
     current_timestamp() AS executed_at
 ) AS source
 ON target.run_id = source.run_id
 WHEN NOT MATCHED THEN INSERT *"""
+
+
+def run_metadata_finalize_sql(
+    spec: BatchInferenceSpec,
+    *,
+    run_id: str,
+    target_table_version: int,
+) -> str:
+    """Record the table version this run produced — once, and only once.
+
+    The version cannot be known before the write, so it is the single
+    field the reserved record leaves open. Setting it only where it is
+    still NULL keeps the record append-only in effect: a retry after a
+    later commit finds it already filled and changes nothing, rather than
+    repointing rows at a version they were not produced under.
+    """
+    return f"""UPDATE {spec.run_metadata_table}
+SET target_table_version = {int(target_table_version)}
+WHERE run_id = {sql_string_literal(run_id)}
+  AND target_table_version IS NULL"""
 
 
 def run_metadata_conflict_sql(
@@ -2976,17 +3029,23 @@ def run_metadata_conflict_sql(
 ) -> str:
     """Find an existing run record this run would have contradicted.
 
-    The upsert is insert-only, so a reused ``run_id`` leaves the original
+    The reserve is insert-only, so a reused ``run_id`` leaves the original
     record standing rather than overwriting it — correct, but silent. Run
     this after it: any row returned means two different runs claimed one
     id, and every landed row carrying it now resolves to the wrong one.
+
+    A still-NULL ``target_table_version`` is not a conflict: that is this
+    run's own reserved record, waiting to be finalised.
     """
     return f"""SELECT run_id, spec_digest, target_table_version
 FROM {spec.run_metadata_table}
 WHERE run_id = {sql_string_literal(run_id)}
-  AND NOT (
-    spec_digest <=> {sql_string_literal(spec.spec_digest)}
-    AND target_table_version <=> {int(target_table_version)}
+  AND (
+    NOT (spec_digest <=> {sql_string_literal(spec.spec_digest)})
+    OR (
+      target_table_version IS NOT NULL
+      AND target_table_version <> {int(target_table_version)}
+    )
   )"""
 
 
@@ -3049,13 +3108,19 @@ def log_gate_evidence(
     spec: BatchInferenceSpec,
     estimate: CostEstimate,
     allocation: Mapping[str, int],
-    scores: Sequence[FieldStratumScore],
     report: GateReport,
 ) -> None:
     """Log spec, sample, per-field per-stratum intervals, and the decision
     to the *active* MLflow run. The caller owns the run lifecycle so the
     same run can later receive the output table version. Imported lazily so
     this module stays importable without MLflow installed.
+
+    The intervals come from ``report.scores``, not from a separate
+    argument. Taking the scores independently meant a caller holding two
+    evaluations — which the notebook does, by design — could log v1's
+    metrics beside v2's adoption, and the record would look complete.
+    The report already carries the scores its verdicts were derived from;
+    a second source for them could only ever disagree.
     """
     import mlflow
 
@@ -3103,7 +3168,7 @@ def log_gate_evidence(
     mlflow.log_text(spec.to_yaml(), "governed_batch_inference/spec.yaml")
     mlflow.log_dict(dict(allocation), "governed_batch_inference/sample_allocation.json")
     mlflow.log_metric("projected_cost_cad", estimate.projected_cost_cad)
-    for score in scores:
+    for score in report.scores:
         for metric, interval in (
             ("precision", score.precision),
             ("recall", score.recall),
