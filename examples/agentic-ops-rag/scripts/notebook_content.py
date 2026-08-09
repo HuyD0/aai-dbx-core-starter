@@ -741,7 +741,10 @@ uses an OData collection security filter, while Databricks standard endpoints
 use an ARRAY filter. Storage-optimized Databricks indexes must expose a
 platform-approved scalar ACL field before this lab can run. This evaluation
 keeps `candidate_k` equal to `final_k`, so the normalized documents on the SDK
-retriever span are exactly the evidence supplied to the answer model.
+retriever span are exactly the evidence supplied to the answer model. The
+governed `predict_fn` span owns the complete invocation. MLflow's evaluation
+harness can otherwise enable OpenAI autologging temporarily, so this SDK-owned
+path disables that second tracing owner before either evaluation begins.
 """),
         c("""
 RUN_CONNECTED = False
@@ -756,7 +759,7 @@ if RUN_CONNECTED:
         Safety,
     )
 
-    from aai_core.tracing import TraceIntegration
+    from aai_core.tracing import TraceIntegration, traced
 
     if RUN_MLFLOW:
         raise RuntimeError(
@@ -764,6 +767,7 @@ if RUN_CONNECTED:
             "and connected tracing cannot share one process."
         )
     session.context.configure_tracing(integration=TraceIntegration.SDK)
+    mlflow.openai.autolog(disable=True)
     resources = session.connected_components(allow_network=True)
 
     def generate_answer(question: str, retrieved) -> str:
@@ -782,6 +786,7 @@ if RUN_CONNECTED:
         answer_generator=generate_answer,
     )
 
+    @traced(name="operations-rag.predict", span_type="CHAIN")
     def predict_fn(
         question: str,
         tenant_id: str,

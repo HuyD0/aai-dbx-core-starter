@@ -7,7 +7,9 @@ import importlib.util
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -264,6 +266,212 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
     assert len(generated_from) == 2
 
 
+def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
+    monkeypatch,
+):
+    from conftest import install_fake_module
+
+    from aai_core import tracing
+    from aai_core.providers import (
+        DatabricksAISearchRetriever,
+        OpenAICompatibleChatModel,
+    )
+
+    class FakeSpan:
+        def __init__(self, name, span_type, parent_id):
+            self.name = name
+            self.span_type = span_type
+            self.parent_id = parent_id
+            self.span_id = f"span-{len(spans) + 1}"
+            self.inputs = None
+            self.outputs = None
+            self.attributes = {}
+
+        def set_inputs(self, value):
+            self.inputs = value
+
+        def set_outputs(self, value):
+            self.outputs = value
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+    spans = []
+    active_spans = []
+    autolog_calls = []
+
+    @contextmanager
+    def start_span(name, span_type):
+        parent_id = active_spans[-1].span_id if active_spans else None
+        span = FakeSpan(name, span_type, parent_id)
+        spans.append(span)
+        active_spans.append(span)
+        try:
+            yield span
+        finally:
+            assert active_spans.pop() is span
+
+    def trace(**_options):
+        return lambda target: target
+
+    def update_current_trace(**_options):
+        assert active_spans
+
+    fake_mlflow = install_fake_module(
+        monkeypatch,
+        "mlflow",
+        set_experiment=lambda _name: None,
+        start_span=start_span,
+        trace=trace,
+        update_current_trace=update_current_trace,
+    )
+    fake_mlflow.openai = SimpleNamespace(
+        autolog=lambda **options: autolog_calls.append(options)
+    )
+
+    default_trace_state = tracing.TraceState(
+        metadata={},
+        policy=tracing.TracePolicy(capture_mode=tracing.TraceCaptureMode.OFF),
+    )
+    monkeypatch.setattr(tracing, "_DEFAULT_TRACE_STATE", default_trace_state)
+    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", None)
+    trace_state_token = tracing._TRACE_STATE.set(None)
+
+    class FakeIndex:
+        def similarity_search(self, **options):
+            assert options["num_results"] == 3
+            assert options["filters"]["allowed_groups"] == ["ops-payments"]
+            columns = [
+                "id",
+                "content",
+                "source_uri",
+                "chunk_id",
+                "tenant_id",
+                "score",
+            ]
+            rows = [
+                [
+                    f"doc-{number}",
+                    f"Authorized evidence {number}.",
+                    f"synthetic://connected/doc-{number}",
+                    f"chunk-{number}",
+                    "tenant-alpha",
+                    score,
+                ]
+                for number, score in ((1, 0.9), (2, 0.8), (3, 0.7))
+            ]
+            return {
+                "manifest": {
+                    "columns": [{"name": column} for column in columns],
+                },
+                "result": {"data_array": rows},
+            }
+
+    response = SimpleNamespace(
+        model="operations-chat",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Generated only from authorized evidence.",
+                    tool_calls=None,
+                )
+            )
+        ],
+        usage={"prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10},
+    )
+    native_model = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_request: response)
+        )
+    )
+    retriever = DatabricksAISearchRetriever(
+        logical_name="operations-knowledge",
+        index=FakeIndex(),
+        columns=("id", "content", "source_uri", "chunk_id", "tenant_id"),
+        content_field="content",
+        id_field="id",
+        source_uri_field="source_uri",
+        chunk_id_field="chunk_id",
+    )
+    model = OpenAICompatibleChatModel(
+        logical_name="operations-chat",
+        provider="databricks",
+        model="operations-chat",
+        client=native_model,
+    )
+    generated_from = []
+
+    def answer_generator(question, evidence):
+        generated_from.append(tuple(item.document_id for item in evidence))
+        response = model.generate(
+            [
+                {"role": "system", "content": "Answer only from supplied evidence."},
+                {"role": "user", "content": question},
+            ],
+            temperature=0.0,
+        )
+        return response.content
+
+    pipeline = OperationsRAGPipeline(
+        retriever,
+        answer_generator=answer_generator,
+    )
+
+    try:
+        tracing.configure_tracing(
+            session.context.tags,
+            experiment_name="/Shared/agentic-ops-rag-trace-test",
+            integration=tracing.TraceIntegration.SDK,
+        )
+        fake_mlflow.openai.autolog(disable=True)
+
+        @tracing.traced(name="operations-rag.predict", span_type="CHAIN")
+        def predict_fn(question, tenant_id, region, allowed_groups):
+            result = pipeline.invoke(
+                question,
+                tenant_id=tenant_id,
+                region=region,
+                allowed_groups=allowed_groups,
+                mode="hybrid",
+                candidate_k=3,
+                final_k=3,
+            )
+            return result.answer
+
+        answer = predict_fn(
+            "Explain the connected evidence",
+            "tenant-alpha",
+            "eastus",
+            ["ops-payments"],
+        )
+    finally:
+        tracing._TRACE_STATE.reset(trace_state_token)
+
+    assert autolog_calls == [{"disable": True}]
+    assert answer == (
+        "Generated only from authorized evidence. " "Sources: [doc-1], [doc-2], [doc-3]"
+    )
+    assert generated_from == [("doc-1", "doc-2", "doc-3")]
+
+    roots = [span for span in spans if span.parent_id is None]
+    assert len(roots) == 1
+    root = roots[0]
+    assert root.name == "operations-rag.predict"
+    assert root.span_type == "CHAIN"
+    assert root.outputs == answer
+    children = [span for span in spans if span.parent_id == root.span_id]
+    assert [(span.name, span.span_type) for span in children] == [
+        ("retriever.search", "RETRIEVER"),
+        ("model.generate", "LLM"),
+    ]
+    retriever_span, model_span = children
+    assert [document["id"] for document in retriever_span.outputs] == list(
+        generated_from[0]
+    )
+    assert model_span.outputs == {"content": "Generated only from authorized evidence."}
+    assert len([span for span in spans if span.span_type == "LLM"]) == 1
+
+
 def test_structural_chunking_bounds_a_single_oversized_paragraph():
     markdown = "# Recovery\n\n" + " ".join(f"step-{index}" for index in range(80))
     chunks = structural_chunks(
@@ -363,6 +571,10 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "connected_pipeline = OperationsRAGPipeline(" in evaluation_source
     assert "session.context.configure_tracing(" in evaluation_source
     assert "integration=TraceIntegration.SDK" in evaluation_source
+    assert "mlflow.openai.autolog(disable=True)" in evaluation_source
+    assert (
+        '@traced(name="operations-rag.predict", span_type="CHAIN")' in evaluation_source
+    )
     assert "result = connected_pipeline.invoke(" in evaluation_source
     assert "candidate_k=3" in evaluation_source
     assert "final_k=3" in evaluation_source
