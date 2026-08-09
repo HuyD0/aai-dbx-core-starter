@@ -479,13 +479,12 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     # A valid request must not hide a malformed span representation. Both
     # layouts are supported, and when either is supplied its value must be
     # exactly the collection of mapping spans the local readers expect.
-    representations: list[Any] = []
     data = document.get("data")
-    if isinstance(data, Mapping) and "spans" in data:
-        representations.append(data["spans"])
-    if "spans" in document:
-        representations.append(document["spans"])
-    spans: list[Mapping[str, Any]] = []
+    nested_supplied = isinstance(data, Mapping) and "spans" in data
+    top_level_supplied = "spans" in document
+    representations = ([data["spans"]] if nested_supplied else []) + (
+        [document["spans"]] if top_level_supplied else []
+    )
     for representation in representations:
         if not isinstance(representation, Sequence) or isinstance(
             representation, (str, bytes)
@@ -493,7 +492,16 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
             return False
         if not all(isinstance(span, Mapping) for span in representation):
             return False
-        spans.extend(representation)
+
+    # Match `_spans` exactly: a non-null nested representation wins, and the
+    # top-level layout is only its fallback. Merging them lets an ignored root
+    # make an unusable effective trace look valid.
+    if nested_supplied and data["spans"] is not None:
+        spans = list(data["spans"])
+    elif top_level_supplied:
+        spans = list(document["spans"])
+    else:
+        spans = []
 
     # Read the trace-info request directly. Going through `_trace_inputs`
     # would let the inputs on an id-less mapping masquerading as a root span
@@ -515,7 +523,7 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     # With no span representation, a usable trace-info request is the whole
     # supported trace shape. Once spans are supplied, validate their roots
     # before allowing that request to satisfy the row.
-    if not representations:
+    if not (nested_supplied or top_level_supplied):
         return info_has_request
 
     roots = [span for span in spans if _is_root_span(span)]
