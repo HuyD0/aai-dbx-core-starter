@@ -2156,6 +2156,50 @@ def test_a_run_id_reused_for_a_later_snapshot_is_caught_before_spending():
     assert f"{report.source_snapshot.version} AS source_table_version" in reserve
 
 
+def test_the_notebook_refuses_a_reused_id_before_it_mutates_anything():
+    """Raising after the strata resync leaves that write in place,
+    stamped with the very id the check just rejected. Source-level,
+    because CI cannot execute the notebook."""
+    source = (
+        ROOT / "examples" / "governed-batch-inference" / "example_notebook.py"
+    ).read_text()
+    conflict_check = source.index("require_unique_run_id")
+    first_mutation = source.index("gbi.resync_strata_sql")
+    execute = source.index("spark.sql(execute_sql)")
+    assert conflict_check < first_mutation < execute
+    # And the reservation precedes the check that reads it.
+    assert source.index("run_metadata_reserve_sql") < conflict_check
+    # The migration runs before the reservation queries the new columns.
+    assert source.index("run_metadata_migration_sql") < source.index(
+        "run_metadata_reserve_sql"
+    )
+
+
+def test_an_existing_metadata_table_is_migrated_not_assumed():
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+    exists, so adding a column to the DDL breaks every installation that
+    predates it — the queries reference it and fail unresolved."""
+    spec = make_spec()
+    current = [name for name, _ in gbi.RUN_METADATA_COLUMNS]
+    assert gbi.run_metadata_migration_sql(spec, current) == ()  # already current
+    assert gbi.run_metadata_migration_sql(spec, []) == ()  # absent: DDL covers it
+
+    # A table from before the source-snapshot columns existed.
+    older = [c for c in current if not c.startswith("source_table")]
+    (statement,) = gbi.run_metadata_migration_sql(spec, older)
+    assert statement.startswith(f"ALTER TABLE {spec.run_metadata_table} ADD COLUMNS (")
+    assert "source_table STRING" in statement
+    assert "source_table_version BIGINT" in statement
+    # Additive only: a column this release no longer writes is left
+    # alone, because dropping it would destroy recorded provenance.
+    assert "DROP" not in statement
+
+    # The DDL and the migration agree about what the table holds.
+    ddl = gbi.create_run_metadata_table_sql(spec)
+    for name, sql_type in gbi.RUN_METADATA_COLUMNS:
+        assert f"{name} {sql_type}" in ddl
+
+
 def test_a_right_name_with_the_wrong_type_blocks_the_release():
     """`UPDATE SET *` would cast silently, leaving the advertised schema
     wrong, or fail inside the paid statement instead of before it."""

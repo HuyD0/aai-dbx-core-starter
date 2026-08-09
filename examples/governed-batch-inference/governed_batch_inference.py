@@ -3071,8 +3071,65 @@ def column_tag_statements(spec: BatchInferenceSpec, run_id: str) -> tuple[str, .
     return tuple(statements)
 
 
+#: Columns of the run-metadata table, in order. One definition so the
+#: DDL and the migration cannot disagree about what the table holds.
+RUN_METADATA_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("run_id", "STRING"),
+    ("spec_name", "STRING"),
+    ("spec_digest", "STRING"),
+    ("spec_yaml", "STRING"),
+    ("use_tier", "INT"),
+    ("endpoint", "STRING"),
+    ("model_version", "STRING"),
+    ("prompt_version", "STRING"),
+    ("gate_decision", "STRING"),
+    ("approved_by", "STRING"),
+    ("projected_cost_cad", "DOUBLE"),
+    ("source_table", "STRING"),
+    ("source_table_version", "BIGINT"),
+    ("target_table", "STRING"),
+    ("target_table_version", "BIGINT"),
+    ("executed_at", "TIMESTAMP"),
+)
+
+
+def run_metadata_migration_sql(
+    spec: BatchInferenceSpec, existing_columns: Sequence[str]
+) -> tuple[str, ...]:
+    """Additive migration for a run-metadata table that predates a column.
+
+    ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already
+    exists, so adding a column to the DDL silently breaks every existing
+    installation: the reservation and conflict queries reference it and
+    fail on an unresolved column before anything runs. The target table
+    has had this treatment since early on; the metadata table was given
+    new columns without it, which is the whole defect.
+
+    Returns the statements needed, empty when the table is current or
+    absent. Additive only — a column this pipeline no longer writes is
+    left alone, because dropping it would destroy recorded provenance.
+    """
+    present = {column.casefold() for column in existing_columns}
+    if not present:  # table does not exist yet; the DDL covers it
+        return ()
+    missing = [
+        f"{name} {sql_type}"
+        for name, sql_type in RUN_METADATA_COLUMNS
+        if name.casefold() not in present
+    ]
+    if not missing:
+        return ()
+    return (
+        f"ALTER TABLE {spec.run_metadata_table} ADD COLUMNS ({', '.join(missing)})",
+    )
+
+
 def create_run_metadata_table_sql(spec: BatchInferenceSpec) -> str:
-    """Layer 3: the run record everything joins back to by ``run_id``."""
+    """Layer 3: the run record everything joins back to by ``run_id``.
+
+    Pair this with ``run_metadata_migration_sql`` for tables that already
+    exist: this statement will not alter one.
+    """
     return f"""CREATE TABLE IF NOT EXISTS {spec.run_metadata_table} (
   run_id STRING,
   spec_name STRING,

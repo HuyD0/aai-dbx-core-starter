@@ -1284,20 +1284,30 @@ pending_sql = f"""
 # stage 7 with nothing of its own to find.
 spark.conf.set("spark.databricks.delta.commitInfo.userMetadata", RUN_ID)
 
-# Strata are row metadata, not model output. If a document's `layout` was
-# corrected while its text stayed the same, the restart predicate rightly
-# calls the row done — but the landed label would stay wrong forever, and
-# monitoring groups by it. Fix the labels directly rather than paying an
-# endpoint to regenerate identical values.
-spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT, preflight=PREFLIGHT))
-# A release that changes only judgment produces the predictions already
-# landed, so restart leaves those rows alone — but the table would still
-# name the older policy. This corrects the stamp without inference.
-# The run record has to exist before any row points at it. Landed rows
-# carry `ai_run_id`, and the resync below writes `ai_policy_run_id`; if
-# the record were written at the end, an interruption here would strand
-# those references permanently, because nothing revisits them.
+# The run record comes first — before *any* target mutation, not just
+# before the execute statement. Two reasons converge on the same
+# ordering. Landed rows carry `ai_run_id` and the policy resync writes
+# `ai_policy_run_id`, so writing the record late would strand those
+# references if the notebook stopped in between. And the reused-id check
+# has to refuse *before* a write happens: raising after the strata
+# resync leaves that mutation in place, stamped with the very id the
+# check just rejected.
 spark.sql(gbi.create_run_metadata_table_sql(spec_v2))
+# `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+# exists, so a metadata table from an earlier revision keeps its old
+# schema and the queries below fail on an unresolved column. Additive
+# migration, same treatment the target table gets.
+for statement in gbi.run_metadata_migration_sql(
+    spec_v2,
+    (
+        [field.name for field in spark.table(RUNS_TABLE).schema.fields]
+        if spark.catalog.tableExists(RUNS_TABLE)
+        else []
+    ),
+):
+    spark.sql(statement)
+    print(f"migrated run metadata: {statement}")
+
 spark.sql(
     gbi.run_metadata_reserve_sql(
         spec_v2,
@@ -1321,6 +1331,17 @@ gbi.require_unique_run_id(
         )
     ).count(),
 )
+
+# Only now does anything touch the target. Strata are row metadata, not
+# model output: if a document's `layout` was corrected while its text
+# stayed the same, the restart predicate rightly calls the row done — but
+# the landed label would stay wrong forever, and monitoring groups by it.
+# Fix the labels directly rather than paying an endpoint to regenerate
+# identical values.
+spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT, preflight=PREFLIGHT))
+# A release that changes only judgment produces the predictions already
+# landed, so restart leaves those rows alone — but the table would still
+# name the older policy. This corrects the stamp without inference.
 
 spark.sql(
     gbi.resync_policy_sql(
