@@ -436,10 +436,11 @@ def test_declined_confirmation_scores_nothing(tmp_path, monkeypatch):
     """
 
     project = _project(tmp_path)
+    identity_calls = []
     monkeypatch.setattr(
         project,
         "judge_model_identity",
-        lambda: pytest.fail("endpoint identity was resolved"),
+        lambda: identity_calls.append("identity") or None,
     )
     fake = FakeMlflow()
 
@@ -455,6 +456,7 @@ def test_declined_confirmation_scores_nothing(tmp_path, monkeypatch):
 
     assert code == EXIT_ERROR
     assert outcome.declined
+    assert identity_calls == ["identity"]
     assert fake.evaluate_calls == []
     assert not project.baseline_path.exists()
     assert any("--yes" in message for message in outcome.messages)
@@ -632,8 +634,8 @@ def test_a_changed_dataset_refuses_the_comparison(tmp_path):
     assert mlflow.evaluate_calls == []
 
 
-def test_baseline_refusal_follows_confirmation_but_precedes_spend(tmp_path):
-    """The endpoint check stays late, but an invalid delta is never scored."""
+def test_baseline_refusal_precedes_confirmation_and_spend(tmp_path):
+    """Never ask approval for a comparison that cannot produce a valid delta."""
 
     project = _project(tmp_path)
     run_scoring(
@@ -658,11 +660,11 @@ def test_baseline_refusal_follows_confirmation_but_precedes_spend(tmp_path):
             mlflow_module=mlflow,
         )
 
-    assert asked == ["Proceed?"]
+    assert asked == []
     assert mlflow.evaluate_calls == []
 
 
-def test_endpoint_identity_follows_confirmation_and_precedes_comparison_and_spend(
+def test_endpoint_identity_follows_budget_and_precedes_comparison_prompt_and_spend(
     tmp_path, monkeypatch
 ):
     from aai_core.agentkit import runner as runner_module
@@ -683,6 +685,13 @@ def test_endpoint_identity_follows_confirmation_and_precedes_comparison_and_spen
     )
 
     events = []
+    enforce_budget = runner_module.enforce_budget
+
+    def record_budget(*args, **kwargs):
+        events.append("budget")
+        return enforce_budget(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "enforce_budget", record_budget)
     monkeypatch.setattr(
         project,
         "judge_model_identity",
@@ -717,9 +726,10 @@ def test_endpoint_identity_follows_confirmation_and_precedes_comparison_and_spen
         mlflow_module=mlflow,
     )
 
-    assert events[0:2] == ["confirm", "identity"]
+    assert events[0:4] == ["budget", "identity", "comparability", "confirm"]
     assert events.index("identity") < events.index("comparability")
-    assert events.index("comparability") < events.index("evaluate")
+    assert events.index("comparability") < events.index("confirm")
+    assert events.index("confirm") < events.index("evaluate")
 
 
 def test_allow_baseline_drift_proceeds_and_records_the_reason(tmp_path):

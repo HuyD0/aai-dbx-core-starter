@@ -248,9 +248,9 @@ def run_scoring(
         return outcome, EXIT_PASS
 
     # Select the baseline before the budget check, but defer the endpoint-
-    # backed comparability check until every local refusal and confirmation
-    # has completed. An unreachable workspace must not delay a dry plan, a
-    # malformed dataset, or a run the caller will decline.
+    # backed comparability check until local validation and budget enforcement
+    # have completed. An unreachable workspace must not delay a dry plan or a
+    # run that local policy can already refuse.
     baseline: BaselineRecord | None = None
     warnings: list[str] = list(mode_warnings)
     if establish_baseline:
@@ -291,25 +291,12 @@ def run_scoring(
             )
 
     enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
-    if cost.judge_calls and not assume_yes:
-        if confirm is None or not confirm("Proceed?"):
-            # Nothing was scored, so this cannot be a pass. The usual cause
-            # is a CI job on a non-interactive stream with no --yes, and
-            # exit 0 there would report success for an evaluation that
-            # never happened.
-            outcome.declined = True
-            outcome.messages.append(
-                "Cancelled - nothing was scored. Pass --yes to run without "
-                "the confirmation prompt."
-            )
-            return outcome, EXIT_ERROR
-
     if judges_enabled:
         # Best effort: an endpoint name is stable while the model behind it
         # is not, so pin what it currently serves when the workspace will
         # say. This is intentionally after all local checks, plan-only, budget
-        # enforcement, and confirmation, but before comparability or a paid
-        # judge call. A least-privilege CI principal may hold CAN_QUERY without
+        # enforcement, but before comparability, confirmation, or a paid judge
+        # call. A least-privilege CI principal may hold CAN_QUERY without
         # CAN_VIEW; widening that grant to make this work is forbidden.
         judge_model_identity = project.judge_model_identity()
     if baseline is not None:
@@ -336,6 +323,19 @@ def run_scoring(
             )
         if not comparable:
             baseline = None
+
+    if cost.judge_calls and not assume_yes:
+        if confirm is None or not confirm("Proceed?"):
+            # Nothing was scored, so this cannot be a pass. The usual cause
+            # is a CI job on a non-interactive stream with no --yes, and
+            # exit 0 there would report success for an evaluation that
+            # never happened.
+            outcome.declined = True
+            outcome.messages.append(
+                "Cancelled - nothing was scored. Pass --yes to run without "
+                "the confirmation prompt."
+            )
+            return outcome, EXIT_ERROR
 
     set_concurrency_env(config.concurrency, environ)
     # A code-scorer-only run over recorded answers needs nothing from
