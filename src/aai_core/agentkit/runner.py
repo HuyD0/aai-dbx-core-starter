@@ -324,20 +324,6 @@ def run_scoring(
         if not comparable:
             baseline = None
 
-    if cost.judge_calls and not assume_yes:
-        if confirm is None or not confirm("Proceed?"):
-            # Nothing was scored, so this cannot be a pass. The usual cause
-            # is a CI job on a non-interactive stream with no --yes, and
-            # exit 0 there would report success for an evaluation that
-            # never happened.
-            outcome.declined = True
-            outcome.messages.append(
-                "Cancelled - nothing was scored. Pass --yes to run without "
-                "the confirmation prompt."
-            )
-            return outcome, EXIT_ERROR
-
-    set_concurrency_env(config.concurrency, environ)
     # A code-scorer-only run over recorded answers needs nothing from
     # MLflow, so it does not open a run. That is deliberate on two counts:
     # it keeps `agentkit smoke` runnable on every commit with no
@@ -378,6 +364,24 @@ def run_scoring(
             warnings.extend(prompt_drift)
             if not comparable:
                 baseline = None
+
+    if cost.judge_calls and not assume_yes:
+        if confirm is None or not confirm("Proceed?"):
+            # Nothing was scored, so this cannot be a pass. The usual cause
+            # is a CI job on a non-interactive stream with no --yes, and
+            # exit 0 there would report success for an evaluation that
+            # never happened.
+            outcome.declined = True
+            outcome.messages.append(
+                "Cancelled - nothing was scored. Pass --yes to run without "
+                "the confirmation prompt."
+            )
+            return outcome, EXIT_ERROR
+
+    # Confirmation follows every refusal that can be determined without
+    # scoring, including governed prompt drift. Only an accepted run tunes
+    # process-wide evaluator concurrency.
+    set_concurrency_env(config.concurrency, environ)
 
     change_id = _change_id()
     purpose = RunPurpose.BASELINE if establish_baseline else RunPurpose.RESULT

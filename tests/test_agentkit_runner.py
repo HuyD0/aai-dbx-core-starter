@@ -443,6 +443,7 @@ def test_declined_confirmation_scores_nothing(tmp_path, monkeypatch):
         lambda: identity_calls.append("identity") or None,
     )
     fake = FakeMlflow()
+    environ = {}
 
     outcome, code = run_scoring(
         project,
@@ -451,12 +452,14 @@ def test_declined_confirmation_scores_nothing(tmp_path, monkeypatch):
         mode="answer-sheet",
         assume_yes=False,
         confirm=lambda prompt: False,
+        environ=environ,
         mlflow_module=fake,
     )
 
     assert code == EXIT_ERROR
     assert outcome.declined
     assert identity_calls == ["identity"]
+    assert environ == {}
     assert fake.evaluate_calls == []
     assert not project.baseline_path.exists()
     assert any("--yes" in message for message in outcome.messages)
@@ -664,12 +667,13 @@ def test_baseline_refusal_precedes_confirmation_and_spend(tmp_path):
     assert mlflow.evaluate_calls == []
 
 
-def test_endpoint_identity_follows_budget_and_precedes_comparison_prompt_and_spend(
+def test_all_comparability_follows_budget_and_precedes_confirmation_and_spend(
     tmp_path, monkeypatch
 ):
     from aai_core.agentkit import runner as runner_module
 
-    project = _project(tmp_path)
+    project = _with_prompt_judge(tmp_path)
+    _use_registered_prompt(project, monkeypatch)
     monkeypatch.setattr(
         project,
         "judge_model_identity",
@@ -700,7 +704,9 @@ def test_endpoint_identity_follows_budget_and_precedes_comparison_prompt_and_spe
     enforce_comparability = runner_module._enforce_comparability
 
     def record_comparability(*args, **kwargs):
-        events.append("comparability")
+        events.append(
+            "prompt-comparability" if kwargs.get("only_prompts") else "comparability"
+        )
         return enforce_comparability(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -726,9 +732,16 @@ def test_endpoint_identity_follows_budget_and_precedes_comparison_prompt_and_spe
         mlflow_module=mlflow,
     )
 
-    assert events[0:4] == ["budget", "identity", "comparability", "confirm"]
+    assert events[0:5] == [
+        "budget",
+        "identity",
+        "comparability",
+        "prompt-comparability",
+        "confirm",
+    ]
     assert events.index("identity") < events.index("comparability")
-    assert events.index("comparability") < events.index("confirm")
+    assert events.index("comparability") < events.index("prompt-comparability")
+    assert events.index("prompt-comparability") < events.index("confirm")
     assert events.index("confirm") < events.index("evaluate")
 
 
@@ -1675,7 +1688,9 @@ def test_prompt_resolution_is_shared_by_provenance_and_scorer(tmp_path, monkeypa
     )
 
 
-def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatch):
+def test_a_moved_judge_prompt_refuses_before_confirmation_run_or_spend(
+    tmp_path, monkeypatch
+):
     """A moved alias means a different judge scored the baseline."""
 
     from aai_core.agentkit import runner as runner_module
@@ -1702,18 +1717,26 @@ def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatc
         lambda plan, prompt_loader: {"pension_domain_policy": "prompts:/cat.sch.p/4"},
     )
     mlflow = FakeMlflow()
+    asked = []
+    environ = {}
 
     with pytest.raises(BaselineIncomparableError) as excinfo:
         run_scoring(
             project,
             judges_enabled=True,
             mode="answer-sheet",
-            assume_yes=True,
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
+            environ=environ,
             mlflow_module=mlflow,
         )
 
     assert "judge prompt moved" in str(excinfo.value)
-    # Refused before the run opened and before a single judge call.
+    # Refused before approval, process tuning, the run, or a judge call.
+    assert asked == []
+    assert environ == {}
+    assert mlflow.experiment is None
+    assert mlflow.tags == {}
     assert mlflow.evaluate_calls == []
 
 
