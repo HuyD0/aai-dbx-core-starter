@@ -724,7 +724,7 @@ def require_usable_source_rows(
     *,
     snapshot: SourceSnapshot,
     row_count: int,
-    stratum_population: Mapping[str, int] | None = None,
+    stratum_population: Mapping[str, int],
 ) -> SourcePreflight:
     """Refuse to run when the source rows cannot carry the landing contract.
 
@@ -789,7 +789,7 @@ def require_usable_source_rows(
     return SourcePreflight(
         snapshot=snapshot,
         row_count=row_count,
-        stratum_population=tuple(sorted((stratum_population or {}).items())),
+        stratum_population=tuple(sorted(stratum_population.items())),
     )
 
 
@@ -1562,6 +1562,27 @@ class GateReport(BaseModel):
     decision: GateDecision
     source_snapshot: SourceSnapshot | None = None
     approved_by: str | None = None
+
+    @field_validator("approved_by")
+    @classmethod
+    def _approver_is_a_name(cls, value: str | None) -> str | None:
+        """`approve_gate` strips and refuses blanks; the model must too.
+
+        A whitespace approver is truthy, so a reconstructed tier 1 report
+        carrying `" "` derives ADOPT and satisfies the named-approver
+        check while recording that nobody accepted the risk. Persisted
+        evidence reaches this class without going through `approve_gate`.
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(
+                "approved_by records the person or group who accepted the "
+                "residual risk; blank is not an approver"
+            )
+        return stripped
+
     human_review_obligations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
@@ -2086,10 +2107,21 @@ def require_executable(
     # claims a million good rows and one bad one. Only the measured
     # counts settle it.
     measured = dict(preflight.stratum_population)
+    weighted_rows = [score for score in report.scores if score.stratum == WEIGHTED]
+    # An empty measurement is not permission to skip the check — it is the
+    # absence of the only thing that makes weighted evidence mean
+    # anything. Guarding this with `if measured:` re-created, inside the
+    # very change that made the preflight a required argument, exactly the
+    # optional-guard failure that argument existed to remove.
+    if weighted_rows and not measured:
+        raise GateNotPassed(
+            "the preflight carries no measured stratum counts, and this "
+            "report is weighted by population. Measure them with "
+            "`source_population_sql` — an unmeasured population cannot "
+            "certify an estimate of it."
+        )
     if measured:
-        for score in report.scores:
-            if score.stratum != WEIGHTED:
-                continue
+        for score in weighted_rows:
             claimed = dict(score.stratum_population)
             if claimed != {k: v for k, v in measured.items() if k in claimed}:
                 raise GateNotPassed(
@@ -2467,13 +2499,18 @@ def resync_policy_sql(
 
     This statement corrects the provenance without paying an endpoint. It
     touches only the policy stamps, and only on rows whose values this
-    release would have produced anyway.
+    release would have produced anyway — which means matching the source
+    content too, not just the inference identity. A document edited since
+    the row was inferred is *pending*, and the run may be interrupted or
+    never started; stamping it here would leave production claiming this
+    release governs values derived from text that no longer exists.
     """
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
 WHEN MATCHED
   AND target.ai_inference_digest = {sql_string_literal(spec.inference_digest)}
+  AND target.ai_source_digest = sha2(source.{spec.document_column}, 256)
   AND coalesce(target.ai_release_sequence, -1) <= {int(spec.release_sequence)}
   AND NOT (target.ai_spec_digest <=> {sql_string_literal(spec.spec_digest)})
   THEN UPDATE SET

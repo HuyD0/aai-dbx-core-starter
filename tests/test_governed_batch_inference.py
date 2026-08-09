@@ -142,7 +142,24 @@ def gate(spec, scores, **kwargs):
 ESTIMATED_ROWS = 1_000
 
 
-def preflight_for(spec, source_snapshot=_UNSET, row_count=ESTIMATED_ROWS):
+def preflight_matching(report, spec, row_count=ESTIMATED_ROWS):
+    """A preflight whose measured population matches this report's weights.
+
+    `require_executable` compares the two, so a test that builds a report
+    over stratum "s" needs a preflight that measured stratum "s".
+    """
+    weights: dict[str, int] = {}
+    for score in report.scores:
+        if score.stratum == gbi.WEIGHTED:
+            weights.update(dict(score.stratum_population))
+    return preflight_for(
+        spec, report.source_snapshot or snapshot_for(spec), row_count, weights
+    )
+
+
+def preflight_for(
+    spec, source_snapshot=_UNSET, row_count=ESTIMATED_ROWS, population=None
+):
     """A clean preflight for the snapshot `estimate_for` prices.
 
     Holding one is proof the usability checks passed, which is what the
@@ -152,8 +169,19 @@ def preflight_for(spec, source_snapshot=_UNSET, row_count=ESTIMATED_ROWS):
         # Every paid run is pinned now, gated or not — the preflight
         # describes the table, and tier does not change that.
         source_snapshot = snapshot_for(spec)
+    if population is None:
+        # Weighted evidence is checked against measured counts, so a
+        # preflight needs a population that matches the strata the
+        # evidence covers. Both sample builders here use 200 rows.
+        population = {"standard": 200}
     return gbi.require_usable_source_rows(
-        spec, 0, 0, 0, snapshot=source_snapshot, row_count=row_count
+        spec,
+        0,
+        0,
+        0,
+        snapshot=source_snapshot,
+        row_count=row_count,
+        stratum_population=population,
     )
 
 
@@ -1236,7 +1264,7 @@ def test_the_sql_builder_enforces_the_gate_itself():
             spec,
             run_id="run-1",
             estimate=estimate_for(spec),
-            preflight=preflight_for(spec),
+            preflight=preflight_matching(rejecting, spec),
             report=rejecting,
         )
 
@@ -1250,7 +1278,7 @@ def test_the_sql_builder_enforces_the_gate_itself():
             tier1,
             run_id="run-1",
             estimate=estimate_for(tier1),
-            preflight=preflight_for(tier1),
+            preflight=preflight_matching(pending, tier1),
             report=pending,
         )
     # Signed off, it builds.
@@ -1259,7 +1287,7 @@ def test_the_sql_builder_enforces_the_gate_itself():
         tier1,
         run_id="run-1",
         estimate=estimate_for(tier1),
-        preflight=preflight_for(tier1),
+        preflight=preflight_matching(approved, tier1),
         report=approved,
     )
 
@@ -1496,6 +1524,7 @@ def test_the_builder_requires_proof_the_preflight_ran():
             0,
             snapshot=gbi.SourceSnapshot(table="main.other.docs", version=7),
             row_count=10,
+            stratum_population={"standard": 10},
         )
 
 
@@ -1539,14 +1568,14 @@ def test_model_copy_cannot_smuggle_a_decision_past_the_validators():
     flipped = rejecting.model_copy(update={"decision": gbi.GateDecision.ADOPT})
     assert flipped.decision == gbi.GateDecision.ADOPT
     with pytest.raises(gbi.GateNotPassed, match="does not satisfy its own"):
-        gbi.require_executable(spec, flipped, preflight_for(spec))
+        gbi.require_executable(spec, flipped, preflight_matching(rejecting, spec))
     # And the builder refuses it for the same reason.
     with pytest.raises(gbi.GateNotPassed, match="does not satisfy its own"):
         gbi.build_execute_sql(
             spec,
             run_id="r",
             estimate=estimate_for(spec),
-            preflight=preflight_for(spec),
+            preflight=preflight_matching(rejecting, spec),
             report=flipped,
         )
     # The legitimate `model_copy` transition still survives the round trip.
@@ -1554,7 +1583,7 @@ def test_model_copy_cannot_smuggle_a_decision_past_the_validators():
     approved = gbi.approve_gate(
         gate(tier1, score(records_for("s", correct=200), tier1)), "board"
     )
-    gbi.require_executable(tier1, approved, preflight_for(tier1))
+    gbi.require_executable(tier1, approved, preflight_matching(approved, tier1))
 
 
 def test_population_weights_are_checked_against_the_measured_snapshot():
@@ -1610,6 +1639,57 @@ def test_a_policy_only_release_reuses_the_predictions_it_has():
     assert f"target.ai_spec_digest = '{relaxed.spec_digest}'" in policy
     assert f"target.ai_inference_digest = '{relaxed.inference_digest}'" in policy
     assert "ai_query" not in policy
+
+
+def test_an_unmeasured_population_cannot_certify_weighted_evidence():
+    """An empty measurement is the absence of the check, not a pass."""
+    spec = one_field_spec(criticality="medium")
+    forged = gate(
+        spec,
+        score(
+            records_for("standard", correct=200)
+            + records_for("legacy_scan", wrong=200),
+            spec,
+            {"standard": 1_000_000, "legacy_scan": 1},
+        ),
+    )
+    assert forged.decision == gbi.GateDecision.ADOPT
+
+    blank = gbi.SourcePreflight(snapshot=snapshot_for(spec), row_count=1000)
+    assert blank.stratum_population == ()
+    with pytest.raises(gbi.GateNotPassed, match="no measured stratum counts"):
+        gbi.require_executable(spec, forged, blank)
+
+    # The public helper can no longer produce one by omission.
+    with pytest.raises(TypeError):
+        gbi.require_usable_source_rows(
+            spec, 0, 0, 0, snapshot=snapshot_for(spec), row_count=10
+        )
+
+
+def test_a_blank_approver_is_not_an_approver():
+    """`approve_gate` strips and refuses; persisted evidence reaches the
+    model without passing through it."""
+    tier1 = one_field_spec(use_tier=1, rollback_plan="Restore prior version.")
+    approved = gbi.approve_gate(
+        gate(tier1, score(records_for("s", correct=200), tier1)), "  board  "
+    )
+    assert approved.approved_by == "board"  # stripped on the way in
+
+    payload = approved.model_dump(mode="json")
+    for blank in (" ", "", "\t\n"):
+        with pytest.raises(ValidationError, match="blank is not an approver"):
+            gbi.GateReport.model_validate({**payload, "approved_by": blank})
+
+
+def test_the_policy_resync_leaves_edited_documents_alone():
+    """A row whose source text changed is pending, and the run may never
+    happen — stamping it would claim this release governs stale values."""
+    spec = one_field_spec()
+    sql = gbi.resync_policy_sql(spec, snapshot_for(spec))
+    assert "target.ai_source_digest = sha2(source.doc_text, 256)" in sql
+    assert f"target.ai_inference_digest = '{spec.inference_digest}'" in sql
+    assert "ai_query" not in sql
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -1933,12 +2013,20 @@ def test_unusable_source_keys_are_refused_before_the_paid_query():
 
     def check_rows(nulls=0, dupes=0, null_docs=0):
         return gbi.require_usable_source_rows(
-            spec, nulls, dupes, null_docs, snapshot=snap, row_count=500
+            spec,
+            nulls,
+            dupes,
+            null_docs,
+            snapshot=snap,
+            row_count=500,
+            stratum_population={"standard": 500},
         )
 
     # The clean case proceeds — and hands back the proof the builder wants.
     clean = check_rows()
-    assert clean == gbi.SourcePreflight(snapshot=snap, row_count=500)
+    assert clean == gbi.SourcePreflight(
+        snapshot=snap, row_count=500, stratum_population=(("standard", 500),)
+    )
     with pytest.raises(gbi.UnusableSourceRows, match="3 row"):
         check_rows(nulls=3)
     with pytest.raises(gbi.UnusableSourceRows, match="2 duplicate"):
