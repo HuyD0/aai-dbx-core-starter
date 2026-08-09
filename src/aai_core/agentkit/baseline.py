@@ -256,9 +256,10 @@ def _prompt_failures(record: BaselineRecord, current: Mapping[str, str]) -> list
     registered prompt since the baseline, is the same change in the other
     direction.
 
-    A baseline that recorded no prompts at all says nothing about
-    membership — legacy records and judge-free runs both look like that —
-    so only shared names are version-compared there.
+    An empty prompt map is ambiguous for a legacy or judge-free baseline,
+    but scorer versions disambiguate a prompt-backed judge that ran with
+    bundled instructions. A registered prompt appearing later is drift for
+    that scorer even though the old prompt map was empty.
     """
 
     recorded = dict(record.versions.judge_prompts)
@@ -269,7 +270,19 @@ def _prompt_failures(record: BaselineRecord, current: Mapping[str, str]) -> list
         if recorded[name] != current[name]
     ]
     if not recorded:
-        return failures
+        # An empty prompt map is ambiguous only when the baseline says
+        # nothing about which scorers ran. Once the scorer versions name a
+        # prompt-backed judge, an empty entry means that judge used its
+        # bundled instructions. If the same scorer resolves a registered
+        # prompt now, its instructions changed even though the old map was
+        # empty.
+        current = {
+            name: uri
+            for name, uri in current.items()
+            if name in record.versions.scorers
+        }
+        if not current:
+            return failures
     for name in sorted(set(recorded) - set(current)):
         failures.append(
             f"the {name} judge prompt {recorded[name]} no longer resolves, so "

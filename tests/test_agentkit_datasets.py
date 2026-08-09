@@ -870,6 +870,43 @@ def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
     assert validate_dataset(dataset, minimum_rows=1) == []
 
 
+def test_traced_rows_still_reject_placeholder_content(tmp_path):
+    rows = [
+        {
+            "inputs": {"question": "TODO replace this question"},
+            "expectations": {"expected_response": "a real answer"},
+            "trace": {"info": {"trace_id": "t0"}},
+        },
+        {
+            "inputs": {"question": "a real question"},
+            "expectations": {"expected_response": "TODO write the answer"},
+            "trace": {"info": {"trace_id": "t1"}},
+        },
+        {
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": "root",
+                            "inputs": {"question": "changeme"},
+                        }
+                    ]
+                }
+            }
+        },
+    ]
+    _write_dataset(tmp_path, rows)
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert len(failures) == 3
+    assert all(
+        f"row {index} still contains placeholder text" in failures for index in range(3)
+    )
+
+
 def test_a_null_expectations_column_is_not_malformed(tmp_path):
     """A dataframe null is a missing value, not a bad one."""
 

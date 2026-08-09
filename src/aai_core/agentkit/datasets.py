@@ -530,6 +530,8 @@ def validate_dataset(
     for index, row in enumerate(dataset.rows):
         inputs = row.get("inputs")
         expectations = row.get("expectations")
+        trace = row.get("trace")
+        has_trace = _is_populated(trace)
         # Checked before the trace shortcut below: shape inference reads a
         # malformed expectations value as *absent*, which silently drops
         # the scorers and thresholds that depend on it while the value
@@ -538,16 +540,25 @@ def validate_dataset(
         if not _is_missing(expectations) and not isinstance(expectations, Mapping):
             failures.append(f"row {index} expectations must be an object")
             continue
-        if _is_populated(row.get("trace")):
+        # A trace exempts the row from supplying authored inputs, but MLflow
+        # still scores explicit inputs and curated expectations when they are
+        # present. When they are absent, the recoverable trace request is the
+        # input that represents the row. Validate exactly that content before
+        # the trace shortcut can accept a placeholder into a paid run.
+        checked_inputs = inputs
+        if has_trace and not _is_populated(checked_inputs):
+            checked_inputs = _trace_request(trace)
+        if has_trace or (isinstance(inputs, Mapping) and inputs):
+            text = json.dumps(_plain(checked_inputs), default=str).lower()
+            if _is_populated(expectations):
+                text += json.dumps(_plain(expectations), default=str).lower()
+            if any(marker in text for marker in PLACEHOLDER_MARKERS):
+                failures.append(f"row {index} still contains placeholder text")
+        if has_trace:
             continue
         if not isinstance(inputs, Mapping) or not inputs:
             failures.append(f"row {index} is missing a non-empty inputs object")
             continue
-        text = json.dumps(_plain(inputs), default=str).lower()
-        if expectations:
-            text += json.dumps(_plain(expectations), default=str).lower()
-        if any(marker in text for marker in PLACEHOLDER_MARKERS):
-            failures.append(f"row {index} still contains placeholder text")
     return failures
 
 

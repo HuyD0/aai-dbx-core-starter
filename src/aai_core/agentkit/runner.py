@@ -349,8 +349,10 @@ def run_scoring(
     # is a different judge, and reporting that alongside the results would
     # be reporting it too late.
     judge_prompts: dict[str, str] = {}
+    prompt_loader: _PromptLoader | None = None
     if judges_enabled and mlflow is not None:
-        judge_prompts = _resolved_prompt_versions(plan, project, mlflow)
+        prompt_loader = _prompt_loader(project, mlflow)
+        judge_prompts = _resolved_prompt_versions(plan, prompt_loader)
         if baseline is not None:
             prompt_drift, comparable = _enforce_comparability(
                 baseline,
@@ -409,7 +411,6 @@ def run_scoring(
             if resolved_mode == "live"
             else None
         )
-        prompt_loader = _prompt_loader(project, mlflow) if judges_enabled else None
         scorers = [
             catalog_module.build_scorer(
                 entry.spec,
@@ -976,43 +977,51 @@ def _render_outcome(
     return lines
 
 
-def _prompt_loader(project: ProjectContext, mlflow: Any):
-    manager = project.prompt_manager(mlflow_module=mlflow)
+class _PromptLoader:
+    """Resolve each governed prompt once for provenance and construction."""
 
-    def load(name: str, alias: str) -> Any:
-        try:
-            return manager.load(name, alias=alias)
-        except Exception:
-            # A judge prompt that is not registered yet falls back to the
-            # catalog's bundled instructions; the run records which was used.
-            return None
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+        self._resolved: dict[tuple[str, str], Any | None] = {}
 
-    return load
+    def __call__(self, name: str, alias: str) -> Any:
+        key = (name, alias)
+        if key not in self._resolved:
+            try:
+                self._resolved[key] = self._manager.load(name, alias=alias)
+            except Exception:
+                # A judge prompt that is not registered yet falls back to the
+                # catalog's bundled instructions. Cache that fallback too: a
+                # retry must not make provenance and execution disagree.
+                self._resolved[key] = None
+        return self._resolved[key]
+
+    def version_uri(self, name: str, alias: str) -> str | None:
+        prompt = self(name, alias)
+        uri = getattr(prompt, "uri", None)
+        version = getattr(prompt, "version", None)
+        if uri:
+            return str(uri)
+        if version is not None:
+            return f"prompts:/{self._manager.qualify(name)}/{version}"
+        return None
+
+
+def _prompt_loader(project: ProjectContext, mlflow: Any) -> _PromptLoader:
+    return _PromptLoader(project.prompt_manager(mlflow_module=mlflow))
 
 
 def _resolved_prompt_versions(
-    plan: ScorerPlan, project: ProjectContext, mlflow: Any
+    plan: ScorerPlan, prompt_loader: _PromptLoader
 ) -> dict[str, str]:
     versions: dict[str, str] = {}
-    manager = None
     for spec in plan.specs:
         binding = spec.judge
         if binding is None or not binding.prompt_name:
             continue
-        if manager is None:
-            manager = project.prompt_manager(mlflow_module=mlflow)
-        try:
-            prompt = manager.load(binding.prompt_name, alias=binding.prompt_alias)
-        except Exception:
-            continue
-        uri = getattr(prompt, "uri", None)
-        version = getattr(prompt, "version", None)
+        uri = prompt_loader.version_uri(binding.prompt_name, binding.prompt_alias)
         if uri:
-            versions[spec.name] = str(uri)
-        elif version is not None:
-            versions[spec.name] = (
-                f"prompts:/{manager.qualify(binding.prompt_name)}/{version}"
-            )
+            versions[spec.name] = uri
     return versions
 
 

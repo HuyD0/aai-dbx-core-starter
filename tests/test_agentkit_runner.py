@@ -1206,6 +1206,55 @@ def _with_prompt_judge(tmp_path):
     return ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
 
 
+def test_prompt_resolution_is_shared_by_provenance_and_scorer(tmp_path, monkeypatch):
+    """The recorded URI and executed instructions come from one lookup."""
+
+    project = _with_prompt_judge(tmp_path)
+
+    class ChangingPromptManager:
+        def __init__(self):
+            self.calls = []
+
+        def load(self, name, *, alias):
+            self.calls.append((name, alias))
+            version = len(self.calls)
+            return SimpleNamespace(
+                uri=f"prompts:/cat.sch.{name}/{version}",
+                template=f"instructions version {version}",
+            )
+
+        def qualify(self, name):
+            return f"cat.sch.{name}"
+
+    manager = ChangingPromptManager()
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: manager,
+    )
+    mlflow = FakeMlflow()
+
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=mlflow,
+    )
+
+    assert manager.calls == [("agentkit_judge_domain_policy", "production")]
+    scorer = next(
+        scorer
+        for scorer in mlflow.evaluate_calls[0]["scorers"]
+        if getattr(scorer, "name", None) == "pension_domain_policy"
+    )
+    assert scorer.instructions == "instructions version 1"
+    assert mlflow.tags["aai.judge_prompt_versions"] == (
+        "pension_domain_policy=" "prompts:/cat.sch.agentkit_judge_domain_policy/1"
+    )
+
+
 def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatch):
     """A moved alias means a different judge scored the baseline."""
 
@@ -1215,9 +1264,7 @@ def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatc
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
-        lambda plan, project_, mlflow: {
-            "pension_domain_policy": "prompts:/cat.sch.p/3"
-        },
+        lambda plan, prompt_loader: {"pension_domain_policy": "prompts:/cat.sch.p/3"},
     )
     run_scoring(
         project,
@@ -1231,9 +1278,7 @@ def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatc
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
-        lambda plan, project_, mlflow: {
-            "pension_domain_policy": "prompts:/cat.sch.p/4"
-        },
+        lambda plan, prompt_loader: {"pension_domain_policy": "prompts:/cat.sch.p/4"},
     )
     mlflow = FakeMlflow()
 
@@ -1258,9 +1303,7 @@ def test_an_unchanged_judge_prompt_compares_cleanly(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
-        lambda plan, project_, mlflow: {
-            "pension_domain_policy": "prompts:/cat.sch.p/3"
-        },
+        lambda plan, prompt_loader: {"pension_domain_policy": "prompts:/cat.sch.p/3"},
     )
     run_scoring(
         project,
@@ -1289,9 +1332,7 @@ def test_prompt_drift_can_be_overridden_and_is_recorded(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
-        lambda plan, project_, mlflow: {
-            "pension_domain_policy": "prompts:/cat.sch.p/3"
-        },
+        lambda plan, prompt_loader: {"pension_domain_policy": "prompts:/cat.sch.p/3"},
     )
     run_scoring(
         project,
@@ -1304,9 +1345,7 @@ def test_prompt_drift_can_be_overridden_and_is_recorded(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
-        lambda plan, project_, mlflow: {
-            "pension_domain_policy": "prompts:/cat.sch.p/4"
-        },
+        lambda plan, prompt_loader: {"pension_domain_policy": "prompts:/cat.sch.p/4"},
     )
 
     outcome, _ = run_scoring(

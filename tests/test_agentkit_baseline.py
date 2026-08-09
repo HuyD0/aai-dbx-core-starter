@@ -474,6 +474,31 @@ def test_a_newly_registered_judge_prompt_is_not_comparable():
     assert any("bundled instructions" in failure for failure in failures)
 
 
+def test_a_prompt_added_to_a_recorded_judge_is_not_comparable():
+    """An empty prompt map can mean a governed judge used its fallback."""
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1, "pension_domain_policy": 1},
+            judge_prompts={},
+            aai_core="0.4.0",
+        )
+    )
+
+    failures = comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={
+            "pension_domain_policy": "prompts:/cat.sch.agentkit_judge_domain_policy/1"
+        },
+    )
+
+    assert any("bundled instructions" in failure for failure in failures)
+
+
 def test_a_baseline_with_no_recorded_prompts_still_compares():
     """A legacy or judge-free baseline says nothing about prompt membership."""
 
