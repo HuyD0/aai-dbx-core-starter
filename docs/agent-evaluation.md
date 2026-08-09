@@ -184,11 +184,16 @@ function today and a deployed endpoint tomorrow with a one-line change:
 |---|---|
 | `src/app/agent.py:respond` or `pkg.module:respond` | a local Python callable |
 | `endpoints:/my-agent` or a bare endpoint name | a Databricks serving endpoint |
-| `models:/catalog.schema.model` | a Unity Catalog registered model |
+| `models:/catalog.schema.model/7` or `models:/catalog.schema.model@champion` | a selected Unity Catalog registered-model version or alias |
 | `https://host/score` | any HTTP/JSON endpoint, including a hosted agent elsewhere |
 | a logical name from `aai-platform.yml` | whatever that name is configured to be |
 
 Execution can sit anywhere. The record stays in one place, which is the point.
+
+A three-part Unity Catalog name always needs the `/version` or `@alias`
+selector. In MLflow 3, a suffixless `models:/...` value denotes a logged-model
+ID instead, so AgentKit refuses an ambiguous `models:/catalog.schema.model`
+before it contacts MLflow or asks you to approve spend.
 
 An HTTP target that needs a token — `request_mapping.auth_env` names the
 environment variable, never the value — has to be `https://`. Loopback is the
@@ -212,6 +217,11 @@ has already been answered — by production. MLflow scores those traces when no
 again would discard the recorded behaviour and score something else that
 merely shares the questions, so a trace-backed dataset defaults to `traces`
 and `--mode live` says out loud what it is about to overwrite.
+
+Each `trace` value must be a complete MLflow v2/v3 serialized envelope with
+both `info` and `data` (normally the result of `Trace.to_dict()`). AgentKit
+rejects preview-only or hand-rolled shorthand before planning and spend
+confirmation because MLflow cannot deserialize it for evaluation.
 
 A stored trace is therefore **passed to MLflow only in `traces` mode**. A
 live run's answers come from the agent and an answer-sheet run's from the

@@ -25,7 +25,7 @@ regression_budget:
 # Point `agent:` somewhere else when you replace the example. The value
 # resolves by shape, so nothing else in the project changes:
 #   agent: endpoints:/{{.project_name}}-serving   # Databricks serving endpoint
-#   agent: models:/{{.catalog}}.{{.schema}}.my_agent
+#   agent: models:/{{.catalog}}.{{.schema}}.my_agent/7  # version (or @champion alias)
 #   agent: https://my-agent.example.com/score     # any HTTP/JSON endpoint
 #   agent: target-model                           # a logical model from aai-platform.yml
 #

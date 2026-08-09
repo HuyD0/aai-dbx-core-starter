@@ -1,5 +1,6 @@
 """Unit tests for dataset loading, digesting, sampling, and validation."""
 
+import base64
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -37,6 +38,131 @@ def _write_dataset(tmp_path, rows, name="golden.json"):
     path = tmp_path / name
     path.write_text(json.dumps(rows), encoding="utf-8")
     return path
+
+
+def _encoded_id(value, width):
+    return base64.b64encode(int(value).to_bytes(width, "big")).decode("ascii")
+
+
+def _mlflow_span(
+    index=0,
+    *,
+    question="q",
+    output="a",
+    span_type="LLM",
+    parent_span_id=None,
+):
+    """A complete MLflow 3.14 v3 span dictionary."""
+
+    request_id = f"tr-{index:032x}"
+    attributes = {
+        "mlflow.traceRequestId": json.dumps(request_id),
+        "mlflow.spanType": json.dumps(span_type),
+        "mlflow.spanOutputs": json.dumps(output),
+    }
+    if question is not None:
+        attributes["mlflow.spanInputs"] = json.dumps({"question": question})
+    return {
+        "trace_id": _encoded_id(index + 1, 16),
+        "span_id": _encoded_id(index + 1, 8),
+        "parent_span_id": parent_span_id,
+        "name": f"span-{index}",
+        "start_time_unix_nano": 1_786_000_000_000_000_000 + index,
+        "end_time_unix_nano": 1_786_000_000_001_000_000 + index,
+        "events": [],
+        "status": {"code": "STATUS_CODE_OK", "message": ""},
+        "attributes": attributes,
+        "links": [],
+    }
+
+
+def _mlflow_expectation(index, name, expectation):
+    return {
+        "assessment_id": f"a-{index:032x}",
+        "assessment_name": name,
+        "trace_id": f"tr-{index:032x}",
+        "source": {"source_type": "HUMAN", "source_id": "test"},
+        "create_time": "2026-08-09T00:00:00Z",
+        "last_update_time": "2026-08-09T00:00:00Z",
+        "expectation": expectation,
+    }
+
+
+def _mlflow_trace(
+    index=0,
+    *,
+    question="q",
+    output="a",
+    spans=None,
+    assessments=(),
+    request_preview=True,
+):
+    """A complete MLflow 3.14 v3 Trace.to_dict-compatible envelope."""
+
+    info = {
+        "trace_id": f"tr-{index:032x}",
+        "trace_location": {
+            "type": "MLFLOW_EXPERIMENT",
+            "mlflow_experiment": {"experiment_id": "0"},
+        },
+        "request_time": "2026-08-09T00:00:00Z",
+        "state": "OK",
+        "trace_metadata": {},
+        "tags": {},
+        "assessments": list(assessments),
+    }
+    if request_preview:
+        info["request_preview"] = json.dumps({"question": question})
+        info["response_preview"] = json.dumps(output)
+    return {
+        "info": info,
+        "data": {
+            "spans": (
+                [_mlflow_span(index, question=question, output=output)]
+                if spans is None
+                else spans
+            )
+        },
+    }
+
+
+def _mlflow_v2_trace():
+    request_id = "tr-0123456789abcdef0123456789abcdef"
+    return {
+        "info": {
+            "request_id": request_id,
+            "experiment_id": "0",
+            "timestamp_ms": 1,
+            "execution_time_ms": 1,
+            "status": "OK",
+            "request_metadata": {},
+            "tags": {},
+            "assessments": [],
+        },
+        "data": {
+            "spans": [
+                {
+                    "context": {
+                        "trace_id": "0123456789abcdef0123456789abcdef",
+                        "span_id": "0123456789abcdef",
+                    },
+                    "parent_id": None,
+                    "name": "agent",
+                    "start_time": 1,
+                    "end_time": 2,
+                    "attributes": {
+                        "mlflow.traceRequestId": json.dumps(request_id),
+                        "mlflow.spanInputs": json.dumps({"question": "q"}),
+                        "mlflow.spanOutputs": json.dumps("a"),
+                    },
+                    "status_code": "OK",
+                    "status_message": "",
+                    "events": [],
+                    "links": [],
+                }
+            ]
+        },
+    }
 
 
 def test_load_json_and_jsonl(tmp_path):
@@ -821,45 +947,15 @@ def test_the_preview_is_still_used_when_there_are_no_spans(tmp_path):
     )
 
 
-def _top_level_span_trace(question, answer):
-    """The layout that puts `spans` at the top level, not under `data`."""
+def test_trace_readers_ignore_top_level_spans_like_mlflow_from_dict():
+    """A top-level span field cannot override the v2/v3 data envelope."""
 
-    return {
-        "info": {
-            "request_preview": "TRUNCATED PREFIX " + "x" * 200,
-            "response_preview": "truncated answer",
-        },
-        "spans": [
-            {
-                "span_id": "1",
-                "type": "LLM",
-                "inputs": {"question": question},
-                "outputs": answer,
-            }
-        ],
-    }
+    from aai_core.agentkit.datasets import _trace_request
 
+    trace = _mlflow_trace(spans=[])
+    trace["spans"] = [_mlflow_span(question="ignored question")]
 
-def test_identity_reads_top_level_spans_before_the_preview(tmp_path):
-    """`_spans` supports both layouts; the identity lookup must use it.
-
-    Reading only `data.spans` meant a top-level-spans payload fell through
-    to the truncated preview, so two different questions sharing a prefix
-    collided on the digest — the exact failure the previous fix set out to
-    remove, still reachable through the other layout.
-    """
-
-    _write_dataset(
-        tmp_path, [_top_level_span_trace("part-time staff?", "a")] * 10, name="a.json"
-    )
-    _write_dataset(
-        tmp_path, [_top_level_span_trace("seasonal staff?", "a")] * 10, name="b.json"
-    )
-
-    first = load_dataset("a.json", root=tmp_path)
-    second = load_dataset("b.json", root=tmp_path)
-
-    assert first.digest != second.digest
+    assert _trace_request(trace) == json.dumps({"question": "q"})
 
 
 def test_the_token_estimate_reads_the_full_response(tmp_path):
@@ -916,22 +1012,7 @@ def test_a_traced_row_still_has_its_expectations_checked(tmp_path):
 
 
 def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
-    rows = [
-        {
-            "trace": {
-                "info": {"trace_id": f"t{index}"},
-                "data": {
-                    "spans": [
-                        {
-                            "span_id": f"root-{index}",
-                            "inputs": {"question": f"q{index}"},
-                        }
-                    ]
-                },
-            }
-        }
-        for index in range(3)
-    ]
+    rows = [{"trace": _mlflow_trace(index, question=f"q{index}")} for index in range(3)]
     _write_dataset(tmp_path, rows)
 
     dataset = load_dataset("golden.json", root=tmp_path)
@@ -944,10 +1025,17 @@ def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
     [
         "not-json",
         {"unrelated": "object"},
+        {"info": {"trace_id": "info-only"}},
         {"spans": [{}]},
         {"spans": [{"inputs": {"question": "q"}}]},
     ],
-    ids=("invalid-json", "unrelated-object", "empty-span", "id-less-root-span"),
+    ids=(
+        "invalid-json",
+        "unrelated-object",
+        "info-only-no-data",
+        "top-level-empty-span",
+        "top-level-id-less-root-span",
+    ),
 )
 def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
     rows = [{"inputs": {"question": "q"}, "trace": trace}]
@@ -963,7 +1051,18 @@ def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
 
 
 def test_an_identified_root_without_any_request_fails_local_validation(tmp_path):
-    _write_dataset(tmp_path, [{"trace": {"spans": [{"span_id": "root"}]}}])
+    _write_dataset(
+        tmp_path,
+        [
+            {
+                "trace": _mlflow_trace(
+                    question=None,
+                    request_preview=False,
+                    spans=[_mlflow_span(question=None)],
+                )
+            }
+        ],
+    )
 
     failures = validate_dataset(
         load_dataset("golden.json", root=tmp_path), minimum_rows=1
@@ -980,7 +1079,11 @@ def test_an_identified_root_can_use_non_empty_authored_inputs(tmp_path):
         [
             {
                 "inputs": {"question": "q"},
-                "trace": {"spans": [{"span_id": "root"}]},
+                "trace": _mlflow_trace(
+                    question=None,
+                    request_preview=False,
+                    spans=[_mlflow_span(question=None)],
+                ),
             }
         ],
     )
@@ -1001,15 +1104,13 @@ def test_an_identified_root_can_use_non_empty_authored_inputs(tmp_path):
             "info": {"request_preview": json.dumps({"question": "q"})},
             "data": {"spans": "not-a-list"},
         },
-        {
-            "info": {"request": {"question": "q"}},
-            "spans": [
-                {
-                    "span_id": "child",
-                    "parent_span_id": "missing-root",
-                }
-            ],
-        },
+        _mlflow_trace(
+            spans=[
+                _mlflow_span(
+                    parent_span_id=_encoded_id(999, 8),
+                )
+            ]
+        ),
     ],
     ids=("unidentified-root", "non-sequence-spans", "child-only-graph"),
 )
@@ -1030,23 +1131,20 @@ def test_trace_info_request_does_not_hide_malformed_spans(tmp_path, trace):
     [
         ("parent_span_id", None),
         ("parent_span_id", ""),
-        ("parentSpanId", ""),
     ],
 )
 def test_empty_parent_identifier_is_a_valid_root(tmp_path, parent_key, parent_value):
+    root = _mlflow_span(question="q")
+    root[parent_key] = parent_value
     _write_dataset(
         tmp_path,
         [
             {
-                "trace": {
-                    "spans": [
-                        {
-                            "span_id": "root",
-                            parent_key: parent_value,
-                            "inputs": {"question": "q"},
-                        }
-                    ]
-                }
+                "trace": _mlflow_trace(
+                    question="q",
+                    request_preview=False,
+                    spans=[root],
+                )
             }
         ],
     )
@@ -1065,21 +1163,18 @@ def test_empty_parent_identifier_is_a_valid_root(tmp_path, parent_key, parent_va
     ids=("empty-nested", "child-only-nested"),
 )
 def test_nested_spans_cannot_borrow_a_top_level_root(tmp_path, nested_spans):
+    if nested_spans:
+        nested_spans = [_mlflow_span(parent_span_id=_encoded_id(999, 8), question=None)]
+    top_level = _mlflow_span(question="q")
+    trace = _mlflow_trace(
+        question=None,
+        request_preview=False,
+        spans=nested_spans,
+    )
+    trace["spans"] = [top_level]
     _write_dataset(
         tmp_path,
-        [
-            {
-                "trace": {
-                    "data": {"spans": nested_spans},
-                    "spans": [
-                        {
-                            "span_id": "ignored-root",
-                            "inputs": {"question": "q"},
-                        }
-                    ],
-                }
-            }
-        ],
+        [{"trace": trace}],
     )
 
     failures = validate_dataset(
@@ -1092,10 +1187,12 @@ def test_nested_spans_cannot_borrow_a_top_level_root(tmp_path, nested_spans):
 
 
 def test_consistent_dual_span_layout_uses_the_nested_root(tmp_path):
-    root = {"span_id": "root", "inputs": {"question": "q"}}
+    root = _mlflow_span(question="q")
+    trace = _mlflow_trace(request_preview=False, spans=[root])
+    trace["spans"] = [dict(root)]
     _write_dataset(
         tmp_path,
-        [{"trace": {"data": {"spans": [root]}, "spans": [dict(root)]}}],
+        [{"trace": trace}],
     )
     dataset = load_dataset("golden.json", root=tmp_path)
 
@@ -1105,64 +1202,44 @@ def test_consistent_dual_span_layout_uses_the_nested_root(tmp_path):
     }
 
 
-def test_null_nested_spans_fall_back_to_the_top_level_layout(tmp_path):
-    root = {"span_id": "root", "inputs": {"question": "q"}}
+def test_null_nested_spans_do_not_fall_back_to_an_ignored_top_level_layout(tmp_path):
+    root = _mlflow_span(question="q")
+    trace = _mlflow_trace(request_preview=False, spans=[])
+    trace["data"]["spans"] = None
+    trace["spans"] = [root]
     _write_dataset(
         tmp_path,
-        [{"trace": {"data": {"spans": None}, "spans": [root]}}],
+        [{"trace": trace}],
     )
     dataset = load_dataset("golden.json", root=tmp_path)
 
-    assert validate_dataset(dataset, minimum_rows=1) == []
-    assert effective_dataset(dataset, mode="live").rows[0]["inputs"] == {
-        "question": "q"
-    }
+    assert validate_dataset(dataset, minimum_rows=1) == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
 
 
 @pytest.mark.parametrize(
     "trace",
     [
-        {
-            "info": {"request": {"question": "q"}},
-            "data": {"spans": []},
-        },
-        {
-            "info": {"request_preview": json.dumps({"question": "q"})},
-            "data": {"spans": []},
-        },
-        {
-            "spans": [
-                {
-                    "span_id": "root",
-                    "inputs": {"question": "q"},
-                }
-            ]
-        },
+        _mlflow_trace(spans=[]),
+        _mlflow_trace(request_preview=False),
+        _mlflow_v2_trace(),
         json.dumps(
-            {
-                "info": {
-                    "assessments": [
-                        {
-                            "assessment_name": "expected_response",
-                            "expectation": {"value": "a"},
-                        }
-                    ]
-                },
-                "data": {
-                    "spans": [
-                        {
-                            "span_id": "root",
-                            "inputs": {"question": "q"},
-                        }
-                    ]
-                },
-            }
+            _mlflow_trace(
+                assessments=[
+                    _mlflow_expectation(
+                        0,
+                        "expected_response",
+                        {"value": "a"},
+                    )
+                ]
+            )
         ),
     ],
     ids=(
-        "info-request",
         "info-request-preview",
-        "top-level-root-span",
+        "root-span-request",
+        "v2-root-span-request",
         "serialized-with-expectation",
     ),
 )
@@ -1178,13 +1255,41 @@ def test_supported_trace_shapes_pass_local_validation(tmp_path, trace):
         }
 
 
+def test_trace_validation_matches_locked_mlflow_from_dict(tmp_path):
+    """Pin the local structural guard to MLflow's real v3 deserializer."""
+
+    pytest.importorskip("mlflow")
+    from mlflow.entities import Trace
+    from mlflow.exceptions import MlflowException
+
+    valid = _mlflow_trace()
+    assert Trace.from_dict(valid).info.trace_id == valid["info"]["trace_id"]
+    _write_dataset(tmp_path, [{"inputs": {"question": "q"}, "trace": valid}])
+    assert (
+        validate_dataset(load_dataset("golden.json", root=tmp_path), minimum_rows=1)
+        == []
+    )
+
+    info_only = {"info": valid["info"]}
+    with pytest.raises(MlflowException, match="Expected keys: 'info' and 'data'"):
+        Trace.from_dict(info_only)
+    _write_dataset(
+        tmp_path,
+        [{"inputs": {"question": "q"}, "trace": info_only}],
+        "invalid.json",
+    )
+    assert validate_dataset(
+        load_dataset("invalid.json", root=tmp_path), minimum_rows=1
+    ) == ["row 0 trace must be decodable and contain a usable request or root span"]
+
+
 @pytest.mark.parametrize("inputs", ["scalar request", ["list request"]])
 def test_a_traced_row_rejects_authored_non_object_inputs(tmp_path, inputs):
     """A trace fills in absence; it cannot legalize a malformed row field."""
 
     _write_dataset(
         tmp_path,
-        [{"inputs": inputs, "trace": {"info": {"trace_id": "t0"}}}],
+        [{"inputs": inputs, "trace": _mlflow_trace()}],
     )
 
     failures = validate_dataset(
@@ -1199,31 +1304,14 @@ def test_traced_rows_still_reject_placeholder_content(tmp_path):
         {
             "inputs": {"question": "TODO replace this question"},
             "expectations": {"expected_response": "a real answer"},
-            "trace": {
-                "info": {"trace_id": "t0"},
-                "data": {"spans": [{"span_id": "root-0"}]},
-            },
+            "trace": _mlflow_trace(0),
         },
         {
             "inputs": {"question": "a real question"},
             "expectations": {"expected_response": "TODO write the answer"},
-            "trace": {
-                "info": {"trace_id": "t1"},
-                "data": {"spans": [{"span_id": "root-1"}]},
-            },
+            "trace": _mlflow_trace(1),
         },
-        {
-            "trace": {
-                "data": {
-                    "spans": [
-                        {
-                            "span_id": "root",
-                            "inputs": {"question": "changeme"},
-                        }
-                    ]
-                }
-            }
-        },
+        {"trace": _mlflow_trace(2, question="changeme")},
     ]
     _write_dataset(tmp_path, rows)
 
@@ -1706,18 +1794,10 @@ def test_a_trace_body_is_not_scanned_for_placeholders(tmp_path):
         {
             "inputs": {"question": "what should I do about my pension?"},
             "expectations": {"expected_response": "review your contributions"},
-            "trace": {
-                "info": {"trace_id": "t0"},
-                "data": {
-                    "spans": [
-                        {
-                            "span_id": "root",
-                            "inputs": {"question": "what should I do?"},
-                            "outputs": "Add it to your TODO list and changeme later",
-                        }
-                    ]
-                },
-            },
+            "trace": _mlflow_trace(
+                question="what should I do?",
+                output="Add it to your TODO list and changeme later",
+            ),
         }
     ]
     _write_dataset(tmp_path, rows)

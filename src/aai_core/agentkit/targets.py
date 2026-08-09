@@ -38,7 +38,6 @@ from aai_core.contracts import thaw_value
 
 _ENDPOINT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _MODULE_PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
-_PREFERRED_INPUT_KEYS = ("question", "input", "query", "prompt", "message")
 _HTTP_TIMEOUT_SECONDS = 60
 _AUTH_REMEDIATIONS = {
     401: "The request was not authenticated. Check the token in the "
@@ -50,7 +49,10 @@ _AUTH_REMEDIATIONS = {
 SUPPORTED_SHAPES = (
     ("logical model", "target-model  (a providers.models entry in aai-platform.yml)"),
     ("serving endpoint", "endpoints:/agent-serving  (or a bare endpoint name)"),
-    ("UC model", "models:/catalog.schema.agent_model"),
+    (
+        "UC model",
+        "models:/catalog.schema.agent_model/7  (or @champion)",
+    ),
     ("HTTP endpoint", "https://host/score  (request_mapping maps the fields)"),
     ("local callable", "src/app/example_agent.py:respond  or  pkg.module:respond"),
     ("answer sheet", "evals/data/answer_sheet.json  (recorded outputs)"),
@@ -89,7 +91,8 @@ def resolve_target(
     if reference.startswith("endpoints:/"):
         return Target(TargetKind.SERVING_ENDPOINT, reference, reference)
     if reference.startswith("models:/"):
-        return Target(TargetKind.UC_MODEL, reference, reference)
+        normalized = _validated_model_uri(reference)
+        return Target(TargetKind.UC_MODEL, normalized, normalized)
     if reference.startswith(("http://", "https://")):
         normalized = _validated_http_url(reference)
         return Target(TargetKind.HTTP, normalized, normalized)
@@ -152,6 +155,56 @@ def preflight_target(
         _validated_http_url(target.normalized)
         if require_invocation:
             _preflight_http(target, project.config.request_mapping)
+    elif target.kind is TargetKind.UC_MODEL:
+        _validated_model_uri(target.normalized)
+
+
+def _validated_model_uri(reference: str) -> str:
+    """Reject an ambiguous registered-model URI before loading MLflow.
+
+    MLflow 3 interprets ``models:/<value>`` without a selector as a logged
+    model id.  A three-part Unity Catalog name therefore does *not* name the
+    registered model a developer likely intended unless it carries a version
+    or alias. Logged-model ids remain valid, while UC references must select
+    the scored artifact explicitly.
+    """
+
+    if not reference.startswith("models:/"):
+        raise TargetResolutionError(f"agent {reference!r} is not an MLflow model URI")
+    remainder = reference.removeprefix("models:/")
+    name = remainder
+    selector: str | None = None
+    if "/" in remainder:
+        name, separator, selector = remainder.partition("/")
+        if "/" in selector:
+            selector = None
+        selector_kind = "version"
+    elif "@" in remainder:
+        name, separator, selector = remainder.partition("@")
+        if "@" in selector:
+            selector = None
+        selector_kind = "alias"
+    else:
+        separator = ""
+        selector_kind = "version or alias"
+
+    is_three_part_uc_name = len(name.split(".")) == 3 and all(name.split("."))
+    if not remainder or (
+        is_three_part_uc_name
+        and (not separator or not selector or not selector.strip())
+    ):
+        raise TargetResolutionError(
+            f"agent {reference!r} is an incomplete Unity Catalog model reference",
+            remediation=(
+                "Select the exact registered-model version or alias, for example "
+                f"models:/{name}/7 or models:/{name}@champion."
+            ),
+        )
+    if separator and (not name or selector is None or not selector.strip()):
+        raise TargetResolutionError(
+            f"agent {reference!r} has an invalid model {selector_kind} selector"
+        )
+    return reference
 
 
 def _preflight_local_file(target: Target) -> None:
@@ -865,9 +918,10 @@ def _urllib_transport(request: urllib.request.Request) -> bytes:
 def _primary_input(inputs: Mapping[str, Any]) -> Any:
     if len(inputs) == 1:
         return next(iter(inputs.values()))
-    for key in _PREFERRED_INPUT_KEYS:
-        if key in inputs:
-            return inputs[key]
+    # An HTTP request mapping is the adapter for structured input.  Preserve
+    # the complete row rather than choosing a familiar-looking key and
+    # silently dropping context, history, tenant, or another required field.
+    # Chat-style adapters call `_primary_text`, which rejects this mapping.
     return dict(inputs)
 
 
