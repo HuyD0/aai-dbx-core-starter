@@ -438,7 +438,35 @@ def test_eval_submit_rejects_plan_before_running_the_bundle_job(
 
     assert code == 1
     assert commands == []
-    assert "--submit and --plan cannot be used together" in capsys.readouterr().err
+    assert "--submit cannot be combined" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        ("--agent", "models:/catalog.schema.agent/7"),
+        ("--mode", "traces"),
+        ("--decision", "adopt"),
+        ("--baseline-run", "run-123"),
+        ("--establish-baseline",),
+        ("--allow-baseline-drift",),
+    ],
+    ids=("agent", "mode", "decision", "baseline", "establish", "drift"),
+)
+def test_eval_submit_rejects_local_scoring_overrides_before_project_loading(
+    project_dir, capsys, monkeypatch, override
+):
+    def fail_project(arguments):
+        raise AssertionError("an unsupported submit override must fail locally")
+
+    monkeypatch.setattr("aai_core.agentkit.cli._project", fail_project)
+
+    code = main(["eval", "--submit", *override, *_config_flag(project_dir)])
+
+    assert code == 1
+    error = capsys.readouterr().err
+    assert "--submit cannot be combined" in error
+    assert override[0] in error
 
 
 def test_cli_imports_no_heavy_dependencies():

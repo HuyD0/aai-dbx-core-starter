@@ -262,14 +262,29 @@ def _cmd_smoke(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_eval(arguments: argparse.Namespace) -> int:
-    if arguments.submit and arguments.plan:
+    submit_only_flags = [
+        flag
+        for flag, selected in (
+            ("--agent", arguments.agent is not None),
+            ("--plan", arguments.plan),
+            ("--mode", arguments.mode is not None),
+            ("--decision", arguments.decision is not None),
+            ("--baseline-run", arguments.baseline_run is not None),
+            ("--establish-baseline", arguments.establish_baseline),
+            ("--allow-baseline-drift", arguments.allow_baseline_drift),
+        )
+        if selected
+    ]
+    if arguments.submit and submit_only_flags:
         from aai_core.agentkit.errors import ConfigError
 
         raise ConfigError(
-            "--submit and --plan cannot be used together",
+            "--submit cannot be combined with local scoring option(s): "
+            + ", ".join(submit_only_flags),
             remediation=(
-                "Run `agentkit eval --plan` to inspect the local plan, or "
-                "remove `--plan` to submit the release_gate job."
+                "Run the option locally without `--submit`, or remove it and "
+                "submit the release_gate job using its committed project "
+                "configuration."
             ),
         )
     project = _project(arguments)
