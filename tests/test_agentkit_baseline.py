@@ -192,6 +192,24 @@ def test_integer_metrics_coerce_to_floats():
     assert record.metrics["safety/mean"] == 1.0
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_baseline_rejects_non_finite_metric_evidence(value):
+    with pytest.raises(ValueError, match="finite"):
+        _record(metrics={"safety/mean": value})
+
+
+def test_written_baseline_is_strict_standard_json(tmp_path):
+    path = tmp_path / "baseline.json"
+    write_baseline(path, _record())
+
+    document = json.loads(
+        path.read_text(encoding="utf-8"),
+        parse_constant=lambda value: pytest.fail(f"non-standard number: {value}"),
+    )
+
+    assert document["metrics"]["safety/mean"] == 1.0
+
+
 def test_corrupt_baseline_is_a_config_error(tmp_path):
     path = tmp_path / "baseline.json"
     path.write_text("{not json")
@@ -638,6 +656,49 @@ def test_remote_baseline_artifact_must_match_the_run_lineage(
         )
 
     assert field in str(excinfo.value)
+
+
+def test_remote_baseline_artifact_must_include_every_run_metric(tmp_path):
+    run = _remote_run(metrics={"keyword_coverage/mean": 0.8, "safety/mean": 1.0})
+    mlflow = _remote_mlflow(
+        tmp_path,
+        lambda run_id: run,
+        evidence_overrides={"metrics": {"keyword_coverage/mean": 0.8}},
+    )
+
+    with pytest.raises(BaselineIncomparableError, match="metrics"):
+        select_baseline(
+            baseline_path=tmp_path / "missing.json",
+            flag_run_id="run-9",
+            mlflow_module=mlflow,
+        )
+
+
+@pytest.mark.parametrize("artifact_kind", ["array", "invalid-utf8", "directory"])
+def test_malformed_remote_results_become_baseline_incomparable(tmp_path, artifact_kind):
+    run = _remote_run()
+    artifact = tmp_path / "remote-results"
+    if artifact_kind == "array":
+        artifact.write_text("[]", encoding="utf-8")
+    elif artifact_kind == "invalid-utf8":
+        artifact.write_bytes(b"\xff")
+    else:
+        artifact.mkdir()
+    mlflow = SimpleNamespace(
+        get_run=lambda run_id: run,
+        artifacts=SimpleNamespace(
+            download_artifacts=lambda **kwargs: str(artifact),
+        ),
+    )
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        select_baseline(
+            baseline_path=tmp_path / "missing.json",
+            flag_run_id="run-9",
+            mlflow_module=mlflow,
+        )
+
+    assert "canonical agentkit/results.json" in str(excinfo.value)
 
 
 def _prompt_record():

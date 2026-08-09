@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import uuid
@@ -76,6 +77,10 @@ class ResultsRecord(ContractModel):
     """What one ``compare``/``smoke``/``eval`` run produced."""
 
     schema_version: Literal[1] = 1
+    # New records bind the durable evidence to the local attempt that
+    # produced it.  ``None`` keeps already-published v1 artifacts readable;
+    # a result completed through the attempt protocol must always set it.
+    attempt_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     command: str = Field(min_length=1)
     recorded_at: str = Field(min_length=1)
     run_id: str | None = None
@@ -131,6 +136,13 @@ class ResultsRecord(ContractModel):
     @field_validator("metrics", "baseline_metrics", mode="after")
     @classmethod
     def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
+        non_finite = sorted(
+            name for name, item in value.items() if not math.isfinite(item)
+        )
+        if non_finite:
+            raise ValueError(
+                "metric values must be finite (invalid: " + ", ".join(non_finite) + ")"
+            )
         return freeze_value(value)
 
     @field_validator("gate_failures", mode="after")
@@ -160,19 +172,40 @@ class ResultsRecord(ContractModel):
 
 
 def _results_document(record: ResultsRecord) -> str:
-    return json.dumps(record.model_dump(), indent=2, sort_keys=True, default=str) + "\n"
+    return (
+        json.dumps(
+            record.model_dump(mode="json"),
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
 
 
 def _write_results_file(path: Path, record: ResultsRecord) -> None:
     path.write_text(_results_document(record), encoding="utf-8")
 
 
-def write_results(directory: Path, record: ResultsRecord) -> Path:
+def write_results(
+    directory: Path,
+    record: ResultsRecord,
+    *,
+    attempt: ResultsAttempt | None = None,
+) -> Path:
     """Atomically expose a completed local results record."""
 
     directory.mkdir(parents=True, exist_ok=True)
+    if attempt is not None:
+        _require_attempt_binding(record, attempt)
+        owner = attempt.attempt_id
+    else:
+        # Legacy/test callers that do not participate in the attempt protocol
+        # still receive a collision-free path.  Production scoring always
+        # passes its attempt and therefore uses the attempt id as the owner.
+        owner = uuid.uuid4().hex
     stamp = record.recorded_at.replace(":", "").replace("-", "")
-    path = directory / f"{stamp}-{record.command}.json"
+    path = directory / f"{stamp}-{record.command}-{owner}.json"
     descriptor, scratch_name = tempfile.mkstemp(
         dir=directory, prefix=f".{path.name}.", suffix=".tmp"
     )
@@ -194,7 +227,9 @@ def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
         command=command,
         status="pending",
     )
-    _write_attempt_state(directory, attempt)
+    # Point at the new attempt first.  If its state write then fails, the
+    # pointer names a missing state and the gate refuses.  Writing the state
+    # first could fail while leaving the previous passing pointer visible.
     _write_contract_file(
         directory / RESULTS_ATTEMPT_FILE,
         ResultsAttemptPointer(
@@ -202,6 +237,7 @@ def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
             command=attempt.command,
         ).model_dump(),
     )
+    _write_attempt_state(directory, attempt)
     return attempt
 
 
@@ -214,12 +250,15 @@ def complete_results_attempt(
         raise ConfigError(
             "completed results must live in the project results directory"
         )
+    document = _read_results_bytes(results_path)
+    record = _parse_results_bytes(results_path, document)
+    _require_attempt_binding(record, attempt)
     completed = ResultsAttempt(
         attempt_id=attempt.attempt_id,
         command=attempt.command,
         status="complete",
         results_file=results_path.name,
-        results_sha256=hashlib.sha256(results_path.read_bytes()).hexdigest(),
+        results_sha256=hashlib.sha256(document).hexdigest(),
     )
     _write_attempt_state(directory, completed)
 
@@ -228,20 +267,28 @@ def load_gate_results(directory: Path) -> tuple[ResultsRecord, Path] | None:
     """The result bound to the latest attempt, with legacy fallback."""
 
     pointer_path = directory / RESULTS_ATTEMPT_FILE
-    if not pointer_path.is_file():
-        return load_latest_results(directory)
     try:
-        pointer = ResultsAttemptPointer(
-            **json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer_path.stat()
+    except FileNotFoundError:
+        return load_latest_results(directory)
+    except OSError as error:
+        raise ConfigError(
+            f"could not inspect evaluation-attempt pointer {pointer_path}: {error}"
+        ) from error
+    try:
+        pointer = ResultsAttemptPointer.model_validate(
+            json.loads(pointer_path.read_text(encoding="utf-8"))
         )
-    except (OSError, json.JSONDecodeError, ValidationError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as error:
         raise ConfigError(
             f"{pointer_path} is not a valid evaluation-attempt pointer: {error}"
         ) from error
     state_path = _attempt_state_path(directory, pointer.attempt_id)
     try:
-        attempt = ResultsAttempt(**json.loads(state_path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError, ValidationError) as error:
+        attempt = ResultsAttempt.model_validate(
+            json.loads(state_path.read_text(encoding="utf-8"))
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as error:
         raise ConfigError(
             f"{state_path} is not a valid evaluation-attempt record: {error}"
         ) from error
@@ -256,18 +303,30 @@ def load_gate_results(directory: Path) -> tuple[ResultsRecord, Path] | None:
             ),
         )
     path = directory / str(attempt.results_file)
-    if not path.is_file():
+    try:
+        document = path.read_bytes()
+    except FileNotFoundError as error:
         raise ConfigError(
             f"the latest evaluation result {path} is missing",
             remediation="Run the evaluation again before invoking `agentkit gate`.",
-        )
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        ) from error
+    except OSError as error:
+        raise ConfigError(
+            f"the latest evaluation result {path} could not be read: {error}",
+            remediation="Run the evaluation again before invoking `agentkit gate`.",
+        ) from error
+    digest = hashlib.sha256(document).hexdigest()
     if digest != attempt.results_sha256:
         raise ConfigError(
             f"the latest evaluation result {path} changed after it was recorded",
             remediation="Run the evaluation again before invoking `agentkit gate`.",
         )
-    return read_results(path), path
+    # Parse the exact byte string whose digest was compared.  A second read
+    # here would reopen a check/use race and could validate different
+    # evidence from the bytes the completed attempt actually bound.
+    record = _parse_results_bytes(path, document)
+    _require_attempt_binding(record, attempt)
+    return record, path
 
 
 def _attempt_state_path(directory: Path, attempt_id: str) -> Path:
@@ -290,7 +349,7 @@ def _write_contract_file(path: Path, document: Mapping[str, Any]) -> None:
     scratch = Path(scratch_name)
     try:
         scratch.write_text(
-            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n",
             encoding="utf-8",
         )
         os.replace(scratch, path)
@@ -299,14 +358,38 @@ def _write_contract_file(path: Path, document: Mapping[str, Any]) -> None:
 
 
 def read_results(path: Path) -> ResultsRecord:
+    return _parse_results_bytes(path, _read_results_bytes(path))
+
+
+def _read_results_bytes(path: Path) -> bytes:
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ConfigError(f"{path} is not valid JSON: {error}") from error
+        return path.read_bytes()
+    except OSError as error:
+        raise ConfigError(f"could not read results record {path}: {error}") from error
+
+
+def _parse_results_bytes(path: Path, payload: bytes) -> ResultsRecord:
     try:
-        return ResultsRecord(**document)
+        document = json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ConfigError(f"{path} is not valid UTF-8 JSON: {error}") from error
+    if not isinstance(document, Mapping):
+        raise ConfigError(f"{path} must contain a JSON object")
+    try:
+        return ResultsRecord.model_validate(document)
     except ValidationError as error:
         raise ConfigError(f"{path} is not a valid results record: {error}") from error
+
+
+def _require_attempt_binding(
+    record: ResultsRecord,
+    attempt: ResultsAttempt,
+) -> None:
+    if record.attempt_id != attempt.attempt_id or record.command != attempt.command:
+        raise ConfigError(
+            "the results record is not bound to the evaluation attempt that "
+            "is completing"
+        )
 
 
 def publish_results(
@@ -356,7 +439,13 @@ def fetch_results(run_id: str, *, mlflow_module: Any | None = None) -> ResultsRe
                 "locally and opens no run."
             ),
         ) from error
-    record = read_results(Path(local))
+    try:
+        path = Path(local)
+    except (TypeError, ValueError, OSError) as error:
+        raise ConfigError(
+            f"run {run_id} returned an invalid agentkit results artifact path"
+        ) from error
+    record = read_results(path)
     if record.run_id != run_id:
         raise ConfigError(
             f"run {run_id} carries an agentkit results record for "

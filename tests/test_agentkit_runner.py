@@ -470,6 +470,40 @@ def test_declined_confirmation_scores_nothing(tmp_path, monkeypatch):
     assert fake.evaluate_calls == []
     assert not project.baseline_path.exists()
     assert any("--yes" in message for message in outcome.messages)
+    report, gate_code, gate_message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in gate_message
+
+
+def test_declined_confirmation_invalidates_an_older_passing_gate(tmp_path):
+    project = _project(tmp_path)
+    first, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(run_id="run-1"),
+    )
+    assert code == EXIT_PASS
+    assert first.results.gate_passed
+
+    declined, code = run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=False,
+        confirm=lambda prompt: False,
+        mlflow_module=FakeMlflow(run_id="run-2"),
+    )
+
+    assert code == EXIT_ERROR
+    assert declined.declined
+    report, gate_code, message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in message
 
 
 def test_budget_stops_the_run_before_any_call(tmp_path, monkeypatch):
@@ -519,6 +553,7 @@ def test_plan_only_prints_without_scoring(tmp_path):
     text = "\n".join(outcome.messages)
     assert "Inferred evaluation plan" in text
     assert "0 judge calls" in text
+    assert not project.results_dir.exists()
 
 
 def test_a_judged_plan_never_resolves_the_endpoint_identity(tmp_path, monkeypatch):

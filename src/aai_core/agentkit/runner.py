@@ -381,6 +381,12 @@ def run_scoring(
             if not comparable:
                 baseline = None
 
+    # A confirmation decline is still the newest evaluation attempt: it
+    # must invalidate an older passing gate rather than leave that stale
+    # result eligible for promotion.  Plan-only returned above and remains
+    # the one path that intentionally creates no attempt.
+    attempt = begin_results_attempt(project.results_dir, command=command)
+
     if cost.judge_calls and not assume_yes:
         if confirm is None or not confirm("Proceed?"):
             # Nothing was scored, so this cannot be a pass. The usual cause
@@ -393,8 +399,6 @@ def run_scoring(
                 "the confirmation prompt."
             )
             return outcome, EXIT_ERROR
-
-    attempt = begin_results_attempt(project.results_dir, command=command)
 
     # Confirmation follows every refusal that can be determined without
     # scoring, including governed prompt drift. Only an accepted run tunes
@@ -519,6 +523,7 @@ def run_scoring(
         seed=None,
     )
     results = ResultsRecord(
+        attempt_id=attempt.attempt_id,
         command=command,
         recorded_at=recorded_at,
         run_id=run_id,
@@ -579,7 +584,7 @@ def run_scoring(
     # Only a durably published remote run (or an entirely local run) becomes
     # gate-visible evidence. If publication failed above, no passing JSON is
     # left for a later `agentkit gate` invocation to mistake for success.
-    results_path = write_results(project.results_dir, results)
+    results_path = write_results(project.results_dir, results, attempt=attempt)
 
     if establish_baseline:
         write_baseline(

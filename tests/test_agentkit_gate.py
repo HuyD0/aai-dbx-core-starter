@@ -1,5 +1,7 @@
 """Unit tests for the promotion gate and the CI exit-code contract."""
 
+from pathlib import Path
+
 import pytest
 
 from aai_core.agentkit.baseline import (
@@ -12,6 +14,7 @@ from aai_core.agentkit.baseline import (
 from aai_core.agentkit.catalog import select_scorers
 from aai_core.agentkit.config import AgentkitConfig, ProjectContext
 from aai_core.agentkit.datasets import DatasetShape
+from aai_core.agentkit.errors import ConfigError
 from aai_core.agentkit.gate import (
     EXIT_ERROR,
     EXIT_PASS,
@@ -22,9 +25,11 @@ from aai_core.agentkit.gate import (
     run_gate,
 )
 from aai_core.agentkit.results import (
+    RESULTS_ATTEMPT_FILE,
     ResultsRecord,
     begin_results_attempt,
     complete_results_attempt,
+    load_gate_results,
     write_results,
 )
 from aai_core.testing import dev_settings
@@ -270,7 +275,11 @@ def test_completed_attempt_binds_gate_to_exact_result_bytes(tmp_path):
     project = _project(tmp_path)
     write_baseline(project.baseline_path, _baseline())
     attempt = begin_results_attempt(project.results_dir, command="compare")
-    path = write_results(project.results_dir, _results())
+    path = write_results(
+        project.results_dir,
+        _results(attempt_id=attempt.attempt_id),
+        attempt=attempt,
+    )
     complete_results_attempt(project.results_dir, attempt, path)
 
     report, code, message = run_gate(project)
@@ -285,20 +294,107 @@ def test_completed_attempt_binds_gate_to_exact_result_bytes(tmp_path):
     assert "changed after it was recorded" in message
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"attempt_id": "0" * 32},
+        {"command": "smoke"},
+    ],
+)
+def test_results_must_match_the_attempt_they_complete(tmp_path, overrides):
+    project = _project(tmp_path)
+    attempt = begin_results_attempt(project.results_dir, command="compare")
+    values = {"attempt_id": attempt.attempt_id, **overrides}
+
+    with pytest.raises(ConfigError, match="not bound"):
+        write_results(
+            project.results_dir,
+            _results(**values),
+            attempt=attempt,
+        )
+
+
 def test_older_concurrent_completion_cannot_replace_the_latest_attempt(tmp_path):
     project = _project(tmp_path)
     write_baseline(project.baseline_path, _baseline())
     older = begin_results_attempt(project.results_dir, command="compare")
     latest = begin_results_attempt(project.results_dir, command="compare")
-    path = write_results(project.results_dir, _results())
+    older_path = write_results(
+        project.results_dir,
+        _results(attempt_id=older.attempt_id, run_id="run-older"),
+        attempt=older,
+    )
+    latest_path = write_results(
+        project.results_dir,
+        _results(attempt_id=latest.attempt_id, run_id="run-latest"),
+        attempt=latest,
+    )
 
-    complete_results_attempt(project.results_dir, older, path)
+    assert older_path != latest_path
+    assert older.attempt_id in older_path.name
+    assert latest.attempt_id in latest_path.name
 
-    report, code, message = run_gate(project)
-    assert report is None
-    assert code == EXIT_ERROR
-    assert "latest evaluation attempt" in message
+    # The latest command finishes first, then the older concurrent command
+    # completes out of order. Its state update must not replace or corrupt
+    # the result the pointer names.
+    complete_results_attempt(project.results_dir, latest, latest_path)
+    complete_results_attempt(project.results_dir, older, older_path)
+
+    record, path = load_gate_results(project.results_dir)
+
+    assert path == latest_path
+    assert record.run_id == "run-latest"
     assert older.attempt_id != latest.attempt_id
+
+
+def test_gate_parses_the_same_result_bytes_it_hashes(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    attempt = begin_results_attempt(project.results_dir, command="compare")
+    result_path = write_results(
+        project.results_dir,
+        _results(attempt_id=attempt.attempt_id),
+        attempt=attempt,
+    )
+    complete_results_attempt(project.results_dir, attempt, result_path)
+    original_read_bytes = Path.read_bytes
+
+    def replace_after_read(path):
+        payload = original_read_bytes(path)
+        if path == result_path:
+            path.write_text("[]", encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+
+    record, loaded_path = load_gate_results(project.results_dir)
+
+    assert loaded_path == result_path
+    assert record.run_id == "run-1"
+    assert result_path.read_text(encoding="utf-8") == "[]"
+
+
+def test_attempt_state_write_failure_leaves_the_gate_invalidated(tmp_path, monkeypatch):
+    from aai_core.agentkit import results as results_module
+
+    project = _project(tmp_path)
+    calls = []
+    write_contract = results_module._write_contract_file
+
+    def fail_state(path, document):
+        calls.append(path)
+        if path.name.startswith(".attempt-"):
+            raise OSError("disk full")
+        write_contract(path, document)
+
+    monkeypatch.setattr(results_module, "_write_contract_file", fail_state)
+
+    with pytest.raises(OSError, match="disk full"):
+        begin_results_attempt(project.results_dir, command="compare")
+
+    assert calls[0] == project.results_dir / RESULTS_ATTEMPT_FILE
+    assert calls[1].name.startswith(".attempt-")
+    with pytest.raises(ConfigError, match="evaluation-attempt record"):
+        load_gate_results(project.results_dir)
 
 
 def test_run_gate_with_explicit_missing_path_exits_one(tmp_path):

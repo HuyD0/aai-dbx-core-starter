@@ -10,6 +10,7 @@ records that the current version IS the baseline.
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -101,6 +102,13 @@ class BaselineRecord(ContractModel):
     @field_validator("metrics", mode="after")
     @classmethod
     def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
+        non_finite = sorted(
+            name for name, item in value.items() if not math.isfinite(item)
+        )
+        if non_finite:
+            raise ValueError(
+                "metric values must be finite (invalid: " + ", ".join(non_finite) + ")"
+            )
         return freeze_value(value)
 
     @field_serializer("metrics")
@@ -154,7 +162,15 @@ def write_baseline(path: Path, record: BaselineRecord) -> None:
     """Atomic, sorted, newline-terminated write (review-friendly diffs)."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(record.model_dump(), indent=2, sort_keys=True, default=str) + "\n"
+    text = (
+        json.dumps(
+            record.model_dump(mode="json"),
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
     scratch = path.with_suffix(path.suffix + ".tmp")
     scratch.write_text(text, encoding="utf-8")
     os.replace(scratch, path)
@@ -502,10 +518,7 @@ def _baseline_from_run(
     evidence_metrics = dict(evidence.metrics)
     if not evidence_metrics:
         mismatches.append("metrics")
-    elif any(
-        name not in run_metrics or run_metrics[name] != value
-        for name, value in evidence_metrics.items()
-    ):
+    elif evidence_metrics != run_metrics:
         mismatches.append("metrics")
     if mismatches:
         raise _invalid_remote_baseline(
