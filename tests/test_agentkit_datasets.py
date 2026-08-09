@@ -325,6 +325,14 @@ def _malformed_complete_trace(case):
         span["status_code"] = "UNKNOWN"
     elif case == "v2-bad-event":
         span["events"] = [{"timestamp": 1, "attributes": {}}]
+    elif case == "v2-event-missing-attributes":
+        span["events"] = [{"name": "empty", "timestamp": 1}]
+    elif case == "v2-event-list-attributes":
+        span["events"] = [{"name": "empty", "timestamp": 1, "attributes": []}]
+    elif case == "v2-event-string-attributes":
+        span["events"] = [
+            {"name": "empty", "timestamp": 1, "attributes": "not-a-mapping"}
+        ]
     elif case == "v2-bad-link":
         span["links"] = [{"trace_id": "tr-" + "1" * 32}]
     elif case == "v2-bad-request-id-json":
@@ -1480,6 +1488,9 @@ _MALFORMED_TRACE_CASES = (
     "v2-bad-trace-id",
     "v2-bad-span-status",
     "v2-bad-event",
+    "v2-event-missing-attributes",
+    "v2-event-list-attributes",
+    "v2-event-string-attributes",
     "v2-bad-link",
     "v2-bad-request-id-json",
 )
@@ -1505,6 +1516,34 @@ def test_dependency_free_trace_contract_accepts_canonical_v2_and_v3(trace):
     from aai_core.agentkit.datasets import _complete_trace_envelope
 
     assert _complete_trace_envelope(_trace_with_event_and_link(trace)) is True
+
+
+def test_dependency_free_v2_event_accepts_explicit_null_attributes(tmp_path):
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    trace = _mlflow_v2_trace()
+    trace["data"]["spans"][0]["events"] = [
+        {"name": "empty", "timestamp": 2, "attributes": None}
+    ]
+
+    assert _complete_trace_envelope(trace) is True
+    _write_dataset(tmp_path, [{"inputs": {"question": "q"}, "trace": trace}])
+    assert (
+        validate_dataset(load_dataset("golden.json", root=tmp_path), minimum_rows=1)
+        == []
+    )
+
+
+def test_dependency_free_v3_event_preserves_mapping_semantics():
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    missing = _mlflow_trace()
+    missing["data"]["spans"][0]["events"] = [{"name": "empty", "time_unix_nano": 2}]
+    explicit_null = json.loads(json.dumps(missing))
+    explicit_null["data"]["spans"][0]["events"][0]["attributes"] = None
+
+    assert _complete_trace_envelope(missing) is True
+    assert _complete_trace_envelope(explicit_null) is False
 
 
 def test_dependency_free_trace_contract_accepts_tuple_otel_attributes():
@@ -1682,6 +1721,43 @@ def test_locked_mlflow_trace_to_dict_tuple_event_attributes_match_contract():
 
     attributes = document["data"]["spans"][0]["events"][0]["attributes"]
     assert isinstance(attributes["batch.names"], tuple)
+    assert _complete_trace_envelope(document) is True
+
+
+def test_locked_mlflow_accepts_null_attributes_on_v2_events():
+    pytest.importorskip("mlflow")
+    from mlflow.entities import Trace
+
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    document = _mlflow_v2_trace()
+    document["data"]["spans"][0]["events"] = [
+        {"name": "empty", "timestamp": 2, "attributes": None}
+    ]
+
+    assert Trace.from_dict(document).data.spans
+    assert _complete_trace_envelope(document) is True
+
+
+def test_locked_mlflow_v3_empty_event_serializes_an_attribute_mapping():
+    pytest.importorskip("mlflow")
+    from mlflow.entities import SpanEvent, Trace
+
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    event = SpanEvent(name="empty", timestamp=2)
+    seed = _mlflow_trace()
+    seed["data"]["spans"][0]["events"] = [
+        {
+            "name": event.name,
+            "time_unix_nano": event.timestamp,
+            "attributes": event.attributes,
+        }
+    ]
+
+    document = Trace.from_dict(seed).to_dict()
+
+    assert document["data"]["spans"][0]["events"][0]["attributes"] == {}
     assert _complete_trace_envelope(document) is True
 
 

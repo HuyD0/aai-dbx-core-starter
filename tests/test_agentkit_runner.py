@@ -693,14 +693,23 @@ def test_local_target_preflight_precedes_cloud_reads_confirmation_and_spend(
     assert "latest evaluation attempt" in gate_message
 
 
-def test_suffixless_uc_model_is_rejected_before_dataset_or_spend(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("reference", "message"),
+    [
+        ("models:/main.evaluation.agent", "incomplete Unity Catalog"),
+        ("models:/main.evaluation.agent/champion", "nonnumeric Unity Catalog"),
+    ],
+)
+def test_invalid_uc_model_is_rejected_before_dataset_or_spend(
+    tmp_path, monkeypatch, reference, message
+):
     from aai_core.agentkit import runner as runner_module
 
     project = _project(
         tmp_path,
         config_text=(
             "version: 1\n"
-            "agent: models:/main.evaluation.agent\n"
+            f"agent: {reference}\n"
             "dataset: main.evaluation.golden_cases\n"
         ),
     )
@@ -712,7 +721,7 @@ def test_suffixless_uc_model_is_rejected_before_dataset_or_spend(tmp_path, monke
     asked = []
     mlflow = FakeMlflow()
 
-    with pytest.raises(TargetResolutionError, match="incomplete Unity Catalog"):
+    with pytest.raises(TargetResolutionError, match=message):
         run_scoring(
             project,
             establish_baseline=True,
