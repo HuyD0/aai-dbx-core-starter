@@ -817,18 +817,21 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
     assert is_release_eligible(
         "C_hybrid",
         absolute_gate=absolute_gate,
+        baseline_metrics=metrics,
         comparison=adopted_comparison,
         source_state="clean",
     )
     assert not is_release_eligible(
         "D_hybrid_reranked",
         absolute_gate=absolute_gate,
+        baseline_metrics=metrics,
         comparison=adopted_comparison,
         source_state="clean",
     )
     assert not is_release_eligible(
         "C_hybrid",
         absolute_gate=absolute_gate,
+        baseline_metrics=metrics,
         comparison=adopted_comparison,
         source_state="dirty",
     )
@@ -840,6 +843,7 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
         assert not is_release_eligible(
             "C_hybrid",
             absolute_gate=absolute_gate,
+            baseline_metrics=metrics,
             comparison=mismatched_comparison,
             source_state="clean",
         )
@@ -852,6 +856,7 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
         assert not is_release_eligible(
             "C_hybrid",
             absolute_gate=absolute_gate,
+            baseline_metrics=metrics,
             comparison=adopted_comparison.model_copy(update=decision_update),
             source_state="clean",
         )
@@ -875,7 +880,23 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
     assert not is_release_eligible(
         "C_hybrid",
         absolute_gate=regressed_absolute_gate,
+        baseline_metrics=metrics,
         comparison=forged_adopt,
+        source_state="clean",
+    )
+
+    forged_baseline_adopt = comparison_record(
+        regressed_metrics,
+        regressed_metrics,
+        baseline_configuration="B_vector",
+        change_configuration="C_hybrid",
+    )
+    assert forged_baseline_adopt.decision == "adopt"
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=regressed_absolute_gate,
+        baseline_metrics=metrics,
+        comparison=forged_baseline_adopt,
         source_state="clean",
     )
 
@@ -893,6 +914,7 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
     assert not is_release_eligible(
         "C_hybrid",
         absolute_gate=rejected_current_gate,
+        baseline_metrics=metrics,
         comparison=adopted_comparison,
         source_state="clean",
     )
@@ -900,6 +922,7 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
     assert not is_release_eligible(
         "C_hybrid",
         absolute_gate=absolute_gate,
+        baseline_metrics=metrics,
         comparison=adopted_comparison.model_dump(mode="json"),  # type: ignore[arg-type]
         source_state="clean",
     )
@@ -999,6 +1022,9 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     capstone_source = "\n".join(_source(cell) for cell in capstone_notebook["cells"])
     assert 'change_configuration="C_hybrid"' in capstone_source
     assert "release_eligible = is_release_eligible(" in capstone_source
+    assert (
+        "baseline_metrics=reports[comparison.baseline_configuration]" in capstone_source
+    )
     assert "comparison=comparison" in capstone_source
     assert "decision_record=" not in capstone_source
     assert "if release_eligible:" in capstone_source

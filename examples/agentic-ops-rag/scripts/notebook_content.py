@@ -1036,6 +1036,7 @@ selected_gate = absolute_gates[selected_name]
 release_eligible = is_release_eligible(
     selected_name,
     absolute_gate=selected_gate,
+    baseline_metrics=reports[comparison.baseline_configuration],
     comparison=comparison,
     source_state=source_state,
 )

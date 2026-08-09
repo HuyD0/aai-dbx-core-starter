@@ -252,6 +252,7 @@ def is_release_eligible(
     selected_configuration: str,
     *,
     absolute_gate: GateResult,
+    baseline_metrics: Mapping[str, float],
     comparison: ComparisonRecord,
     source_state: str,
 ) -> bool:
@@ -260,9 +261,12 @@ def is_release_eligible(
     if comparison.__class__ is not ComparisonRecord:
         return False
     gate_metrics = dict(absolute_gate.metrics)
+    trusted_baseline = dict(baseline_metrics)
+    if dict(comparison.baseline) != trusted_baseline:
+        return False
     comparison_gate = release_gate(
         dict(comparison.change),
-        baseline_metrics=dict(comparison.baseline),
+        baseline_metrics=trusted_baseline,
     )
     return (
         source_state == "clean"
