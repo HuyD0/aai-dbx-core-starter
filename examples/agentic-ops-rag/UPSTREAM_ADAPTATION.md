@@ -50,8 +50,9 @@ second set of solution notebooks.
   checks plus MLflow GenAI scorers over real retriever traces.
 - Custom tracer objects are replaced by one governed MLflow tracing owner.
 - Embedded duplicate datasets are replaced by versionable JSONL sources.
-- Aggregate-only quality is replaced by fixed cases, critical authorization and
-  refusal rows, coverage, row-level inspection, and baseline regression.
+- Aggregate-only quality is replaced by fixed cases, independent tenant,
+  region, group, and current-evidence gates, critical refusal rows, coverage,
+  row-level inspection, and baseline regression.
 - “Wrap it in FastAPI” is replaced by the repository's `rag-app` and
   `agent-app` templates, MLflow Agent Server, and Databricks Apps.
 

@@ -82,6 +82,13 @@ array filtering, so the helper fails closed until the platform publishes a
 compatible scalar ACL field; it never falls back to post-filtering retrieved
 content in application code.
 
+Both mappings also filter on `active=true` before ranking and return tenant,
+region, group, active-state, runbook-code, and effective-date evidence. The
+deterministic gate verifies each scope dimension independently, including
+same-tenant documents restricted to a different group. The application keeps
+the newest active revision of each runbook code and never interprets an
+arbitrary positive provider score as proof that a result supports the query.
+
 The stable 2026 API also supports query-time integrated vectorization through a
 configured vectorizer. This SDK currently uses an explicit client-side query
 embedding. A future adapter may add a typed `VectorizableTextQuery` mode, but it

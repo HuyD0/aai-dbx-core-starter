@@ -262,6 +262,8 @@ class OfflineOperationsRetriever:
                 "service": document.service,
                 "runbook_code": document.runbook_code,
                 "effective_at": document.effective_at,
+                "allowed_groups": document.allowed_groups,
+                "active": document.active,
                 "lexical_score": lexical,
                 "semantic_score": semantic,
             },

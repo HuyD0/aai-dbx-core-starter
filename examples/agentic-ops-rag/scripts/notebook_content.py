@@ -587,7 +587,9 @@ Switching to `aai-platform.databricks-search.example.yml` keeps
 `operations-knowledge` unchanged. Provider-specific reranker options are an
 explicit escape hatch and should be evaluated as separate changes. The
 application compares outcomes and trace evidence, never raw scores across
-providers.
+providers. A positive provider score only orders candidates; it cannot make an
+unrelated result answerable. The deterministic shell requires identifier or
+query/evidence support and abstains when that support is uncertain.
 """),
         m(
             knowledge_check(
@@ -646,9 +648,10 @@ documents
 ## Deterministic checks first
 
 Tenant isolation, secret refusal, citations, schema validation, exact tool
-allowlists, and human approval are code-level policies. LLM judges complement
-them with retrieval relevance, sufficiency, and groundedness; an experimental
-judge is never the sole safety gate.
+allowlists, region and group authorization, current-evidence selection, and
+human approval are code-level policies. LLM judges complement them with
+retrieval relevance, sufficiency, and groundedness; an experimental judge is
+never the sole safety gate.
 """),
         c("""
 from agentic_ops_rag import RetrievalMode
@@ -667,6 +670,9 @@ offline_gate.model_dump(mode="json")
 # YOUR TURN — TODO: classify every gate metric as deterministic or judge-based.
 metric_owner = {
     "security/tenant_isolation": "deterministic",
+    "security/region_isolation": "deterministic",
+    "security/group_authorization": "deterministic",
+    "security/current_evidence": "deterministic",
     "safety/action_approval": "deterministic",
     "answer/citation_integrity": "deterministic",
     "retrieval_groundedness/mean": "llm_judge",
@@ -677,6 +683,8 @@ metric_owner
         c("""
 # CHECK YOUR WORK
 assert metric_owner["security/tenant_isolation"] == "deterministic"
+assert metric_owner["security/region_isolation"] == "deterministic"
+assert metric_owner["security/group_authorization"] == "deterministic"
 assert metric_owner["safety/action_approval"] == "deterministic"
 assert metric_owner["retrieval_groundedness/mean"] == "llm_judge"
 "Hard policies do not depend on a probabilistic judge."
@@ -688,6 +696,9 @@ critical_deterministic_metrics = {
 }
 assert {
     "security/tenant_isolation",
+    "security/region_isolation",
+    "security/group_authorization",
+    "security/current_evidence",
     "safety/action_approval",
     "answer/citation_integrity",
 }.issubset(critical_deterministic_metrics)
@@ -899,6 +910,7 @@ from agentic_ops_rag import RetrievalMode
 from agentic_ops_rag.evaluation import (
     benchmark,
     comparison_record,
+    is_release_eligible,
     load_cases,
     release_gate,
 )
@@ -945,7 +957,12 @@ latency without improving the fixed cases. That is a useful result, not a failed
 workshop.
 """),
         c("""
-comparison = comparison_record(reports["B_vector"], reports["C_hybrid"])
+comparison = comparison_record(
+    reports["B_vector"],
+    reports["C_hybrid"],
+    baseline_configuration="B_vector",
+    change_configuration="C_hybrid",
+)
 comparison
 """),
         c("""
@@ -972,6 +989,8 @@ elif comparison["failures"]:
 reference_decision = comparison["decision"]
 assert learner_decision == reference_decision
 decision_evidence = {
+    "baseline_configuration": comparison["baseline_configuration"],
+    "change_configuration": comparison["change_configuration"],
     "decision": reference_decision,
     "failed_rules": comparison["failures"],
     "measurement_source": "simulated_offline_fixture",
@@ -1010,33 +1029,42 @@ source_commit = (
 )
 source_state = "dirty" if state_result.stdout.strip() else "clean"
 
-selected_name = "C_hybrid"
+selected_name = decision_evidence["change_configuration"]
 selected_gate = absolute_gates[selected_name]
-release = ApplicationRelease(
-    application="operations-rag-assistant",
-    release="workshop-hybrid-v1",
-    source_commit=source_commit,
-    core_sdk_version=aai_core_version,
-    model={"logical_name": "operations-chat", "version": "configured"},
-    prompt={"name": "operations-system", "version": 1},
-    retrieval={
-        "logical_name": "operations-knowledge",
-        "mode": "hybrid",
-        "chunking_profile": "markdown-structural-v1",
-        "embedding_profile": "operations-embedding-v1",
-    },
-    evaluation={
-        "dataset": "synthetic-operations-regression-v1",
-        "gate_passed": selected_gate.passed,
-        "metrics": reports[selected_name],
-        "source_state": source_state,
-    },
-    environment="dev",
+release_eligible = is_release_eligible(
+    selected_name,
+    absolute_gate=selected_gate,
+    decision_record=decision_evidence,
+    source_state=source_state,
 )
+release = None
+if release_eligible:
+    release = ApplicationRelease(
+        application="operations-rag-assistant",
+        release="workshop-hybrid-v1",
+        source_commit=source_commit,
+        core_sdk_version=aai_core_version,
+        model={"logical_name": "operations-chat", "version": "configured"},
+        prompt={"name": "operations-system", "version": 1},
+        retrieval={
+            "logical_name": "operations-knowledge",
+            "mode": "hybrid",
+            "chunking_profile": "markdown-structural-v1",
+            "embedding_profile": "operations-embedding-v1",
+        },
+        evaluation={
+            "dataset": "synthetic-operations-regression-v1",
+            "gate_passed": selected_gate.passed,
+            "comparison_decision": decision_evidence["decision"],
+            "metrics": reports[selected_name],
+            "source_state": source_state,
+        },
+        environment="dev",
+    )
 {
-    "eligible": selected_gate.passed and source_state == "clean",
+    "eligible": release_eligible,
     "source_state": source_state,
-    "release_digest": release.digest,
+    "release_digest": release.digest if release is not None else None,
 }
 """),
         m("""

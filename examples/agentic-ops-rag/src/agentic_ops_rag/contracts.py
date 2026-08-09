@@ -70,6 +70,9 @@ class PipelineResult(ContractModel):
     citations: tuple[str, ...] = ()
     retrieved_document_ids: tuple[str, ...] = ()
     retrieved_tenants: tuple[str, ...] = ()
+    retrieved_regions: tuple[str, ...] = ()
+    retrieved_allowed_groups: tuple[tuple[str, ...], ...] = ()
+    retrieved_active: tuple[bool, ...] = ()
     abstained: bool
     proposed_action: str | None = None
     requires_approval: bool = False

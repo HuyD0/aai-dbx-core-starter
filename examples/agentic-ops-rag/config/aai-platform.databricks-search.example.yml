@@ -40,7 +40,7 @@ providers:
       content_field: content
       source_uri_field: source_uri
       chunk_id_field: chunk_id
-      columns: [id, content, source_uri, chunk_id, tenant_id, region, service, allowed_groups]
+      columns: [id, content, source_uri, chunk_id, tenant_id, region, service, allowed_groups, active, runbook_code, effective_at]
       embedding: operations-embedding
 
 # Secret references only. The workshop needs none by default.

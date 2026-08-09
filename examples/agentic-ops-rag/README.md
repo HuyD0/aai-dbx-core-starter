@@ -127,5 +127,11 @@ and [UPSTREAM_ADAPTATION.md](UPSTREAM_ADAPTATION.md) for the clean-room mapping.
   individual developer's access.
 - Retrieved text is untrusted data. It cannot override system instructions,
   access scope, tool allowlists, or approval policy.
+- Connected provider scores rank candidates but never prove that a candidate
+  supports an answer. The application requires current evidence plus a
+  deterministic identifier or query/evidence overlap and abstains when that
+  support is uncertain.
+- Release eligibility is bound to the exact comparison change and its recorded
+  `adopt` decision; an absolute gate cannot release a regression-policy reject.
 - A notebook never moves a prompt alias, deploys an app, or executes an
   operational action.

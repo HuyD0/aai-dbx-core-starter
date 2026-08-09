@@ -45,8 +45,10 @@ if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
 from agentic_ops_rag import (  # noqa: E402
+    EvaluationCase,
     OfflineOperationsRetriever,
     OperationsRAGPipeline,
+    PipelineResult,
     QueryKind,
     RetrievalMode,
     benchmark,
@@ -54,7 +56,11 @@ from agentic_ops_rag import (  # noqa: E402
     route_query,
     structural_chunks,
 )
-from agentic_ops_rag.evaluation import load_cases, release_gate  # noqa: E402
+from agentic_ops_rag.evaluation import (  # noqa: E402
+    is_release_eligible,
+    load_cases,
+    release_gate,
+)
 
 
 def _source(cell: dict[str, object]) -> str:
@@ -81,10 +87,17 @@ def test_configuration_is_portable_keyless_and_provider_swappable():
         databricks["providers"]["retrievers"]["operations-knowledge"]["provider"]
         == "databricks_ai_search"
     )
-    assert (
-        "allowed_groups"
-        in databricks["providers"]["retrievers"]["operations-knowledge"]["columns"]
+    selected_columns = set(
+        databricks["providers"]["retrievers"]["operations-knowledge"]["columns"]
     )
+    assert {
+        "tenant_id",
+        "region",
+        "allowed_groups",
+        "active",
+        "runbook_code",
+        "effective_at",
+    }.issubset(selected_columns)
     combined = azure_path.read_text() + databricks_path.read_text()
     assert "replace-with" in combined
     assert "api_key:" not in combined
@@ -200,11 +213,19 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
             return [
                 SearchResult(
                     document_id="connected-result",
-                    content="Authorized connected evidence.",
+                    content="Authorized connected result and service restart evidence.",
                     score=0.42,
                     source_uri="synthetic://connected/result",
                     chunk_id="connected-chunk",
-                    metadata={"tenant_id": "tenant-alpha"},
+                    metadata={
+                        "title": "Connected result runbook",
+                        "tenant_id": "tenant-alpha",
+                        "region": "eastus",
+                        "allowed_groups": ("ops-payments",),
+                        "active": True,
+                        "runbook_code": "OPS-CONNECTED-RESULT",
+                        "effective_at": "2026-08-01",
+                    },
                     provider=self.provider,
                 )
             ]
@@ -236,6 +257,16 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
     security_filter = retriever.options["provider_options"]["filter"]
     assert "allowed_groups/any" in security_filter
     assert "ops-payments" in security_filter
+    assert "active eq true" in security_filter
+    selected_fields = set(retriever.options["provider_options"]["select"])
+    assert {
+        "tenant_id",
+        "region",
+        "allowed_groups",
+        "active",
+        "runbook_code",
+        "effective_at",
+    }.issubset(selected_fields)
 
     sensitive = OperationsRAGPipeline(
         retriever,
@@ -264,6 +295,102 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
     assert "No operational change was executed" in action.answer
     assert retriever.calls == 2
     assert len(generated_from) == 2
+
+
+def test_connected_positive_score_without_deterministic_support_abstains():
+    class UnrelatedRetriever:
+        provider = "azure_ai_search"
+
+        def search(self, _query, **_options):
+            return [
+                SearchResult(
+                    document_id="unrelated-positive-hit",
+                    content="The cafeteria menu changes every Thursday.",
+                    score=9999.0,
+                    source_uri="synthetic://connected/unrelated",
+                    chunk_id="unrelated-chunk",
+                    metadata={
+                        "tenant_id": "tenant-alpha",
+                        "region": "eastus",
+                        "allowed_groups": ("ops-payments",),
+                        "active": True,
+                        "runbook_code": "OPS-CAFETERIA",
+                        "effective_at": "2026-08-01",
+                    },
+                    provider=self.provider,
+                )
+            ]
+
+    generator_calls = []
+
+    def unexpected_generator(question, evidence):
+        generator_calls.append((question, evidence))
+        raise AssertionError("unsupported evidence must not reach generation")
+
+    result = OperationsRAGPipeline(
+        UnrelatedRetriever(),
+        answer_generator=unexpected_generator,
+    ).invoke(
+        "Explain the payment outage recovery runbook",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
+    )
+
+    assert result.abstained
+    assert not result.citations
+    assert result.retrieved_document_ids == ("unrelated-positive-hit",)
+    assert generator_calls == []
+
+
+def test_connected_rerank_discards_retired_revision_even_with_higher_score():
+    class RevisionRetriever:
+        provider = "azure_ai_search"
+
+        def __init__(self):
+            self.options = None
+
+        def search(self, _query, **options):
+            self.options = options
+            common = {
+                "tenant_id": "tenant-alpha",
+                "region": "eastus",
+                "allowed_groups": ("ops-payments",),
+                "runbook_code": "ERR-PAY-503",
+            }
+            return [
+                SearchResult(
+                    document_id="retired",
+                    content="Retired ERR-PAY-503 recovery steps.",
+                    score=100.0,
+                    source_uri="synthetic://connected/retired",
+                    chunk_id="retired-chunk",
+                    metadata={**common, "active": False, "effective_at": "2024-01-01"},
+                    provider=self.provider,
+                ),
+                SearchResult(
+                    document_id="current",
+                    content="Current ERR-PAY-503 recovery evidence.",
+                    score=0.01,
+                    source_uri="synthetic://connected/current",
+                    chunk_id="current-chunk",
+                    metadata={**common, "active": True, "effective_at": "2026-08-01"},
+                    provider=self.provider,
+                ),
+            ]
+
+    retriever = RevisionRetriever()
+    result = OperationsRAGPipeline(retriever).invoke(
+        "Explain ERR-PAY-503",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
+    )
+
+    assert not result.abstained
+    assert result.retrieved_document_ids == ("current",)
+    assert result.retrieved_active == (True,)
+    assert "active eq true" in retriever.options["provider_options"]["filter"]
 
 
 def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
@@ -341,21 +468,40 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
         def similarity_search(self, **options):
             assert options["num_results"] == 3
             assert options["filters"]["allowed_groups"] == ["ops-payments"]
+            assert options["filters"]["active"] is True
+            assert {
+                "tenant_id",
+                "region",
+                "allowed_groups",
+                "active",
+                "runbook_code",
+                "effective_at",
+            }.issubset(options["columns"])
             columns = [
                 "id",
                 "content",
                 "source_uri",
                 "chunk_id",
                 "tenant_id",
+                "region",
+                "allowed_groups",
+                "active",
+                "runbook_code",
+                "effective_at",
                 "score",
             ]
             rows = [
                 [
                     f"doc-{number}",
-                    f"Authorized evidence {number}.",
+                    f"Authorized connected evidence {number}.",
                     f"synthetic://connected/doc-{number}",
                     f"chunk-{number}",
                     "tenant-alpha",
+                    "eastus",
+                    ["ops-payments"],
+                    True,
+                    f"OPS-CONNECTED-{number}",
+                    f"2026-08-0{number}",
                     score,
                 ]
                 for number, score in ((1, 0.9), (2, 0.8), (3, 0.7))
@@ -387,7 +533,18 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
     retriever = DatabricksAISearchRetriever(
         logical_name="operations-knowledge",
         index=FakeIndex(),
-        columns=("id", "content", "source_uri", "chunk_id", "tenant_id"),
+        columns=(
+            "id",
+            "content",
+            "source_uri",
+            "chunk_id",
+            "tenant_id",
+            "region",
+            "allowed_groups",
+            "active",
+            "runbook_code",
+            "effective_at",
+        ),
         content_field="content",
         id_field="id",
         source_uri_field="source_uri",
@@ -496,11 +653,133 @@ def test_fixed_cases_cover_retrieval_abstention_access_and_action_policy():
 
     metrics = benchmark(pipeline, cases, mode=RetrievalMode.HYBRID)
     assert metrics["security/tenant_isolation"] == 1.0
+    assert metrics["security/region_isolation"] == 1.0
+    assert metrics["security/group_authorization"] == 1.0
+    assert metrics["security/current_evidence"] == 1.0
     assert metrics["safety/action_approval"] == 1.0
     assert metrics["answer/abstention_accuracy"] == 1.0
     assert metrics["answer/citation_integrity"] == 1.0
     assert metrics["cost/coverage"] == 0.0
     assert release_gate(metrics).passed
+
+
+def test_release_gate_detects_each_returned_authorization_scope_leak():
+    case = EvaluationCase(
+        case_id="scope-contract",
+        question="Explain the payments recovery procedure",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
+        expected_document_ids=("scope-doc",),
+        answerable=True,
+    )
+    safe_result = PipelineResult(
+        query=case.question,
+        query_kind=QueryKind.KNOWLEDGE,
+        retrieval_mode=RetrievalMode.HYBRID,
+        answer="Grounded answer. Sources: [scope-doc]",
+        citations=("scope-doc",),
+        retrieved_document_ids=("scope-doc",),
+        retrieved_tenants=("tenant-alpha",),
+        retrieved_regions=("eastus",),
+        retrieved_allowed_groups=(("ops-payments",),),
+        retrieved_active=(True,),
+        abstained=False,
+        latency_ms=10.0,
+    )
+
+    class FixedPipeline:
+        def __init__(self, result):
+            self.result = result
+
+        def invoke(self, *_args, **_kwargs):
+            return self.result
+
+    leaks = {
+        "security/tenant_isolation": {
+            "retrieved_tenants": ("tenant-beta",),
+        },
+        "security/region_isolation": {
+            "retrieved_regions": ("westus",),
+        },
+        # This is deliberately same-tenant and same-region. Tenant-only checks
+        # must not authorize evidence restricted to another group.
+        "security/group_authorization": {
+            "retrieved_allowed_groups": (("ops-identity",),),
+        },
+        "security/current_evidence": {
+            "retrieved_active": (False,),
+        },
+    }
+    for metric_name, update in leaks.items():
+        metrics = benchmark(
+            FixedPipeline(safe_result.model_copy(update=update)),
+            (case,),
+            mode=RetrievalMode.HYBRID,
+        )
+        assert metrics[metric_name] == 0.0
+        if metric_name == "security/group_authorization":
+            assert metrics["security/tenant_isolation"] == 1.0
+            assert metrics["security/region_isolation"] == 1.0
+        gate = release_gate(metrics)
+        assert not gate.passed
+        assert metric_name in {failure.metric for failure in gate.failures}
+
+
+def test_release_eligibility_honors_exact_recorded_comparison_decision():
+    documents = load_documents(COURSE / "data" / "operations_documents.jsonl")
+    cases = load_cases(COURSE / "data" / "evaluation_cases.jsonl")
+    metrics = benchmark(
+        OperationsRAGPipeline(OfflineOperationsRetriever(documents)),
+        cases,
+        mode=RetrievalMode.HYBRID,
+    )
+    absolute_gate = release_gate(metrics)
+    assert absolute_gate.passed
+    rejected_change = {
+        "change_configuration": "C_hybrid",
+        "decision": "reject",
+        "failed_rules": [{"metric": "latency/p95_ms"}],
+    }
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=absolute_gate,
+        decision_record=rejected_change,
+        source_state="clean",
+    )
+
+    adopted_change = {
+        "change_configuration": "C_hybrid",
+        "decision": "adopt",
+        "failed_rules": [],
+    }
+    assert is_release_eligible(
+        "C_hybrid",
+        absolute_gate=absolute_gate,
+        decision_record=adopted_change,
+        source_state="clean",
+    )
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=absolute_gate,
+        decision_record={
+            "change_configuration": "C_hybrid",
+            "decision": "adopt",
+        },
+        source_state="clean",
+    )
+    assert not is_release_eligible(
+        "D_hybrid_reranked",
+        absolute_gate=absolute_gate,
+        decision_record=adopted_change,
+        source_state="clean",
+    )
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=absolute_gate,
+        decision_record=adopted_change,
+        source_state="dirty",
+    )
 
 
 def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
@@ -580,6 +859,17 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "final_k=3" in evaluation_source
     assert '"expected_response": reference.answer' in evaluation_source
     assert "if not case.answerable or case.expects_action_proposal" in evaluation_source
+
+    capstone_notebook = json.loads(
+        (COURSE / "notebooks" / "05_capstone_release_decision.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    capstone_source = "\n".join(_source(cell) for cell in capstone_notebook["cells"])
+    assert 'change_configuration="C_hybrid"' in capstone_source
+    assert "release_eligible = is_release_eligible(" in capstone_source
+    assert "if release_eligible:" in capstone_source
+    assert '"comparison_decision": decision_evidence["decision"]' in capstone_source
 
 
 def test_all_default_notebook_paths_execute_without_network_or_credentials():

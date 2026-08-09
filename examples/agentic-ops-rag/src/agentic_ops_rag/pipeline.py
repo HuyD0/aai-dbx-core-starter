@@ -23,6 +23,37 @@ _SENSITIVE_REQUEST = re.compile(
     r"\b(?:api key|client secret|password|private key|root credential|token)\b",
     re.IGNORECASE,
 )
+_SUPPORT_TOKEN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_SUPPORT_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "explain",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "it",
+    "of",
+    "please",
+    "the",
+    "this",
+    "to",
+    "what",
+    "when",
+    "which",
+    "with",
+}
+_CONNECTED_EVIDENCE_FIELDS = (
+    "tenant_id",
+    "region",
+    "allowed_groups",
+    "active",
+    "runbook_code",
+    "effective_at",
+)
 
 
 def authorized_search(
@@ -51,7 +82,7 @@ def authorized_search(
     provider = str(getattr(retriever, "provider", ""))
     filters: dict[str, object] = {"tenant_id": tenant_id, "region": region}
     native_options = dict(provider_options or {})
-    controlled = {"filter", "filters"}.intersection(native_options)
+    controlled = {"columns", "filter", "filters", "select"}.intersection(native_options)
     if controlled:
         raise ValueError(
             "provider_options cannot override authorization filters: "
@@ -81,6 +112,7 @@ def authorized_search(
 
     if provider == "azure_ai_search":
         native_options["filter"] = _azure_access_filter(tenant_id, region, groups)
+        native_options["select"] = _azure_selected_fields(retriever)
         return retriever.search(
             query,
             top_k=top_k,
@@ -93,7 +125,14 @@ def authorized_search(
         # ARRAY filters are supported by standard AI Search endpoints. A
         # storage-optimized endpoint rejects this expression, which is a safe
         # failure until the platform supplies a compatible scalar ACL field.
-        filters["allowed_groups"] = list(groups)
+        configured_columns = set(getattr(retriever, "columns", ()))
+        missing_columns = set(_CONNECTED_EVIDENCE_FIELDS).difference(configured_columns)
+        if missing_columns:
+            raise UnsupportedCapabilityError(
+                "Databricks AI Search must return governed evidence columns: "
+                + ", ".join(sorted(missing_columns))
+            )
+        filters.update({"active": True, "allowed_groups": list(groups)})
         return retriever.search(
             query,
             top_k=top_k,
@@ -118,8 +157,25 @@ def _azure_access_filter(
     return (
         f"tenant_id eq {_odata_literal(tenant_id)} and "
         f"region eq {_odata_literal(region)} and "
+        "active eq true and "
         "allowed_groups/any(group:search.in("
         f"group, {_odata_literal(group_values)}, {_odata_literal(delimiter)}))"
+    )
+
+
+def _azure_selected_fields(retriever) -> list[str]:
+    identity_fields = (
+        getattr(retriever, "id_field", "id"),
+        getattr(retriever, "content_field", "content"),
+        getattr(retriever, "source_uri_field", "source_uri"),
+        getattr(retriever, "chunk_id_field", "chunk_id"),
+    )
+    return list(
+        dict.fromkeys(
+            str(field)
+            for field in (*identity_fields, *_CONNECTED_EVIDENCE_FIELDS)
+            if field
+        )
     )
 
 
@@ -205,7 +261,7 @@ class OperationsRAGPipeline:
             semantic_rerank=semantic_rerank,
         )
         ranked = self._application_rerank(query, results)[:final_k]
-        answerable = self._has_support(ranked)
+        answerable = self._has_support(query, ranked)
         proposed_action = None
         requires_approval = False
         if not answerable:
@@ -252,6 +308,16 @@ class OperationsRAGPipeline:
             retrieved_tenants=tuple(
                 str(result.metadata.get("tenant_id", "")) for result in ranked
             ),
+            retrieved_regions=tuple(
+                str(result.metadata.get("region", "")) for result in ranked
+            ),
+            retrieved_allowed_groups=tuple(
+                _normalized_groups(result.metadata.get("allowed_groups"))
+                for result in ranked
+            ),
+            retrieved_active=tuple(
+                result.metadata.get("active") is True for result in ranked
+            ),
             abstained=not answerable,
             proposed_action=proposed_action,
             requires_approval=requires_approval,
@@ -271,21 +337,41 @@ class OperationsRAGPipeline:
     ) -> list[SearchResult]:
         normalized = query.lower()
 
-        def score(result: SearchResult) -> tuple[float, str]:
+        # Access filters request active evidence before ranking. Retain this
+        # fail-closed application boundary as well: a provider/index that omits
+        # or ignores the field cannot send retired material to generation.
+        current = [
+            result for result in results if result.metadata.get("active") is True
+        ]
+
+        # A provider can return several active revisions for one runbook code.
+        # Keep the newest ISO-dated revision before comparing provider ranking
+        # signals so a highly scored stale revision cannot displace it.
+        latest_by_runbook: dict[str, SearchResult] = {}
+        for result in current:
+            code = str(result.metadata.get("runbook_code", "")).strip().lower()
+            key = code or f"document:{result.document_id}"
+            existing = latest_by_runbook.get(key)
+            if existing is None or str(result.metadata.get("effective_at", "")) > str(
+                existing.metadata.get("effective_at", "")
+            ):
+                latest_by_runbook[key] = result
+
+        def score(result: SearchResult) -> tuple[bool, float, str]:
             provider_score = float(result.score or 0.0)
             code = str(result.metadata.get("runbook_code", "")).lower()
             freshness = str(result.metadata.get("effective_at", ""))
-            exact_bonus = 2.0 if code and code in normalized else 0.0
-            return provider_score + exact_bonus, freshness
+            exact_identifier = bool(code and code in normalized)
+            return exact_identifier, provider_score, freshness
 
         return sorted(
-            results,
-            key=lambda result: (score(result)[0], score(result)[1], result.document_id),
+            latest_by_runbook.values(),
+            key=lambda result: (*score(result), result.document_id),
             reverse=True,
         )
 
     @staticmethod
-    def _has_support(results: Sequence[SearchResult]) -> bool:
+    def _has_support(query: str, results: Sequence[SearchResult]) -> bool:
         if not results:
             return False
         top = results[0]
@@ -294,17 +380,41 @@ class OperationsRAGPipeline:
             semantic = float(top.metadata.get("semantic_score", 0.0))
             return lexical >= 0.2 or semantic >= 0.18
 
-        # Connected provider scores are ranking signals with provider-specific
-        # scales, so zero is treated only as missing support—not as a portable
-        # quality threshold. Requiring normalized evidence fields keeps the
-        # result usable by MLflow retriever spans and downstream judges.
-        return (
-            top.score is not None
-            and float(top.score) > 0.0
-            and bool(top.content.strip())
-            and bool(top.source_uri)
-            and bool(top.chunk_id)
+        # Connected scores are ranking signals with provider-specific scales;
+        # no positive value proves semantic support. Require complete evidence
+        # plus deterministic identifier or lexical overlap. Ambiguous semantic-
+        # only retrieval abstains until an evaluated application-owned support
+        # policy (or governed judge) supplies evidence.
+        if not (
+            top.content.strip()
+            and top.source_uri
+            and top.chunk_id
+            and top.metadata.get("active") is True
+        ):
+            return False
+        evidence = " ".join(
+            (
+                top.content,
+                str(top.metadata.get("title", "")),
+                str(top.metadata.get("service", "")),
+                str(top.metadata.get("runbook_code", "")),
+            )
         )
+        identifiers = {match.group(0).lower() for match in _IDENTIFIER.finditer(query)}
+        if identifiers:
+            normalized_evidence = evidence.lower()
+            return identifiers.issubset(
+                {
+                    match.group(0).lower()
+                    for match in _IDENTIFIER.finditer(normalized_evidence)
+                }
+            )
+        query_terms = _support_terms(query)
+        if not query_terms:
+            return False
+        overlap = query_terms.intersection(_support_terms(evidence))
+        required_overlap = 1 if len(query_terms) == 1 else 2
+        return len(overlap) >= required_overlap
 
     @staticmethod
     def _proposed_action(query: str) -> str:
@@ -321,3 +431,19 @@ class OperationsRAGPipeline:
             RetrievalMode.HYBRID: 43.0,
         }[mode]
         return base + (candidate_count * 0.75) + (12.0 if semantic_rerank else 0.0)
+
+
+def _support_terms(text: str) -> set[str]:
+    return {
+        token
+        for token in _SUPPORT_TOKEN.findall(text.lower())
+        if token not in _SUPPORT_STOP_WORDS
+    }
+
+
+def _normalized_groups(value: object) -> tuple[str, ...]:
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        return ()
+    return tuple(
+        dict.fromkeys(str(group).strip() for group in value if str(group).strip())
+    )

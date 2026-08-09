@@ -9,7 +9,7 @@ from agentic_ops_rag.contracts import (
     QueryKind,
     RetrievalMode,
 )
-from agentic_ops_rag.evaluation import benchmark, release_gate
+from agentic_ops_rag.evaluation import benchmark, is_release_eligible, release_gate
 from agentic_ops_rag.offline import OfflineOperationsRetriever, load_documents
 from agentic_ops_rag.pipeline import (
     OperationsRAGPipeline,
@@ -29,6 +29,7 @@ __all__ = [
     "benchmark",
     "authorized_search",
     "load_documents",
+    "is_release_eligible",
     "release_gate",
     "route_query",
     "structural_chunks",
