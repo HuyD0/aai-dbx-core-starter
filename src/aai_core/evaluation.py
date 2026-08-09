@@ -611,7 +611,11 @@ def _is_missing_registry_error(error: Exception) -> bool:
     shape under ``INVALID_PARAMETER_VALUE``.
     """
 
-    errors = _registry_exception_chain(error)
+    errors, chain_complete = _registry_exception_chain(error)
+    # A provider wrapper may put the real failure beyond our defensive walk
+    # bound. Never interpret a partially inspected chain as absence.
+    if not chain_complete:
+        return False
     coded = tuple((item, _registry_error_code(item)) for item in errors)
     missing_codes = {"404", "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}
 
@@ -632,20 +636,25 @@ def _is_missing_registry_error(error: Exception) -> bool:
         for statuses_for_item in statuses_by_error.values()
         for status in statuses_for_item
     }
-    alias_missing = {
+    alias_candidates = {
         id(item)
         for item, error_code in coded
         if error_code in {"", "INVALID_PARAMETER_VALUE"}
         and _is_missing_alias_shape(item)
+    }
+    alias_missing = {
+        id(item)
+        for item in errors
+        if id(item) in alias_candidates
+        and (not statuses_by_error[id(item)] or statuses_by_error[id(item)] == {400})
     }
     # A response is structured evidence too. Only 404 denotes general
     # absence; 401, 403, 429, 5xx, and every other non-404 response must
     # propagate. MLflow's exact missing-alias exception is the documented
     # special case: it uses INVALID_PARAMETER_VALUE/HTTP 400 for absence.
     if any(
-        status != 404
+        status != 404 and not (status == 400 and id(item) in alias_missing)
         for item in errors
-        if id(item) not in alias_missing
         for status in statuses_by_error[id(item)]
     ):
         return False
@@ -659,6 +668,7 @@ def _is_missing_registry_error(error: Exception) -> bool:
         for item, error_code in coded
         if error_code in missing_codes
         or 404 in statuses_by_error[id(item)]
+        or id(item) in alias_missing
         or _is_explicit_missing_exception_type(item)
         or isinstance(item, FileNotFoundError)
     }
@@ -689,8 +699,10 @@ def _is_missing_registry_error(error: Exception) -> bool:
     )
 
 
-def _registry_exception_chain(error: Exception) -> tuple[Exception, ...]:
-    """Return an exception and the provider wrappers it exposes, cycle-safe."""
+def _registry_exception_chain(
+    error: Exception,
+) -> tuple[tuple[Exception, ...], bool]:
+    """Return the bounded exception walk and whether it visited every child."""
 
     pending = [error]
     found: list[Exception] = []
@@ -719,7 +731,8 @@ def _registry_exception_chain(error: Exception) -> tuple[Exception, ...]:
                 continue
             if isinstance(nested, Exception) and id(nested) not in seen:
                 pending.append(nested)
-    return tuple(found)
+    complete = not any(id(item) not in seen for item in pending)
+    return tuple(found), complete
 
 
 def _registry_error_code(error: Exception) -> str:
@@ -869,22 +882,39 @@ def _has_authoritative_non_absence_message(error: Exception) -> bool:
         "access denied",
         "invalid credential",
         "invalid api key",
+        "api key invalid",
         "api key is invalid",
         "api key rejected",
+        "api key was rejected",
         "credential rejected",
         "credentials rejected",
+        "credential invalid",
+        "credentials invalid",
+        "access token expired",
+        "expired access token",
+        "token has expired",
+        "token is expired",
         "insufficient privilege",
         "insufficient permission",
         "connection",
+        "connection refused",
+        "connection reset",
         "timed out",
         "timeout",
         "transport",
         "network error",
         "network failure",
+        "network unreachable",
+        "host unreachable",
+        "no route to host",
         "socket error",
         "dns failure",
+        "dns lookup",
+        "dns resolution",
         "tls error",
+        "tls handshake",
         "ssl error",
+        "ssl handshake",
         "proxy error",
         "rate limit",
         "quota",
@@ -896,8 +926,22 @@ def _has_authoritative_non_absence_message(error: Exception) -> bool:
         "bad gateway",
         "gateway timeout",
     )
+    strong_patterns = (
+        r"\bapi[ _-]?key\b.{0,24}\b(?:invalid|rejected|revoked|expired)\b",
+        r"\b(?:invalid|rejected|revoked|expired)\b.{0,24}\bapi[ _-]?key\b",
+        r"\bcredentials?\b.{0,24}\b(?:invalid|rejected|revoked|expired)\b",
+        r"\b(?:invalid|rejected|revoked|expired)\b.{0,24}\bcredentials?\b",
+        r"\baccess[ _-]?token\b.{0,24}\b(?:invalid|rejected|revoked|expired)\b",
+        r"\b(?:invalid|rejected|revoked|expired)\b.{0,24}\baccess[ _-]?token\b",
+        r"\b(?:network|host)\b.{0,24}\bunreachable\b",
+        r"\bunreachable\b.{0,24}\b(?:network|host)\b",
+        r"\b(?:tls|ssl)\b.{0,24}\bhandshake\b",
+        r"\bdns\b.{0,24}\b(?:lookup|resolution|failure|error)\b",
+        r"\b(?:connection|connect)\b.{0,24}\b(?:refused|reset|aborted|closed)\b",
+    )
     return (
         any(signal in message for signal in signals)
+        or any(search(pattern, message) is not None for pattern in strong_patterns)
         or search(r"\b(?:401|403|429|5\d\d)\b", message) is not None
     )
 

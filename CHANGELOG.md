@@ -160,8 +160,12 @@ All notable changes to `aai-core` are documented here.
   provider `NotFound`, or MLflow missing-alias shape is not erased merely
   because its own class also inherits `OSError`/`HTTPError`, while any nested
   authentication, credentials, quota, HTTP/request, RPC/API, or transport
-  failure still propagates. The same shared predicate guards the dataset
-  helper's create path.
+  failure still propagates. An exact MLflow alias shape accepts only its
+  expected HTTP 400 (or no status); 401, 403, 429, and 5xx responses still
+  propagate. The bounded walk fails closed when an unseen exception remains,
+  and code-less API-key, credential, token, network, host, TLS, DNS, and
+  connection failures are recognized from their strong message signals. The
+  same shared predicate guards the dataset helper's create path.
   `promote()` verifies the target version through `get_prompt_version()`,
   the only fetch with no lineage side effects — every `load_prompt`
   flavor, the client-level one included, links the loaded version to

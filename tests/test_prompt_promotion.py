@@ -267,6 +267,48 @@ def test_is_missing_prompt_error_uses_actual_http_response_status(status, missin
     assert is_missing_prompt_error(error) is missing
 
 
+@pytest.mark.parametrize("error_kind", ("registry", "http", "request", "os"))
+@pytest.mark.parametrize(
+    ("status", "missing"),
+    ((None, True), (400, True), (401, False), (403, False), (429, False), (503, False)),
+)
+def test_exact_mlflow_missing_alias_status_precedence(error_kind, status, missing):
+    message = "Registered model alias production not found."
+    if error_kind == "registry":
+        error = type(
+            "RegistryError",
+            (RuntimeError,),
+            {"error_code": "INVALID_PARAMETER_VALUE"},
+        )(message)
+    elif error_kind == "os":
+        error = OSError(message)
+    else:
+        httpx = pytest.importorskip("httpx")
+        if error_kind == "http":
+            error = httpx.HTTPError(message)
+        else:
+            request = httpx.Request("GET", "https://registry.example/prompts/hidden")
+            error = httpx.RequestError(message, request=request)
+    if status is not None:
+        error.response = SimpleNamespace(status_code=status)
+
+    assert is_missing_prompt_error(error) is missing
+
+
+@pytest.mark.parametrize("status", (None, 400))
+def test_exact_mlflow_missing_alias_still_checks_nested_failures(status):
+    error = type("HTTPError", (OSError,), {})(
+        "Registered model alias production not found."
+    )
+    if status is not None:
+        error.response = SimpleNamespace(status_code=status)
+    error.inner_exception = PermissionError(
+        "credentials invalid; prompt does not exist"
+    )
+
+    assert not is_missing_prompt_error(error)
+
+
 @pytest.mark.parametrize(
     "error",
     (
@@ -292,6 +334,25 @@ def test_is_missing_prompt_error_rejects_unstructured_failure_wrappers(error):
     assert not is_missing_prompt_error(error)
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "API key invalid; prompt does not exist",
+        "API key was rejected; prompt does not exist",
+        "credentials invalid; prompt does not exist",
+        "access token expired; prompt does not exist",
+        "network unreachable; prompt does not exist",
+        "host unreachable; prompt does not exist",
+        "TLS handshake failed; prompt does not exist",
+        "DNS lookup failed; prompt does not exist",
+        "connection refused; prompt does not exist",
+        "connection reset; prompt does not exist",
+    ),
+)
+def test_is_missing_prompt_error_rejects_strong_code_less_messages(message):
+    assert not is_missing_prompt_error(RuntimeError(message))
+
+
 def test_is_missing_prompt_error_inspects_nested_provider_failures():
     inner = type("RegistryError", (RuntimeError,), {"error_code": "PERMISSION_DENIED"})(
         "prompt does not exist"
@@ -309,6 +370,36 @@ def test_nested_unstructured_failure_overrides_explicit_outer_absence():
     outer.inner_exception = RuntimeError("invalid API key; prompt does not exist")
 
     assert not is_missing_prompt_error(outer)
+
+
+def _registry_wrapper_chain(*, node_count, terminal=None, cycle=False):
+    outer = type("RegistryError", (RuntimeError,), {"error_code": "NOT_FOUND"})(
+        "prompt does not exist"
+    )
+    current = outer
+    for _ in range(node_count - 1):
+        nested = RuntimeError("prompt does not exist")
+        current.inner_exception = nested
+        current = nested
+    if terminal is not None:
+        current.inner_exception = terminal
+    elif cycle:
+        current.inner_exception = outer
+    return outer
+
+
+def test_exception_chain_limit_fails_closed_before_hidden_permission_error():
+    outer = _registry_wrapper_chain(
+        node_count=16,
+        terminal=PermissionError("prompt does not exist"),
+    )
+
+    assert not is_missing_prompt_error(outer)
+
+
+def test_exception_chain_limit_allows_complete_boundary_and_cycle():
+    assert is_missing_prompt_error(_registry_wrapper_chain(node_count=16))
+    assert is_missing_prompt_error(_registry_wrapper_chain(node_count=16, cycle=True))
 
 
 @pytest.mark.parametrize(
@@ -346,7 +437,7 @@ def test_actual_httpx_code_less_request_errors_propagate():
     assert not is_missing_prompt_error(
         httpx.RequestError("prompt does not exist", request=request)
     )
-    assert not is_missing_prompt_error(
+    assert is_missing_prompt_error(
         httpx.HTTPError("Registered model alias production not found.")
     )
 
