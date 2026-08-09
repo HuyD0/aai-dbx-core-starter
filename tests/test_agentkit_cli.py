@@ -576,3 +576,38 @@ def test_confirmation_refuses_without_a_tty_and_names_the_flag(capsys, monkeypat
 
     assert _confirm("Proceed?") is False
     assert "--yes" in capsys.readouterr().err
+
+
+def test_rows_zero_is_refused_rather_than_read_as_unset(project_dir, capsys):
+    """`--rows 0` asked for the smallest run; it must not become the largest.
+
+    Truthiness read 0 as "flag not given", which on `compare` meant the
+    default scope — every configured judge call — on a run that had just
+    asked for none.
+    """
+
+    code = main(["compare", "--rows", "0", "--yes", *_config_flag(project_dir)])
+
+    assert code == 1
+    assert "--rows must be at least 1" in capsys.readouterr().err
+
+
+def test_rows_zero_is_refused_on_smoke_too(project_dir, capsys):
+    """Smoke read the flag its own way, so it kept the same hole."""
+
+    code = main(["smoke", "--rows", "0", *_config_flag(project_dir)])
+
+    assert code == 1
+    assert "--rows must be at least 1" in capsys.readouterr().err
+
+
+def test_a_negative_row_count_is_refused(project_dir, capsys):
+    assert main(["smoke", "--rows", "-5", *_config_flag(project_dir)]) == 1
+    assert "got -5" in capsys.readouterr().err
+
+
+def test_rows_still_narrows_the_scope(project_dir, capsys):
+    """The guard rejects 0, not the flag."""
+
+    assert main(["smoke", "--rows", "3", *_config_flag(project_dir)]) == 0
+    assert "3 rows" in capsys.readouterr().out

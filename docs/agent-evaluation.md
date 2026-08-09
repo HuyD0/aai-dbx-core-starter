@@ -108,6 +108,13 @@ suite may mix the two. A scorer that needs one specific field still needs it
 everywhere: a field on only some rows means the others would score as
 vacuously perfect, so the scorer is excluded and names the gap.
 
+That inference reads a *malformed* `expectations` — a string, a list — as
+absent, which would drop those scorers and their thresholds without saying
+anything. So dataset validation rejects it, including on a row that carries a
+trace: a trace excuses a row from supplying `inputs`, not from being well
+formed. A null value is different, and stays a missing value: a Unity Catalog
+dataset arrives as dataframe records, where an absent field is `NaN`.
+
 Retrieval is the other. An agent that retrieves only when a question needs it
 produces rows with nothing to judge, and MLflow's retrieval scorers raise on
 those. The toolkit skips them instead: the row is left out of the mean rather
@@ -308,9 +315,9 @@ that can read an exit code works the same way.
 
 Every run writes a governed MLflow run carrying the platform resource tags
 plus the lineage the developer would otherwise have to type: dataset reference
-and version digest, row count, agent target, scorer versions, judge model,
-resolved judge prompt versions, the baseline it was compared against, the gate
-verdict, and the decision.
+and version digest, row count, agent target, scorer versions, judge model and
+the model that endpoint actually served, resolved judge prompt versions, the
+baseline it was compared against, the gate verdict, and the decision.
 
 Decisions use the platform vocabulary — **adopt**, **reject**, or
 **inconclusive** — and default to `inconclusive`, because a comparison that

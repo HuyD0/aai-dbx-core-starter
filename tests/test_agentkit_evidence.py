@@ -500,3 +500,45 @@ def test_an_evaluated_version_is_still_read(tmp_path, monkeypatch):
     assert approver["status"] == "approved"
     assert approver["model_version"] == "main.eval.agent v7"
     assert "latest" not in approver["model_version"]
+
+
+def test_the_pack_names_the_model_behind_the_judge_endpoint(tmp_path):
+    """`endpoints:/judge` is a mutable pointer, not an identity.
+
+    The run resolves what the endpoint actually served; without carrying
+    that into the pack, an approver reading it months later cannot tell
+    which model produced the scores — and the comparability check that
+    pins the identity has nothing to show for itself.
+    """
+
+    project = _project(tmp_path)
+    results = _results(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"correctness": 1},
+            judge_model="endpoints:/judge",
+            judge_model_identity="databricks-claude-sonnet-4-5",
+            aai_core="0.4.0",
+        )
+    )
+
+    document, markdown = build_evidence(
+        project, results=results, baseline=_baseline(), gate_report=None
+    )
+
+    assert (
+        document["versions"]["judge_model_identity"] == "databricks-claude-sonnet-4-5"
+    )
+    assert "judge model served: `databricks-claude-sonnet-4-5`" in markdown
+
+
+def test_an_unresolved_judge_identity_adds_no_line(tmp_path):
+    document, markdown = build_evidence(
+        _project(tmp_path),
+        results=_results(),
+        baseline=_baseline(),
+        gate_report=None,
+    )
+
+    assert document["versions"]["judge_model_identity"] is None
+    assert "judge model served" not in markdown

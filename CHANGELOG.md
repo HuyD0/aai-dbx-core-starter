@@ -190,6 +190,16 @@ All notable changes to `aai-core` are documented here.
   is reported rather than enforced, and a baseline that pinned one says
   plainly when the current run could not verify it.
 
+  Dataset validation checks a row's `expectations` before excusing it for
+  carrying a trace: a trace exempts a row from needing `inputs`, not from
+  being well formed, and a malformed value reads as *absent* to shape
+  inference — which silently drops the scorers and thresholds that depend
+  on it. The evidence pack now records which model the judge endpoint
+  actually served, so an approver reading it later can tell. And
+  `--rows 0` is refused rather than read as "flag not given", which had
+  meant scoring the default scope — every configured judge call — on a
+  `--yes` run that asked for the smallest possible one.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

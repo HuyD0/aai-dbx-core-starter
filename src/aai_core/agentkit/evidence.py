@@ -72,6 +72,10 @@ def build_evidence(
         "versions": {
             "scorers": dict(results.versions.scorers),
             "judge_model": results.versions.judge_model,
+            # The endpoint URI is mutable; this is what it actually served.
+            # Without it an approver reading the pack later cannot tell
+            # which model produced the scores.
+            "judge_model_identity": results.versions.judge_model_identity,
             "judge_prompts": dict(results.versions.judge_prompts),
             "aai_core": results.versions.aai_core,
         },
@@ -192,6 +196,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
         lines.append("- no scorer versions recorded")
     if versions["judge_model"]:
         lines.append(f"- judge model: `{versions['judge_model']}`")
+    if versions.get("judge_model_identity"):
+        lines.append(f"- judge model served: `{versions['judge_model_identity']}`")
     for name, prompt in sorted(dict(versions["judge_prompts"]).items()):
         lines.append(f"- judge prompt `{name}`: `{prompt}`")
 

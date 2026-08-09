@@ -229,7 +229,7 @@ def _cmd_init(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_compare(arguments: argparse.Namespace) -> int:
-    rows_limit = _rows_limit(arguments, default_to_sample=False)
+    rows_limit = _rows_limit(arguments)
     return _score(
         arguments,
         command="compare",
@@ -240,8 +240,9 @@ def _cmd_compare(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_smoke(arguments: argparse.Namespace) -> int:
+    requested = _rows_limit(arguments)
     project = _project(arguments)
-    rows = arguments.rows or project.config.smoke.rows
+    rows = project.config.smoke.rows if requested is None else requested
     return _score(
         arguments,
         command="smoke",
@@ -507,15 +508,30 @@ def _score(
     return code
 
 
-def _rows_limit(
-    arguments: argparse.Namespace, *, default_to_sample: bool
-) -> int | None:
+def _rows_limit(arguments: argparse.Namespace) -> int | None:
+    """The scope the developer asked for, or ``None`` for the default.
+
+    The single reader of ``--rows``: every command that accepts the flag
+    routes through here so a rejected value is rejected the same way
+    everywhere.
+    """
+    from aai_core.agentkit.errors import ConfigError
+
     if getattr(arguments, "full", False):
         return None
     rows = getattr(arguments, "rows", None)
-    if rows:
-        return rows
-    return None
+    if rows is None:
+        return None
+    if rows < 1:
+        # Truthiness would read 0 as "not given" and score the default
+        # scope instead — every configured judge call, on a --yes run that
+        # asked for the smallest possible one.
+        raise ConfigError(
+            f"--rows must be at least 1; got {rows}",
+            remediation="Drop --rows to score the default scope, or pass "
+            "--full to score every row deliberately.",
+        )
+    return rows
 
 
 def _project(arguments: argparse.Namespace) -> Any:

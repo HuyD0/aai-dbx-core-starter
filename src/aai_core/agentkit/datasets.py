@@ -329,14 +329,19 @@ def validate_dataset(
         )
     for index, row in enumerate(dataset.rows):
         inputs = row.get("inputs")
+        expectations = row.get("expectations")
+        # Checked before the trace shortcut below: shape inference reads a
+        # malformed expectations value as *absent*, which silently drops
+        # the scorers and thresholds that depend on it while the value
+        # still travels to MLflow. A traced row is exempt from needing
+        # inputs, not from being well formed.
+        if not _is_missing(expectations) and not isinstance(expectations, Mapping):
+            failures.append(f"row {index} expectations must be an object")
+            continue
         if _is_populated(row.get("trace")):
             continue
         if not isinstance(inputs, Mapping) or not inputs:
             failures.append(f"row {index} is missing a non-empty inputs object")
-            continue
-        expectations = row.get("expectations")
-        if expectations is not None and not isinstance(expectations, Mapping):
-            failures.append(f"row {index} expectations must be an object")
             continue
         text = json.dumps(_plain(inputs), default=str).lower()
         if expectations:

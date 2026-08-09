@@ -833,3 +833,47 @@ def test_the_response_preview_is_still_the_fallback():
     )
 
     assert "the only answer" in text
+
+
+def test_a_traced_row_still_has_its_expectations_checked(tmp_path):
+    """A trace exempts a row from needing inputs, not from being well formed.
+
+    Shape inference reads a malformed expectations value as *absent*, so
+    the scorers and thresholds that depend on it are silently dropped
+    while the value still travels to MLflow. The check therefore runs
+    before the traced-row shortcut, not after it.
+    """
+
+    rows = [
+        {"trace": {"info": {"trace_id": "t0"}}, "expectations": "yes"},
+        {"trace": {"info": {"trace_id": "t1"}}, "expectations": ["yes"]},
+    ]
+    _write_dataset(tmp_path, rows)
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+    failures = validate_dataset(dataset, minimum_rows=1)
+
+    assert any("row 0 expectations must be an object" in f for f in failures)
+    assert any("row 1 expectations must be an object" in f for f in failures)
+
+
+def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
+    rows = [{"trace": {"info": {"trace_id": f"t{index}"}}} for index in range(3)]
+    _write_dataset(tmp_path, rows)
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert validate_dataset(dataset, minimum_rows=1) == []
+
+
+def test_a_null_expectations_column_is_not_malformed(tmp_path):
+    """A dataframe null is a missing value, not a bad one."""
+
+    rows = _rows(3)
+    rows[0]["expectations"] = float("nan")
+    _write_dataset(tmp_path, rows)
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+    failures = validate_dataset(dataset, minimum_rows=1)
+
+    assert not any("must be an object" in failure for failure in failures)
