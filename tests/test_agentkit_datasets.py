@@ -453,6 +453,49 @@ def test_trace_payload_is_not_dataset_identity(tmp_path):
     assert first.digest == second.digest
 
 
+def test_trace_expectation_assessments_are_dataset_identity(tmp_path):
+    """Trace ground truth is identity only in the mode that scores it."""
+
+    def _rows_with(expected_response):
+        return [
+            {
+                "inputs": {"question": "how do I retire early?"},
+                "trace": {
+                    "info": {
+                        "trace_id": "volatile-id",
+                        "assessments": [
+                            {
+                                "assessment_name": "expected_response",
+                                "expectation": {"value": expected_response},
+                            }
+                        ],
+                    },
+                    "data": {"spans": [{"type": "LLM", "outputs": "volatile answer"}]},
+                },
+            }
+        ]
+
+    _write_dataset(tmp_path, _rows_with("age 60"), name="a.json")
+    _write_dataset(tmp_path, _rows_with("age 65"), name="b.json")
+
+    first = load_dataset("a.json", root=tmp_path)
+    second = load_dataset("b.json", root=tmp_path)
+
+    # The authored dataset identity remains trace-free: live and
+    # answer-sheet modes discard the recorded trace entirely.
+    assert first.digest == second.digest
+    assert (
+        effective_dataset(first, mode="live").digest
+        == effective_dataset(second, mode="live").digest
+    )
+    # Traces mode replaces authored expectations with these assessments, so
+    # changing one changes the evidence that is actually scored.
+    assert (
+        effective_dataset(first, mode="traces").digest
+        != effective_dataset(second, mode="traces").digest
+    )
+
+
 def test_a_different_question_still_changes_the_digest(tmp_path):
     def _rows_with(question):
         return [{"inputs": {"question": question}, "trace": {"data": {"spans": []}}}]
@@ -868,6 +911,22 @@ def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
     dataset = load_dataset("golden.json", root=tmp_path)
 
     assert validate_dataset(dataset, minimum_rows=1) == []
+
+
+@pytest.mark.parametrize("inputs", ["scalar request", ["list request"]])
+def test_a_traced_row_rejects_authored_non_object_inputs(tmp_path, inputs):
+    """A trace fills in absence; it cannot legalize a malformed row field."""
+
+    _write_dataset(
+        tmp_path,
+        [{"inputs": inputs, "trace": {"info": {"trace_id": "t0"}}}],
+    )
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == ["row 0 inputs must be an object"]
 
 
 def test_traced_rows_still_reject_placeholder_content(tmp_path):

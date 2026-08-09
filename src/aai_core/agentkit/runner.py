@@ -188,14 +188,22 @@ def run_scoring(
             ),
         )
     mode_warnings = _mode_warnings(resolved_mode, dataset, explicit=mode is not None)
+    if resolved_mode == "answer-sheet":
+        dataset = attach_answer_sheet(dataset, _answer_sheet_path(project, target))
+    # Plan, sample, compare, and price the rows MLflow will actually score,
+    # not the authored rows on disk. Applying the mode before sampling also
+    # makes ``sampled_from`` carry the full mode-aware digest: in traces mode
+    # the trace's expectation assessments are ground truth, while other modes
+    # discard them. A sampled baseline can therefore still identify the full
+    # effective dataset it came from.
+    dataset = effective_dataset(dataset, mode=resolved_mode)
     full_row_count = dataset.shape.row_count
     if rows_limit:
         dataset = smoke_sample(dataset, rows_limit, strata=config.strata)
     # A "sample" that covered every row is a full run: saying otherwise
     # would raise a scope-drift warning on every later comparison.
     sampled = dataset.shape.row_count < full_row_count
-    if resolved_mode == "answer-sheet":
-        dataset = attach_answer_sheet(dataset, _answer_sheet_path(project, target))
+    scored = dataset
 
     judge_model_uri = None
     judge_model_identity = None
@@ -208,12 +216,6 @@ def run_scoring(
         # without CAN_VIEW, and widening that grant to make a check work
         # is exactly what section 4 of AGENTS.md forbids.
         judge_model_identity = project.judge_model_identity()
-    # Plan and price the rows MLflow will actually score, not the ones on
-    # disk. In a live run the stored traces are gone, so their retrieval
-    # fan-out is not this run's; in a traces run the traces' own
-    # expectation assessments replace the dataset's, so a scorer chosen
-    # from the curated fields could be reading nothing at all.
-    scored = effective_dataset(dataset, mode=resolved_mode)
     if resolved_mode != "traces":
         missing_inputs = rows_missing_inputs(scored)
         if missing_inputs:

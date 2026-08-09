@@ -16,7 +16,12 @@ from aai_core.agentkit.baseline import (
     select_baseline,
     write_baseline,
 )
-from aai_core.agentkit.datasets import DatasetShape, LoadedDataset
+from aai_core.agentkit.datasets import (
+    DatasetShape,
+    LoadedDataset,
+    dataset_digest,
+    effective_dataset,
+)
 from aai_core.agentkit.errors import BaselineMissingError, ConfigError
 
 
@@ -182,6 +187,62 @@ def test_a_changed_dataset_is_not_comparable():
         _record(), dataset=_dataset(digest="other"), mode="full", rows=10
     )
 
+    assert any("the dataset changed" in failure for failure in failures)
+
+
+def test_changed_trace_ground_truth_is_not_comparable():
+    """Trace assessments replace authored expectations in traces mode."""
+
+    def _dataset_with(expected_response):
+        rows = (
+            {
+                "inputs": {"question": "when can I retire?"},
+                "trace": {
+                    "info": {
+                        "assessments": [
+                            {
+                                "assessment_name": "expected_response",
+                                "expectation": {"value": expected_response},
+                            }
+                        ]
+                    }
+                },
+            },
+        )
+        return LoadedDataset(
+            ref="golden.json",
+            source="local-json",
+            rows=rows,
+            digest=dataset_digest(rows),
+            shape=DatasetShape(
+                row_count=1,
+                input_keys=("question",),
+                has_outputs=False,
+                expectation_keys=(),
+                has_traces=True,
+                strata_values={},
+            ),
+        )
+
+    baseline_authored = _dataset_with("age 60")
+    current_authored = _dataset_with("age 65")
+    # Outside traces mode the recorded answer is deliberately not identity.
+    assert baseline_authored.digest == current_authored.digest
+    baseline = effective_dataset(baseline_authored, mode="traces")
+    current = effective_dataset(current_authored, mode="traces")
+    record = _record(
+        dataset=BaselineDataset(ref="golden.json", digest=baseline.digest, rows=1),
+        scope=BaselineScope(mode="full", rows=1, seed=None),
+    )
+
+    failures = comparability_failures(
+        record,
+        dataset=current,
+        mode="full",
+        rows=1,
+    )
+
+    assert baseline.digest != current.digest
     assert any("the dataset changed" in failure for failure in failures)
 
 

@@ -362,8 +362,12 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     dataset — pandas refills the column for the rows that dropped the key
     — which is why the mode rule exists as well.
 
-    The digest, ref and sampling provenance are the authored dataset's:
-    this is the same data seen through the run's mode, not different data.
+    The digest is recomputed from the effective rows. That makes identity
+    mode-aware: ``traces`` binds the expectation assessments MLflow actually
+    scores, while live and answer-sheet modes discard the trace and retain
+    authored expectations. The digest still excludes trace outputs, ids, and
+    timestamps through ``dataset_digest``. Ref and sampling provenance stay
+    attached to the source dataset.
     """
 
     keep_trace = mode in STORED_TRACE_MODES
@@ -407,7 +411,7 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
         ref=dataset.ref,
         source=dataset.source,
         rows=frozen,
-        digest=dataset.digest,
+        digest=dataset_digest(frozen),
         shape=shape,
         sampled_from=dataset.sampled_from,
     )
@@ -539,6 +543,13 @@ def validate_dataset(
         # inputs, not from being well formed.
         if not _is_missing(expectations) and not isinstance(expectations, Mapping):
             failures.append(f"row {index} expectations must be an object")
+            continue
+        # A trace replaces a missing request, not a malformed authored one.
+        # MLflow retains an explicit ``inputs`` value on the evaluation row,
+        # so accepting a scalar or list here only defers the row-contract
+        # failure until after planning and spend confirmation.
+        if has_trace and not _is_missing(inputs) and not isinstance(inputs, Mapping):
+            failures.append(f"row {index} inputs must be an object")
             continue
         # A trace exempts the row from supplying authored inputs, but MLflow
         # still scores explicit inputs and curated expectations when they are
@@ -755,12 +766,19 @@ class RetrievalFanout:
     # scorers skip it, so assuming a span and a page of chunks for it
     # would refuse a budget the real run comes in well under.
     rows_with_traces: int = 0
+    # Input characters in exactly the retriever spans/chunks the built-in
+    # scorers judge. Cost estimation converts these aggregates to tokens;
+    # keeping them beside the fan-out prevents non-retrieving rows from
+    # diluting the price of a large retrieved context.
+    retriever_span_input_characters: int = 0
+    retrieved_chunk_input_characters: int = 0
 
 
 def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
     """Count retriever spans and retrieved chunks in the rows' traces."""
 
     rows_counted = spans = chunks = traced = 0
+    span_input_characters = chunk_input_characters = 0
     for row in rows:
         trace = row.get("trace") if isinstance(row, Mapping) else None
         if _is_missing(trace):
@@ -776,11 +794,65 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         rows_counted += 1
         spans += len(row_spans)
         chunks += sum(_chunk_count(span) for span in row_spans)
+        span_characters, chunk_characters = _retrieval_judge_input_characters(
+            row, row_spans
+        )
+        span_input_characters += span_characters
+        chunk_input_characters += chunk_characters
     return RetrievalFanout(
         rows_counted=rows_counted,
         retriever_spans=spans,
         retrieved_chunks=chunks,
         rows_with_traces=traced,
+        retriever_span_input_characters=span_input_characters,
+        retrieved_chunk_input_characters=chunk_input_characters,
+    )
+
+
+def _retrieval_judge_input_characters(
+    row: Mapping[str, Any],
+    spans: Sequence[Mapping[str, Any]],
+) -> tuple[int, int]:
+    """Characters sent to span- and chunk-fan-out retrieval judges.
+
+    Groundedness and sufficiency judge one retriever span at a time, with
+    the request, answer, and that span's documents. Relevance judges one
+    document at a time with the request. Counting these actual payloads is
+    both more faithful and safer than multiplying an all-row average, which
+    lets unrelated conversational rows make an expensive retrieval look
+    artificially cheap.
+    """
+
+    trace = row.get("trace")
+    request = _trace_request(trace)
+    if request is None:
+        request = row.get("inputs")
+    response = _trace_response(trace)
+    if response is None:
+        response = row.get("outputs")
+
+    span_characters = chunk_characters = 0
+    for span in spans:
+        outputs = _span_outputs(span)
+        span_characters += _judge_payload_characters(request, response, outputs)
+        if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)):
+            documents = list(outputs) or [None]
+        else:
+            documents = [outputs]
+        for document in documents:
+            chunk_characters += _judge_payload_characters(request, document)
+    return span_characters, chunk_characters
+
+
+def _judge_payload_characters(*parts: Any) -> int:
+    payload = [_plain(part) for part in parts if part is not None]
+    return len(
+        json.dumps(
+            payload,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
     )
 
 

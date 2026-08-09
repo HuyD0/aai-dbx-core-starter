@@ -2,7 +2,7 @@
 
 import pytest
 
-from aai_core.agentkit.catalog import select_scorers
+from aai_core.agentkit.catalog import PlanEntry, ScorerPlan, get_spec, select_scorers
 from aai_core.agentkit.config import AgentkitConfig
 from aai_core.agentkit.cost import enforce_budget, estimate, render
 from aai_core.agentkit.datasets import DatasetShape
@@ -301,6 +301,50 @@ def test_a_traced_row_that_retrieved_nothing_costs_nothing():
     assert calls["retrieval_relevance"] == 2
     # Every row's trace was readable, so nothing was assumed.
     assert cost.fanout_counted is True
+
+
+def test_retrieval_cost_uses_only_the_spans_and_chunks_it_judges():
+    """Small conversational rows must not dilute one large retrieval."""
+
+    retrieving = _rag_rows(count=1, chunks=2)[0]
+    spans = retrieving["trace"]["data"]["spans"]
+    spans[0]["outputs"] = [
+        {"page_content": "large first retrieved document " * 200},
+        {"page_content": "large second retrieved document " * 120},
+    ]
+    spans.append(
+        {
+            "type": "RETRIEVER",
+            "name": "second search",
+            "outputs": [{"page_content": "another retrieved document " * 80}],
+        }
+    )
+    conversational = {
+        "inputs": {"question": "hi"},
+        "trace": {
+            "data": {"spans": [{"span_id": "llm", "type": "LLM", "outputs": "hello"}]}
+        },
+    }
+    specs = (get_spec("retrieval_groundedness"), get_spec("retrieval_relevance"))
+    plan = ScorerPlan(
+        entries=tuple(PlanEntry(spec, "test", None) for spec in specs),
+        excluded=(),
+        mode="traces",
+        judges_enabled=True,
+    )
+
+    retrieval_only = estimate([retrieving], plan, price_per_1m_tokens=10.0)
+    with_unjudged_rows = estimate(
+        [retrieving] + [conversational] * 20,
+        plan,
+        price_per_1m_tokens=10.0,
+    )
+
+    expected_calls = {"retrieval_groundedness": 2, "retrieval_relevance": 3}
+    assert dict(retrieval_only.calls_by_scorer) == expected_calls
+    assert dict(with_unjudged_rows.calls_by_scorer) == expected_calls
+    assert with_unjudged_rows.estimated_tokens == retrieval_only.estimated_tokens
+    assert with_unjudged_rows.estimated_usd == retrieval_only.estimated_usd
 
 
 def test_an_unreadable_trace_still_gets_the_assumption():

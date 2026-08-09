@@ -148,6 +148,14 @@ def test_release_wheel_rejects_wrong_version(tmp_path):
         release_validation.validate_wheel(wheel, "0.3.0")
 
 
+def test_current_sdk_version_has_a_changelog_release_section():
+    version = json.loads((ROOT / "compatibility.json").read_text())["sdk"]["version"]
+
+    commit = release_validation.validate_release_version(version, require_tag=False)
+
+    assert commit == release_validation.git_output("rev-parse", "HEAD")
+
+
 def test_release_requires_an_annotated_tag(monkeypatch):
     monkeypatch.setattr(
         release_validation,

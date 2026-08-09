@@ -4,6 +4,8 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+## 0.4.0
+
 - Added `agentkit`, the agent-evaluation paved road: a second console script
   in the same wheel (`aai_core.agentkit`) built around one idea — an
   experiment is a comparison, not a log. `agentkit compare` scores this
@@ -75,12 +77,15 @@ All notable changes to `aai-core` are documented here.
   evaluated nothing, and `--mode traces` on a dataset without a trace on
   every row is an error rather than a warning.
 
-  The dataset digest covers the questions a dataset asks and excludes both
-  answer fields — `outputs` and `trace` — so two sets of production traces
-  over the same questions stay comparable while an edited case does not; a
-  trace-only row takes its identity from the request the trace recorded. A
-  run records the scope it scored at, so a sampled baseline fetched by run
-  id is still a sampled baseline. HTTP request mapping builds arrays for
+  Dataset identity excludes answer behaviour — `outputs`, trace ids,
+  timestamps, and responses — so two sets of production traces over the same
+  questions stay comparable while an edited case does not; a trace-only row
+  takes its identity from the request the trace recorded. In traces mode the
+  effective digest additionally binds the trace expectation assessments that
+  MLflow substitutes for authored ground truth, so changing what is judged
+  cannot reuse the old baseline. A run records the scope it scored at, so a
+  sampled baseline fetched by run id is still a sampled baseline. HTTP request
+  mapping builds arrays for
   numeric path segments, so the documented `messages.0.content` produces a
   real messages list instead of `{"0": ...}` and preserves what
   `extra_body` already placed there.
@@ -218,9 +223,9 @@ All notable changes to `aai-core` are documented here.
   instead of letting the substitution pass unseen.
 
   The plan, the cost estimate and the payload are all built from the rows
-  MLflow will actually score rather than the rows on disk — the same data
-  seen through the run's mode, keeping the authored dataset's digest. The
-  authored rows had been deciding all three, which is how a plan could
+  MLflow will actually score rather than the rows on disk, and comparison
+  identity is recomputed from those effective questions and expectations.
+  The authored rows had been deciding all three, which is how a plan could
   promise a scorer whose field the run would not have: one expectation
   assessment replaces MLflow's whole expectations column, so a row whose
   trace carries none loses the curated `expected_response` entirely, and

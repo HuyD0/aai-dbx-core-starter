@@ -83,24 +83,46 @@ def estimate(
     uncounted_rows = row_count - (counted.rows_with_traces if counted else 0)
     fanout_counted = not needs_fanout or uncounted_rows == 0
     spans = chunks = 0
+    span_input_tokens = chunk_input_tokens = 0
     if counted is not None:
         spans = counted.retriever_spans + uncounted_rows * (
             _ASSUMED_RETRIEVER_SPANS_PER_ROW
         )
         chunks = counted.retrieved_chunks + uncounted_rows * chunks_per_row
+        # Traced retrieval calls are priced from the spans/chunks actually
+        # judged. Only unreadable/unavailable traces need an assumption, and
+        # their own row payloads supply that assumption's token size. Using
+        # the mean across every row lets many small non-retrieving rows dilute
+        # one large retrieved context before approval.
+        uncounted_row_tokens = sum(
+            _mean_row_tokens((row,))
+            for row in rows
+            if retrieval_fanout((row,)).rows_with_traces == 0
+        )
+        span_input_tokens = (
+            round(counted.retriever_span_input_characters / _CHARS_PER_TOKEN)
+            + uncounted_row_tokens * _ASSUMED_RETRIEVER_SPANS_PER_ROW
+        )
+        chunk_input_tokens = (
+            round(counted.retrieved_chunk_input_characters / _CHARS_PER_TOKEN)
+            + uncounted_row_tokens * chunks_per_row
+        )
 
     total_tokens = 0
     calls_by_scorer: dict[str, int] = {}
     for spec in judge_specs:
         if spec.fanout is JudgeFanout.RETRIEVER_SPAN:
             calls = spans
+            input_tokens = span_input_tokens
         elif spec.fanout is JudgeFanout.RETRIEVED_CHUNK:
             calls = chunks
+            input_tokens = chunk_input_tokens
         else:
             calls = row_count
+            input_tokens = calls * mean_row_tokens
         calls_by_scorer[spec.name] = calls
-        total_tokens += calls * (
-            spec.judge_overhead_tokens + mean_row_tokens + _ASSUMED_JUDGE_OUTPUT_TOKENS
+        total_tokens += input_tokens + calls * (
+            spec.judge_overhead_tokens + _ASSUMED_JUDGE_OUTPUT_TOKENS
         )
     judge_calls = sum(calls_by_scorer.values())
     estimated_usd = None
