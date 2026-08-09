@@ -1420,3 +1420,39 @@ def test_a_live_run_keeps_the_span_kinds_but_not_the_counts(tmp_path):
     assert scored.shape.has_retrieval_spans
     assert not scored.shape.has_traces
     assert all("trace" not in row for row in scored.rows)
+
+
+def test_a_trace_body_is_not_scanned_for_placeholders(tmp_path):
+    """The placeholder scan is request-side on purpose.
+
+    A production answer may legitimately say "todo" or "changeme", and
+    failing a real trace dataset for that would teach developers to stop
+    trusting the check. Pinned here so widening the scan to the whole row
+    is caught by this suite rather than by someone's evaluation run.
+    """
+
+    rows = [
+        {
+            "inputs": {"question": "what should I do about my pension?"},
+            "expectations": {"expected_response": "review your contributions"},
+            "trace": {
+                "info": {"trace_id": "t0"},
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": "root",
+                            "inputs": {"question": "what should I do?"},
+                            "outputs": "Add it to your TODO list and changeme later",
+                        }
+                    ]
+                },
+            },
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == []

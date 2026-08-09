@@ -115,6 +115,18 @@ trace: a trace excuses a row from supplying `inputs`, not from being well
 formed. A null value is different, and stays a missing value: a Unity Catalog
 dataset arrives as dataframe records, where an absent field is `NaN`.
 
+The same rule covers the rest of a traced row. A trace replaces a *missing*
+request, not a malformed authored one — MLflow keeps an explicit `inputs`
+value on the evaluation row, so a scalar or a list there is rejected up front
+instead of failing the row contract after the plan was printed and the spend
+confirmed. Placeholder text is caught on traced rows too, against the
+authored fields, or against the request the trace recorded when the row has
+no `inputs` of its own: a trace means the row was answered, not that it was
+finished, and `expected_response: "TODO"` reaching paid judges produces
+promotion evidence that means nothing. The trace *body* is deliberately not
+scanned — a production answer may legitimately contain the word "todo", and
+failing a real dataset for that would teach you to stop trusting the check.
+
 Retrieval is the other. An agent that retrieves only when a question needs it
 produces rows with nothing to judge, and MLflow's retrieval scorers raise on
 those. The toolkit skips them instead: the row is left out of the mean rather
@@ -266,6 +278,20 @@ chunk — which is exactly what the retrieval judges are shown — so those are
 counted. Span ids, timestamps, and attributes are not: they never reach a
 judge, and counting them would trade an under-estimate for an over-estimate.
 
+**Each call is priced by what that call is shown**, not by a dataset
+average. A retrieval judge only runs on the rows that retrieved, so pricing
+its calls at the mean row size would dilute one large retrieved context
+through every short conversational row and then multiply it back by the
+single call it belonged to — understating exactly the runs that cost the
+most. So groundedness is priced from its span's request, recorded response
+and documents; relevance from the individual chunk; and sufficiency from the
+request, the documents, and the **ground truth** — `expected_facts` or
+`expected_response` — because that is what MLflow's sufficiency prompt
+actually sends, and a long expected answer against a short recorded one is
+otherwise invisible in the number you approve. Per-row scorers still use the
+whole-dataset mean, because they really do see every row. Rows whose trace
+cannot be read keep the conservative per-row assumption.
+
 ## What the gate refuses
 
 `agentkit gate` is the promotion check, and it says no in three situations:
@@ -307,7 +333,29 @@ of moving an alias. The same applies when an alias is *deleted*: the judge
 falls back to its bundled instructions without raising, so a prompt the
 baseline used and this run cannot resolve counts as drift in its own right.
 The number would still subtract cleanly; it just would not mean anything,
-which is worse than no comparison because it looks like one.
+which is worse than no comparison because it looks like one. Registering a
+prompt for the *first* time counts too: a baseline scored before the prompt
+existed used the catalog's bundled instructions, so the comparison stops on
+the same reasoning even though the baseline recorded no prompt version at
+all. Only a record that names no scorers — a genuinely legacy baseline —
+cannot be read that way, and there the check stays quiet.
+
+The prompt a judge is given and the prompt version the run records come from
+one resolution. Looking it up a second time to build the scorer could answer
+differently than the lookup whose URI was already recorded and compared
+against the baseline — leaving the evidence describing a judge the run did
+not use. What was recorded and what was executed are therefore one fact, not
+two that can drift apart between two calls.
+
+And only a prompt that is *confirmed absent* falls back to the bundled
+instructions. A permission error, an expired credential, or a transient
+registry failure stops the run instead — before any scorer is built, any
+judge is called, or any baseline is written. Those failures look identical
+to "not registered yet" from the outside, and treating them the same way
+would let a run spend real money and record promotion evidence against
+instructions nobody chose. `--establish-baseline` is where that matters
+most: there is no baseline to compare against, so nothing downstream would
+ever notice the substitution.
 
 **`smoke` is a threshold gate, not a comparison**, and it is not refused.
 It scores a deterministic sample — 20 rows by default, of a suite you are
@@ -327,6 +375,14 @@ production run recorded — because those are the behaviour under comparison,
 not the data. Two weeks of production traces over the same questions
 therefore share a digest and compare cleanly, while adding or editing a case
 changes it and asks for a new baseline.
+
+With one exception, and it is the ground truth. In `traces` mode MLflow
+replaces the authored expectations with the assessments recorded on the
+traces, so those assessments *are* what the run is judged against — and the
+identity binds them. Change what a reviewer expects and the comparison asks
+for a new baseline, rather than reusing one that measured something else
+under the same digest. Live and answer-sheet identity stays trace-free, since
+those runs never see a stored assessment.
 
 `--allow-baseline-drift` proceeds anyway and records every reason in the
 results and the evidence pack — an override someone can see, rather than a

@@ -720,3 +720,33 @@ def test_an_unreadable_judge_identity_does_not_block():
         )
         == []
     )
+
+
+def test_a_baseline_recording_no_scorers_says_nothing_about_prompts():
+    """The cut that keeps a genuinely legacy record readable.
+
+    A newly registered prompt is drift for a judge the baseline is known to
+    have run, which the scorer list is what establishes. Without one there
+    is no way to tell a judge-free run from a fallback run, so membership
+    stays unexamined rather than blocking every comparison against an old
+    file.
+    """
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={},
+            judge_prompts={},
+            aai_core="0.3.0",
+        )
+    )
+
+    failures = comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/1"},
+    )
+
+    assert not any("judge prompt" in failure for failure in failures)
