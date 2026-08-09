@@ -203,11 +203,14 @@ def _root_spans(trace: Any) -> list[Mapping[str, Any]]:
     stayed invisible while the truncated preview got used instead.
     """
 
-    return [
-        span
-        for span in _spans(trace)
-        if span.get("parent_span_id", span.get("parentSpanId")) is None
-    ]
+    return [span for span in _spans(trace) if _is_root_span(span)]
+
+
+def _is_root_span(span: Mapping[str, Any]) -> bool:
+    """Whether a span has no populated parent identifier."""
+
+    parent = span.get("parent_span_id", span.get("parentSpanId"))
+    return not _is_populated(parent)
 
 
 def _span_field(
@@ -473,9 +476,29 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     if document is None:
         return False
 
+    # A valid request must not hide a malformed span representation. Both
+    # layouts are supported, and when either is supplied its value must be
+    # exactly the collection of mapping spans the local readers expect.
+    representations: list[Any] = []
+    data = document.get("data")
+    if isinstance(data, Mapping) and "spans" in data:
+        representations.append(data["spans"])
+    if "spans" in document:
+        representations.append(document["spans"])
+    spans: list[Mapping[str, Any]] = []
+    for representation in representations:
+        if not isinstance(representation, Sequence) or isinstance(
+            representation, (str, bytes)
+        ):
+            return False
+        if not all(isinstance(span, Mapping) for span in representation):
+            return False
+        spans.extend(representation)
+
     # Read the trace-info request directly. Going through `_trace_inputs`
     # would let the inputs on an id-less mapping masquerading as a root span
     # satisfy this branch before its span structure is checked.
+    info_has_request = False
     info = document.get("info")
     if isinstance(info, Mapping):
         for key in ("request", "request_preview"):
@@ -486,9 +509,21 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
                 except (ValueError, TypeError):
                     continue
             if isinstance(request, Mapping) and request:
-                return True
+                info_has_request = True
+                break
 
-    roots = _root_spans(trace)
+    # With no span representation, a usable trace-info request is the whole
+    # supported trace shape. Once spans are supplied, validate their roots
+    # before allowing that request to satisfy the row.
+    if not representations:
+        return info_has_request
+
+    roots = [span for span in spans if _is_root_span(span)]
+    if not roots:
+        # MLflow accepts traces fetched with an explicitly empty span list,
+        # but a non-empty graph made only of children has a dangling parent
+        # chain rather than an omitted root.
+        return not spans and info_has_request
     identified_roots = bool(roots) and all(
         _is_populated(span.get("span_id")) or _is_populated(span.get("spanId"))
         for span in roots
@@ -497,10 +532,18 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
         return False
     # A span id proves structure, not that the row has a question to score.
     # The request may come from the authored row or the identified root span.
-    return (
-        isinstance(authored_inputs, Mapping)
-        and bool(authored_inputs)
-        or _trace_inputs(trace) is not None
+    row_has_request = (
+        isinstance(authored_inputs, Mapping) and bool(authored_inputs)
+    ) or info_has_request
+    if row_has_request:
+        return True
+    return all(
+        isinstance(
+            request := _span_field(root, ("inputs", "input"), "mlflow.spanInputs"),
+            Mapping,
+        )
+        and bool(request)
+        for root in roots
     )
 
 
