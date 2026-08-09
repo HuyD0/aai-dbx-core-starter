@@ -84,6 +84,13 @@ one means. Browse the registry:
 agentkit scorers ls
 ```
 
+`--live` adds what the workspace currently resolves — the judge endpoint and
+each judge prompt's exact version. It reports a prompt as unregistered only
+when the registry actually says so; a permission error, an expired
+credential or an unreachable registry is reported as the failure it is.
+"Not registered yet" and "I could not ask" look identical from the outside,
+and only one of them is safe to act on.
+
 Which scorers run is inferred from what the dataset rows contain, so nobody
 has to memorise the contracts:
 
@@ -107,6 +114,16 @@ contract is a *choice* — correctness reads `expected_response` **or**
 suite may mix the two. A scorer that needs one specific field still needs it
 everywhere: a field on only some rows means the others would score as
 vacuously perfect, so the scorer is excluded and names the gap.
+
+**Being excluded and being refused are different**, and which one you get
+depends on who asked. A scorer the toolkit *inferred* is dropped with the
+reason printed — inference is allowed to be conservative. A scorer you put
+in `scorers.add` is a statement that it must run, so an unsatisfied
+contract is a configuration error and the command stops: silently ignoring
+a scorer someone explicitly selected would record promotion evidence
+missing a check the project asked for. That covers the row contract, the
+mode, and the trace requirement alike, and a name appearing in both `add`
+and `remove` is rejected before the dataset is even read.
 
 That inference reads a *malformed* `expectations` — a string, a list — as
 absent, which would drop those scorers and their thresholds without saying
@@ -294,7 +311,7 @@ cannot be read keep the conservative per-row assumption.
 
 ## What the gate refuses
 
-`agentkit gate` is the promotion check, and it says no in three situations:
+`agentkit gate` is the promotion check, and it says no in four situations:
 
 1. **No evidence at all.** Nothing has been scored yet.
 2. **Evidence that is not a comparison.** A run that never named a baseline
@@ -305,6 +322,15 @@ cannot be read keep the conservative per-row assumption.
    rows counts too: MLflow reports those in its result table rather than its
    metrics, so an aggregate over the surviving rows would otherwise look
    healthy.
+4. **Evidence it cannot trust.** A results record that will not parse, an
+   inconsistent attempt pointer, or an evaluation still in flight is an
+   error, not a reason to read the last record that happened to pass. Every
+   real run supersedes the previous evidence the moment it starts, so a run
+   that then fails, is cancelled, or is still going cannot leave an older
+   pass standing behind it. (`--plan` is inspection rather than an
+   evaluation, so it leaves the current evidence alone.) Reading stale
+   evidence is the same failure as comparing against the wrong baseline: the
+   number is real, it just answers a question nobody asked.
 
 `compare` and `eval` refuse earlier still, before any judge call, when the
 recorded baseline measured something else. A delta is only evidence when both
