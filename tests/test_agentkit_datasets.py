@@ -88,6 +88,18 @@ def _mlflow_expectation(index, name, expectation):
     }
 
 
+def _mlflow_feedback(index, name, feedback):
+    return {
+        "assessment_id": f"a-{index:032x}",
+        "assessment_name": name,
+        "trace_id": f"tr-{index:032x}",
+        "source": {"source_type": "CODE", "source_id": "test"},
+        "create_time": "2026-08-09T00:00:00Z",
+        "last_update_time": "2026-08-09T00:00:00Z",
+        "feedback": feedback,
+    }
+
+
 def _mlflow_trace(
     index=0,
     *,
@@ -199,6 +211,22 @@ def _malformed_complete_trace(case):
         document["info"]["state"] = ["OK"]
     elif case == "mapping-location-type":
         document["info"]["trace_location"]["type"] = {"name": "experiment"}
+    elif case == "unspecified-location-with-arm":
+        document["info"]["trace_location"] = {
+            "type": "TRACE_LOCATION_TYPE_UNSPECIFIED",
+            "mlflow_experiment": {"experiment_id": "0"},
+        }
+    elif case == "unspecified-location-with-malformed-arm":
+        document["info"]["trace_location"] = {
+            "type": "TRACE_LOCATION_TYPE_UNSPECIFIED",
+            "mlflow_experiment": [],
+        }
+    elif case == "inference-location-with-malformed-experiment":
+        document["info"]["trace_location"] = {
+            "type": "INFERENCE_TABLE",
+            "mlflow_experiment": {"unexpected": "0"},
+            "inference_table": {"full_table_name": "catalog.schema.table"},
+        }
     elif case == "bad-trace-id":
         span["trace_id"] = "not-base64!"
     elif case == "bad-span-id":
@@ -215,6 +243,80 @@ def _malformed_complete_trace(case):
         span["attributes"]["mlflow.traceRequestId"] = "not-json"
     elif case == "mismatched-request-id":
         span["attributes"]["mlflow.traceRequestId"] = json.dumps("tr-other")
+    elif case == "assessment-unknown-key":
+        assessment = _mlflow_expectation(0, "expected_response", {"value": "a"})
+        assessment["unexpected"] = "ignored"
+        document["info"]["assessments"] = [assessment]
+    elif case == "assessment-multiple-arms":
+        assessment = _mlflow_expectation(0, "expected_response", {"value": "a"})
+        assessment["feedback"] = {"value": True}
+        document["info"]["assessments"] = [assessment]
+    elif case == "expectation-unknown-key":
+        assessment = _mlflow_expectation(0, "expected_response", {"value": "a"})
+        assessment["expectation"]["unexpected"] = "ignored"
+        document["info"]["assessments"] = [assessment]
+    elif case == "serialized-expectation-null":
+        document["info"]["assessments"] = [
+            _mlflow_expectation(
+                0,
+                "expected_facts",
+                {
+                    "serialized_value": {
+                        "serialization_format": "JSON_FORMAT",
+                        "value": "null",
+                    }
+                },
+            )
+        ]
+    elif case == "serialized-expectation-missing":
+        document["info"]["assessments"] = [
+            _mlflow_expectation(
+                0,
+                "expected_facts",
+                {
+                    "serialized_value": {
+                        "serialization_format": "JSON_FORMAT",
+                    }
+                },
+            )
+        ]
+    elif case == "serialized-expectation-unknown-key":
+        document["info"]["assessments"] = [
+            _mlflow_expectation(
+                0,
+                "expected_facts",
+                {
+                    "serialized_value": {
+                        "serialization_format": "JSON_FORMAT",
+                        "value": json.dumps(["a"]),
+                        "unexpected": "ignored",
+                    }
+                },
+            )
+        ]
+    elif case == "feedback-unknown-key":
+        document["info"]["assessments"] = [
+            _mlflow_feedback(0, "quality", {"value": 1, "unexpected": "ignored"})
+        ]
+    elif case == "feedback-error-unknown-key":
+        document["info"]["assessments"] = [
+            _mlflow_feedback(
+                0,
+                "quality",
+                {
+                    "value": None,
+                    "error": {
+                        "error_code": "JUDGE_FAILED",
+                        "unexpected": "ignored",
+                    },
+                },
+            )
+        ]
+    elif case == "issue-unknown-key":
+        assessment = _mlflow_expectation(0, "issue-id", {"value": "unused"})
+        assessment.pop("expectation")
+        assessment["issue"] = {"issue_name": "bad answer", "unexpected": "ignored"}
+        document["info"]["assessments"] = [assessment]
     elif case == "v2-bad-timestamp":
         document["info"]["timestamp_ms"] = "not-an-integer"
     elif case == "v2-bad-trace-id":
@@ -1354,6 +1456,9 @@ _MALFORMED_TRACE_CASES = (
     "bad-request-time",
     "list-state",
     "mapping-location-type",
+    "unspecified-location-with-arm",
+    "unspecified-location-with-malformed-arm",
+    "inference-location-with-malformed-experiment",
     "bad-trace-id",
     "bad-span-id",
     "bad-span-status",
@@ -1362,6 +1467,15 @@ _MALFORMED_TRACE_CASES = (
     "bad-request-id-json",
     "bad-request-id-encoding",
     "mismatched-request-id",
+    "assessment-unknown-key",
+    "assessment-multiple-arms",
+    "expectation-unknown-key",
+    "serialized-expectation-null",
+    "serialized-expectation-missing",
+    "serialized-expectation-unknown-key",
+    "feedback-unknown-key",
+    "feedback-error-unknown-key",
+    "issue-unknown-key",
     "v2-bad-timestamp",
     "v2-bad-trace-id",
     "v2-bad-span-status",
@@ -1393,18 +1507,129 @@ def test_dependency_free_trace_contract_accepts_canonical_v2_and_v3(trace):
     assert _complete_trace_envelope(_trace_with_event_and_link(trace)) is True
 
 
+def test_dependency_free_trace_contract_accepts_tuple_otel_attributes():
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    trace = _mlflow_trace()
+    span = trace["data"]["spans"][0]
+    span["attributes"]["batch.names"] = ("first", "second")
+    span["events"] = [
+        {
+            "name": "batched",
+            "time_unix_nano": 1_786_000_000_000_000_001,
+            "attributes": {
+                "batch.ids": (1, 2),
+                "batch.scores": (0.5, 0.75),
+                "batch.flags": (True, False),
+            },
+        }
+    ]
+
+    assert _complete_trace_envelope(trace) is True
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [("one", 2), (("nested",),), (1.0, float("inf"))],
+    ids=("heterogeneous", "nested", "non-finite"),
+)
+def test_dependency_free_trace_contract_rejects_malformed_tuple_attributes(
+    attribute,
+):
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    trace = _mlflow_trace()
+    trace["data"]["spans"][0]["events"] = [
+        {
+            "name": "bad-attributes",
+            "time_unix_nano": 1_786_000_000_000_000_001,
+            "attributes": {"bad": attribute},
+        }
+    ]
+
+    assert _complete_trace_envelope(trace) is False
+
+
+def test_dependency_free_contract_accepts_canonical_assessment_unions():
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    trace = _mlflow_trace(
+        assessments=[
+            _mlflow_expectation(
+                0,
+                "expected_facts",
+                {
+                    "serialized_value": {
+                        "serialization_format": "JSON_FORMAT",
+                        "value": json.dumps(["one", {"nested": 2}]),
+                    }
+                },
+            ),
+            _mlflow_feedback(0, "quality", {"value": 0.75}),
+        ]
+    )
+
+    assert _complete_trace_envelope(trace) is True
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        {"type": "TRACE_LOCATION_TYPE_UNSPECIFIED"},
+        {
+            "type": "MLFLOW_EXPERIMENT",
+            "mlflow_experiment": {"experiment_id": "0"},
+        },
+        {
+            "type": "INFERENCE_TABLE",
+            "inference_table": {"full_table_name": "catalog.schema.table"},
+        },
+        {
+            "type": "UC_SCHEMA",
+            "uc_schema": {
+                "catalog_name": "catalog",
+                "schema_name": "schema",
+                "otel_spans_table_name": "spans",
+                "otel_logs_table_name": "logs",
+            },
+        },
+        {
+            "type": "UC_TABLE_PREFIX",
+            "uc_table_prefix": {
+                "catalog_name": "catalog",
+                "schema_name": "schema",
+                "table_prefix": "agent",
+                "annotations_table_name": "catalog.schema.annotations",
+            },
+        },
+    ],
+)
+def test_dependency_free_contract_accepts_exact_trace_location_arms(location):
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    trace = _mlflow_trace()
+    trace["info"]["trace_location"] = location
+
+    assert _complete_trace_envelope(trace) is True
+
+
 @pytest.mark.parametrize(
     "case",
     [
         "bad-request-time",
         "list-state",
         "mapping-location-type",
+        "unspecified-location-with-arm",
+        "inference-location-with-malformed-experiment",
         "bad-trace-id",
         "bad-span-id",
         "bad-span-status",
         "bad-event",
         "bad-link",
         "bad-request-id-json",
+        "serialized-expectation-null",
+        "serialized-expectation-missing",
+        "feedback-error-unknown-key",
         "v2-bad-trace-id",
         "v2-bad-span-status",
         "v2-bad-event",
@@ -1417,7 +1642,7 @@ def test_structural_rejections_match_locked_mlflow(case):
     from mlflow.entities import Trace
     from mlflow.exceptions import MlflowException
 
-    with pytest.raises((ValueError, TypeError, MlflowException)):
+    with pytest.raises((KeyError, ValueError, TypeError, MlflowException)):
         Trace.from_dict(_malformed_complete_trace(case))
 
 
@@ -1428,6 +1653,64 @@ def test_canonical_event_and_link_shapes_match_locked_mlflow(trace):
 
     document = _trace_with_event_and_link(trace)
     assert Trace.from_dict(document).data.spans
+
+
+def test_locked_mlflow_trace_to_dict_tuple_event_attributes_match_contract():
+    pytest.importorskip("mlflow")
+    from mlflow.entities import SpanEvent, Trace
+
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    event = SpanEvent(
+        name="batched",
+        timestamp=1_786_000_000_000_000_001,
+        attributes={
+            "batch.names": ("first", "second"),
+            "batch.ids": (1, 2),
+        },
+    )
+    seed = _mlflow_trace()
+    seed["data"]["spans"][0]["events"] = [
+        {
+            "name": event.name,
+            "time_unix_nano": event.timestamp,
+            "attributes": event.attributes,
+        }
+    ]
+
+    document = Trace.from_dict(seed).to_dict()
+
+    attributes = document["data"]["spans"][0]["events"][0]["attributes"]
+    assert isinstance(attributes["batch.names"], tuple)
+    assert _complete_trace_envelope(document) is True
+
+
+def test_locked_mlflow_assessment_serializations_match_contract():
+    pytest.importorskip("mlflow")
+    from mlflow.entities import Expectation, Feedback, Trace
+
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    document = _mlflow_trace()
+    trace_id = document["info"]["trace_id"]
+    document["info"]["assessments"] = [
+        Expectation(
+            name="expected_facts",
+            value=["one", {"nested": 2}],
+            trace_id=trace_id,
+        ).to_dictionary(),
+        Feedback(name="quality", value=0.75, trace_id=trace_id).to_dictionary(),
+    ]
+
+    serialized = Trace.from_dict(document).to_dict()
+
+    expectation, feedback = serialized["info"]["assessments"]
+    assert json.loads(expectation["expectation"]["serialized_value"]["value"]) == [
+        "one",
+        {"nested": 2},
+    ]
+    assert feedback["feedback"]["value"] == 0.75
+    assert _complete_trace_envelope(serialized) is True
 
 
 @pytest.mark.parametrize("inputs", ["scalar request", ["list request"]])
