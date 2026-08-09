@@ -28,6 +28,7 @@ _CHARS_PER_TOKEN = 4
 # difference between a budget that holds and one that is exceeded 4x.
 _ASSUMED_RETRIEVER_SPANS_PER_ROW = 1
 DEFAULT_CHUNKS_PER_ROW = 5
+_RETRIEVAL_SUFFICIENCY_SCORER = "retrieval_sufficiency"
 
 
 class CostEstimate(ContractModel):
@@ -83,7 +84,7 @@ def estimate(
     uncounted_rows = row_count - (counted.rows_with_traces if counted else 0)
     fanout_counted = not needs_fanout or uncounted_rows == 0
     spans = chunks = 0
-    span_input_tokens = chunk_input_tokens = 0
+    span_input_tokens = sufficiency_input_tokens = chunk_input_tokens = 0
     if counted is not None:
         spans = counted.retriever_spans + uncounted_rows * (
             _ASSUMED_RETRIEVER_SPANS_PER_ROW
@@ -103,6 +104,10 @@ def estimate(
             round(counted.retriever_span_input_characters / _CHARS_PER_TOKEN)
             + uncounted_row_tokens * _ASSUMED_RETRIEVER_SPANS_PER_ROW
         )
+        sufficiency_input_tokens = (
+            round(counted.retrieval_sufficiency_input_characters / _CHARS_PER_TOKEN)
+            + uncounted_row_tokens * _ASSUMED_RETRIEVER_SPANS_PER_ROW
+        )
         chunk_input_tokens = (
             round(counted.retrieved_chunk_input_characters / _CHARS_PER_TOKEN)
             + uncounted_row_tokens * chunks_per_row
@@ -113,7 +118,11 @@ def estimate(
     for spec in judge_specs:
         if spec.fanout is JudgeFanout.RETRIEVER_SPAN:
             calls = spans
-            input_tokens = span_input_tokens
+            input_tokens = (
+                sufficiency_input_tokens
+                if spec.name == _RETRIEVAL_SUFFICIENCY_SCORER
+                else span_input_tokens
+            )
         elif spec.fanout is JudgeFanout.RETRIEVED_CHUNK:
             calls = chunks
             input_tokens = chunk_input_tokens

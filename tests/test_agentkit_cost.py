@@ -141,6 +141,16 @@ def _rag_plan(mode="traces", **shape_kwargs):
     return select_scorers(shape, config, mode=mode, judges_enabled=True)
 
 
+def _judge_plan(*names):
+    specs = tuple(get_spec(name) for name in names)
+    return ScorerPlan(
+        entries=tuple(PlanEntry(spec, "test", None) for spec in specs),
+        excluded=(),
+        mode="traces",
+        judges_enabled=True,
+    )
+
+
 def test_retrieval_relevance_costs_one_call_per_chunk():
     """MLflow judges retrieval relevance per chunk, not per row.
 
@@ -325,13 +335,7 @@ def test_retrieval_cost_uses_only_the_spans_and_chunks_it_judges():
             "data": {"spans": [{"span_id": "llm", "type": "LLM", "outputs": "hello"}]}
         },
     }
-    specs = (get_spec("retrieval_groundedness"), get_spec("retrieval_relevance"))
-    plan = ScorerPlan(
-        entries=tuple(PlanEntry(spec, "test", None) for spec in specs),
-        excluded=(),
-        mode="traces",
-        judges_enabled=True,
-    )
+    plan = _judge_plan("retrieval_groundedness", "retrieval_relevance")
 
     retrieval_only = estimate([retrieving], plan, price_per_1m_tokens=10.0)
     with_unjudged_rows = estimate(
@@ -345,6 +349,64 @@ def test_retrieval_cost_uses_only_the_spans_and_chunks_it_judges():
     assert dict(with_unjudged_rows.calls_by_scorer) == expected_calls
     assert with_unjudged_rows.estimated_tokens == retrieval_only.estimated_tokens
     assert with_unjudged_rows.estimated_usd == retrieval_only.estimated_usd
+
+
+def test_retrieval_sufficiency_prices_effective_ground_truth_without_dilution():
+    """Sufficiency judges expectations, not the recorded response."""
+
+    def _retrieving(expected_response):
+        return {
+            "inputs": {"question": "What is the vesting rule?"},
+            "expectations": {"expected_response": expected_response},
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": "root",
+                            "type": "LLM",
+                            "inputs": {"question": "What is the vesting rule?"},
+                            "outputs": "Short recorded answer.",
+                        },
+                        {
+                            "span_id": "search",
+                            "parent_span_id": "root",
+                            "type": "RETRIEVER",
+                            "outputs": [{"page_content": "Policy context."}],
+                        },
+                    ]
+                }
+            },
+        }
+
+    short = _retrieving("Two years.")
+    large_ground_truth = "Detailed expected fact about the policy. " * 300
+    large = _retrieving(large_ground_truth)
+    conversational = {
+        "inputs": {"question": "hello"},
+        "expectations": {"expected_response": "hello"},
+        "trace": {
+            "data": {"spans": [{"span_id": "root", "type": "LLM", "outputs": "hello"}]}
+        },
+    }
+    sufficiency = _judge_plan("retrieval_sufficiency")
+
+    short_cost = estimate([short], sufficiency)
+    large_cost = estimate([large], sufficiency)
+    mixed_cost = estimate([large] + [conversational] * 20, sufficiency)
+
+    assert dict(large_cost.calls_by_scorer) == {"retrieval_sufficiency": 1}
+    assert large_cost.estimated_tokens > (
+        short_cost.estimated_tokens + len(large_ground_truth) // 5
+    )
+    # Rows the scorer skips neither dilute nor multiply the one judged span.
+    assert mixed_cost.estimated_tokens == large_cost.estimated_tokens
+    # The other retrieval prompts do not consume the expected answer.
+    for scorer in ("retrieval_groundedness", "retrieval_relevance"):
+        plan = _judge_plan(scorer)
+        assert (
+            estimate([short], plan).estimated_tokens
+            == estimate([large], plan).estimated_tokens
+        )
 
 
 def test_an_unreadable_trace_still_gets_the_assumption():

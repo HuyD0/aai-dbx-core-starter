@@ -771,6 +771,7 @@ class RetrievalFanout:
     # keeping them beside the fan-out prevents non-retrieving rows from
     # diluting the price of a large retrieved context.
     retriever_span_input_characters: int = 0
+    retrieval_sufficiency_input_characters: int = 0
     retrieved_chunk_input_characters: int = 0
 
 
@@ -778,7 +779,8 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
     """Count retriever spans and retrieved chunks in the rows' traces."""
 
     rows_counted = spans = chunks = traced = 0
-    span_input_characters = chunk_input_characters = 0
+    span_input_characters = sufficiency_input_characters = 0
+    chunk_input_characters = 0
     for row in rows:
         trace = row.get("trace") if isinstance(row, Mapping) else None
         if _is_missing(trace):
@@ -794,10 +796,13 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         rows_counted += 1
         spans += len(row_spans)
         chunks += sum(_chunk_count(span) for span in row_spans)
-        span_characters, chunk_characters = _retrieval_judge_input_characters(
-            row, row_spans
-        )
+        (
+            span_characters,
+            sufficiency_characters,
+            chunk_characters,
+        ) = _retrieval_judge_input_characters(row, row_spans)
         span_input_characters += span_characters
+        sufficiency_input_characters += sufficiency_characters
         chunk_input_characters += chunk_characters
     return RetrievalFanout(
         rows_counted=rows_counted,
@@ -805,6 +810,7 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         retrieved_chunks=chunks,
         rows_with_traces=traced,
         retriever_span_input_characters=span_input_characters,
+        retrieval_sufficiency_input_characters=sufficiency_input_characters,
         retrieved_chunk_input_characters=chunk_input_characters,
     )
 
@@ -812,15 +818,17 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
 def _retrieval_judge_input_characters(
     row: Mapping[str, Any],
     spans: Sequence[Mapping[str, Any]],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Characters sent to span- and chunk-fan-out retrieval judges.
 
-    Groundedness and sufficiency judge one retriever span at a time, with
-    the request, answer, and that span's documents. Relevance judges one
-    document at a time with the request. Counting these actual payloads is
-    both more faithful and safer than multiplying an all-row average, which
-    lets unrelated conversational rows make an expensive retrieval look
-    artificially cheap.
+    Groundedness judges the request, recorded answer, and one retriever
+    span's documents. Sufficiency judges the request, effective expected
+    facts/response, and those documents instead; sharing groundedness's
+    payload would omit the potentially large ground truth. Relevance judges
+    one document at a time with the request. Counting these actual payloads
+    is both more faithful and safer than multiplying an all-row average,
+    which lets unrelated conversational rows make an expensive retrieval
+    look artificially cheap.
     """
 
     trace = row.get("trace")
@@ -830,18 +838,31 @@ def _retrieval_judge_input_characters(
     response = _trace_response(trace)
     if response is None:
         response = row.get("outputs")
+    expectations = row.get("expectations")
+    ground_truth = None
+    if isinstance(expectations, Mapping):
+        selected = {
+            key: _plain(expectations[key])
+            for key in ("expected_facts", "expected_response")
+            if key in expectations and _is_populated(expectations[key])
+        }
+        if selected:
+            ground_truth = selected
 
-    span_characters = chunk_characters = 0
+    span_characters = sufficiency_characters = chunk_characters = 0
     for span in spans:
         outputs = _span_outputs(span)
         span_characters += _judge_payload_characters(request, response, outputs)
+        sufficiency_characters += _judge_payload_characters(
+            request, ground_truth, outputs
+        )
         if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)):
             documents = list(outputs) or [None]
         else:
             documents = [outputs]
         for document in documents:
             chunk_characters += _judge_payload_characters(request, document)
-    return span_characters, chunk_characters
+    return span_characters, sufficiency_characters, chunk_characters
 
 
 def _judge_payload_characters(*parts: Any) -> int:
