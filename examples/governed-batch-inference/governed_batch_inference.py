@@ -313,13 +313,13 @@ class BatchInferenceSpec(BaseModel):
     source_table: str
     target_table: str
     run_metadata_table: str
-    document_column: str
-    key_column: str
+    document_column: NonBlank
+    key_column: NonBlank
     use_tier: UseTier
-    consumed_by: tuple[str, ...] = Field(min_length=1)
+    consumed_by: tuple[NonBlank, ...] = Field(min_length=1)
     fields: tuple[FieldSpec, ...] = Field(min_length=1)
-    strata: tuple[str, ...] = Field(min_length=1)
-    endpoint: str
+    strata: tuple[NonBlank, ...] = Field(min_length=1)
+    endpoint: NonBlank
     model_version: str
     prompt_version: str
     #: The instruction text itself, not just its label. The document is
@@ -1134,7 +1134,7 @@ class FieldStratumScore(BaseModel):
     stratum: str
     release: ReleaseIdentity
     confidence: float = Field(gt=0.5, lt=1.0)
-    sample_strata: tuple[str, ...] = Field(min_length=1)
+    sample_strata: tuple[NonBlank, ...] = Field(min_length=1)
     stratum_population: tuple[tuple[str, int], ...] = ()
     n_rows: int = Field(ge=0)
     n_gold: int = Field(ge=0)
@@ -1977,9 +1977,23 @@ def require_matching_evidence(
     # the gate over failing physical strata. So it is not read as
     # evidence at all until it has been rebuilt from the physical rows
     # and the weights it carries, and found identical.
+    # One score per (field, stratum). Indexing by that key silently kept
+    # the last row, so a payload could retain the real failing score,
+    # append a passing duplicate of it plus a matching weighted row, and
+    # adopt: the recomputation would use the duplicate and agree with
+    # itself. Scoring refuses duplicate *documents*, but that check runs
+    # before persistence and cannot see a reconstructed report.
     by_field_stratum: dict[str, dict[str, FieldStratumScore]] = {}
     for score in scores:
-        by_field_stratum.setdefault(score.field, {})[score.stratum] = score
+        group = by_field_stratum.setdefault(score.field, {})
+        if score.stratum in group:
+            raise EvidenceMismatch(
+                f"two scores describe {score.field!r} in stratum "
+                f"{score.stratum!r}. One measurement per group is what makes "
+                "the aggregate recomputable; with two, the gate reads "
+                "whichever happens to be last."
+            )
+        group[score.stratum] = score
     for field in spec.fields:
         group = by_field_stratum.get(field.name, {})
         claimed = group.get(WEIGHTED)
@@ -2571,6 +2585,22 @@ def _require_authorised_write(
     Returns the snapshot the caller must read, so the authorisation and
     the data can never come from different places.
     """
+    # `model_copy(update=...)` skips validators, so *any* artifact reaching
+    # here may never have satisfied the invariants its own model declares.
+    # `require_executable` round-trips the report for exactly that reason —
+    # and the estimate and preflight were left out, which meant
+    # `estimate.model_copy(update={"projected_cost_cad": 0})` cleared the
+    # ceiling with every other check still matching. Revalidating one
+    # artifact and not its siblings is the same mistake three rounds
+    # running, so this revalidates the whole bundle.
+    for artifact in (estimate, preflight):
+        try:
+            type(artifact).model_validate(artifact.model_dump(mode="python"))
+        except ValidationError as invalid:
+            raise EvidenceMismatch(
+                f"the {type(artifact).__name__} does not satisfy its own "
+                f"invariants: {invalid}"
+            ) from invalid
     if spec.gate_required and report is None:
         raise GateNotPassed(
             f"tier {spec.use_tier} runs execute against the snapshot their "

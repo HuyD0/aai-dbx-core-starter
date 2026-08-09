@@ -1962,6 +1962,79 @@ def test_blank_strings_are_refused_wherever_they_would_be_believed():
     assert make_spec(prompt_template=template).prompt_template == template
 
 
+def test_every_artifact_is_revalidated_at_the_authorisation_boundary():
+    """`model_copy` skips validators, so revalidating the report and not
+    its siblings left the same hole one artifact over."""
+    spec = one_field_spec(cost_ceiling_cad=1.0)
+    report = adopting_report(spec)
+    over = gbi.estimate_cost(
+        spec,
+        row_count=ADOPTING_ROWS,
+        probe_input_tokens=[5_000],
+        probe_output_tokens=[5_000],
+        cad_per_million_input_tokens=7.0,
+        cad_per_million_output_tokens=21.0,
+        source_snapshot=report.source_snapshot,
+    )
+    assert not over.within_ceiling
+    # Declare it free. No validator runs, and every other check matches.
+    forged = over.model_copy(update={"projected_cost_cad": 0.0})
+    assert forged.within_ceiling
+    with pytest.raises(gbi.EvidenceMismatch, match="does not satisfy its own"):
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=forged,
+            preflight=preflight_matching(report, spec),
+            report=report,
+        )
+    # The preflight is revalidated on the same footing.
+    bad_preflight = preflight_matching(report, spec).model_copy(
+        update={"row_count": 999_999}
+    )
+    with pytest.raises(gbi.EvidenceMismatch):
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=estimate_matching(report, spec),
+            preflight=bad_preflight,
+            report=report,
+        )
+
+
+def test_two_scores_for_one_group_are_refused():
+    """Indexing by (field, stratum) kept the last row, so a passing
+    duplicate could sit beside the real failing score and win."""
+    spec = one_field_spec(criticality="medium")
+    failing = score(
+        records_for("standard", correct=200) + records_for("legacy_scan", wrong=200),
+        spec,
+        {"standard": 500, "legacy_scan": 500},
+    )
+    assert gate(spec, failing).decision == gbi.GateDecision.REJECT
+
+    passing_dupe = next(s for s in failing if s.stratum == "standard").model_copy(
+        update={"stratum": "legacy_scan"}
+    )
+    with pytest.raises(gbi.EvidenceMismatch, match="two scores describe"):
+        gate(spec, [*failing, passing_dupe])
+
+
+def test_a_blank_endpoint_is_refused_before_anything_is_spent():
+    """It would pass estimation and gating, then generate ai_query
+    against nothing."""
+    for blank in (" ", ""):
+        with pytest.raises(ValidationError):
+            make_spec(endpoint=blank)
+        with pytest.raises(ValidationError):
+            make_spec(key_column=blank)
+    with pytest.raises(ValidationError):
+        make_spec(strata=("layout", " "))
+    assert make_spec(endpoint="  databricks-gpt-oss-20b  ").endpoint == (
+        "databricks-gpt-oss-20b"
+    )
+
+
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
     spec = one_field_spec(criticality="high")
     records = [

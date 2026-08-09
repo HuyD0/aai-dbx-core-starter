@@ -1306,6 +1306,15 @@ spark.sql(
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
+# The version this run *starts* from. Stage 7 needs the version this run
+# produced, and `DESCRIBE HISTORY ... LIMIT 1` there would return whatever
+# committed most recently — another writer's version, during exactly the
+# overlapping cycles this example supports. Anchoring here narrows it to
+# commits that happened after we began.
+VERSION_BEFORE_WRITE = spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1").first()[
+    "version"
+]
+
 if not SIMULATED:
     spark.sql(execute_sql)
 else:
@@ -1449,9 +1458,19 @@ for statement in gbi.column_tag_statements(spec_v2, RUN_ID):
         print(f"  {statement}")
         print(f"  ({tag_error})")
 
-target_version = spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1").first()[
-    "version"
-]
+# The earliest commit after this run began is this run's own write. That
+# is not airtight — a writer that committed between our anchor and our
+# MERGE would be picked instead — but it is bounded and honest, where
+# taking the latest version silently attributes someone else's commit to
+# this run forever. A single-writer table makes it exact.
+target_version = (
+    spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE}")
+    .filter(F.col("version") > F.lit(VERSION_BEFORE_WRITE))
+    .agg(F.min("version").alias("version"))
+    .first()["version"]
+)
+if target_version is None:  # restart found nothing pending: no new commit
+    target_version = VERSION_BEFORE_WRITE
 
 # The record was reserved before execution; all that was unknown then is
 # the version the write produced. It is set once, and only from NULL, so
@@ -1471,7 +1490,14 @@ gbi.require_unique_run_id(
 )
 
 mlflow.log_metric("target_table_version", int(target_version))
-mlflow.log_metric("rows_landed", spark.table(TARGET_TABLE).count())
+# Rows *this run* wrote, not the table's population. A retry whose
+# anti-join finds nothing pending writes zero, and logging the whole
+# table would report a throughput this run did not have — inconsistent
+# with the cost and version recorded beside it.
+mlflow.log_metric(
+    "rows_landed",
+    spark.table(TARGET_TABLE).filter(F.col("ai_run_id") == F.lit(RUN_ID)).count(),
+)
 mlflow.end_run()
 
 print(f"run {RUN_ID} recorded; target table version {target_version}")
