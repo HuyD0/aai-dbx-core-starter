@@ -458,7 +458,7 @@ def _trace_inputs(trace: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def _has_usable_trace(trace: Any) -> bool:
+def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     """Whether a populated trace is safe to hand to MLflow.
 
     A non-empty string or mapping is not necessarily a trace. MLflow only
@@ -489,9 +489,18 @@ def _has_usable_trace(trace: Any) -> bool:
                 return True
 
     roots = _root_spans(trace)
-    return bool(roots) and all(
+    identified_roots = bool(roots) and all(
         _is_populated(span.get("span_id")) or _is_populated(span.get("spanId"))
         for span in roots
+    )
+    if not identified_roots:
+        return False
+    # A span id proves structure, not that the row has a question to score.
+    # The request may come from the authored row or the identified root span.
+    return (
+        isinstance(authored_inputs, Mapping)
+        and bool(authored_inputs)
+        or _trace_inputs(trace) is not None
     )
 
 
@@ -636,7 +645,7 @@ def validate_dataset(
         if has_trace and not _is_missing(inputs) and not isinstance(inputs, Mapping):
             failures.append(f"row {index} inputs must be an object")
             continue
-        if has_trace and not _has_usable_trace(trace):
+        if has_trace and not _has_usable_trace(trace, authored_inputs=inputs):
             failures.append(
                 f"row {index} trace must be decodable and contain a usable "
                 "request or root span"
