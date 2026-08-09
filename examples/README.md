@@ -53,6 +53,18 @@ make classification-check
 make classification-notebook
 ```
 
+## Separate governed batch inference pattern
+
+[`governed-batch-inference/`](governed-batch-inference/README.md) is a
+standalone reference implementation for running `ai_query` over large tables
+without shipping unvalidated model output into finance data products. It is
+not a stage in the numbered curriculum: one Databricks notebook plus a pure,
+unit-tested Python module walk `declare → estimate → sample → evaluate →
+gate → execute → land → monitor` end to end on synthetic tax documents, with
+Wilson-lower-bound gates, worst-stratum rules for high-criticality fields, an
+abstention path, and three-layer provenance. Its statistics are pinned by
+`tests/test_governed_batch_inference.py`.
+
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or
