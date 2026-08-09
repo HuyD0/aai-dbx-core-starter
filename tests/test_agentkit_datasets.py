@@ -962,6 +962,34 @@ def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
     ]
 
 
+def test_an_identified_root_without_any_request_fails_local_validation(tmp_path):
+    _write_dataset(tmp_path, [{"trace": {"spans": [{"span_id": "root"}]}}])
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
+
+
+def test_an_identified_root_can_use_non_empty_authored_inputs(tmp_path):
+    _write_dataset(
+        tmp_path,
+        [
+            {
+                "inputs": {"question": "q"},
+                "trace": {"spans": [{"span_id": "root"}]},
+            }
+        ],
+    )
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert validate_dataset(dataset, minimum_rows=1) == []
+
+
 @pytest.mark.parametrize(
     "trace",
     [
