@@ -262,6 +262,16 @@ def _cmd_smoke(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_eval(arguments: argparse.Namespace) -> int:
+    if arguments.submit and arguments.plan:
+        from aai_core.agentkit.errors import ConfigError
+
+        raise ConfigError(
+            "--submit and --plan cannot be used together",
+            remediation=(
+                "Run `agentkit eval --plan` to inspect the local plan, or "
+                "remove `--plan` to submit the release_gate job."
+            ),
+        )
     project = _project(arguments)
     if arguments.submit:
         from aai_core.agentkit.runner import submit_job

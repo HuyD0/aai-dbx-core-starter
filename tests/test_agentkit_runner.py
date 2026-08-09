@@ -2336,9 +2336,59 @@ def _traced_project(tmp_path, *, trace, rows=12):
     project = _project(tmp_path, rows=rows)
     cases = json.loads((tmp_path / "evals" / "data" / "golden_cases.json").read_text())
     for index, case in enumerate(cases):
-        case["trace"] = trace(index)
+        value = trace(index)
+        # TraceInfo-only shorthand used by these tests is not a complete
+        # serialized MLflow trace. Give it the root span a real Trace.to_dict
+        # payload carries so local structural validation tests the intended
+        # mode behavior rather than rejecting the fixture itself.
+        if isinstance(value, dict) and "info" in value and "data" not in value:
+            value = {
+                **value,
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": f"root-{index}",
+                            "inputs": dict(case["inputs"]),
+                        }
+                    ]
+                },
+            }
+        case["trace"] = value
     (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
     return project
+
+
+@pytest.mark.parametrize("trace", ["not-json", {"unrelated": "object"}])
+def test_malformed_traces_fail_before_plan_confirmation_or_evaluation(
+    tmp_path, monkeypatch, trace
+):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _project(tmp_path)
+    cases_path = tmp_path / "evals" / "data" / "golden_cases.json"
+    cases = json.loads(cases_path.read_text())
+    for case in cases:
+        case["trace"] = trace
+    cases_path.write_text(json.dumps(cases))
+    fake = FakeMlflow()
+    confirmations = []
+
+    def unexpected_plan(*args, **kwargs):
+        raise AssertionError("malformed traces must fail before planning")
+
+    monkeypatch.setattr(runner_module, "select_scorers", unexpected_plan)
+
+    with pytest.raises(ConfigError, match="trace must be decodable"):
+        run_scoring(
+            project,
+            establish_baseline=True,
+            judges_enabled=False,
+            mlflow_module=fake,
+            confirm=lambda prompt: confirmations.append(prompt) or True,
+        )
+
+    assert confirmations == []
+    assert fake.evaluate_calls == []
 
 
 def test_a_live_run_does_not_hand_mlflow_a_stored_trace(tmp_path):
@@ -2550,7 +2600,7 @@ def test_a_trace_only_dataset_can_still_be_re_run_live(tmp_path):
     assert all("trace" not in row for row in payload)
 
 
-def test_a_row_whose_request_cannot_be_recovered_is_refused(tmp_path):
+def test_a_trace_without_a_usable_request_or_root_span_is_refused(tmp_path):
     project = _project(tmp_path)
     cases = [{"trace": {"info": {"request_preview": "unparseable"}}} for _ in range(12)]
     (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
@@ -2566,8 +2616,8 @@ def test_a_row_whose_request_cannot_be_recovered_is_refused(tmp_path):
             mlflow_module=fake,
         )
 
-    assert "no inputs to send the agent" in str(excinfo.value)
-    assert "--mode traces" in str(excinfo.value)
+    assert "trace must be decodable" in str(excinfo.value)
+    assert "usable request or root span" in str(excinfo.value)
     assert fake.evaluate_calls == []
 
 
