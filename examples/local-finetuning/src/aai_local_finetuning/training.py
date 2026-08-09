@@ -54,6 +54,26 @@ _RUNTIME_PAYLOAD_DIGEST_CACHE: dict[
     tuple[str, int],
 ] = {}
 _RUNTIME_PAYLOAD_DIGEST_CACHE_LOCK = threading.Lock()
+_RUNTIME_NON_PAYLOAD_METADATA_FILES = frozenset(
+    {
+        "INSTALLER",
+        "RECORD",
+        "REQUESTED",
+        "SOURCES.txt",
+        "WHEEL",
+        "direct_url.json",
+    }
+)
+_RUNTIME_NON_PAYLOAD_METADATA_DIRECTORIES = frozenset({"licenses"})
+_RUNTIME_TRANSIENT_DIRECTORIES = frozenset({"__pycache__"})
+_RUNTIME_EXTERNAL_BOOKKEEPING_PREFIXES = (
+    ("bin",),
+    ("Scripts",),
+    ("etc", "jupyter"),
+    ("share", "jupyter"),
+    ("share", "man"),
+)
+_RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES = frozenset({".jar"})
 
 
 class TrainingManifestError(RuntimeError):
@@ -318,6 +338,7 @@ class _RuntimeDistribution:
     metadata_file: _CapturedFile
     install_root: Path
     payload_files: tuple[_CapturedFile, ...]
+    runtime_roots: tuple[_CapturedDirectory, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1626,6 +1647,7 @@ def _runtime_package_state(
         metadata_files.append(distribution.metadata_file)
         payload_files.extend(distribution.payload_files)
         roots.add(distribution.install_root)
+        roots.update(root.path for root in distribution.runtime_roots)
 
     captured_roots = tuple(
         _capture_directory_identity(path)
@@ -1652,16 +1674,21 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
 
     by_metadata_path: dict[Path, _RuntimeDistribution] = {}
     for distribution in importlib.metadata.distributions():
-        metadata_path = _distribution_metadata_path(distribution)
-        if metadata_path.is_symlink():
-            raise ValueError(
-                f"runtime package metadata is a symbolic link: {metadata_path}"
-            )
-        resolved_metadata = metadata_path.resolve(strict=True)
+        inventory = _require_distribution_file_inventory(distribution)
+        install_root = Path(distribution.locate_file("")).resolve(strict=True)
+        metadata_path = _distribution_metadata_path(distribution, inventory)
+        resolved_metadata = _require_runtime_location(
+            metadata_path,
+            install_root=install_root,
+            label="runtime package metadata",
+        )
         if resolved_metadata in by_metadata_path:
             continue
-        install_root = Path(distribution.locate_file("")).resolve(strict=True)
-        payload_files = _capture_runtime_package_payloads(distribution)
+        payload_files, runtime_roots = _capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root,
+            inventory=inventory,
+        )
         evidence = _runtime_package_evidence(distribution, payload_files)
         metadata_display_path = (
             "runtime-package-metadata/"
@@ -1673,6 +1700,7 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
             metadata_file=_capture_file(resolved_metadata, metadata_display_path),
             install_root=install_root,
             payload_files=payload_files,
+            runtime_roots=runtime_roots,
         )
         by_metadata_path[resolved_metadata] = captured
     return tuple(
@@ -1719,42 +1747,163 @@ def _runtime_package_sort_key(
 
 def _capture_runtime_package_payloads(
     distribution: importlib.metadata.Distribution,
-) -> tuple[_CapturedFile, ...]:
-    """Hash every installed non-metadata file without persisting local paths."""
+    *,
+    install_root: Path,
+    inventory: tuple[importlib.metadata.PackagePath, ...],
+) -> tuple[tuple[_CapturedFile, ...], tuple[_CapturedDirectory, ...]]:
+    """Hash runtime metadata and complete import roots using portable names.
 
-    by_record_path: dict[str, importlib.metadata.PackagePath] = {}
-    for item in distribution.files or ():
-        record_path = _distribution_record_path(item)
-        if _is_distribution_metadata_path(record_path):
-            continue
-        if record_path in by_record_path:
+    Wheel ``RECORD`` is an inventory seed, not an authority over the live
+    import tree: files may be added after installation, and editable installs
+    can expose a source root through a ``.pth`` file.  Enumerating every seeded
+    top-level runtime directory closes both gaps.  Generated launchers outside
+    the installation root (for example ``../../../bin/<console-script>``) are
+    deliberately excluded; their portable behavior is represented by
+    ``entry_points.txt`` instead of a machine-specific shebang.  Known external
+    runtime archives are content-addressed under a stable logical path, and any
+    other escape fails closed.
+    """
+
+    explicit_paths: dict[str, Path] = {}
+    captured_files: dict[str, _CapturedFile] = {}
+    runtime_trees: dict[str, Path] = {}
+    seen_record_paths: set[tuple[bool, str]] = set()
+
+    ordered_inventory = sorted(inventory, key=lambda item: str(item).replace("\\", "/"))
+    for item in ordered_inventory:
+        record_path, outside_install_root = _distribution_record_path(item)
+        record_key = (outside_install_root, record_path)
+        if record_key in seen_record_paths:
             name = distribution.metadata.get("Name") or "<unknown>"
             raise RuntimeError(
                 f"installed distribution contains a duplicate payload path: {name}"
             )
-        by_record_path[record_path] = item
-
-    captured: list[_CapturedFile] = []
-    for record_path, item in sorted(by_record_path.items()):
-        display_path = (
-            "runtime-package-payload/"
-            + hashlib.sha256(record_path.encode()).hexdigest()
-        )
-        captured.append(
-            _capture_runtime_payload_file(
-                Path(distribution.locate_file(item)),
-                display_path,
+        seen_record_paths.add(record_key)
+        if outside_install_root:
+            if _is_external_runtime_bookkeeping(record_path):
+                continue
+            if PurePosixPath(record_path).suffix in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES:
+                explicit_paths[f"runtime-external/{record_path}"] = (
+                    _require_external_runtime_location(
+                        Path(distribution.locate_file(item)),
+                        label="external runtime package payload",
+                    )
+                )
+                continue
+            raise ValueError(
+                "installed distribution path escapes its installation root "
+                f"without a portable runtime mapping: {record_path}"
             )
+        if _is_distribution_metadata_path(record_path):
+            if _is_runtime_metadata_payload(record_path):
+                explicit_paths[record_path] = _require_runtime_location(
+                    Path(distribution.locate_file(item)),
+                    install_root=install_root,
+                    label="runtime package metadata",
+                )
+            continue
+        parts = PurePosixPath(record_path).parts
+        if any(part in _RUNTIME_TRANSIENT_DIRECTORIES for part in parts):
+            continue
+
+        located = _require_runtime_location(
+            Path(distribution.locate_file(item)),
+            install_root=install_root,
+            label="runtime package payload",
         )
-    return tuple(captured)
+        if len(parts) == 1 and located.suffix == ".pth":
+            captured, exposed_trees = _capture_runtime_path_configuration(
+                located,
+                record_path=record_path,
+                install_root=install_root,
+            )
+            captured_files[record_path] = captured
+            for tree_name, tree_path in exposed_trees:
+                runtime_trees[tree_name] = tree_path
+            continue
+
+        top_level = parts[0]
+        top_level_path = _require_runtime_location(
+            Path(distribution.locate_file(top_level)),
+            install_root=install_root,
+            label="runtime package root",
+        )
+        if top_level_path.is_dir():
+            runtime_trees[top_level] = top_level_path
+        else:
+            explicit_paths[record_path] = located
+
+    tree_identities: dict[Path, _CapturedDirectory] = {}
+    for tree_name, tree_path in sorted(runtime_trees.items()):
+        tree_identities[tree_path] = _capture_directory_identity(
+            tree_path,
+            label="runtime package import root",
+        )
+        for logical_path, physical_path in _runtime_tree_files(
+            tree_path,
+            logical_prefix=tree_name,
+        ):
+            existing = explicit_paths.get(logical_path)
+            if existing is not None and existing != physical_path:
+                raise RuntimeError(
+                    "runtime package inventory maps one portable path to multiple files"
+                )
+            explicit_paths[logical_path] = physical_path
+
+    for logical_path, path in sorted(explicit_paths.items()):
+        if logical_path in captured_files:
+            continue
+        captured_files[logical_path] = _capture_runtime_payload_file(
+            path,
+            _runtime_payload_display_path(logical_path),
+        )
+    if not captured_files:
+        name = distribution.metadata.get("Name") or "<unknown>"
+        raise RuntimeError(f"installed distribution runtime payload is empty: {name}")
+    return (
+        tuple(captured_files[path] for path in sorted(captured_files)),
+        tuple(tree_identities[path] for path in sorted(tree_identities)),
+    )
 
 
-def _distribution_record_path(item: importlib.metadata.PackagePath) -> str:
+def _require_distribution_file_inventory(
+    distribution: importlib.metadata.Distribution,
+) -> tuple[importlib.metadata.PackagePath, ...]:
+    files = distribution.files
+    name = distribution.metadata.get("Name") or "<unknown>"
+    if files is None:
+        raise RuntimeError(
+            f"installed distribution file inventory is unavailable: {name}"
+        )
+    inventory = tuple(files)
+    if not inventory:
+        raise RuntimeError(f"installed distribution file inventory is empty: {name}")
+    return inventory
+
+
+def _distribution_record_path(
+    item: importlib.metadata.PackagePath,
+) -> tuple[str, bool]:
     raw = str(item).replace("\\", "/")
     candidate = PurePosixPath(raw)
-    if candidate.is_absolute() or not candidate.parts or candidate.as_posix() != raw:
+    if (
+        candidate.is_absolute()
+        or re.match(r"^[A-Za-z]:/", raw)
+        or not candidate.parts
+        or candidate.as_posix() != raw
+    ):
         raise ValueError(f"installed distribution path is not canonical: {raw}")
-    return raw
+    parts = list(candidate.parts)
+    parent_count = 0
+    while parts and parts[0] == "..":
+        parent_count += 1
+        parts.pop(0)
+    if ".." in parts or not parts:
+        raise ValueError(
+            f"installed distribution path contains unsafe traversal: {raw}"
+        )
+    portable = PurePosixPath(*parts).as_posix()
+    return portable, parent_count > 0
 
 
 def _is_distribution_metadata_path(record_path: str) -> bool:
@@ -1764,16 +1913,165 @@ def _is_distribution_metadata_path(record_path: str) -> bool:
     )
 
 
+def _is_runtime_metadata_payload(record_path: str) -> bool:
+    parts = PurePosixPath(record_path).parts
+    metadata_index = next(
+        (
+            index
+            for index, part in enumerate(parts)
+            if part.endswith((".dist-info", ".egg-info"))
+        ),
+        None,
+    )
+    if metadata_index is None:
+        return True
+    relative = parts[metadata_index + 1 :]
+    if not relative:
+        return False
+    if any(part in _RUNTIME_NON_PAYLOAD_METADATA_DIRECTORIES for part in relative[:-1]):
+        return False
+    return relative[-1] not in _RUNTIME_NON_PAYLOAD_METADATA_FILES
+
+
+def _is_external_runtime_bookkeeping(record_path: str) -> bool:
+    parts = PurePosixPath(record_path).parts
+    return any(
+        parts[: len(prefix)] == prefix
+        for prefix in _RUNTIME_EXTERNAL_BOOKKEEPING_PREFIXES
+    )
+
+
+def _require_runtime_location(
+    path: Path,
+    *,
+    install_root: Path,
+    label: str,
+) -> Path:
+    if path.is_symlink():
+        raise ValueError(f"{label} is a symbolic link: {path}")
+    resolved = path.resolve(strict=True)
+    try:
+        resolved.relative_to(install_root)
+    except ValueError as error:
+        raise ValueError(f"{label} escapes its installation root: {path}") from error
+    return resolved
+
+
+def _require_external_runtime_location(path: Path, *, label: str) -> Path:
+    if path.is_symlink():
+        raise ValueError(f"{label} is a symbolic link: {path}")
+    resolved = path.resolve(strict=True)
+    try:
+        resolved.relative_to(Path(sys.prefix).resolve(strict=True))
+    except ValueError as error:
+        raise ValueError(f"{label} escapes the Python environment: {path}") from error
+    if not resolved.is_file():
+        raise ValueError(f"{label} is not a regular file: {path}")
+    return resolved
+
+
+def _runtime_payload_display_path(logical_path: str) -> str:
+    _require_safe_relative_path(logical_path, "runtime package payload")
+    return (
+        "runtime-package-payload/"
+        + hashlib.sha256(logical_path.encode("utf-8")).hexdigest()
+    )
+
+
+def _capture_runtime_path_configuration(
+    path: Path,
+    *,
+    record_path: str,
+    install_root: Path,
+) -> tuple[_CapturedFile, tuple[tuple[str, Path], ...]]:
+    """Canonicalize a ``.pth`` file and expose its live import roots.
+
+    Absolute editable-source paths are intentionally replaced by stable ordinal
+    markers.  The referenced source bytes are captured below those markers, so
+    two equivalent environments produce the same portable digest while a
+    source or mapping change still invalidates an in-flight snapshot.
+    """
+
+    display_path = _runtime_payload_display_path(record_path)
+    raw_capture, raw = _capture_file_bytes(path, display_path)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"runtime path configuration is not UTF-8: {path}") from error
+
+    canonical_lines: list[str] = []
+    exposed_trees: list[tuple[str, Path]] = []
+    path_key = hashlib.sha256(record_path.encode("utf-8")).hexdigest()[:16]
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(("import ", "import\t")):
+            canonical_lines.append(f"exec:{line}")
+            continue
+        candidate = Path(line)
+        located = candidate if candidate.is_absolute() else install_root / candidate
+        if located.is_symlink():
+            raise ValueError(f"runtime import root is a symbolic link: {located}")
+        resolved = located.resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError(f"runtime import root is not a directory: {located}")
+        tree_name = f"runtime-path/{path_key}/{line_number:06d}"
+        canonical_lines.append(f"path:{line_number:06d}")
+        exposed_trees.append((tree_name, resolved))
+
+    canonical = "\n".join(canonical_lines).encode("utf-8")
+    captured = _CapturedFile(
+        evidence=TrainingFileEvidence(
+            path=display_path,
+            sha256=hashlib.sha256(canonical).hexdigest(),
+            size_bytes=len(canonical),
+        ),
+        device=raw_capture.device,
+        inode=raw_capture.inode,
+        modified_ns=raw_capture.modified_ns,
+        changed_ns=raw_capture.changed_ns,
+    )
+    return captured, tuple(exposed_trees)
+
+
+def _runtime_tree_files(
+    root: Path,
+    *,
+    logical_prefix: str,
+) -> tuple[tuple[str, Path], ...]:
+    paths: list[tuple[str, Path]] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if path.is_symlink():
+            raise ValueError(f"runtime package import root contains a symlink: {path}")
+        if any(part in _RUNTIME_TRANSIENT_DIRECTORIES for part in relative.parts):
+            continue
+        if path.is_file():
+            logical_path = PurePosixPath(logical_prefix, relative.as_posix()).as_posix()
+            if _is_distribution_metadata_path(logical_path) and not (
+                _is_runtime_metadata_payload(logical_path)
+            ):
+                continue
+            paths.append((logical_path, path.resolve(strict=True)))
+        elif path.exists() and not path.is_dir():
+            raise ValueError(
+                f"runtime package import root contains a non-regular path: {path}"
+            )
+    return tuple(sorted(paths))
+
+
 def _distribution_metadata_path(
     distribution: importlib.metadata.Distribution,
+    inventory: tuple[importlib.metadata.PackagePath, ...],
 ) -> Path:
-    candidates = [
-        item
-        for item in distribution.files or ()
-        if str(item)
-        .replace("\\", "/")
-        .endswith((".dist-info/METADATA", ".egg-info/PKG-INFO"))
-    ]
+    candidates = []
+    for item in inventory:
+        record_path, outside_install_root = _distribution_record_path(item)
+        if outside_install_root:
+            continue
+        if record_path.endswith((".dist-info/METADATA", ".egg-info/PKG-INFO")):
+            candidates.append(item)
     if candidates:
         shallowest = min(len(item.parts) for item in candidates)
         candidates = [item for item in candidates if len(item.parts) == shallowest]

@@ -7,7 +7,7 @@ import json
 import os
 from argparse import Namespace
 from dataclasses import dataclass
-from importlib.metadata import PathDistribution
+from importlib.metadata import PackagePath, PathDistribution
 from inspect import Parameter, signature
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +40,7 @@ class GovernedRuntime:
     project_root: Path
     source_path: Path
     metadata_path: Path
+    entry_points_path: Path
     package_payload_path: Path
     settings: object
     model_dir: Path
@@ -106,7 +107,12 @@ def governed_runtime(
         encoding="utf-8",
     )
 
-    distribution, metadata_path, package_payload_path = _write_distribution(
+    (
+        distribution,
+        metadata_path,
+        entry_points_path,
+        package_payload_path,
+    ) = _write_distribution(
         tmp_path / "site-packages",
         name="session-runtime",
         version="1.0.0",
@@ -144,6 +150,7 @@ def governed_runtime(
         project_root=project_root,
         source_path=source_path,
         metadata_path=metadata_path,
+        entry_points_path=entry_points_path,
         package_payload_path=package_payload_path,
         settings=settings,
         model_dir=model_dir,
@@ -157,7 +164,7 @@ def _write_distribution(
     *,
     name: str,
     version: str,
-) -> tuple[PathDistribution, Path, Path]:
+) -> tuple[PathDistribution, Path, Path, Path]:
     normalized_name = name.replace("-", "_")
     directory_name = f"{normalized_name}-{version}.dist-info"
     distribution_dir = root / directory_name
@@ -174,15 +181,26 @@ def _write_distribution(
         f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
         encoding="utf-8",
     )
+    entry_points_path = distribution_dir / "entry_points.txt"
+    entry_points_path.write_text(
+        f"[console_scripts]\n{name} = {normalized_name}:main\n",
+        encoding="utf-8",
+    )
     (distribution_dir / "RECORD").write_text(
         (
             f"{normalized_name}/__init__.py,,\n"
             f"{directory_name}/METADATA,,\n"
+            f"{directory_name}/entry_points.txt,,\n"
             f"{directory_name}/RECORD,,\n"
         ),
         encoding="utf-8",
     )
-    return PathDistribution(distribution_dir), metadata_path, package_payload_path
+    return (
+        PathDistribution(distribution_dir),
+        metadata_path,
+        entry_points_path,
+        package_payload_path,
+    )
 
 
 def _replace_with_original_bytes(path: Path) -> None:
@@ -399,14 +417,152 @@ def test_prestarted_session_rejects_installed_package_payload_mutation(
 ) -> None:
     session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
     package = session.execution_contract.runtime_packages[0]
+    runtime_files = (
+        governed_runtime.package_payload_path,
+        governed_runtime.metadata_path,
+        governed_runtime.entry_points_path,
+    )
     original = governed_runtime.package_payload_path.read_bytes()
 
-    assert package.payload_file_count == 1
-    assert package.payload_size_bytes == len(original)
+    assert package.payload_file_count == len(runtime_files)
+    assert package.payload_size_bytes == sum(
+        len(path.read_bytes()) for path in runtime_files
+    )
     governed_runtime.package_payload_path.write_bytes(b"x" * len(original))
 
     with pytest.raises(RuntimeError, match="runtime package files changed"):
         recheck_evaluation_session(session)
+
+
+def test_execution_capture_fails_when_distribution_inventory_is_unavailable(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable = SimpleNamespace(
+        files=None,
+        metadata={"Name": "session-runtime"},
+    )
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (unavailable,),
+    )
+
+    with pytest.raises(RuntimeError, match="file inventory is unavailable"):
+        start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+
+
+def test_prestarted_session_rejects_unrecorded_importable_module(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    unrecorded = governed_runtime.package_payload_path.with_name("unrecorded.py")
+
+    unrecorded.write_text('VALUE = "runtime drift"\n', encoding="utf-8")
+
+    assert (
+        training._capture_runtime_packages()
+        != session.execution_contract.runtime_packages
+    )
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_prestarted_session_rejects_entry_point_metadata_mutation(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+
+    governed_runtime.entry_points_path.write_text(
+        "[console_scripts]\nsession-runtime = session_runtime:replacement\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        training._capture_runtime_packages()
+        != session.execution_contract.runtime_packages
+    )
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_external_console_launcher_record_is_portable_bookkeeping(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    distribution = PathDistribution(governed_runtime.metadata_path.parent)
+    inventory = training._require_distribution_file_inventory(distribution)
+    install_root = Path(distribution.locate_file("")).resolve(strict=True)
+    before, _before_roots = training._capture_runtime_package_payloads(
+        distribution,
+        install_root=install_root,
+        inventory=inventory,
+    )
+    with_launcher, _launcher_roots = training._capture_runtime_package_payloads(
+        distribution,
+        install_root=install_root,
+        inventory=inventory + (PackagePath("../../../bin/session-runtime"),),
+    )
+
+    assert with_launcher == before
+    assert training._distribution_record_path(
+        PackagePath("../../../bin/session-runtime")
+    ) == ("bin/session-runtime", True)
+    with pytest.raises(ValueError, match="unsafe traversal"):
+        training._distribution_record_path(PackagePath("package/../../bin/tool"))
+    with pytest.raises(ValueError, match="without a portable runtime mapping"):
+        training._capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root,
+            inventory=inventory + (PackagePath("../../../../etc/passwd"),),
+        )
+
+
+def test_editable_import_root_uses_portable_content_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def editable_distribution(prefix: str) -> PathDistribution:
+        source_root = tmp_path / f"{prefix}-checkout" / "src"
+        package_root = source_root / "session_runtime"
+        package_root.mkdir(parents=True)
+        (package_root / "__init__.py").write_text(
+            'VALUE = "portable editable source"\n',
+            encoding="utf-8",
+        )
+        install_root = tmp_path / prefix / "site-packages"
+        distribution_root = install_root / "session_runtime-1.0.0.dist-info"
+        distribution_root.mkdir(parents=True)
+        (distribution_root / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: session-runtime\nVersion: 1.0.0\n",
+            encoding="utf-8",
+        )
+        editable_path = install_root / "_editable_impl_session_runtime.pth"
+        editable_path.write_text(str(source_root) + "\n", encoding="utf-8")
+        (distribution_root / "RECORD").write_text(
+            (
+                "_editable_impl_session_runtime.pth,,\n"
+                "session_runtime-1.0.0.dist-info/METADATA,,\n"
+                "session_runtime-1.0.0.dist-info/RECORD,,\n"
+            ),
+            encoding="utf-8",
+        )
+        return PathDistribution(distribution_root)
+
+    first = editable_distribution("first-environment")
+    second = editable_distribution("second-environment")
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (first,),
+    )
+    first_evidence = training._capture_runtime_packages()
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (second,),
+    )
+
+    assert training._capture_runtime_packages() == first_evidence
 
 
 def test_support_and_capstone_reports_bind_the_prestarted_session_hash(
@@ -444,7 +600,12 @@ def test_session_preserves_distinct_vendored_versions_with_the_same_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     primary = PathDistribution(governed_runtime.metadata_path.parent)
-    vendored, _vendored_metadata, _vendored_payload = _write_distribution(
+    (
+        vendored,
+        _vendored_metadata,
+        _vendored_entry_points,
+        _vendored_payload,
+    ) = _write_distribution(
         governed_runtime.metadata_path.parents[2] / "provider" / "_vendor",
         name="session-runtime",
         version="0.9.0",
