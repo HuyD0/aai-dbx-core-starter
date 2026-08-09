@@ -106,10 +106,20 @@ abstention path) then passes the same gate on the same terms.
    budget, and `log_gate_evidence` refuses an estimate measured for
    another release rather than let one clear the ceiling on another's
    assumptions.
-10. **"Done" means this content, by this release or newer.** The restart
-    anti-join matches on the key, a digest of the source document, *and*
-    the full release identity — spec digest, model version, prompt
-    version — and the write is a `MERGE`. The content digest is what makes
+10. **"Done" means this content, by this inference identity or newer.** The
+    restart anti-join matches on the key, a digest of the source document,
+    *and* the **inference** digest — endpoint, model, prompt text,
+    abstention threshold, field descriptions — and the write is a `MERGE`.
+    Not the spec digest: that also covers tolerances, tier, consumers and
+    the cost ceiling, none of which change a character the model returns,
+    so keying on it sent a whole table back through a paid endpoint to
+    regenerate byte-identical predictions every time a tolerance moved.
+    `resync_policy_sql` refreshes which policy governs a row instead.
+    Stratum labels order on their own `ai_strata_version`, for the mirror
+    of the same reason: they come from source columns, not the model, so
+    release identity says nothing about them — and advancing the release
+    sequence to order them would make a relabelled row look inferred by
+    that release and skip the inference it still needs. The content digest is what makes
     an edit-in-place reprocess instead of leaving the target serving values
     derived from text that no longer exists. Stratum labels are row
     metadata rather than model output, so a corrected label is resynced by
@@ -165,6 +175,18 @@ abstention path) then passes the same gate on the same terms.
       field is gated on, which makes it the row worth forging;
     - each `FieldGateResult` by re-running the gate over those scores;
     - and the report's aggregate `decision` from the field results.
+
+    **`model_copy` skips validators**, so none of that binds unless it is
+    re-checked where it is used: `require_executable` round-trips the
+    report through `model_validate` first. Otherwise
+    `rejecting.model_copy(update={"decision": ADOPT})` is a valid object
+    that never satisfied a single one of these rules — and this module
+    builds reports that way itself, in `approve_gate`.
+
+    The population weights are checked against the `SourcePreflight` too,
+    not just against the report that carries them: re-weighting a 50/50
+    sample as a million-to-one population is internally consistent and
+    adopts, and only measured counts contradict it.
 
     `require_executable` closes the loop by binding those scores to the
     spec — the one thing a self-contained report cannot know about itself —

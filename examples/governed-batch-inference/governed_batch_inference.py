@@ -45,7 +45,14 @@ from enum import IntEnum, StrEnum
 from statistics import NormalDist
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 # ---------------------------------------------------------------------------
 # Constants and small helpers
@@ -76,6 +83,21 @@ PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
     #: — and the older one could overwrite the newer. Ordering is on the
     #: pair.
     ("ai_source_version", "BIGINT"),
+    #: The snapshot whose *stratum labels* this row carries. Strata come
+    #: from source columns rather than from the model, so their ordering
+    #: has nothing to do with release identity and everything to do with
+    #: which snapshot was read — they need their own column. Advancing
+    #: `ai_release_sequence` instead would be actively wrong: it would
+    #: make a row whose labels were resynced look as though the newer
+    #: release had inferred it, and that release's anti-join would then
+    #: skip the inference the row still needs.
+    ("ai_strata_version", "BIGINT"),
+    #: What produced the values: endpoint, model, prompt text, abstention
+    #: threshold and field descriptions. Restart keys on this rather than
+    #: on the spec digest, so a pure policy change — a tolerance, a tier,
+    #: a consumer — re-scores the predictions it already has instead of
+    #: paying to regenerate identical ones.
+    ("ai_inference_digest", "STRING"),
     #: Digest of the document text this row was derived from, so an
     #: edit-in-place makes the row pending instead of silently stale.
     ("ai_source_digest", "STRING"),
@@ -685,6 +707,13 @@ class SourcePreflight(BaseModel):
 
     snapshot: SourceSnapshot
     row_count: int = Field(ge=0)
+    #: Rows per stratum in that snapshot. The weighted gate row is an
+    #: estimate *of this population*, and recomputing it from the weights
+    #: the same report carries proves only that the report agrees with
+    #: itself: claim 1,000,000 good rows and 1 failing one and evidence
+    #: from a 50/50 sample adopts. Measured counts are the only thing
+    #: that makes those weights mean anything.
+    stratum_population: tuple[tuple[str, int], ...] = ()
 
 
 def require_usable_source_rows(
@@ -695,6 +724,7 @@ def require_usable_source_rows(
     *,
     snapshot: SourceSnapshot,
     row_count: int,
+    stratum_population: Mapping[str, int] | None = None,
 ) -> SourcePreflight:
     """Refuse to run when the source rows cannot carry the landing contract.
 
@@ -756,7 +786,26 @@ def require_usable_source_rows(
             f"the preflight measured {snapshot.table!r}, but this spec reads "
             f"{spec.source_table!r}"
         )
-    return SourcePreflight(snapshot=snapshot, row_count=row_count)
+    return SourcePreflight(
+        snapshot=snapshot,
+        row_count=row_count,
+        stratum_population=tuple(sorted((stratum_population or {}).items())),
+    )
+
+
+def source_population_sql(
+    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+) -> str:
+    """Rows per stratum in the pinned snapshot.
+
+    This is the population the weighted gate row estimates, so it is
+    measured rather than asserted — for the same reason the total row
+    count is. Feed the result into ``require_usable_source_rows``.
+    """
+    columns = ", ".join(spec.strata)
+    return f"""SELECT {columns}, count(*) AS n
+FROM {_source_relation(spec, snapshot)}
+GROUP BY {columns}"""
 
 
 def require_within_ceiling(estimate: CostEstimate) -> CostEstimate:
@@ -1946,12 +1995,37 @@ def approve_gate(report: GateReport, approver: str) -> GateReport:
     )
 
 
-def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> None:
-    """Refuse to execute without an adopting gate (tiers 1 and 2)."""
+def require_executable(
+    spec: BatchInferenceSpec,
+    report: GateReport | None,
+    preflight: SourcePreflight,
+) -> None:
+    """Refuse to execute without an adopting gate (tiers 1 and 2).
+
+    ``preflight`` is required, not optional, because two of the checks
+    below compare the report against numbers only the warehouse can
+    supply. An optional guard is the failure mode rounds of review here
+    have found over and over: it holds for the caller who passes it and
+    silently does nothing for the one who does not.
+    """
     if not spec.gate_required:
         return
     if report is None:
         raise GateNotPassed(f"tier {spec.use_tier} runs require a gate report")
+    # `model_copy(update=...)` does not re-run validators, so a report can
+    # reach this function having never satisfied the invariants its own
+    # model declares — `rejecting.model_copy(update={"decision": ADOPT})`
+    # is a valid `GateReport` object with an aggregate its field results
+    # do not support. Every "the artifact validates itself" guard added
+    # since the interval checks rests on this round trip, and this module
+    # builds reports that way itself in `approve_gate`. Revalidating here
+    # is what makes those guards true at the point they are relied upon.
+    try:
+        GateReport.model_validate(report.model_dump(mode="python"))
+    except ValidationError as invalid:
+        raise GateNotPassed(
+            f"the gate report does not satisfy its own invariants: {invalid}"
+        ) from invalid
     if report.spec_digest != spec.spec_digest:
         raise GateNotPassed(
             "gate report was produced for a different spec revision; "
@@ -2005,6 +2079,32 @@ def require_executable(spec: BatchInferenceSpec, report: GateReport | None) -> N
                 f"{field.required_rate}. It certifies a policy this run does "
                 "not run under."
             )
+    # The weighted row is recomputed from the physical rows and the
+    # weights the report carries — which shows the report agrees with
+    # itself, and nothing about whether those weights are the population.
+    # Evidence from a 50/50 good/failing sample adopts if the artifact
+    # claims a million good rows and one bad one. Only the measured
+    # counts settle it.
+    measured = dict(preflight.stratum_population)
+    if measured:
+        for score in report.scores:
+            if score.stratum != WEIGHTED:
+                continue
+            claimed = dict(score.stratum_population)
+            if claimed != {k: v for k, v in measured.items() if k in claimed}:
+                raise GateNotPassed(
+                    f"the weighted evidence for {score.field!r} claims "
+                    f"population {sorted(claimed.items())}, but the snapshot "
+                    f"holds {sorted(measured.items())}. The estimate is "
+                    "weighted for a population that does not exist."
+                )
+            unsampled = sorted(set(measured) - set(claimed))
+            if unsampled:
+                raise GateNotPassed(
+                    f"the snapshot contains strata {unsampled} that the "
+                    f"weighted evidence for {score.field!r} does not cover; "
+                    "the population estimate omits part of the population."
+                )
     if report.decision != GateDecision.ADOPT:
         raise GateNotPassed(
             f"gate decision is {report.decision.value!r}; execution requires " "'adopt'"
@@ -2182,7 +2282,11 @@ def plan_target_migration(
     if add:
         columns = ", ".join(f"{name} {sql_type}" for name, sql_type in add)
         statements.append(f"ALTER TABLE {spec.target_table} ADD COLUMNS ({columns})")
-    for ordering_column in ("ai_release_sequence", "ai_source_version"):
+    for ordering_column in (
+        "ai_release_sequence",
+        "ai_source_version",
+        "ai_strata_version",
+    ):
         if any(name == ordering_column for name, _ in add):
             # Rows that predate sequencing get -1 rather than NULL. The SQL
             # comparisons coalesce anyway, but a real value keeps the column
@@ -2256,44 +2360,38 @@ def resync_strata_sql(
     This statement updates the labels directly instead. Run it before the
     execute stage; it is cheap and touches only stratum columns.
     """
-    sequence = int(spec.release_sequence)
     version = snapshot.version if snapshot else -1
-    # The update advances `ai_source_version` along with the labels.
-    # Without that the guard above never moves: a corrected label with
-    # unchanged document text is skipped by inference (the row really is
-    # done), so the column keeps the version of whichever run last
-    # *inferred* it, and a delayed older resync still satisfies `<=` and
-    # restores the stale label. Writing it here makes the column mean
-    # "the newest snapshot whose content and labels this row reflects",
-    # which is what both orderings actually need it to mean — and it
-    # stays correct for inference, where a bumped version only ever
-    # excludes older runs from touching the row.
+    # The update advances the column it orders on, so the guard actually
+    # moves: a corrected label with unchanged document text is skipped by
+    # inference (the row really is done), so nothing else would ever
+    # raise it and a delayed older resync would keep winning.
     assignments = ",\n    ".join(
         [f"target.{column} = source.{column}" for column in spec.strata]
-        + [f"target.ai_source_version = {version}"]
+        + [f"target.ai_strata_version = {version}"]
     )
     differs = "\n     OR ".join(
         f"NOT (target.{column} <=> source.{column})" for column in spec.strata
     )
-    # The same *pair* ordering the inference MERGE uses, and needed here
-    # for its own reason: this statement runs from a pinned snapshot, so
-    # a delayed older cycle would otherwise relabel rows a newer one has
-    # already resynced — regressing exactly the grouping that monitoring
-    # and re-sampling depend on, while the model output beside it stayed
-    # current and made the row look healthy. Comparing the release
-    # sequence alone is not enough, because two cycles of one unchanged
-    # spec tie there and differ only in which snapshot they read.
+    # Strata order on a column of their own, and it is the only ordering
+    # that applies to them. They come from source columns rather than
+    # from the model, so release identity is irrelevant here — and
+    # borrowing the inference pair, as this statement used to, ordered on
+    # numbers it could not consistently advance: it wrote
+    # `ai_source_version` while leaving `ai_release_sequence` at whatever
+    # release last inferred the row, so a newer release resyncing from an
+    # older snapshot moved the two halves in opposite directions and a
+    # delayed older resync could win again at an intermediate version.
+    #
+    # Advancing `ai_release_sequence` here instead would be worse than
+    # the bug: a row whose labels were resynced would look as though the
+    # newer release had inferred it, and that release's anti-join would
+    # skip the inference the row still needs. Metadata gets metadata
+    # ordering.
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
 WHEN MATCHED
-  AND (
-    coalesce(target.ai_release_sequence, -1) < {sequence}
-    OR (
-      coalesce(target.ai_release_sequence, -1) = {sequence}
-      AND coalesce(target.ai_source_version, -1) <= {version}
-    )
-  )
+  AND coalesce(target.ai_strata_version, -1) <= {version}
   AND (
      {differs}
    ) THEN UPDATE SET
@@ -2327,6 +2425,16 @@ def restart_predicate_sql(
     predicate drifts the moment the real one changes — it silently did,
     twice, while the ordering rules were being worked out. One string,
     every caller.
+
+    Matching is on the **inference identity**, not the spec digest. The
+    digest covers tolerances, tier, consumers and the cost ceiling —
+    none of which change a character the model returns — so keying on it
+    sent an entire pinned table back through a paid endpoint to
+    regenerate byte-identical predictions every time a tolerance moved.
+    The inference digest still covers endpoint, model, prompt *text*,
+    abstention threshold and field descriptions, so a changed threshold
+    or field set re-infers exactly as before; ``resync_policy_sql``
+    refreshes which policy governs a row without paying for it.
     """
     sequence = int(spec.release_sequence)
     version = snapshot.version if snapshot else -1
@@ -2339,11 +2447,38 @@ def restart_predicate_sql(
         )
         OR (
           done.ai_source_digest = sha2(source.{spec.document_column}, 256)
-          AND done.ai_spec_digest = {sql_string_literal(spec.spec_digest)}
-          AND done.ai_model_version = {sql_string_literal(spec.model_version)}
-          AND done.ai_prompt_version = {sql_string_literal(spec.prompt_version)}
+          AND done.ai_inference_digest =
+            {sql_string_literal(spec.inference_digest)}
         )
       )"""
+
+
+def resync_policy_sql(
+    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+) -> str:
+    """Refresh which policy release governs already-correct predictions.
+
+    A release that changes only judgment — a tolerance, a tier, a
+    consumer, the cost ceiling — produces exactly the predictions already
+    landed, because none of it reaches the model. Restart therefore keys
+    on the inference identity and leaves those rows alone, which is the
+    whole point; but the table would then still say an older spec digest
+    governs them.
+
+    This statement corrects the provenance without paying an endpoint. It
+    touches only the policy stamps, and only on rows whose values this
+    release would have produced anyway.
+    """
+    return f"""MERGE INTO {spec.target_table} AS target
+USING {_source_relation(spec, snapshot)} AS source
+ON target.{spec.key_column} = source.{spec.key_column}
+WHEN MATCHED
+  AND target.ai_inference_digest = {sql_string_literal(spec.inference_digest)}
+  AND coalesce(target.ai_release_sequence, -1) <= {int(spec.release_sequence)}
+  AND NOT (target.ai_spec_digest <=> {sql_string_literal(spec.spec_digest)})
+  THEN UPDATE SET
+    target.ai_spec_digest = {sql_string_literal(spec.spec_digest)},
+    target.ai_release_sequence = {int(spec.release_sequence)}"""
 
 
 def build_execute_sql(
@@ -2454,7 +2589,7 @@ def build_execute_sql(
     # gap invisible here while leaving every other caller of this reusable
     # builder unprotected. A guard that depends on being called in the
     # right order is not a guard.
-    require_executable(spec, report)
+    require_executable(spec, report, preflight)
     # Gated runs are pinned by their evidence. Tier 3 has no evidence, so
     # it is pinned by the thing that *is* its only control: the estimate.
     # Leaving that path unpinned meant the one tier governed by cost alone
@@ -2625,6 +2760,8 @@ USING (
     {prompt_literal} AS ai_prompt_version,
     {sequence} AS ai_release_sequence,
     {source_version} AS ai_source_version,
+    {source_version} AS ai_strata_version,
+    {sql_string_literal(spec.inference_digest)} AS ai_inference_digest,
     {source_digest} AS ai_source_digest,
     current_timestamp() AS ai_executed_at
   FROM parsed

@@ -404,6 +404,15 @@ def pinned_source():
 # it. Otherwise an estimate could price one row, stay perfectly
 # self-consistent, and authorise a million-row run.
 rows = spark.sql(gbi.source_preflight_sql(spec_v1, SOURCE_SNAPSHOT)).first()
+# Per-stratum counts are measured here for the same reason the total is:
+# the weighted gate row is an estimate *of this population*, and checking
+# it against weights the report itself supplies only shows the report
+# agrees with itself. Claim a million good rows and one bad one and a
+# 50/50 sample adopts.
+POPULATION = {
+    row["layout"]: row["n"]
+    for row in spark.sql(gbi.source_population_sql(spec_v1, SOURCE_SNAPSHOT)).collect()
+}
 PREFLIGHT = gbi.require_usable_source_rows(
     spec_v1,
     rows.null_keys,
@@ -411,6 +420,7 @@ PREFLIGHT = gbi.require_usable_source_rows(
     rows.null_documents,
     snapshot=SOURCE_SNAPSHOT,
     row_count=rows.row_count,
+    stratum_population=POPULATION,
 )
 print(
     f"source rows usable: {rows.null_keys} null and "
@@ -514,10 +524,9 @@ except gbi.CostCeilingExceeded as refusal:
 
 # COMMAND ----------
 
-population = {
-    row["layout"]: row["count"]
-    for row in pinned_source().groupBy("layout").count().collect()
-}
+# From the preflight, not a second count: the gate's weights are checked
+# against exactly this measurement.
+population = POPULATION
 LABELLING_BUDGET = 400
 allocation = gbi.allocate_stratified_sample(
     population, LABELLING_BUDGET, min_per_stratum=150
@@ -978,7 +987,7 @@ for field_result in report_v1.fields:
 # The gate is not advisory. Execution refuses to build so much as a SQL
 # statement without an adopting report for this exact spec revision.
 try:
-    gbi.require_executable(spec_v1, report_v1)
+    gbi.require_executable(spec_v1, report_v1, PREFLIGHT)
 except gbi.GateNotPassed as refusal:
     print(f"GateNotPassed: {refusal}")
 
@@ -1199,7 +1208,7 @@ print(
 # what protects the run. `build_execute_sql` re-runs both this and the
 # ceiling check itself, so a caller who skips this cell, or who uses the
 # builder from their own code, gets the same refusal.
-gbi.require_executable(spec_v2, report_v2)  # raises unless the gate adopted
+gbi.require_executable(spec_v2, report_v2, PREFLIGHT)  # raises unless adopted
 
 spark.sql(gbi.create_target_table_sql(spec_v2))
 
@@ -1254,6 +1263,10 @@ pending_sql = f"""
 # monitoring groups by it. Fix the labels directly rather than paying an
 # endpoint to regenerate identical values.
 spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT))
+# A release that changes only judgment produces the predictions already
+# landed, so restart leaves those rows alone — but the table would still
+# name the older policy. This corrects the stamp without inference.
+spark.sql(gbi.resync_policy_sql(spec_v2, SOURCE_SNAPSHOT))
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
@@ -1310,6 +1323,8 @@ else:
         # Ordering is on the pair: the release says what ran, this says
         # over which rows. Two cycles of one release tie without it.
         record["ai_source_version"] = SOURCE_SNAPSHOT.version
+        record["ai_strata_version"] = SOURCE_SNAPSHOT.version
+        record["ai_inference_digest"] = spec_v2.inference_digest
         # Matches Spark's sha2(col, 256): both hash the UTF-8 bytes.
         record["ai_source_digest"] = hashlib.sha256(
             row.doc_text.encode("utf-8")

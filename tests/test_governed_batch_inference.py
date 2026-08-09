@@ -149,7 +149,9 @@ def preflight_for(spec, source_snapshot=_UNSET, row_count=ESTIMATED_ROWS):
     builder now requires instead of trusting call order.
     """
     if source_snapshot is _UNSET:
-        source_snapshot = snapshot_for(spec) if spec.gate_required else None
+        # Every paid run is pinned now, gated or not — the preflight
+        # describes the table, and tier does not change that.
+        source_snapshot = snapshot_for(spec)
     return gbi.require_usable_source_rows(
         spec, 0, 0, 0, snapshot=source_snapshot, row_count=row_count
     )
@@ -162,7 +164,7 @@ def estimate_for(spec, source_snapshot=_UNSET):
     budget for exactly these rows — release and snapshot both.
     """
     if source_snapshot is _UNSET:
-        source_snapshot = snapshot_for(spec) if spec.gate_required else None
+        source_snapshot = snapshot_for(spec)
     return gbi.estimate_cost(
         spec,
         row_count=ESTIMATED_ROWS,
@@ -763,13 +765,13 @@ def test_execution_needs_a_report_that_judged_every_field():
         )
     ] * 200
     report = gate(spec, score(records, spec))
-    gbi.require_executable(spec, report)
+    gbi.require_executable(spec, report, preflight_for(spec))
 
     partial = report.model_copy(
         update={"fields": tuple(f for f in report.fields if f.field != "account_id")}
     )
     with pytest.raises(gbi.GateNotPassed, match="account_id"):
-        gbi.require_executable(spec, partial)
+        gbi.require_executable(spec, partial, preflight_for(spec))
 
 
 def test_a_score_cannot_borrow_another_groups_intervals():
@@ -814,7 +816,7 @@ def test_strata_are_resynced_without_paying_for_inference():
     # It touches only strata — no ai_ column and no inference call.
     assert "ai_query" not in sql
     # It advances the ordering column, but never an extracted value.
-    assert "target.ai_source_version" in sql.split("THEN UPDATE SET")[1]
+    assert "target.ai_strata_version" in sql.split("THEN UPDATE SET")[1]
     assert not any(
         gbi.ai_column(f.name) in sql.split("THEN UPDATE SET")[1] for f in spec.fields
     )
@@ -1058,7 +1060,7 @@ def test_execution_binds_the_reports_scores_to_the_spec():
     caller knows whether those scores are about this release."""
     spec = one_field_spec()
     report = adopting_report(spec)
-    gbi.require_executable(spec, report)
+    gbi.require_executable(spec, report, preflight_for(spec))
 
     # Scores from a different release, re-judged into an adopting report,
     # cannot authorise this one even though that report is self-consistent.
@@ -1070,7 +1072,7 @@ def test_execution_binds_the_reports_scores_to_the_spec():
         }
     )
     with pytest.raises(gbi.EvidenceMismatch):
-        gbi.require_executable(spec, smuggled)
+        gbi.require_executable(spec, smuggled, preflight_for(spec))
 
 
 def test_gated_evidence_must_record_its_source_version():
@@ -1123,13 +1125,14 @@ def test_the_strata_resync_will_not_relabel_a_newer_release():
     # The same pair the inference MERGE orders on — two cycles of one
     # unchanged spec tie on the release sequence and differ only in
     # which snapshot they read.
-    assert "coalesce(target.ai_release_sequence, -1) < 3" in sql
-    assert "coalesce(target.ai_release_sequence, -1) = 3" in sql
-    assert "coalesce(target.ai_source_version, -1) <= 11" in sql
+    # Strata order on their own column: release identity says nothing
+    # about which snapshot a label came from.
+    assert "coalesce(target.ai_strata_version, -1) <= 11" in sql
+    assert "ai_release_sequence" not in sql
     # Still only touching strata — no inference, no value columns.
     assert "ai_query" not in sql
     # It advances the ordering column, but never an extracted value.
-    assert "target.ai_source_version" in sql.split("THEN UPDATE SET")[1]
+    assert "target.ai_strata_version" in sql.split("THEN UPDATE SET")[1]
     assert not any(
         gbi.ai_column(f.name) in sql.split("THEN UPDATE SET")[1] for f in spec.fields
     )
@@ -1140,7 +1143,7 @@ def test_a_report_cannot_bring_its_own_gate_policy():
     derived against was still whatever the artifact claimed."""
     spec = one_field_spec(criticality="high", tolerable_error_rate=0.02)
     honest = adopting_report(spec)
-    gbi.require_executable(spec, honest)
+    gbi.require_executable(spec, honest, preflight_for(spec))
 
     def with_policy(criticality, required):
         """A report with honest, correctly stamped scores — and a
@@ -1159,13 +1162,13 @@ def test_a_report_cannot_bring_its_own_gate_policy():
     loosened = with_policy(gbi.Criticality.HIGH, 0.5)
     assert loosened.decision == gbi.GateDecision.ADOPT
     with pytest.raises(gbi.GateNotPassed, match="certifies a policy"):
-        gbi.require_executable(spec, loosened)
+        gbi.require_executable(spec, loosened, preflight_for(spec))
 
     # Downgrading criticality is the same attack by another route: it
     # silently swaps worst-stratum gating for the population-weighted row.
     downgraded = with_policy(gbi.Criticality.MEDIUM, spec.fields[0].required_rate)
     with pytest.raises(gbi.GateNotPassed, match="certifies a policy"):
-        gbi.require_executable(spec, downgraded)
+        gbi.require_executable(spec, downgraded, preflight_for(spec))
 
 
 def test_an_older_snapshot_cannot_overwrite_a_newer_one():
@@ -1381,7 +1384,7 @@ def test_a_report_cannot_relabel_its_own_tier():
     )
     assert unpinned.decision == gbi.GateDecision.ADOPT
     with pytest.raises(gbi.GateNotPassed, match="claims tier"):
-        gbi.require_executable(spec, unpinned)
+        gbi.require_executable(spec, unpinned, preflight_for(spec))
     # And so the builder will not read the live table on its say-so.
     with pytest.raises(gbi.GateNotPassed, match="claims tier"):
         gbi.build_execute_sql(
@@ -1400,11 +1403,11 @@ def test_the_resync_advances_the_version_it_compares():
     spec = make_spec(release_sequence=3)
     tuesday = gbi.resync_strata_sql(spec, snapshot_for(spec, 20))
     body = tuesday.split("THEN UPDATE SET")[1]
-    assert "target.ai_source_version = 20" in body
+    assert "target.ai_strata_version = 20" in body
     assert "target.layout = source.layout" in body
     # Monday, arriving late, is now excluded by the version it wrote.
     monday = gbi.resync_strata_sql(spec, snapshot_for(spec, 10))
-    assert "coalesce(target.ai_source_version, -1) <= 10" in monday
+    assert "coalesce(target.ai_strata_version, -1) <= 10" in monday
 
 
 def test_a_cost_estimate_cannot_declare_its_own_projection():
@@ -1523,6 +1526,90 @@ def test_the_priced_row_count_must_be_the_counted_one():
             preflight=preflight_for(spec),
             report=report,
         )
+
+
+def test_model_copy_cannot_smuggle_a_decision_past_the_validators():
+    """`model_copy` does not re-run validators, so every "the artifact
+    validates itself" guard needs a round trip where it is relied upon."""
+    spec = one_field_spec()
+    rejecting = gate(spec, score(records_for("s", correct=80, wrong=20), spec))
+    assert rejecting.decision == gbi.GateDecision.REJECT
+
+    # Pydantic builds this happily: no validator runs.
+    flipped = rejecting.model_copy(update={"decision": gbi.GateDecision.ADOPT})
+    assert flipped.decision == gbi.GateDecision.ADOPT
+    with pytest.raises(gbi.GateNotPassed, match="does not satisfy its own"):
+        gbi.require_executable(spec, flipped, preflight_for(spec))
+    # And the builder refuses it for the same reason.
+    with pytest.raises(gbi.GateNotPassed, match="does not satisfy its own"):
+        gbi.build_execute_sql(
+            spec,
+            run_id="r",
+            estimate=estimate_for(spec),
+            preflight=preflight_for(spec),
+            report=flipped,
+        )
+    # The legitimate `model_copy` transition still survives the round trip.
+    tier1 = one_field_spec(use_tier=1, rollback_plan="Restore prior version.")
+    approved = gbi.approve_gate(
+        gate(tier1, score(records_for("s", correct=200), tier1)), "board"
+    )
+    gbi.require_executable(tier1, approved, preflight_for(tier1))
+
+
+def test_population_weights_are_checked_against_the_measured_snapshot():
+    """Recomputing the weighted row from the weights the same report
+    carries proves it agrees with itself and nothing more."""
+    spec = one_field_spec(criticality="medium")
+    real = {"standard": 500, "legacy_scan": 500}
+    scores = score(
+        records_for("standard", correct=200) + records_for("legacy_scan", wrong=200),
+        spec,
+        real,
+    )
+    honest = gate(spec, scores)
+    assert honest.decision == gbi.GateDecision.REJECT
+
+    # Re-weight the same evidence so the failing stratum all but vanishes.
+    forged = gate(
+        spec,
+        score(
+            records_for("standard", correct=200)
+            + records_for("legacy_scan", wrong=200),
+            spec,
+            {"standard": 1_000_000, "legacy_scan": 1},
+        ),
+    )
+    assert forged.decision == gbi.GateDecision.ADOPT  # internally consistent
+
+    measured = preflight_for(spec, snapshot_for(spec), 1000)
+    measured = measured.model_copy(
+        update={"stratum_population": tuple(sorted(real.items()))}
+    )
+    with pytest.raises(gbi.GateNotPassed, match="population that does not exist"):
+        gbi.require_executable(spec, forged, measured)
+
+
+def test_a_policy_only_release_reuses_the_predictions_it_has():
+    """None of tolerance, tier, consumers or ceiling reaches the model, so
+    re-inferring for them buys byte-identical output at full price."""
+    spec = one_field_spec(tolerable_error_rate=0.05)
+    relaxed = one_field_spec(tolerable_error_rate=0.10)
+    assert relaxed.spec_digest != spec.spec_digest
+    assert relaxed.inference_digest == spec.inference_digest
+
+    # Both statements call the same rows done, so the second is a no-op.
+    predicate = gbi.restart_predicate_sql(relaxed, snapshot_for(relaxed))
+    assert f"done.ai_inference_digest =\n            '{spec.inference_digest}'" in (
+        predicate
+    )
+    assert "ai_spec_digest" not in predicate
+
+    # The policy stamp is refreshed separately, without inference.
+    policy = gbi.resync_policy_sql(relaxed, snapshot_for(relaxed))
+    assert f"target.ai_spec_digest = '{relaxed.spec_digest}'" in policy
+    assert f"target.ai_inference_digest = '{relaxed.inference_digest}'" in policy
+    assert "ai_query" not in policy
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -1657,11 +1744,11 @@ def test_tier_one_passing_gate_requires_a_named_human():
     assert report.decision == gbi.GateDecision.PENDING_APPROVAL
     assert report.human_review_obligations
     with pytest.raises(gbi.GateNotPassed):
-        gbi.require_executable(spec, report)
+        gbi.require_executable(spec, report, preflight_for(spec))
     approved = gbi.approve_gate(report, "analytics-approvers group")
     assert approved.decision == gbi.GateDecision.ADOPT
     assert approved.approved_by == "analytics-approvers group"
-    gbi.require_executable(spec, approved)
+    gbi.require_executable(spec, approved, preflight_for(spec))
 
 
 def test_a_rejected_gate_cannot_be_approved_into_adoption():
@@ -1675,21 +1762,23 @@ def test_a_rejected_gate_cannot_be_approved_into_adoption():
     with pytest.raises(gbi.GateNotPassed):
         gbi.approve_gate(report, "anyone")
     with pytest.raises(gbi.GateNotPassed):
-        gbi.require_executable(spec, report)
+        gbi.require_executable(spec, report, preflight_for(spec))
 
 
 def test_execution_guard_checks_tier_gate_and_spec_digest():
     spec = one_field_spec(criticality="high")
     with pytest.raises(gbi.GateNotPassed):
-        gbi.require_executable(spec, None)
+        gbi.require_executable(spec, None, preflight_for(spec))
     exploratory = make_spec(use_tier=3, target_table="main.sandbox.scratch")
-    gbi.require_executable(exploratory, None)  # tier 3: no gate to demand
+    gbi.require_executable(
+        exploratory, None, preflight_for(exploratory)
+    )  # tier 3: no gate to demand
     scores = score(records_for("standard", correct=200), spec)
     report = gate(spec, scores)
     assert report.decision == gbi.GateDecision.ADOPT
     drifted = spec.model_copy(update={"prompt_version": "2.0.0"})
     with pytest.raises(gbi.GateNotPassed, match="different spec revision"):
-        gbi.require_executable(drifted, report)
+        gbi.require_executable(drifted, report, preflight_for(drifted))
 
 
 # ---------------------------------------------------------------------------
@@ -2042,21 +2131,36 @@ def test_execute_sql_reprocesses_rows_from_an_earlier_release():
     )
     anti_join = sql.split("scored AS")[0]
     assert "ON source.doc_id = done.doc_id" in anti_join
-    assert "done.ai_model_version = 'model-b'" in anti_join
-    assert "done.ai_prompt_version = '2.0.0'" in anti_join
-    # The spec digest too: a changed abstention threshold or field set is
-    # also a new release, even when the model and prompt labels hold still.
-    assert f"done.ai_spec_digest = '{spec.spec_digest}'" in anti_join
-    assert f"'{spec.spec_digest}' AS ai_spec_digest" in sql
-    edited = spec.model_copy(update={"abstain_threshold": 0.8})
-    assert edited.spec_digest != spec.spec_digest
-    assert f"done.ai_spec_digest = '{edited.spec_digest}'" in gbi.build_execute_sql(
-        edited,
-        run_id="run-9",
-        estimate=estimate_for(edited),
-        preflight=preflight_for(edited),
-        report=adopting_report(edited),
+    # Restart keys on the inference identity, which covers the model and
+    # prompt labels, the prompt text, the abstention threshold and the
+    # field descriptions — everything that changes what the model returns.
+    assert f"done.ai_inference_digest =\n            '{spec.inference_digest}'" in (
+        anti_join
     )
+    assert f"'{spec.inference_digest}' AS ai_inference_digest" in sql
+    # The policy stamp is still landed, but is not what restart matches.
+    assert f"'{spec.spec_digest}' AS ai_spec_digest" in sql
+
+    def digest_of(**changes):
+        changed = spec.model_copy(update=changes)
+        return changed.inference_digest
+
+    # A changed threshold, prompt text, model or field set is different
+    # output, so each still re-infers.
+    for change in (
+        {"abstain_threshold": 0.8},
+        {"prompt_template": "Different instructions.\n\nDOC:\n"},
+        {"model_version": "model-c"},
+    ):
+        assert digest_of(**change) != spec.inference_digest, change
+    # A pure policy change is not, so it must not.
+    for change in (
+        {"consumed_by": ("some_other_pipeline",)},
+        {"cost_ceiling_cad": 999.0},
+    ):
+        changed = spec.model_copy(update=change)
+        assert changed.spec_digest != spec.spec_digest, change
+        assert changed.inference_digest == spec.inference_digest, change
     assert sql.startswith("MERGE INTO main.finance_docs.document_entities AS target")
     # Updating in place, but never downwards — see the release-ordering test.
     assert "THEN UPDATE SET *" in sql
