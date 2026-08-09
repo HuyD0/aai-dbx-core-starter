@@ -469,9 +469,30 @@ def _has_usable_trace(trace: Any) -> bool:
     already present while accepting both supported span layouts.
     """
 
-    if _trace_document(trace) is None:
+    document = _trace_document(trace)
+    if document is None:
         return False
-    return _trace_inputs(trace) is not None or bool(_root_spans(trace))
+
+    # Read the trace-info request directly. Going through `_trace_inputs`
+    # would let the inputs on an id-less mapping masquerading as a root span
+    # satisfy this branch before its span structure is checked.
+    info = document.get("info")
+    if isinstance(info, Mapping):
+        for key in ("request", "request_preview"):
+            request = info.get(key)
+            if isinstance(request, (str, bytes)):
+                try:
+                    request = json.loads(request)
+                except (ValueError, TypeError):
+                    continue
+            if isinstance(request, Mapping) and request:
+                return True
+
+    roots = _root_spans(trace)
+    return bool(roots) and all(
+        _is_populated(span.get("span_id")) or _is_populated(span.get("spanId"))
+        for span in roots
+    )
 
 
 def _trace_expectations(trace: Any) -> dict[str, Any]:

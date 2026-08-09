@@ -1082,6 +1082,7 @@ TRACE_ROWS = [
             "data": {
                 "spans": [
                     {
+                        "span_id": f"root-{index}",
                         "type": "RETRIEVER",
                         "name": "search",
                         "outputs": [{"page_content": "policy text"}],
@@ -2504,6 +2505,7 @@ def test_a_live_run_prices_the_fanout_it_will_actually_have(tmp_path):
             "data": {
                 "spans": [
                     {
+                        "span_id": f"root-{i}",
                         "parent_span_id": None,
                         "span_type": "RETRIEVER",
                         "inputs": {"question": f"question {i}"},
@@ -2536,6 +2538,7 @@ def test_a_traces_run_still_counts_the_fanout_it_will_judge(tmp_path):
             "data": {
                 "spans": [
                     {
+                        "span_id": f"root-{i}",
                         "parent_span_id": None,
                         "span_type": "RETRIEVER",
                         "inputs": {"question": f"question {i}"},
@@ -2573,6 +2576,7 @@ def test_a_trace_only_dataset_can_still_be_re_run_live(tmp_path):
                 "data": {
                     "spans": [
                         {
+                            "span_id": f"root-{index}",
                             "parent_span_id": None,
                             "inputs": {"question": f"question {index}"},
                         }
