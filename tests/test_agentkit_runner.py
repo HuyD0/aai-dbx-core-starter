@@ -824,6 +824,47 @@ def test_answer_sheet_target_uses_answer_sheet_mode(tmp_path, mode):
     assert outcome.results.mode == "answer-sheet"
 
 
+def test_jsonl_answer_sheet_target_runs_in_automatic_mode(tmp_path):
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: evals/data/answer_sheet.jsonl\n"
+            "dataset: evals/data/golden_cases.json\n"
+        ),
+    )
+    sheet = tmp_path / "evals" / "data" / "answer_sheet.jsonl"
+    sheet.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "question": f"question {index}",
+                    "answer": f"answer {index} about pensions",
+                }
+            )
+            for index in range(12)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mlflow = FakeMlflow()
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        judges_enabled=False,
+        require_baseline=False,
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.mode == "answer-sheet"
+    assert outcome.results.metrics["keyword_coverage/mean"] == pytest.approx(1.0)
+    assert mlflow.evaluate_calls == []
+
+
 def test_http_auth_preflight_precedes_identity_confirmation_and_transport(
     tmp_path, monkeypatch
 ):
@@ -1237,14 +1278,14 @@ def test_local_scoring_still_gates_and_can_fail(tmp_path):
     assert not outcome.results.gate_passed
 
 
-def test_local_scoring_refuses_a_missing_recorded_output(tmp_path):
+def test_answer_sheet_refuses_a_missing_recorded_output_before_scoring(tmp_path):
     project = _project(tmp_path)
     sheet = tmp_path / "evals" / "data" / "answer_sheet.json"
     answers = json.loads(sheet.read_text())
     answers[0]["answer"] = None
     sheet.write_text(json.dumps(answers))
 
-    with pytest.raises(ConfigError, match="no output to score"):
+    with pytest.raises(ConfigError, match="needs populated answer"):
         run_scoring(
             project,
             command="smoke",

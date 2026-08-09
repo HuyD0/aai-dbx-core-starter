@@ -277,8 +277,9 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
     the generic ``{"inputs": {...}, "outputs": ...}`` shape.
     """
 
+    sheet_path = Path(sheet_path)
     try:
-        records = json.loads(Path(sheet_path).read_text(encoding="utf-8"))
+        text = sheet_path.read_text(encoding="utf-8")
     except FileNotFoundError as error:
         raise ConfigError(
             f"answer sheet {sheet_path} does not exist",
@@ -287,21 +288,78 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
                 "live mode against a callable target."
             ),
         ) from error
-    if not isinstance(records, list):
-        raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
+    except UnicodeError as error:
+        raise ConfigError(f"answer sheet {sheet_path} is not valid UTF-8") from error
+    except OSError as error:
+        raise ConfigError(f"answer sheet {sheet_path} could not be read") from error
+
+    if sheet_path.suffix == ".jsonl":
+        parsed = _load_jsonl_objects(
+            text,
+            subject=f"answer sheet {sheet_path}",
+        )
+        if not parsed:
+            raise ConfigError(
+                f"answer sheet {sheet_path} must contain at least one JSON object"
+            )
+        located_records = [(record, f"line {line}") for line, record in parsed]
+    else:
+        try:
+            records = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ConfigError(
+                f"answer sheet {sheet_path} is not valid JSON "
+                f"(line {error.lineno}, column {error.colno}: {error.msg})"
+            ) from error
+        if not isinstance(records, list):
+            raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
+        located_records = [
+            (record, f"row {index}") for index, record in enumerate(records)
+        ]
+
     answers: dict[str, Any] = {}
-    for record in records:
+    answer_locations: dict[str, str] = {}
+    for record, location in located_records:
         if not isinstance(record, Mapping):
-            raise ConfigError(f"answer sheet {sheet_path} rows must be objects")
+            raise ConfigError(
+                f"answer sheet {sheet_path} {location} must be a JSON object"
+            )
         if "question" in record and "answer" in record:
-            answers[_inputs_key({"question": record["question"]})] = record["answer"]
+            if not _is_populated(record["question"]):
+                raise ConfigError(
+                    f"answer sheet {sheet_path} {location} needs a populated question"
+                )
+            inputs = {"question": record["question"]}
+            output = record["answer"]
+            output_name = "answer"
         elif "inputs" in record and "outputs" in record:
-            answers[_inputs_key(record["inputs"])] = record["outputs"]
+            inputs = record["inputs"]
+            if not isinstance(inputs, Mapping) or not inputs:
+                raise ConfigError(
+                    f"answer sheet {sheet_path} {location} needs a non-empty "
+                    "inputs object"
+                )
+            output = record["outputs"]
+            output_name = "outputs"
         else:
             raise ConfigError(
-                f"answer sheet {sheet_path} rows need question/answer or "
-                "inputs/outputs fields"
+                f"answer sheet {sheet_path} {location} needs question/answer "
+                "or inputs/outputs fields"
             )
+        if not _is_populated(output):
+            raise ConfigError(
+                f"answer sheet {sheet_path} {location} needs populated "
+                f"{output_name}"
+            )
+        key = _inputs_key(inputs)
+        if key in answers:
+            raise ConfigError(
+                f"answer sheet {sheet_path} has duplicate inputs at {location} "
+                f"(first seen at {answer_locations[key]})",
+                remediation="Keep exactly one recorded answer for each input.",
+            )
+        answers[key] = output
+        answer_locations[key] = location
 
     rows: list[Mapping[str, Any]] = []
     missing: list[str] = []
@@ -1793,7 +1851,7 @@ def _stratified_indices(
 def _load_file_rows(path: Path) -> tuple[list[Mapping[str, Any]], str]:
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".jsonl":
-        rows_raw = [json.loads(line) for line in text.splitlines() if line.strip()]
+        rows_raw = [row for _, row in _load_jsonl_objects(text, subject=str(path))]
         source = "local-jsonl"
     else:
         try:
@@ -1809,6 +1867,28 @@ def _load_file_rows(path: Path) -> tuple[list[Mapping[str, Any]], str]:
             raise ConfigError(f"{path} row {index} must be a JSON object")
         rows.append(row)
     return rows, source
+
+
+def _load_jsonl_objects(
+    text: str, *, subject: str
+) -> list[tuple[int, Mapping[str, Any]]]:
+    """Parse nonblank JSONL lines without echoing their untrusted contents."""
+
+    rows: list[tuple[int, Mapping[str, Any]]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ConfigError(
+                f"{subject} line {line_number} is not valid JSON "
+                f"(column {error.colno}: {error.msg})"
+            ) from error
+        if not isinstance(row, Mapping):
+            raise ConfigError(f"{subject} line {line_number} must be a JSON object")
+        rows.append((line_number, row))
+    return rows
 
 
 def _looks_like_uc_dataset(reference: str, root: Path) -> bool:

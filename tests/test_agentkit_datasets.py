@@ -486,6 +486,132 @@ def test_attach_answer_sheet_generic_shape(tmp_path):
     assert replayed.rows[1]["outputs"] == "generic 1"
 
 
+def test_attach_answer_sheet_jsonl_supports_both_record_shapes(tmp_path):
+    rows = _rows(2)
+    _write_dataset(tmp_path, rows)
+    sheet = tmp_path / "answers.jsonl"
+    sheet.write_text(
+        "\n".join(
+            [
+                "",
+                json.dumps({"question": "question 0", "answer": "recorded 0"}),
+                json.dumps(
+                    {
+                        "inputs": rows[1]["inputs"],
+                        "outputs": {"content": ["structured", "answer"]},
+                    }
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+    replayed = attach_answer_sheet(dataset, sheet)
+
+    assert replayed.rows[0]["outputs"] == "recorded 0"
+    assert replayed.rows[1]["outputs"] == {"content": ["structured", "answer"]}
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (
+            '{"question":"question 0","answer":"a"}\n' '{"token":"super-secret",',
+            "line 2 is not valid JSON",
+        ),
+        (
+            '{"question":"question 0","answer":"a"}\n[]',
+            "line 2 must be a JSON object",
+        ),
+        ("\n  \n", "must contain at least one JSON object"),
+    ],
+    ids=("malformed", "nonobject", "empty"),
+)
+def test_attach_answer_sheet_jsonl_rejects_invalid_documents(
+    tmp_path, contents, message
+):
+    _write_dataset(tmp_path, _rows(1))
+    sheet = tmp_path / "answers.jsonl"
+    sheet.write_text(contents, encoding="utf-8")
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    with pytest.raises(ConfigError, match=message) as excinfo:
+        attach_answer_sheet(dataset, sheet)
+
+    assert "super-secret" not in str(excinfo.value)
+    assert all("outputs" not in row for row in dataset.rows)
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_attach_answer_sheet_rejects_duplicate_normalized_inputs(tmp_path, suffix):
+    rows = _rows(1)
+    _write_dataset(tmp_path, rows)
+    records = [
+        {"question": "question 0", "answer": "first"},
+        {"inputs": {"question": "question 0"}, "outputs": "second"},
+    ]
+    sheet = tmp_path / f"answers{suffix}"
+    sheet.write_text(
+        (
+            json.dumps(records)
+            if suffix == ".json"
+            else "\n".join(json.dumps(record) for record in records)
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="duplicate inputs") as excinfo:
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    message = str(excinfo.value)
+    assert "first seen" in message
+    assert "question 0" not in message
+
+
+@pytest.mark.parametrize(
+    ("record", "message"),
+    [
+        ({"inputs": {}, "outputs": "answer"}, "non-empty inputs object"),
+        ({"inputs": "question 0", "outputs": "answer"}, "inputs object"),
+        ({"inputs": {"question": "question 0"}, "outputs": None}, "populated outputs"),
+        ({"question": "", "answer": "answer"}, "populated question"),
+        ({"question": "question 0", "answer": {}}, "populated answer"),
+        ({"question": "question 0"}, "question/answer or inputs/outputs"),
+    ],
+)
+def test_attach_answer_sheet_jsonl_requires_complete_populated_records(
+    tmp_path, record, message
+):
+    _write_dataset(tmp_path, _rows(1))
+    sheet = tmp_path / "answers.jsonl"
+    sheet.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+
+def test_attach_answer_sheet_normalizes_json_and_read_errors(tmp_path):
+    _write_dataset(tmp_path, _rows(1))
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text('[{"answer":', encoding="utf-8")
+    with pytest.raises(ConfigError, match="not valid JSON"):
+        attach_answer_sheet(dataset, malformed)
+
+    invalid_utf8 = tmp_path / "invalid.jsonl"
+    invalid_utf8.write_bytes(b"\xff")
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        attach_answer_sheet(dataset, invalid_utf8)
+
+    unreadable = tmp_path / "directory.jsonl"
+    unreadable.mkdir()
+    with pytest.raises(ConfigError, match="could not be read"):
+        attach_answer_sheet(dataset, unreadable)
+
+
 def test_attach_answer_sheet_reports_missing_rows(tmp_path):
     _write_dataset(tmp_path, _rows(3))
     sheet = tmp_path / "answers.json"
