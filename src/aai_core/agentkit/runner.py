@@ -173,6 +173,16 @@ def run_scoring(
     target = resolve_target(
         agent or config.agent, root=project.root, settings=project.settings
     )
+    if mode == "live" and target.kind is TargetKind.ANSWER_SHEET:
+        raise ConfigError(
+            "live mode cannot use an answer-sheet agent target because it "
+            "has no invocable agent",
+            remediation=(
+                "Remove --mode live to select answer-sheet mode automatically, "
+                "choose --mode answer-sheet, or select a callable, HTTP, "
+                "serving-endpoint, or model target."
+            ),
+        )
     preflight_target(target, project=project, require_invocation=mode == "live")
     dataset = load_dataset(
         config.dataset, root=project.root, mlflow_module=mlflow_module
