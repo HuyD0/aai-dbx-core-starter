@@ -27,6 +27,7 @@ from aai_core.agentkit.errors import (
     BaselineMissingError,
     ConfigError,
 )
+from aai_core.agentkit.results import RESULTS_ARTIFACT_PATH, ResultsRecord
 
 
 def _record(**overrides):
@@ -83,6 +84,8 @@ def _remote_run(
         "aai.recorded_at": "2026-08-02T10:00:00Z",
         "aai.change_id": "abc1234",
         "aai.scorer_versions": "keyword_coverage=1",
+        "aai.gate_passed": "true",
+        "aai.decision": "inconclusive",
     }
     governed_tags.update(tags or {})
     return SimpleNamespace(
@@ -91,6 +94,68 @@ def _remote_run(
             metrics=({"keyword_coverage/mean": 0.8} if metrics is None else metrics),
             tags=governed_tags,
         ),
+    )
+
+
+def _results_from_remote(run, **overrides):
+    tags = run.data.tags
+    values = {
+        "command": "compare",
+        "recorded_at": tags["aai.recorded_at"],
+        "run_id": run.info.run_id,
+        "experiment_id": run.info.experiment_id,
+        "agent": tags["aai.agent_target"],
+        "dataset": BaselineDataset(
+            ref=tags["aai.dataset"],
+            digest=tags["aai.dataset_digest"],
+            rows=int(tags["aai.dataset_rows"]),
+        ),
+        "scope": BaselineScope(
+            mode=tags["aai.scope_mode"], rows=int(tags["aai.scope_rows"])
+        ),
+        "mode": "live",
+        "metrics": dict(run.data.metrics),
+        "versions": BaselineVersions(
+            agent=tags["aai.agent_target"],
+            scorers={
+                name: int(version)
+                for name, version in (
+                    item.split("=", 1)
+                    for item in tags["aai.scorer_versions"].split(",")
+                )
+            },
+            judge_model=tags.get("aai.judge_model"),
+            judge_model_identity=tags.get("aai.judge_model_identity"),
+            judge_prompts={
+                name: version
+                for name, version in (
+                    item.split("=", 1)
+                    for item in tags.get("aai.judge_prompt_versions", "").split(",")
+                    if item
+                )
+            },
+            aai_core=tags["aai.agentkit_version"],
+        ),
+        "established_baseline": True,
+        "decision": tags["aai.decision"],
+        "change_id": tags["aai.change_id"],
+        "gate_passed": tags["aai.gate_passed"] == "true",
+    }
+    values.update(overrides)
+    return ResultsRecord(**values)
+
+
+def _remote_mlflow(tmp_path, get_run, *, evidence_overrides=None):
+    def download_artifacts(run_id=None, artifact_path=None):
+        assert artifact_path == RESULTS_ARTIFACT_PATH
+        record = _results_from_remote(get_run(run_id), **(evidence_overrides or {}))
+        path = tmp_path / "remote-results.json"
+        path.write_text(record.model_dump_json(), encoding="utf-8")
+        return str(path)
+
+    return SimpleNamespace(
+        get_run=get_run,
+        artifacts=SimpleNamespace(download_artifacts=download_artifacts),
     )
 
 
@@ -167,7 +232,7 @@ def test_selection_precedence_flag_then_config_then_file(tmp_path):
             },
         )
 
-    fake_mlflow = SimpleNamespace(get_run=get_run)
+    fake_mlflow = _remote_mlflow(tmp_path, get_run)
 
     from_flag, _ = select_baseline(
         baseline_path=path,
@@ -459,7 +524,7 @@ def test_a_run_baseline_keeps_the_scope_it_was_scored_at(tmp_path):
             "aai.scope_rows": "20",
         },
     )
-    fake = SimpleNamespace(get_run=lambda run_id: run)
+    fake = _remote_mlflow(tmp_path, lambda run_id: run)
 
     record, _ = select_baseline(
         baseline_path=tmp_path / "missing.json",
@@ -514,6 +579,65 @@ def test_an_explicit_remote_baseline_must_be_finished_governed_evidence(
 
     assert reason in str(excinfo.value)
     assert "--establish-baseline" in str(excinfo.value)
+
+
+def test_an_explicit_remote_baseline_requires_its_canonical_results_artifact(
+    tmp_path,
+):
+    run = _remote_run()
+
+    def missing_artifact(**kwargs):
+        raise OSError("artifact not found")
+
+    mlflow = SimpleNamespace(
+        get_run=lambda run_id: run,
+        artifacts=SimpleNamespace(download_artifacts=missing_artifact),
+    )
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        select_baseline(
+            baseline_path=tmp_path / "missing.json",
+            flag_run_id="run-9",
+            mlflow_module=mlflow,
+        )
+
+    assert "canonical agentkit/results.json" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("evidence_overrides", "field"),
+    [
+        ({"established_baseline": False}, "established_baseline"),
+        (
+            {
+                "dataset": BaselineDataset(
+                    ref="golden.json", digest="different", rows=10
+                )
+            },
+            "dataset",
+        ),
+        ({"metrics": {"keyword_coverage/mean": 0.1}}, "metrics"),
+        ({"change_id": "different"}, "change_id"),
+    ],
+)
+def test_remote_baseline_artifact_must_match_the_run_lineage(
+    tmp_path, evidence_overrides, field
+):
+    run = _remote_run()
+    mlflow = _remote_mlflow(
+        tmp_path,
+        lambda run_id: run,
+        evidence_overrides=evidence_overrides,
+    )
+
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        select_baseline(
+            baseline_path=tmp_path / "missing.json",
+            flag_run_id="run-9",
+            mlflow_module=mlflow,
+        )
+
+    assert field in str(excinfo.value)
 
 
 def _prompt_record():
@@ -638,7 +762,7 @@ def test_a_sample_of_the_recorded_dataset_is_not_a_changed_dataset():
     assert any("full/10 rows but this run scores sample/4" in f for f in failures)
 
 
-def test_a_run_baseline_restores_its_judge_prompt_versions():
+def test_a_run_baseline_restores_its_judge_prompt_versions(tmp_path):
     """The prompt drift check is dead without this."""
 
     run = _remote_run(
@@ -648,7 +772,7 @@ def test_a_run_baseline_restores_its_judge_prompt_versions():
             "aai.judge_prompt_versions": "pension_domain_policy=prompts:/cat.sch.p/3"
         },
     )
-    mlflow = SimpleNamespace(get_run=lambda run_id: run)
+    mlflow = _remote_mlflow(tmp_path, lambda run_id: run)
 
     record, _ = select_baseline(
         baseline_path=None,

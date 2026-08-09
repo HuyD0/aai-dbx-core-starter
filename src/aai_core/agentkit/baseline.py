@@ -38,6 +38,8 @@ _REMOTE_BASELINE_TAGS = (
     "aai.recorded_at",
     "aai.change_id",
     "aai.scorer_versions",
+    "aai.gate_passed",
+    "aai.decision",
 )
 
 
@@ -417,7 +419,7 @@ def _baseline_from_run(
             f"its status is {status or 'unknown'}, not FINISHED",
         )
     tags = dict(getattr(run.data, "tags", {}) or {})
-    metrics = dict(getattr(run.data, "metrics", {}) or {})
+    run_metrics = dict(getattr(run.data, "metrics", {}) or {})
     missing = [
         name
         for name in _REMOTE_BASELINE_TAGS
@@ -444,7 +446,7 @@ def _baseline_from_run(
         )
     dataset_rows = _positive_tag_int(tags, "aai.dataset_rows", run_id, origin)
     scope_rows = _positive_tag_int(tags, "aai.scope_rows", run_id, origin)
-    if not metrics:
+    if not run_metrics:
         raise _invalid_remote_baseline(run_id, origin, "it carries no scored metrics")
     scorer_pairs = _strict_tag_pairs(
         tags["aai.scorer_versions"],
@@ -463,31 +465,66 @@ def _baseline_from_run(
     # back would leave every run-fetched baseline with an empty prompt map,
     # and a check that cannot fire is not a check.
     judge_prompts = dict(_tag_pairs(tags.get("aai.judge_prompt_versions")))
+    evidence = _remote_results_evidence(mlflow, run_id, origin)
+    expected_experiment_id = str(getattr(info, "experiment_id", "")) or None
+    expected_versions = BaselineVersions(
+        agent=tags["aai.agent_target"],
+        scorers=scorers,
+        judge_model=tags.get("aai.judge_model"),
+        judge_model_identity=tags.get("aai.judge_model_identity"),
+        judge_prompts=judge_prompts,
+        aai_core=tags["aai.agentkit_version"],
+    )
+    expected_dataset = BaselineDataset(
+        ref=tags["aai.dataset"],
+        digest=tags["aai.dataset_digest"],
+        rows=dataset_rows,
+    )
+    expected_scope = BaselineScope(mode=scope_mode, rows=scope_rows)
+    mismatches: list[str] = []
+    for name, actual, expected in (
+        ("experiment_id", evidence.experiment_id, expected_experiment_id),
+        ("recorded_at", evidence.recorded_at, tags["aai.recorded_at"]),
+        ("agent", evidence.agent, tags["aai.agent_target"]),
+        ("dataset", evidence.dataset, expected_dataset),
+        ("scope", evidence.scope, expected_scope),
+        ("versions", evidence.versions, expected_versions),
+        ("change_id", evidence.change_id, tags["aai.change_id"]),
+        ("gate_passed", str(evidence.gate_passed).lower(), tags["aai.gate_passed"]),
+        ("decision", evidence.decision, tags["aai.decision"]),
+    ):
+        if actual != expected:
+            mismatches.append(name)
+    if not evidence.established_baseline:
+        mismatches.append("established_baseline")
+    if evidence.baseline_run_id is not None or evidence.baseline_metrics:
+        mismatches.append("baseline_lineage")
+    evidence_metrics = dict(evidence.metrics)
+    if not evidence_metrics:
+        mismatches.append("metrics")
+    elif any(
+        name not in run_metrics or run_metrics[name] != value
+        for name, value in evidence_metrics.items()
+    ):
+        mismatches.append("metrics")
+    if mismatches:
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            "canonical agentkit/results.json disagrees with the run's "
+            "lineage: " + ", ".join(sorted(set(mismatches))),
+        )
     return BaselineRecord(
         schema_version=1,
         run_id=run_id,
-        experiment_id=str(getattr(info, "experiment_id", "")) or None,
-        recorded_at=tags["aai.recorded_at"],
-        dataset=BaselineDataset(
-            ref=tags["aai.dataset"],
-            digest=tags["aai.dataset_digest"],
-            rows=dataset_rows,
-        ),
-        scope=BaselineScope(
-            mode=scope_mode,
-            rows=scope_rows,
-        ),
-        metrics=metrics,
-        versions=BaselineVersions(
-            agent=tags["aai.agent_target"],
-            scorers=scorers,
-            judge_model=tags.get("aai.judge_model"),
-            judge_model_identity=tags.get("aai.judge_model_identity"),
-            judge_prompts=judge_prompts,
-            aai_core=tags["aai.agentkit_version"],
-        ),
+        experiment_id=expected_experiment_id,
+        recorded_at=evidence.recorded_at,
+        dataset=evidence.dataset,
+        scope=evidence.scope,
+        metrics=evidence_metrics,
+        versions=evidence.versions,
         recorded_by=origin,
-        change_id=tags["aai.change_id"],
+        change_id=evidence.change_id,
     )
 
 
@@ -502,6 +539,21 @@ def _invalid_remote_baseline(
             "baseline files remain readable, but ungoverned remote runs do not."
         ),
     )
+
+
+def _remote_results_evidence(mlflow: Any, run_id: str, origin: str) -> Any:
+    # Local import avoids the module cycle: ResultsRecord itself uses the
+    # baseline dataset/scope/version contracts defined above.
+    from aai_core.agentkit.results import fetch_results
+
+    try:
+        return fetch_results(run_id, mlflow_module=mlflow)
+    except ConfigError as error:
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            f"its canonical agentkit/results.json is unavailable or invalid ({error})",
+        ) from error
 
 
 def _positive_tag_int(
