@@ -1105,6 +1105,20 @@ def test_consistent_dual_span_layout_uses_the_nested_root(tmp_path):
     }
 
 
+def test_null_nested_spans_fall_back_to_the_top_level_layout(tmp_path):
+    root = {"span_id": "root", "inputs": {"question": "q"}}
+    _write_dataset(
+        tmp_path,
+        [{"trace": {"data": {"spans": None}, "spans": [root]}}],
+    )
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert validate_dataset(dataset, minimum_rows=1) == []
+    assert effective_dataset(dataset, mode="live").rows[0]["inputs"] == {
+        "question": "q"
+    }
+
+
 @pytest.mark.parametrize(
     "trace",
     [

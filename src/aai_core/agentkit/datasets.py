@@ -482,9 +482,9 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     data = document.get("data")
     nested_supplied = isinstance(data, Mapping) and "spans" in data
     top_level_supplied = "spans" in document
-    representations = ([data["spans"]] if nested_supplied else []) + (
-        [document["spans"]] if top_level_supplied else []
-    )
+    representations = (
+        [data["spans"]] if nested_supplied and data["spans"] is not None else []
+    ) + ([document["spans"]] if top_level_supplied else [])
     for representation in representations:
         if not isinstance(representation, Sequence) or isinstance(
             representation, (str, bytes)
