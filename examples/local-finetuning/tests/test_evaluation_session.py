@@ -1156,6 +1156,15 @@ def test_setuptools_finder_editable_is_portable_and_binds_mapped_sources(
         finder_path = install_root / f"{finder_name}.py"
         spec = importlib.util.spec_from_file_location(finder_name, finder_path)
         assert spec is not None and spec.loader is not None
+        tracker = training._RUNTIME_EXTENSION_FINDER
+        assert tracker is not None
+        spec = tracker._tracked_spec(finder_name, spec)
+        monkeypatch.setitem(training._RUNTIME_COMPLETED_LOADS, finder_name, [])
+        monkeypatch.setattr(
+            training,
+            "_RUNTIME_COMPLETED_LOADS_OVERFLOW",
+            training._RUNTIME_COMPLETED_LOADS_OVERFLOW.difference({finder_name}),
+        )
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(training.sys.modules, finder_name, module)
         spec.loader.exec_module(module)
@@ -1856,6 +1865,200 @@ except RuntimeError as error:
     assert "completed import provenance" in str(error.__cause__)
 else:
     raise AssertionError("replacement extension module was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_native_created_extension_child_binds_parent_provenance() -> None:
+    script = r"""
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+snapshot = training.capture_execution_snapshot()
+import charset_normalizer
+import charset_normalizer.cd
+import charset_normalizer.md
+path = training._loaded_module_origin_path(charset_normalizer.md.__spec__)
+assert path is not None
+assert ("charset_normalizer.md", path) in training._RUNTIME_NATIVE_CHILD_MODULES
+training.recheck_execution_snapshot(snapshot)
+
+native = charset_normalizer.md
+replacement = ModuleType("charset_normalizer.md")
+replacement.__spec__ = native.__spec__
+replacement.__loader__ = native.__loader__
+replacement.__package__ = "charset_normalizer"
+charset_normalizer.md = replacement
+sys.modules["charset_normalizer.md"] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "native-created module identity" in str(error.__cause__)
+else:
+    raise AssertionError("replacement native-created module was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_lazy_source_identity_and_expat_aliases_are_bound() -> None:
+    script = r"""
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+snapshot = training.capture_execution_snapshot()
+import PIL.ImageColor
+import xml.parsers.expat
+for name in ("xml.parsers.expat.errors", "xml.parsers.expat.model"):
+    assert sys.modules[name] is getattr(xml.parsers.expat, name.rpartition(".")[2])
+training.recheck_execution_snapshot(snapshot)
+
+native = sys.modules["PIL.ImageColor"]
+replacement = ModuleType("PIL.ImageColor")
+replacement.__spec__ = native.__spec__
+replacement.__loader__ = native.__loader__
+replacement.__package__ = "PIL"
+sys.modules["PIL.ImageColor"] = replacement
+import PIL
+PIL.ImageColor = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "source module identity lacks completed import provenance" in str(
+        error.__cause__
+    )
+else:
+    raise AssertionError("replacement source module was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_lazy_namespace_identity_and_lifecycle_are_bound() -> None:
+    script = r"""
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+snapshot = training.capture_execution_snapshot()
+assert "google" not in sys.modules
+import google
+training.recheck_execution_snapshot(snapshot)
+captured_namespace_snapshot = training.capture_execution_snapshot()
+
+native = google
+replacement = ModuleType("google")
+replacement.__spec__ = native.__spec__
+replacement.__loader__ = native.__loader__
+replacement.__package__ = "google"
+replacement.__path__ = native.__path__
+sys.modules["google"] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "namespace lacks completed import provenance" in str(error.__cause__)
+else:
+    raise AssertionError("replacement namespace module was accepted")
+try:
+    training.recheck_execution_snapshot(captured_namespace_snapshot)
+except RuntimeError as error:
+    assert "namespace module identity changed" in str(error.__cause__)
+else:
+    raise AssertionError("captured namespace identity was not retained")
+
+sys.modules["google"] = native
+training.recheck_execution_snapshot(snapshot)
+del sys.modules["google"]
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "loaded and removed" in str(error.__cause__)
+else:
+    raise AssertionError("removed lazy namespace module was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_interpreter_module_inventory_and_identity_are_bound() -> None:
+    script = r"""
+import importlib.machinery
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+snapshot = training.capture_execution_snapshot()
+assert "_statistics" not in sys.modules
+assert "__hello__" not in sys.modules
+import _statistics
+import __hello__
+training.recheck_execution_snapshot(snapshot)
+
+for name, origin, loader in (
+    ("claimed_builtin", "built-in", importlib.machinery.BuiltinImporter),
+    ("claimed_frozen", "frozen", importlib.machinery.FrozenImporter),
+):
+    claimed = ModuleType(name)
+    claimed.__spec__ = importlib.machinery.ModuleSpec(
+        name,
+        loader,
+        origin=origin,
+    )
+    claimed.__loader__ = loader
+    sys.modules[name] = claimed
+    try:
+        training.recheck_execution_snapshot(snapshot)
+    except RuntimeError as error:
+        assert "not in inventory" in str(error.__cause__)
+    else:
+        raise AssertionError(f"unlisted {origin} module was accepted")
+    del sys.modules[name]
+
+for name in ("_statistics", "__hello__"):
+    native = sys.modules[name]
+    replacement = ModuleType(name)
+    replacement.__spec__ = native.__spec__
+    replacement.__loader__ = native.__loader__
+    sys.modules[name] = replacement
+    try:
+        training.recheck_execution_snapshot(snapshot)
+    except RuntimeError as error:
+        assert "interpreter module" in str(error.__cause__)
+    else:
+        raise AssertionError(f"replacement interpreter module was accepted: {name}")
+    sys.modules[name] = native
+    training.recheck_execution_snapshot(snapshot)
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
