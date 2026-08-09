@@ -747,6 +747,14 @@ class SourcePreflight(BaseModel):
     def _strata_account_for_every_row(self) -> SourcePreflight:
         """The parts must add up to the whole they were measured beside.
 
+        Names must be unique first, or the sum proves nothing: every
+        consumer reads these pairs as a mapping, and
+        ``(("standard", 50), ("standard", 50))`` sums to 100 while
+        `dict()` collapses it to 50 — so a stratum could be omitted from
+        the population entirely and the arithmetic would still balance.
+        A tuple of pairs standing in for a mapping has to enforce the one
+        property a mapping guarantees.
+
         A mapping that omits a group is not obviously wrong anywhere: the
         sample is drawn from it, the weighted row is computed from it, and
         the report/preflight comparison then agrees with itself — while
@@ -755,6 +763,13 @@ class SourcePreflight(BaseModel):
         """
         if not self.stratum_population:
             return self
+        names = [name for name, _ in self.stratum_population]
+        if len(names) != len(set(names)):
+            raise ValueError(
+                "the measured population names a stratum more than once; "
+                "read as a mapping the duplicates collapse, and the row "
+                "count would balance against a population missing a group"
+            )
         counts = [count for _, count in self.stratum_population]
         if any(count < 0 for count in counts):
             raise ValueError("a stratum cannot contain a negative number of rows")
@@ -1183,6 +1198,15 @@ class FieldStratumScore(BaseModel):
                 raise ValueError(
                     "the population-weighted row must carry the weights it "
                     "was computed from, so the gate can recompute it"
+                )
+            # Same reasoning as `SourcePreflight`: these pairs are read
+            # as a mapping, so duplicate names collapse and the weights
+            # would no longer describe what they appear to.
+            weight_names = [name for name, _ in self.stratum_population]
+            if len(weight_names) != len(set(weight_names)):
+                raise ValueError(
+                    "the weighted row names a stratum more than once in its "
+                    "population weights"
                 )
             if tuple(sorted(name for name, _ in self.stratum_population)) != tuple(
                 sorted(self.sample_strata)

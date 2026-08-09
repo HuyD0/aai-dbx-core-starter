@@ -1306,14 +1306,14 @@ spark.sql(
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
-# The version this run *starts* from. Stage 7 needs the version this run
-# produced, and `DESCRIBE HISTORY ... LIMIT 1` there would return whatever
-# committed most recently — another writer's version, during exactly the
-# overlapping cycles this example supports. Anchoring here narrows it to
-# commits that happened after we began.
-VERSION_BEFORE_WRITE = spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1").first()[
-    "version"
-]
+# Stamp this run id into the Delta commit itself. Stage 7 needs the
+# version *this run* produced, and history position cannot supply it:
+# the latest entry is whatever committed most recently, and the earliest
+# entry after an anchor is another writer's commit if one landed in
+# between — both misattribute during exactly the overlapping cycles this
+# example supports. `userMetadata` is written into the commit record, so
+# the entry can be identified rather than inferred.
+spark.conf.set("spark.databricks.delta.commitInfo.userMetadata", RUN_ID)
 
 if not SIMULATED:
     spark.sql(execute_sql)
@@ -1458,19 +1458,24 @@ for statement in gbi.column_tag_statements(spec_v2, RUN_ID):
         print(f"  {statement}")
         print(f"  ({tag_error})")
 
-# The earliest commit after this run began is this run's own write. That
-# is not airtight — a writer that committed between our anchor and our
-# MERGE would be picked instead — but it is bounded and honest, where
-# taking the latest version silently attributes someone else's commit to
-# this run forever. A single-writer table makes it exact.
-target_version = (
+# This run's own commits, identified by the stamp rather than by
+# position. The last of them is the version at which this run's work is
+# complete — the resyncs and the MERGE all carry the same id, and it is
+# the final state that provenance should point at.
+run_commits = (
     spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE}")
-    .filter(F.col("version") > F.lit(VERSION_BEFORE_WRITE))
-    .agg(F.min("version").alias("version"))
+    .filter(F.col("userMetadata") == F.lit(RUN_ID))
+    .agg(F.max("version").alias("version"))
     .first()["version"]
 )
-if target_version is None:  # restart found nothing pending: no new commit
-    target_version = VERSION_BEFORE_WRITE
+# A restart that found nothing pending writes nothing, so there is no
+# commit of ours to point at; the table stands where it already was.
+target_version = (
+    run_commits
+    if run_commits is not None
+    else spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1").first()["version"]
+)
+spark.conf.unset("spark.databricks.delta.commitInfo.userMetadata")
 
 # The record was reserved before execution; all that was unknown then is
 # the version the write produced. It is set once, and only from NULL, so

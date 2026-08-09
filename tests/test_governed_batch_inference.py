@@ -2035,6 +2035,40 @@ def test_a_blank_endpoint_is_refused_before_anything_is_spent():
     )
 
 
+def test_a_tuple_standing_in_for_a_mapping_enforces_unique_keys():
+    """`(("standard", 50), ("standard", 50))` sums to 100 and collapses
+    to 50, so the row-count check balances against a population that is
+    missing a group entirely."""
+    snapshot = gbi.SourceSnapshot(table="main.finance_docs.document_text", version=1)
+    with pytest.raises(ValidationError, match="more than once"):
+        gbi.SourcePreflight(
+            snapshot=snapshot,
+            row_count=100,
+            stratum_population=(("standard", 50), ("standard", 50)),
+        )
+    # The honest two-stratum version of the same total is fine.
+    assert gbi.SourcePreflight(
+        snapshot=snapshot,
+        row_count=100,
+        stratum_population=(("legacy_scan", 50), ("standard", 50)),
+    )
+
+    # The weighted score row carries the same shape and the same rule.
+    spec = one_field_spec()
+    weighted = next(
+        s
+        for s in score(records_for("s", correct=200), spec)
+        if s.stratum == gbi.WEIGHTED
+    )
+    with pytest.raises(ValidationError, match="more than once"):
+        gbi.FieldStratumScore.model_validate(
+            {
+                **weighted.model_dump(mode="json"),
+                "stratum_population": [["s", 100], ["s", 100]],
+            }
+        )
+
+
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
     spec = one_field_spec(criticality="high")
     records = [
