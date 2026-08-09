@@ -995,6 +995,72 @@ def test_an_identified_root_can_use_non_empty_authored_inputs(tmp_path):
     [
         {
             "info": {"request": {"question": "q"}},
+            "spans": [{}],
+        },
+        {
+            "info": {"request_preview": json.dumps({"question": "q"})},
+            "data": {"spans": "not-a-list"},
+        },
+        {
+            "info": {"request": {"question": "q"}},
+            "spans": [
+                {
+                    "span_id": "child",
+                    "parent_span_id": "missing-root",
+                }
+            ],
+        },
+    ],
+    ids=("unidentified-root", "non-sequence-spans", "child-only-graph"),
+)
+def test_trace_info_request_does_not_hide_malformed_spans(tmp_path, trace):
+    _write_dataset(tmp_path, [{"trace": trace}])
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("parent_key", "parent_value"),
+    [
+        ("parent_span_id", None),
+        ("parent_span_id", ""),
+        ("parentSpanId", ""),
+    ],
+)
+def test_empty_parent_identifier_is_a_valid_root(tmp_path, parent_key, parent_value):
+    _write_dataset(
+        tmp_path,
+        [
+            {
+                "trace": {
+                    "spans": [
+                        {
+                            "span_id": "root",
+                            parent_key: parent_value,
+                            "inputs": {"question": "q"},
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert validate_dataset(dataset, minimum_rows=1) == []
+
+
+@pytest.mark.parametrize(
+    "trace",
+    [
+        {
+            "info": {"request": {"question": "q"}},
             "data": {"spans": []},
         },
         {
