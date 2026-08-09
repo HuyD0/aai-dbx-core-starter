@@ -264,6 +264,15 @@ def test_template_prompt_promotion_uses_validation_alias(template: Path):
         assert '"candidate"' not in text
         assert '"validation"' in text
         assert '"production"' in text
+        assert "context.prompts.promote(" in text
+        assert ".set_alias(" not in text
+        assert '"--decision-run-id"' in text
+
+        evaluation = (template / "template" / "evals" / "evaluate.py").read_text()
+        assert "record_decision(" in evaluation
+        assert "change_run_id=evaluation_run_id" in evaluation
+        assert "prompt_version=version" in evaluation
+        assert "prompt_digest=prompt_digest(" in evaluation
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)

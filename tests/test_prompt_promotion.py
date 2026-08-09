@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aai_core.decisions import Decision, DecisionRecord
+from aai_core.decisions import Decision, DecisionRecord, decision_digest
 from aai_core.evaluation import GatePolicy, GateResult, MetricDirection, MetricRule
 from aai_core.prompts import (
     PromptManager,
@@ -63,6 +63,18 @@ class FakeClient:
             uri=uri, template=self.owner.genai.templates_by_uri.get(uri)
         )
 
+    def get_run(self, run_id):
+        self.owner.decision_run_requests.append(run_id)
+        if self.owner.decision_run is None:
+            raise AssertionError("promotion requested an unexpected decision run")
+        return self.owner.decision_run
+
+    def download_artifacts(self, run_id, artifact_path):
+        self.owner.decision_artifact_requests.append((run_id, artifact_path))
+        if self.owner.decision_artifact is None:
+            raise AssertionError("promotion requested an unexpected artifact")
+        return str(self.owner.decision_artifact)
+
 
 class FakeGenAI:
     def __init__(self, templates_by_uri=None):
@@ -95,6 +107,8 @@ class FakeMlflow:
         get_error=None,
         templates_by_uri=None,
         pages=None,
+        decision_run=None,
+        decision_artifact=None,
     ):
         self.prompt = prompt
         self.versions = list(versions)
@@ -102,6 +116,10 @@ class FakeMlflow:
         self.pages = pages
         self.searched_name = None
         self.page_tokens_requested: list = []
+        self.decision_run = decision_run
+        self.decision_artifact = decision_artifact
+        self.decision_run_requests: list[str] = []
+        self.decision_artifact_requests: list[tuple[str, str]] = []
         self.genai = FakeGenAI(templates_by_uri)
 
     def MlflowClient(self):
@@ -114,6 +132,29 @@ def _manager(mlflow):
         catalog="main",
         schema="app",
         mlflow_module=mlflow,
+    )
+
+
+def _persisted_mlflow(tmp_path, record, *, template=TEMPLATE):
+    artifact = tmp_path / "decision.json"
+    artifact.write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    tags = {
+        "aai.run_purpose": "decision",
+        "aai.change_id": record.change_id,
+        "aai.change_summary": record.change_summary,
+        "aai.decision_digest": decision_digest(record),
+        **{f"aai.{name}": value for name, value in record.as_tags().items()},
+    }
+    if record.baseline_run_id:
+        tags["aai.baseline_run_id"] = record.baseline_run_id
+    run = SimpleNamespace(
+        info=SimpleNamespace(run_id="run-decision-1", status="FINISHED"),
+        data=SimpleNamespace(tags=tags, metrics=dict(record.gate.metrics)),
+    )
+    return FakeMlflow(
+        templates_by_uri={"prompts:/main.app.earnings_summary/2": template},
+        decision_run=run,
+        decision_artifact=artifact,
     )
 
 
@@ -337,11 +378,8 @@ def test_promote_refuses_an_adopt_decision_without_a_content_binding():
     assert mlflow.genai.alias is None
 
 
-def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
+def test_promote_refuses_a_version_whose_content_disagrees_with_evidence(tmp_path):
     changed = TEMPLATE + " Cite {{source_id}} exactly once."
-    mlflow = FakeMlflow(
-        templates_by_uri={"prompts:/main.app.earnings_summary/2": changed}
-    )
     record = DecisionRecord(
         decision=Decision.ADOPT,
         change_id="prompt-v2",
@@ -352,9 +390,14 @@ def test_promote_refuses_a_version_whose_content_disagrees_with_evidence():
         prompt_version=2,
         prompt_digest=prompt_digest(TEMPLATE),
     )
+    mlflow = _persisted_mlflow(tmp_path, record, template=changed)
 
     with pytest.raises(PromptPromotionError, match="content digest"):
-        _manager(mlflow).promote("earnings_summary", version=2, evidence=record)
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+        )
 
     assert mlflow.genai.alias is None
 
@@ -419,10 +462,7 @@ def test_promote_refuses_non_adopt_decisions(decision):
     assert mlflow.genai.alias is None
 
 
-def test_promote_accepts_an_adopt_decision_bound_by_prompt_digest():
-    mlflow = FakeMlflow(
-        templates_by_uri={"prompts:/main.app.earnings_summary/2": TEMPLATE}
-    )
+def test_promote_requires_a_persisted_decision_run():
     record = DecisionRecord(
         decision=Decision.ADOPT,
         change_id="prompt-v2",
@@ -434,12 +474,68 @@ def test_promote_accepts_an_adopt_decision_bound_by_prompt_digest():
         prompt_digest=prompt_digest(TEMPLATE),
     )
 
-    _manager(mlflow).promote("earnings_summary", version=2, evidence=record)
+    mlflow = FakeMlflow()
+    with pytest.raises(PromptPromotionError, match="persisted decision run"):
+        _manager(mlflow).promote("earnings_summary", version=2, evidence=record)
+
+    assert mlflow.genai.alias is None
+    assert mlflow.decision_run_requests == []
+
+
+def test_promote_accepts_a_verified_persisted_adopt_decision(tmp_path):
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+
+    _manager(mlflow).promote(
+        "earnings_summary",
+        version=2,
+        decision_run_id="run-decision-1",
+    )
 
     assert mlflow.genai.alias["alias"] == "production"
+    assert mlflow.decision_run_requests == ["run-decision-1"]
+    assert mlflow.decision_artifact_requests == [
+        ("run-decision-1", "decision/decision.json")
+    ]
     # Verification fetches through the raw client: the fluent load would
     # link the candidate to any active run, model, or trace.
     assert mlflow.genai.linking_loads == []
+
+
+def test_promote_refuses_in_memory_evidence_that_differs_from_the_run(tmp_path):
+    persisted = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    supplied = persisted.model_copy(
+        update={"rationale": "A different in-memory rationale."}
+    )
+    mlflow = _persisted_mlflow(tmp_path, persisted)
+
+    with pytest.raises(PromptPromotionError, match="differs from decision.json"):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+            evidence=supplied,
+        )
+
+    assert mlflow.genai.alias is None
 
 
 def test_promote_rejects_unknown_evidence_types():

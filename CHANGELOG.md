@@ -25,7 +25,10 @@ All notable changes to `aai-core` are documented here.
   accepts only the qualified
   `catalog.schema.name` shape with no placeholder components and, with
   `prompt_version`, binds the registry identity the evidence was recorded
-  for), and `record_decision()`
+  for), `decision_digest()` binding the strict artifact to its governed run,
+  `load_decision()` refusing unfinished runs or evidence whose identity,
+  purpose, searchable tags, gate metrics, or artifact digest disagree, and
+  `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
   and a `decision.json` artifact — the free-form rationale persists only
   inside that artifact, never as a run description (MLflow stores
@@ -113,10 +116,11 @@ All notable changes to `aai-core` are documented here.
 - Added evidence-gated prompt promotion: `prompt_digest()`,
   `PromptManager.ensure_version()` registering idempotently by content
   digest across every registry page (promoted from the lifecycle examples),
-  and `PromptManager.promote()` moving a governed alias only on an adopt
-  decision whose `prompt_digest`, qualified `prompt_name`, and immutable
-  `prompt_version` were recorded at decision time and match the registry
-  version's actual template and the prompt and version being promoted
+  and `PromptManager.promote()` moving a governed alias only after loading a
+  finished persisted decision run and verifying an adopt decision whose
+  `prompt_digest`, qualified `prompt_name`, and immutable `prompt_version`
+  were recorded at decision time and match the registry version's actual
+  template and the prompt and version being promoted
   (`aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
   carries no template identity, content identity is not registry identity,
   and two versions can share a template, so evidence gathered for one
@@ -140,6 +144,9 @@ All notable changes to `aai-core` are documented here.
   flavor, the client-level one included, links the loaded version to
   active lineage — so a rejected change is never attached to an active
   experiment, run, model, or trace.
+  The prompt, agent, and RAG templates now persist the exact release-gate
+  decision, print its run id, and require that id when their promotion scripts
+  call the guarded `promote()` path; their template versions are 1.2.0.
 - Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
   prompt-registry catalog/schema, judge-model resolution); optional
   configuration reports skip with remediation, never fail. The

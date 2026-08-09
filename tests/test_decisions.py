@@ -6,7 +6,14 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from aai_core.decisions import Decision, DecisionRecord, record_decision
+from aai_core.decisions import (
+    Decision,
+    DecisionEvidenceError,
+    DecisionRecord,
+    decision_digest,
+    load_decision,
+    record_decision,
+)
 from aai_core.evaluation import (
     GateFailure,
     GatePolicy,
@@ -66,6 +73,30 @@ class FakeMlflow:
         self.artifacts.append((Path(path).name, artifact_path))
 
 
+class FakeDecisionClient:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def get_run(self, run_id):
+        self.owner.requested_run_ids.append(run_id)
+        return self.owner.run
+
+    def download_artifacts(self, run_id, artifact_path):
+        self.owner.downloads.append((run_id, artifact_path))
+        return str(self.owner.artifact)
+
+
+class FakeDecisionMlflow:
+    def __init__(self, *, run, artifact):
+        self.run = run
+        self.artifact = artifact
+        self.requested_run_ids: list[str] = []
+        self.downloads: list[tuple[str, str]] = []
+
+    def MlflowClient(self):
+        return FakeDecisionClient(self)
+
+
 def _record(**overrides):
     values = {
         "decision": Decision.ADOPT,
@@ -78,6 +109,32 @@ def _record(**overrides):
     }
     values.update(overrides)
     return DecisionRecord(**values)
+
+
+def _persisted_mlflow(tmp_path, record, *, status="FINISHED", tags=None, metrics=None):
+    artifact = tmp_path / "decision.json"
+    artifact.write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    expected_tags = {
+        "aai.run_purpose": "decision",
+        "aai.change_id": record.change_id,
+        "aai.change_summary": record.change_summary,
+        "aai.decision_digest": decision_digest(record),
+        **{f"aai.{name}": value for name, value in record.as_tags().items()},
+    }
+    if record.baseline_run_id:
+        expected_tags["aai.baseline_run_id"] = record.baseline_run_id
+    run = SimpleNamespace(
+        info=SimpleNamespace(run_id="run-decision-1", status=status),
+        data=SimpleNamespace(
+            tags=dict(expected_tags if tags is None else tags),
+            metrics=dict(
+                record.gate.metrics
+                if metrics is None and record.gate is not None
+                else metrics or {}
+            ),
+        ),
+    )
+    return FakeDecisionMlflow(run=run, artifact=artifact)
 
 
 def test_decision_record_is_a_strict_frozen_serializable_contract():
@@ -314,8 +371,67 @@ def test_record_decision_emits_governed_searchable_evidence():
     assert fake.tags["aai.baseline_run_id"] == "run-baseline"
     assert fake.tags["aai.change_run_id"] == "run-change"
     assert fake.tags["aai.gate_passed"] == "true"
+    assert fake.tags["aai.decision_digest"] == decision_digest(_record())
     assert fake.metrics == {"citation_rate": 1.0}
     assert ("decision.json", "decision") in fake.artifacts
+
+
+def test_load_decision_verifies_the_finished_run_and_artifact(tmp_path):
+    record = _record(
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest="a" * 64,
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+
+    loaded = load_decision("run-decision-1", mlflow_module=mlflow)
+
+    assert loaded == record
+    assert mlflow.requested_run_ids == ["run-decision-1"]
+    assert mlflow.downloads == [("run-decision-1", "decision/decision.json")]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("running", "not finished"),
+        ("identity", "different run identity"),
+        ("purpose", "tag 'aai.run_purpose' contradicts"),
+        ("digest", "tag 'aai.decision_digest' contradicts"),
+        ("tag", "tag 'aai.decision' contradicts"),
+        ("metric", "metric 'citation_rate' contradicts"),
+        ("artifact", "valid decision/decision.json"),
+    ],
+)
+def test_load_decision_rejects_contradictory_persisted_evidence(
+    tmp_path, mutation, match
+):
+    record = _record()
+    mlflow = _persisted_mlflow(tmp_path, record)
+    if mutation == "running":
+        mlflow.run.info.status = "RUNNING"
+    elif mutation == "identity":
+        mlflow.run.info.run_id = "a-different-run"
+    elif mutation == "purpose":
+        mlflow.run.data.tags["aai.run_purpose"] = "change"
+    elif mutation == "digest":
+        mlflow.run.data.tags["aai.decision_digest"] = "0" * 64
+    elif mutation == "tag":
+        mlflow.run.data.tags["aai.decision"] = "reject"
+    elif mutation == "metric":
+        mlflow.run.data.metrics["citation_rate"] = 0.5
+    else:
+        mlflow.artifact.write_text("not json", encoding="utf-8")
+
+    with pytest.raises(DecisionEvidenceError, match=match):
+        load_decision("run-decision-1", mlflow_module=mlflow)
+
+
+def test_load_decision_validates_run_ids_before_mlflow_access():
+    for invalid in (None, 123, "", "run id", "a" * 65):
+        error = TypeError if not isinstance(invalid, str) else ValueError
+        with pytest.raises(error):
+            load_decision(invalid, mlflow_module=object())
 
 
 def test_record_decision_derives_the_run_name_from_the_bounded_change_id():

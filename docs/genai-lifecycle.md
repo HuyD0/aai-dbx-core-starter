@@ -274,7 +274,9 @@ Some upstream tools and older project versions call a pre-release alias
 It is distinct from the application maturity tag
 `ResourceContext.lifecycle="candidate"`. Evaluation and release evidence
 always bind the exact prompt URI, version, and content digest even when runtime
-configuration loads an alias.
+configuration loads an alias. Promotion also cites the finished MLflow decision
+run: the SDK reloads `decision/decision.json` and verifies its digest, lifecycle
+tags, gate metrics, run purpose, identity, and status before moving the alias.
 
 ## Reproducibility manifest
 

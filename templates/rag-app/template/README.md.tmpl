@@ -36,14 +36,17 @@ a provider integration.
    bundle only references it by name in `aai-platform.yml`. For Azure AI
    Search, index and ingestion are likewise managed outside this bundle.
 3. Register prompts with `python scripts/register_prompt.py`; promote with
-   `python scripts/promote_prompt.py --version <n> --to validation|production`
-   after the gate passes (production loads the `production` alias).
+   `python scripts/promote_prompt.py --version <n> --decision-run-id <run-id>
+   --to validation|production` after the gate passes (production loads the
+   `production` alias). The run ID comes from the release gate; promotion
+   reloads and verifies its persisted decision evidence before moving an alias.
 4. Grow `evals/data/release_cases.json` with your domain's golden and
    failure cases (the seeded cases show the shape). Keep at least 10.
 5. Configure the approved `judge-model`, then run the release gate:
    `python evals/evaluate.py` — explicitly routed groundedness, relevance,
    and safety judges with the thresholds in `evals/gate_config.json`,
-   publishing the report to the CI summary.
+   publishing the report to the CI summary and recording an adopt or reject
+   decision run whose ID is printed for promotion.
    After a released run passes: `--update-baseline`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset

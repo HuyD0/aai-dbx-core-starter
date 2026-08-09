@@ -150,116 +150,91 @@ class PromptManager:
         name: str,
         *,
         version: int,
-        evidence: Any,
+        decision_run_id: str | None = None,
+        evidence: Any | None = None,
         alias: str = "production",
     ) -> None:
-        """Move a governed alias only on an adopt decision bound to the
-        exact version being promoted.
+        """Move an alias only on a verified, persisted adopt decision.
 
-        ``evidence`` is an adopt :class:`~aai_core.decisions.DecisionRecord`
-        whose ``prompt_digest``, qualified ``prompt_name``, and immutable
-        ``prompt_version`` were recorded at decision time; the registry
-        version's actual template must match the digest, and the name and
-        version must match the prompt being promoted, so evidence gathered
-        for one template, one prompt, or one version can never move
-        another's alias.
-        A bare :class:`~aai_core.evaluation.GateResult` is refused: gate
-        evidence alone carries no template identity, and a digest supplied
-        at promotion time would prove only what is being promoted, not what
-        was evaluated. Anything less raises :class:`PromptPromotionError`
-        and leaves the alias untouched.
+        ``decision_run_id`` names the finished MLflow decision run written by
+        :func:`aai_core.decisions.record_decision`. Promotion downloads its
+        strict ``decision.json`` artifact and verifies the canonical digest,
+        lifecycle tags, gate metrics, run purpose, status, and identity before
+        inspecting the target prompt. The persisted record must be an adopt
+        decision bound to the exact qualified prompt, immutable version, and
+        template digest being promoted.
 
-        This is a process guard against mistakes, not an authorization
-        mechanism: metric provenance is not attestable at the client, so
-        authorization for alias moves remains the registry's access
-        controls and the protected-main release path. Persisting the
-        decision first with ``record_decision()`` is the documented
-        convention the labs and templates follow.
+        ``evidence`` is optional in-memory evidence for callers that already
+        hold the record. It is validated locally first for useful refusal
+        messages, then must match the persisted artifact exactly; it can never
+        replace ``decision_run_id``. A bare gate is refused because it carries
+        no prompt identity. Anything less raises :class:`PromptPromotionError`
+        and leaves the alias untouched. Registry access controls and protected
+        main remain the authorization boundary; this method enforces the
+        persisted release process before that authorized alias move.
         """
 
-        from aai_core.decisions import Decision, DecisionRecord
-        from aai_core.evaluation import GateResult
+        from aai_core.decisions import (
+            DecisionEvidenceError,
+            decision_digest,
+            load_decision,
+        )
 
         # The cheapest, fully local check comes first: an alias typo must
         # fail deterministically, never as a network error from the
-        # verification fetch below.
+        # evidence or prompt verification fetches below.
         if alias not in _GOVERNED_ALIASES:
             raise ValueError(f"Unsupported governed prompt alias: {alias}")
-        if isinstance(evidence, GateResult):
-            raise PromptPromotionError(
-                f"Refusing to move alias {alias!r} for prompt {name!r}: "
-                "gate evidence alone carries no template identity",
-                remediation="Record an adopt DecisionRecord citing this gate "
-                "with prompt_digest set at decision time, and promote with "
-                "that record.",
-            )
-        if not isinstance(evidence, DecisionRecord):
-            raise TypeError("evidence must be a DecisionRecord")
-        if evidence.decision is not Decision.ADOPT:
-            raise PromptPromotionError(
-                f"Refusing to move alias {alias!r} for prompt {name!r}: "
-                f"the cited decision is {evidence.decision.value!r}",
-                remediation="Record an adopt decision backed by a passing "
-                "gate before moving the production alias.",
-            )
-        bound_digest = evidence.prompt_digest
-        if not bound_digest:
-            raise PromptPromotionError(
-                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
-                "adopt decision is not bound to any template content",
-                remediation="Record the decision with "
-                "prompt_digest=prompt_digest(template) for the evaluated "
-                "template so promotion can verify the registry version it "
-                "moves.",
-            )
-        # Content identity is not registry identity: two prompts can share a
-        # template, so the decision must also name the exact prompt (and,
-        # when recorded, the immutable version) it was made for.
         qualified = self.qualify(name)
-        if not evidence.prompt_name:
+        local_record = None
+        if evidence is not None:
+            local_record, _ = _bound_prompt_decision(
+                evidence,
+                name=name,
+                qualified=qualified,
+                version=version,
+                alias=alias,
+            )
+        if decision_run_id is None:
             raise PromptPromotionError(
                 f"Refusing to move alias {alias!r} for prompt {name!r}: the "
-                "adopt decision names no prompt",
-                remediation="Record the decision with "
-                "prompt_name=manager.qualify(name) for the evaluated prompt "
-                "so evidence for one prompt can never promote another.",
+                "decision is not backed by a persisted decision run",
+                remediation="Persist the decision with record_decision(), then "
+                "pass the returned decision_run_id to promote().",
             )
-        if evidence.prompt_name != qualified:
+        try:
+            persisted = load_decision(
+                decision_run_id,
+                mlflow_module=self._client(),
+            )
+        except DecisionEvidenceError as error:
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: {error}",
+                remediation="Use the finished decision run produced by "
+                "record_decision() for this exact evaluated prompt version.",
+            ) from error
+        if local_record is not None and decision_digest(
+            local_record
+        ) != decision_digest(persisted):
             raise PromptPromotionError(
                 f"Refusing to move alias {alias!r} for prompt {name!r}: the "
-                f"decision is bound to {evidence.prompt_name!r}, not "
-                f"{qualified!r}",
-                remediation="Promote the prompt the decision was recorded "
-                "for, or record a new decision for this prompt.",
+                "supplied in-memory evidence differs from decision.json",
+                remediation="Use the DecisionRecord persisted in the cited "
+                "decision run, or cite the run that persisted this record.",
             )
-        if evidence.prompt_version is None:
-            # The digest hashes only the template: two immutable versions
-            # can share it while differing in native configuration, so
-            # version-unbound evidence could promote an unevaluated sibling.
-            raise PromptPromotionError(
-                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
-                "adopt decision is not bound to a registry version",
-                remediation="Record the decision with prompt_version set to "
-                "the evaluated registry version so evidence for one "
-                "immutable version can never promote another that shares "
-                "its template.",
-            )
-        if evidence.prompt_version != version:
-            raise PromptPromotionError(
-                f"Refusing to move alias {alias!r} for prompt {name!r}: the "
-                f"decision is bound to version {evidence.prompt_version}, "
-                f"not {version}",
-                remediation="Promote the exact registry version the "
-                "decision evaluated.",
-            )
+        _, bound_digest = _bound_prompt_decision(
+            persisted,
+            name=name,
+            qualified=qualified,
+            version=version,
+            alias=alias,
+        )
         # Every load_prompt flavor links the version to active lineage —
         # even the client-level one attaches it to the active experiment.
         # get_prompt_version is the only fetch with no lineage side
         # effects, so a rejected change never becomes associated evidence.
         registered = (
-            self._client()
-            .MlflowClient()
-            .get_prompt_version(self.qualify(name), version)
+            self._client().MlflowClient().get_prompt_version(qualified, version)
         )
         template = getattr(registered, "template", None)
         if template is None:
@@ -354,6 +329,82 @@ class PromptManager:
         """Expose native MLflow prompt APIs without wrapping new features."""
 
         return self._client()
+
+
+def _bound_prompt_decision(
+    evidence: Any,
+    *,
+    name: str,
+    qualified: str,
+    version: int,
+    alias: str,
+) -> tuple[Any, str]:
+    """Validate prompt bindings shared by local and persisted evidence."""
+
+    from aai_core.decisions import Decision, DecisionRecord
+    from aai_core.evaluation import GateResult
+
+    if isinstance(evidence, GateResult):
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: "
+            "gate evidence alone carries no template identity",
+            remediation="Record an adopt DecisionRecord citing this gate with "
+            "prompt identity, persist it with record_decision(), and promote "
+            "with that decision run.",
+        )
+    if not isinstance(evidence, DecisionRecord):
+        raise TypeError("evidence must be a DecisionRecord")
+    if evidence.decision is not Decision.ADOPT:
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: "
+            f"the cited decision is {evidence.decision.value!r}",
+            remediation="Record an adopt decision backed by a passing gate "
+            "before moving the production alias.",
+        )
+    bound_digest = evidence.prompt_digest
+    if not bound_digest:
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+            "adopt decision is not bound to any template content",
+            remediation="Record the decision with "
+            "prompt_digest=prompt_digest(template) for the evaluated template "
+            "so promotion can verify the registry version it moves.",
+        )
+    # Content identity is not registry identity: two prompts can share a
+    # template, so the decision must also name the exact prompt and immutable
+    # version it was made for.
+    if not evidence.prompt_name:
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+            "adopt decision names no prompt",
+            remediation="Record the decision with "
+            "prompt_name=manager.qualify(name) for the evaluated prompt so "
+            "evidence for one prompt can never promote another.",
+        )
+    if evidence.prompt_name != qualified:
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+            f"decision is bound to {evidence.prompt_name!r}, not {qualified!r}",
+            remediation="Promote the prompt the decision was recorded for, or "
+            "record a new decision for this prompt.",
+        )
+    if evidence.prompt_version is None:
+        # The digest hashes only the template: two immutable versions can
+        # share it while differing in native configuration.
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+            "adopt decision is not bound to a registry version",
+            remediation="Record the decision with prompt_version set to the "
+            "evaluated registry version so evidence for one immutable version "
+            "can never promote another that shares its template.",
+        )
+    if evidence.prompt_version != version:
+        raise PromptPromotionError(
+            f"Refusing to move alias {alias!r} for prompt {name!r}: the "
+            f"decision is bound to version {evidence.prompt_version}, not {version}",
+            remediation="Promote the exact registry version the decision evaluated.",
+        )
+    return evidence, bound_digest
 
 
 def prompt_digest(template: str | list[dict[str, str]]) -> str:

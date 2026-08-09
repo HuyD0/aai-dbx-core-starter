@@ -10,16 +10,20 @@ of its own.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
+from re import fullmatch
 from typing import Any, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
 from aai_core.contracts import ContractModel
 from aai_core.evaluation import GateResult, _is_placeholder
+from aai_core.exceptions import AaiCoreError
 from aai_core.experiments import (
     ExperimentManager,
     ExperimentRunMetadata,
@@ -33,6 +37,15 @@ class Decision(StrEnum):
     ADOPT = "adopt"
     REJECT = "reject"
     INCONCLUSIVE = "inconclusive"
+
+
+class DecisionEvidenceError(AaiCoreError):
+    """A persisted decision run is missing or contradicts its artifact."""
+
+    code = "aai_core.decisions.evidence_invalid"
+
+
+_RUN_ID_PATTERN = r"[A-Za-z0-9_-]{1,64}"
 
 
 class DecisionRecord(ContractModel):
@@ -187,6 +200,121 @@ class DecisionRecord(ContractModel):
         return values
 
 
+def decision_digest(record: DecisionRecord) -> str:
+    """Return the canonical digest used to bind a run to ``decision.json``."""
+
+    canonical = json.dumps(
+        record.model_dump(mode="json"),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def load_decision(
+    decision_run_id: str,
+    *,
+    mlflow_module: Any | None = None,
+) -> DecisionRecord:
+    """Load and verify a decision from its finished governed MLflow run.
+
+    The strict ``decision.json`` artifact is the source of truth. Its
+    canonical digest, searchable lifecycle tags, gate metrics, run purpose,
+    run identity, and terminal status must all agree before the record can be
+    used for promotion. Provider authentication and transport failures are
+    deliberately allowed to propagate; only contradictory evidence is
+    converted to :class:`DecisionEvidenceError`.
+    """
+
+    run_id = _validated_run_id(decision_run_id)
+    mlflow = _decision_client(mlflow_module)
+    client = mlflow.MlflowClient()
+    run = client.get_run(run_id)
+    info = getattr(run, "info", None)
+    if str(getattr(info, "run_id", "")) != run_id:
+        raise DecisionEvidenceError(
+            "The decision lookup returned a different run identity."
+        )
+    if str(getattr(info, "status", "")).upper() != "FINISHED":
+        raise DecisionEvidenceError(
+            "The decision run is not finished; only completed evidence may "
+            "authorize promotion."
+        )
+
+    artifact_path = client.download_artifacts(run_id, "decision/decision.json")
+    try:
+        record = DecisionRecord.model_validate_json(
+            Path(artifact_path).read_text(encoding="utf-8")
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise DecisionEvidenceError(
+            "The decision run does not contain a valid decision/decision.json "
+            "artifact."
+        ) from error
+
+    data = getattr(run, "data", None)
+    tags = getattr(data, "tags", None)
+    metrics = getattr(data, "metrics", None)
+    if not isinstance(tags, Mapping) or not isinstance(metrics, Mapping):
+        raise DecisionEvidenceError(
+            "The decision run does not expose verifiable tags and metrics."
+        )
+
+    expected_tags = _persisted_tags(record)
+    for name, expected in expected_tags.items():
+        if tags.get(name) != expected:
+            raise DecisionEvidenceError(
+                f"The decision run tag {name!r} contradicts decision.json."
+            )
+
+    expected_metrics = dict(record.gate.metrics) if record.gate is not None else {}
+    for name, expected in expected_metrics.items():
+        observed = metrics.get(name)
+        if not isinstance(observed, (int, float)) or float(observed) != float(expected):
+            raise DecisionEvidenceError(
+                f"The decision run metric {name!r} contradicts decision.json."
+            )
+    return record
+
+
+def _persisted_tags(record: DecisionRecord) -> dict[str, str]:
+    tags = {
+        "aai.run_purpose": RunPurpose.DECISION.value,
+        "aai.change_id": record.change_id,
+        "aai.change_summary": record.change_summary,
+        "aai.decision_digest": decision_digest(record),
+        **{f"aai.{name}": value for name, value in record.as_tags().items()},
+    }
+    if record.baseline_run_id:
+        tags["aai.baseline_run_id"] = record.baseline_run_id
+    return tags
+
+
+def _validated_run_id(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"decision_run_id must be a string; got {type(value).__name__}")
+    if not fullmatch(_RUN_ID_PATTERN, value):
+        raise ValueError(
+            "decision_run_id must be a bounded opaque run identifier containing "
+            "only letters, digits, underscores, and hyphens"
+        )
+    return value
+
+
+def _decision_client(mlflow_module: Any | None) -> Any:
+    if mlflow_module is not None:
+        return mlflow_module
+    try:
+        import mlflow
+    except ImportError as error:
+        raise RuntimeError(
+            "Decision evidence requires the `genai` extra. Install "
+            "`aai-core[genai]` in the consuming environment."
+        ) from error
+    return mlflow
+
+
 def record_decision(
     record: DecisionRecord,
     *,
@@ -215,7 +343,7 @@ def record_decision(
     # the decision.json artifact.
     with experiments.run(
         run_name=resolved_name,
-        tags=record.as_tags(),
+        tags={**record.as_tags(), "decision_digest": decision_digest(record)},
         metadata=metadata,
     ) as active_run:
         if record.gate is not None:

@@ -54,9 +54,11 @@ Here: `PromptManager` (`src/aai_core/prompts.py`) registers immutable
 versions in the MLflow Prompt Registry with governed tags, loads by version
 or alias, and constrains aliases to `development`, `validation`, and
 `production`. `ensure_version` registers idempotently by content digest, and
-`promote` moves an alias only on an `adopt` decision bound to the target
-version's content digest — gate evidence alone carries no template
-identity, and evidence gathered for one template can never promote another.
+`promote` reloads a finished decision run and moves an alias only when its
+persisted `decision.json`, lifecycle tags, and gate metrics agree on an
+`adopt` decision bound to the target version's content digest — gate evidence
+alone carries no template identity, and evidence gathered for one template
+can never promote another.
 Examples: [03](../examples/03_first_prompt.py),
 [13](../examples/13_decision_and_promotion_lifecycle.ipynb); doctrine:
 [prompt promotion](genai-lifecycle.md#prompt-promotion).
@@ -103,9 +105,10 @@ binds the evidence used to make it.
 Here: `src/aai_core/decisions.py` provides the `Decision` vocabulary
 (`adopt`, `reject`, `inconclusive`), the `DecisionRecord` contract binding
 baseline run, change run, gate result, and release digest — an `adopt` must
-cite a passing gate, never a failing or absent one — and `record_decision`, which
-writes the decision as a governed MLflow run with searchable
-`aai.decision` tags and a `decision.json` artifact. Example:
+cite a passing gate, never a failing or absent one — `record_decision`, which
+writes the decision as a governed MLflow run with searchable `aai.decision`
+tags and a `decision.json` artifact, and `load_decision`, which verifies that
+persisted evidence before it can authorize promotion. Example:
 [13](../examples/13_decision_and_promotion_lifecycle.ipynb).
 
 ### Tracing and observability
