@@ -425,6 +425,24 @@ def test_eval_submit_runs_the_bundle_job(project_dir, capsys, monkeypatch):
     assert commands[1][:4] == ["databricks", "bundle", "run", "release_gate"]
 
 
+def test_eval_submit_rejects_plan_before_running_the_bundle_job(
+    project_dir, capsys, monkeypatch
+):
+    commands = []
+
+    def fake_run(command, cwd=None, check=False):
+        commands.append(command)
+        raise AssertionError("a plan-only command must not submit a job")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    code = main(["eval", "--submit", "--plan", *_config_flag(project_dir)])
+
+    assert code == 1
+    assert commands == []
+    assert "--submit and --plan cannot be used together" in capsys.readouterr().err
+
+
 def test_cli_imports_no_heavy_dependencies():
     """`agentkit smoke` must work in an environment without MLflow."""
 

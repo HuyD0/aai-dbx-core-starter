@@ -458,6 +458,22 @@ def _trace_inputs(trace: Any) -> Mapping[str, Any] | None:
     return None
 
 
+def _has_usable_trace(trace: Any) -> bool:
+    """Whether a populated trace is safe to hand to MLflow.
+
+    A non-empty string or mapping is not necessarily a trace. MLflow only
+    discovers that after planning and spend confirmation, when it deserializes
+    the evaluation frame. Require the local reader to decode the value and to
+    recover either a request or a root span before treating the row as traced.
+    The latter preserves recorded traces whose authored ``inputs`` column is
+    already present while accepting both supported span layouts.
+    """
+
+    if _trace_document(trace) is None:
+        return False
+    return _trace_inputs(trace) is not None or bool(_root_spans(trace))
+
+
 def _trace_expectations(trace: Any) -> dict[str, Any]:
     return dict(_trace_expectation_items(trace))
 
@@ -598,6 +614,12 @@ def validate_dataset(
         # failure until after planning and spend confirmation.
         if has_trace and not _is_missing(inputs) and not isinstance(inputs, Mapping):
             failures.append(f"row {index} inputs must be an object")
+            continue
+        if has_trace and not _has_usable_trace(trace):
+            failures.append(
+                f"row {index} trace must be decodable and contain a usable "
+                "request or root span"
+            )
             continue
         # A trace exempts the row from supplying authored inputs, but MLflow
         # still scores explicit inputs and curated expectations when they are

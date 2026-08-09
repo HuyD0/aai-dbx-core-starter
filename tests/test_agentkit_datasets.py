@@ -916,12 +916,91 @@ def test_a_traced_row_still_has_its_expectations_checked(tmp_path):
 
 
 def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
-    rows = [{"trace": {"info": {"trace_id": f"t{index}"}}} for index in range(3)]
+    rows = [
+        {
+            "trace": {
+                "info": {"trace_id": f"t{index}"},
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": f"root-{index}",
+                            "inputs": {"question": f"q{index}"},
+                        }
+                    ]
+                },
+            }
+        }
+        for index in range(3)
+    ]
     _write_dataset(tmp_path, rows)
 
     dataset = load_dataset("golden.json", root=tmp_path)
 
     assert validate_dataset(dataset, minimum_rows=1) == []
+
+
+@pytest.mark.parametrize("trace", ["not-json", {"unrelated": "object"}])
+def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
+    rows = [{"inputs": {"question": "q"}, "trace": trace}]
+    _write_dataset(tmp_path, rows)
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
+
+
+@pytest.mark.parametrize(
+    "trace",
+    [
+        {
+            "info": {"request": {"question": "q"}},
+            "data": {"spans": []},
+        },
+        {
+            "spans": [
+                {
+                    "span_id": "root",
+                    "inputs": {"question": "q"},
+                }
+            ]
+        },
+        json.dumps(
+            {
+                "info": {
+                    "assessments": [
+                        {
+                            "assessment_name": "expected_response",
+                            "expectation": {"value": "a"},
+                        }
+                    ]
+                },
+                "data": {
+                    "spans": [
+                        {
+                            "span_id": "root",
+                            "inputs": {"question": "q"},
+                        }
+                    ]
+                },
+            }
+        ),
+    ],
+    ids=("info-request", "top-level-root-span", "serialized-with-expectation"),
+)
+def test_supported_trace_shapes_pass_local_validation(tmp_path, trace):
+    rows = [{"inputs": {"question": "q"}, "trace": trace}]
+    _write_dataset(tmp_path, rows)
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert validate_dataset(dataset, minimum_rows=1) == []
+    if isinstance(trace, str):
+        assert effective_dataset(dataset, mode="traces").rows[0]["expectations"] == {
+            "expected_response": "a"
+        }
 
 
 @pytest.mark.parametrize("inputs", ["scalar request", ["list request"]])
@@ -945,12 +1024,18 @@ def test_traced_rows_still_reject_placeholder_content(tmp_path):
         {
             "inputs": {"question": "TODO replace this question"},
             "expectations": {"expected_response": "a real answer"},
-            "trace": {"info": {"trace_id": "t0"}},
+            "trace": {
+                "info": {"trace_id": "t0"},
+                "data": {"spans": [{"span_id": "root-0"}]},
+            },
         },
         {
             "inputs": {"question": "a real question"},
             "expectations": {"expected_response": "TODO write the answer"},
-            "trace": {"info": {"trace_id": "t1"}},
+            "trace": {
+                "info": {"trace_id": "t1"},
+                "data": {"spans": [{"span_id": "root-1"}]},
+            },
         },
         {
             "trace": {
