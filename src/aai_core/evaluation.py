@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from math import isfinite
 from numbers import Real
-from re import fullmatch
+from re import fullmatch, search
 from typing import Any, Self
 
 from pydantic import Field, field_serializer, field_validator, model_validator
@@ -603,36 +603,142 @@ def _dataset_qualifier(role: str, value: str) -> str:
 def _is_missing_registry_error(error: Exception) -> bool:
     """Shared absence test for registry errors (datasets and prompts alike).
 
-    Any structured code outside the provider's two absence codes is
-    authoritative, even when its message uses non-disclosure wording such as
-    ``does not exist``. The one provider-specific exception is MLflow's exact
-    missing-alias shape under ``INVALID_PARAMETER_VALUE``. Message markers are
-    considered only when the exception exposes no structured code at all.
+    Structured provider codes and HTTP status are authoritative. Type and
+    message signals for authentication, permission, throttling, and transport
+    failures are checked before the code-less missing-message fallback because
+    providers may use ``does not exist`` deliberately to hide a protected
+    resource. The provider-specific exception is MLflow's exact missing-alias
+    shape under ``INVALID_PARAMETER_VALUE``.
     """
 
-    if _is_authoritative_non_absence_exception(error):
+    errors = _registry_exception_chain(error)
+    coded = tuple((item, _registry_error_code(item)) for item in errors)
+    missing_codes = {"404", "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}
+
+    # One non-absence code anywhere in a wrapper chain wins over an outer
+    # "does not exist" message and over a nested absence-looking exception.
+    for item, error_code in coded:
+        if not error_code or error_code in missing_codes:
+            continue
+        if error_code == "INVALID_PARAMETER_VALUE" and _is_missing_alias_shape(item):
+            continue
         return False
-    raw_error_code = getattr(error, "error_code", None)
-    error_code = "" if raw_error_code is None else str(raw_error_code).strip().upper()
-    if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
+
+    statuses = {status for item in errors for status in _http_status_codes(item)}
+    # A response is structured evidence too. Only 404 denotes absence; 401,
+    # 403, 429, 5xx, and every other non-404 response must propagate.
+    if any(status != 404 for status in statuses):
+        return False
+    if any(
+        _is_authoritative_non_absence_exception(item)
+        or _has_authoritative_non_absence_message(item)
+        for item in errors
+    ):
+        return False
+    if 404 in statuses:
         return True
-    message = str(error).strip().upper()
-    missing_alias = (
+    if any(error_code in missing_codes for _, error_code in coded):
+        return True
+    if any(
+        _is_missing_alias_shape(item) and error_code in {"", "INVALID_PARAMETER_VALUE"}
+        for item, error_code in coded
+    ):
+        return True
+    if any(isinstance(item, FileNotFoundError) for item in errors):
+        return True
+    return any(
+        marker in _registry_error_message(item).upper()
+        for item in errors
+        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    )
+
+
+def _registry_exception_chain(error: Exception) -> tuple[Exception, ...]:
+    """Return an exception and the provider wrappers it exposes, cycle-safe."""
+
+    pending = [error]
+    found: list[Exception] = []
+    seen: set[int] = set()
+    while pending and len(found) < 16:
+        item = pending.pop(0)
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        found.append(item)
+        for attribute in (
+            "__cause__",
+            "__context__",
+            "cause",
+            "error",
+            "original_error",
+            "exception",
+        ):
+            try:
+                nested = getattr(item, attribute, None)
+            except Exception:  # noqa: BLE001 - opaque provider wrapper
+                continue
+            if isinstance(nested, Exception) and id(nested) not in seen:
+                pending.append(nested)
+    return tuple(found)
+
+
+def _registry_error_code(error: Exception) -> str:
+    try:
+        raw = getattr(error, "error_code", None)
+    except Exception:  # noqa: BLE001 - opaque provider wrapper
+        return ""
+    return "" if raw is None else str(raw).strip().upper()
+
+
+def _registry_error_message(error: Exception) -> str:
+    try:
+        return str(error).strip()
+    except Exception:  # noqa: BLE001 - opaque provider wrapper
+        return ""
+
+
+def _is_missing_alias_shape(error: Exception) -> bool:
+    return (
         fullmatch(
             r"(?:INVALID_PARAMETER_VALUE: )?"
             r"(?:REGISTERED MODEL|PROMPT) ALIAS [\w-]+ NOT FOUND\.?",
-            message,
+            _registry_error_message(error).upper(),
         )
         is not None
     )
-    if missing_alias and error_code in {"", "INVALID_PARAMETER_VALUE"}:
-        return True
-    if error_code:
-        return False
-    return any(
-        marker in message
-        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
-    )
+
+
+def _http_status_codes(error: Exception) -> tuple[int, ...]:
+    """Read HTTP status without importing any optional HTTP client."""
+
+    values: list[Any] = []
+    for attribute in ("status_code", "http_status_code", "status"):
+        try:
+            values.append(getattr(error, attribute, None))
+        except Exception:  # noqa: BLE001 - opaque provider wrapper
+            pass
+    try:
+        response = getattr(error, "response", None)
+    except Exception:  # noqa: BLE001 - opaque provider wrapper
+        response = None
+    if response is not None:
+        for attribute in ("status_code", "status"):
+            try:
+                values.append(getattr(response, attribute, None))
+            except Exception:  # noqa: BLE001 - opaque provider response
+                pass
+
+    statuses: list[int] = []
+    for value in values:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= status <= 599 and status not in statuses:
+            statuses.append(status)
+    return tuple(statuses)
 
 
 def _is_authoritative_non_absence_exception(error: Exception) -> bool:
@@ -660,11 +766,56 @@ def _is_authoritative_non_absence_exception(error: Exception) -> bool:
         "socket",
         "sslerror",
         "tlserror",
+        "proxyerror",
+        "protocolerror",
+        "ratelimit",
+        "throttl",
+        "serviceunavailable",
+        "servererror",
     )
     return any(
         any(marker in error_type.__name__.lower() for marker in markers)
         for error_type in type(error).__mro__
         if error_type not in {Exception, BaseException, object}
+    )
+
+
+def _has_authoritative_non_absence_message(error: Exception) -> bool:
+    """Recognize unstructured provider failures hidden by generic wrappers."""
+
+    message = _registry_error_message(error).casefold()
+    signals = (
+        "unauthorized",
+        "unauthenticated",
+        "authentication",
+        "authorization",
+        "not authorized",
+        "forbidden",
+        "permission",
+        "access denied",
+        "invalid credential",
+        "connection",
+        "timed out",
+        "timeout",
+        "transport",
+        "network error",
+        "network failure",
+        "socket error",
+        "dns failure",
+        "tls error",
+        "ssl error",
+        "proxy error",
+        "rate limit",
+        "too many requests",
+        "throttl",
+        "service unavailable",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+    )
+    return (
+        any(signal in message for signal in signals)
+        or search(r"\b(?:401|403|429|5\d\d)\b", message) is not None
     )
 
 

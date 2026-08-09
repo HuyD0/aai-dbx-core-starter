@@ -102,7 +102,11 @@ All notable changes to `aai-core` are documented here.
   compliant non-refusal, take the nothing-to-cover branch, or even match an
   expected keyword "none". A dataset defect or absent answer must never inflate
   a release gate. Template copies are unchanged until each template's next
-  version.
+  version. AgentKit publishes `keyword_coverage`, `refusal_compliance`, and
+  `response_length_ok` as scorer version 2 because these output semantics
+  materially changed; a baseline carrying their version-1 scores is now
+  correctly incomparable and must be re-established rather than mixed into a
+  delta.
 - Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
   with a required assessment `source_id` namespaced by source kind
   (`group:` for human review, `judge:`/`code:` for automated scorers) so
@@ -148,8 +152,10 @@ All notable changes to `aai-core` are documented here.
   exist" message wording, the common non-disclosure phrasing. Built-in and
   provider authentication, permission, connection, timeout, transport, and
   non-file OSError types are likewise authoritative even when their message
-  deliberately says a protected prompt was not found. The same shared
-  predicate guards the dataset helper's create path.
+  deliberately says a protected prompt was not found. The classifier also
+  inspects wrapped exceptions and HTTP response status: a genuine 404 remains
+  absence, while 401, 403, 429, every 5xx, and other non-404 responses
+  propagate. The same shared predicate guards the dataset helper's create path.
   `promote()` verifies the target version through `get_prompt_version()`,
   the only fetch with no lineage side effects — every `load_prompt`
   flavor, the client-level one included, links the loaded version to

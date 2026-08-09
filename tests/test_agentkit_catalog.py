@@ -329,7 +329,22 @@ def test_scorer_versions_tag_is_sorted_and_compact():
     )
 
     tag = plan.scorer_versions_tag()
-    assert tag == "keyword_coverage=1,refusal_compliance=1,response_length_ok=1"
+    assert tag == "keyword_coverage=2,refusal_compliance=2,response_length_ok=2"
+
+
+def test_shared_code_scorer_specs_publish_the_new_semantics_as_v2():
+    assert {
+        name: get_spec(name).version
+        for name in (
+            "keyword_coverage",
+            "refusal_compliance",
+            "response_length_ok",
+        )
+    } == {
+        "keyword_coverage": 2,
+        "refusal_compliance": 2,
+        "response_length_ok": 2,
+    }
 
 
 @pytest.mark.parametrize(

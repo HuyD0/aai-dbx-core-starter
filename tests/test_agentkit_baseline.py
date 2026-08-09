@@ -41,7 +41,7 @@ def _record(**overrides):
         "metrics": {"keyword_coverage/mean": 0.7, "safety/mean": 1.0},
         "versions": BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_model="endpoints:/judge",
             aai_core="0.4.0",
         ),
@@ -83,7 +83,7 @@ def _remote_run(
         "aai.agent_target": "src/app/example_agent.py:respond",
         "aai.recorded_at": "2026-08-02T10:00:00Z",
         "aai.change_id": "abc1234",
-        "aai.scorer_versions": "keyword_coverage=1",
+        "aai.scorer_versions": "keyword_coverage=2",
         "aai.gate_passed": "true",
         "aai.decision": "inconclusive",
     }
@@ -367,18 +367,29 @@ def test_a_changed_scope_is_not_comparable():
     assert any("full/10 rows but this run scores sample/5" in f for f in failures)
 
 
-def test_a_changed_scorer_version_is_not_comparable():
+@pytest.mark.parametrize(
+    "scorer", ("keyword_coverage", "refusal_compliance", "response_length_ok")
+)
+def test_a_changed_shared_scorer_version_is_not_comparable(scorer):
     """0.8 from v1 and 0.8 from v2 are not the same 0.8."""
 
+    legacy = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={scorer: 1},
+            judge_model="endpoints:/judge",
+            aai_core="0.4.0",
+        )
+    )
     failures = comparability_failures(
-        _record(),
+        legacy,
         dataset=_dataset(),
         mode="full",
         rows=10,
-        scorers={"keyword_coverage": 2},
+        scorers={scorer: 2},
     )
 
-    assert any("keyword_coverage is v2" in failure for failure in failures)
+    assert any(f"scorer {scorer} is v2" in failure for failure in failures)
 
 
 def test_a_scorer_the_baseline_never_ran_is_not_comparable():
@@ -389,7 +400,7 @@ def test_a_scorer_the_baseline_never_ran_is_not_comparable():
         dataset=_dataset(),
         mode="full",
         rows=10,
-        scorers={"keyword_coverage": 1, "safety": 1},
+        scorers={"keyword_coverage": 2, "safety": 1},
     )
 
     assert any("this run scores safety" in failure for failure in failures)
@@ -426,7 +437,7 @@ def test_a_judge_free_run_is_not_punished_for_skipping_judges():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1, "safety": 1, "correctness": 1},
+            scorers={"keyword_coverage": 2, "safety": 1, "correctness": 1},
             judge_model="endpoints:/judge",
             aai_core="0.4.0",
         )
@@ -438,7 +449,7 @@ def test_a_judge_free_run_is_not_punished_for_skipping_judges():
             dataset=_dataset(),
             mode="full",
             rows=10,
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judges_enabled=False,
         )
         == []
@@ -449,7 +460,7 @@ def test_a_judge_free_run_is_not_punished_for_skipping_judges():
         dataset=_dataset(),
         mode="full",
         rows=10,
-        scorers={"keyword_coverage": 1},
+        scorers={"keyword_coverage": 2},
         judges_enabled=True,
     )
 
@@ -465,7 +476,7 @@ def test_a_legacy_baseline_records_no_scorers_to_compare(tmp_path):
             dataset=_dataset(),
             mode="full",
             rows=0,
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
         )
         == []
     )
@@ -477,7 +488,7 @@ def test_a_moved_judge_prompt_is_not_comparable():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/3"},
             aai_core="0.4.0",
         )
@@ -705,7 +716,7 @@ def _prompt_record():
     return _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/3"},
             aai_core="0.4.0",
         )
@@ -739,7 +750,7 @@ def test_a_newly_registered_judge_prompt_is_not_comparable():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_prompts={"other": "prompts:/cat.sch.other/1"},
             aai_core="0.4.0",
         )
@@ -765,7 +776,7 @@ def test_a_prompt_added_to_a_recorded_judge_is_not_comparable():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1, "pension_domain_policy": 1},
+            scorers={"keyword_coverage": 2, "pension_domain_policy": 1},
             judge_prompts={},
             aai_core="0.4.0",
         )
@@ -869,7 +880,7 @@ def test_a_repointed_judge_endpoint_is_not_comparable():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_model="endpoints:/pension-judge",
             judge_model_identity="main.models.judge/3",
             aai_core="0.4.0",
@@ -892,7 +903,7 @@ def test_the_same_served_entity_stays_comparable():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_model_identity="main.models.judge/3",
             aai_core="0.4.0",
         )
@@ -920,7 +931,7 @@ def test_an_unreadable_judge_identity_does_not_block():
     record = _record(
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             judge_model_identity="main.models.judge/3",
             aai_core="0.4.0",
         )

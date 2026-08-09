@@ -184,6 +184,7 @@ def test_is_missing_prompt_error_recognizes_only_absence():
     assert is_missing_prompt_error(RegistryError("x", error_code="NOT_FOUND"))
     assert is_missing_prompt_error(RegistryError("prompt does not exist"))
     assert is_missing_prompt_error(FileNotFoundError("prompt does not exist"))
+    assert is_missing_prompt_error(FileNotFoundError("missing prompt artifact"))
     # Any structured non-absence code is authoritative. Falling through to
     # message wording here would swallow a real provider failure.
     assert not is_missing_prompt_error(
@@ -209,6 +210,16 @@ def test_is_missing_prompt_error_recognizes_only_absence():
     assert not is_missing_prompt_error(
         RegistryError("prompt does not exist", error_code="PERMISSION_DENIED")
     )
+    structured_denial = RegistryError(
+        "prompt does not exist", error_code="PERMISSION_DENIED"
+    )
+    structured_denial.response = SimpleNamespace(status_code=404)
+    assert not is_missing_prompt_error(structured_denial)
+    missing_code_with_server_failure = RegistryError(
+        "prompt does not exist", error_code="NOT_FOUND"
+    )
+    missing_code_with_server_failure.response = SimpleNamespace(status_code=503)
+    assert not is_missing_prompt_error(missing_code_with_server_failure)
     for provider_error in (
         PermissionError("prompt does not exist"),
         ConnectionError("prompt not found"),
@@ -220,6 +231,48 @@ def test_is_missing_prompt_error_recognizes_only_absence():
         assert not is_missing_prompt_error(provider_error)
     assert not is_missing_prompt_error(RegistryError("401 unauthorized"))
     assert not is_missing_prompt_error(RegistryError("connection reset"))
+
+
+@pytest.mark.parametrize(
+    ("status", "missing"),
+    ((401, False), (403, False), (404, True), (429, False), (503, False)),
+)
+def test_is_missing_prompt_error_uses_actual_http_response_status(status, missing):
+    httpx = pytest.importorskip("httpx")
+    request = httpx.Request("GET", "https://registry.example/prompts/hidden")
+    response = httpx.Response(status, request=request)
+    error = httpx.HTTPStatusError(
+        "prompt does not exist",
+        request=request,
+        response=response,
+    )
+
+    assert is_missing_prompt_error(error) is missing
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        RuntimeError("403 forbidden: prompt does not exist"),
+        RuntimeError("connection reset: prompt does not exist"),
+        RuntimeError("request timed out; prompt does not exist"),
+        RuntimeError("HTTP 503: prompt does not exist"),
+        type("RateLimitError", (RuntimeError,), {})("prompt does not exist"),
+        type("ProtocolError", (RuntimeError,), {})("prompt does not exist"),
+    ),
+)
+def test_is_missing_prompt_error_rejects_unstructured_failure_wrappers(error):
+    assert not is_missing_prompt_error(error)
+
+
+def test_is_missing_prompt_error_inspects_nested_provider_failures():
+    inner = type("RegistryError", (RuntimeError,), {"error_code": "PERMISSION_DENIED"})(
+        "prompt does not exist"
+    )
+    outer = RuntimeError("prompt does not exist")
+    outer.__cause__ = inner
+
+    assert not is_missing_prompt_error(outer)
 
 
 @pytest.mark.parametrize(

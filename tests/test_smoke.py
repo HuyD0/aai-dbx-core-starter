@@ -143,9 +143,35 @@ def test_advanced_notebooks_preserve_release_guardrails():
     assert "set_prompt_alias" not in optimization
 
     operations = sources["14_platform_llm_operations.ipynb"]
-    assert '\\"template_version\\": \\"1.2.0\\"' in operations
-    assert '\\"sdk\\": \\"0.4.0\\"' in operations
-    assert '\\"sdk\\": \\"0.3.0\\"' not in operations
+    operations_notebook = json.loads(operations)
+    provenance_source = next(
+        "".join(cell["source"])
+        for cell in operations_notebook["cells"]
+        if "provenance_stamp =" in "".join(cell.get("source", []))
+    )
+    provenance_tree = ast.parse(provenance_source)
+    provenance_assignment = next(
+        node
+        for node in provenance_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "provenance_stamp"
+            for target in node.targets
+        )
+    )
+    provenance_stamp = ast.literal_eval(provenance_assignment.value)
+    generated_stamp = json.loads(
+        (ROOT / "templates/prompt-app/template/.aai-template.json.tmpl").read_text()
+    )
+    generated_stamp["generated_with"] = {
+        "project_name": "fictional-earnings",
+        "application_name": "earnings-summary",
+        "team": "fictional-app-team",
+        "model_provider": "databricks",
+        "prompt_name": "earnings_summary",
+        "aai_core_version": "0.4.0",
+    }
+    assert provenance_stamp == generated_stamp
 
 
 def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():

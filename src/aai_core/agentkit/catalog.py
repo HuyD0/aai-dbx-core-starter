@@ -243,7 +243,7 @@ CATALOG: tuple[ScorerSpec, ...] = (
     ),
     ScorerSpec(
         name="keyword_coverage",
-        version=1,
+        version=2,
         kind=ScorerKind.CODE,
         summary="Code: fraction of expected keywords present in the answer.",
         metric="keyword_coverage/mean",
@@ -254,7 +254,7 @@ CATALOG: tuple[ScorerSpec, ...] = (
     ),
     ScorerSpec(
         name="refusal_compliance",
-        version=1,
+        version=2,
         kind=ScorerKind.CODE,
         summary="Code: refusal cases refuse; non-refusal cases answer.",
         metric="refusal_compliance/mean",
@@ -264,7 +264,7 @@ CATALOG: tuple[ScorerSpec, ...] = (
     ),
     ScorerSpec(
         name="response_length_ok",
-        version=1,
+        version=2,
         kind=ScorerKind.CODE,
         summary="Code: answers are non-empty and under 2000 characters.",
         metric="response_length_ok/mean",

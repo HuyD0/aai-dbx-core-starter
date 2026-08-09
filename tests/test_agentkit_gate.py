@@ -86,7 +86,7 @@ def _results(**overrides):
         },
         "versions": BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             aai_core="0.4.0",
         ),
         "baseline_run_id": "run-0",
@@ -129,7 +129,7 @@ def test_passing_results_exit_zero(tmp_path):
     text = render_report(report)
     assert "gate: PASSED" in text
     assert "compared against run-0" in text
-    assert "keyword_coverage=v1" in text
+    assert "keyword_coverage=v2" in text
 
 
 def test_threshold_failure_exits_two(tmp_path):
@@ -623,7 +623,7 @@ def test_standalone_regression_budget_respects_registry_direction(tmp_path):
 def test_standalone_regression_budget_defaults_to_higher_is_better(tmp_path):
     project = _project(tmp_path, regression_budget={"keyword_coverage/mean": 0.05})
     versions = BaselineVersions(
-        agent="agent", scorers={"keyword_coverage": 1}, aai_core="0.4.0"
+        agent="agent", scorers={"keyword_coverage": 2}, aai_core="0.4.0"
     )
 
     worse = _results(
