@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from aai_core.decisions import Decision, DecisionRecord, decision_digest
+from aai_core.decisions import (
+    Decision,
+    DecisionEvidenceError,
+    DecisionRecord,
+    decision_digest,
+)
 from aai_core.evaluation import GatePolicy, GateResult, MetricDirection, MetricRule
 from aai_core.prompts import (
     PromptManager,
@@ -71,6 +76,8 @@ class FakeClient:
 
     def download_artifacts(self, run_id, artifact_path):
         self.owner.decision_artifact_requests.append((run_id, artifact_path))
+        if self.owner.decision_artifact_error is not None:
+            raise self.owner.decision_artifact_error
         if self.owner.decision_artifact is None:
             raise AssertionError("promotion requested an unexpected artifact")
         return str(self.owner.decision_artifact)
@@ -109,6 +116,7 @@ class FakeMlflow:
         pages=None,
         decision_run=None,
         decision_artifact=None,
+        decision_artifact_error=None,
     ):
         self.prompt = prompt
         self.versions = list(versions)
@@ -118,6 +126,7 @@ class FakeMlflow:
         self.page_tokens_requested: list = []
         self.decision_run = decision_run
         self.decision_artifact = decision_artifact
+        self.decision_artifact_error = decision_artifact_error
         self.decision_run_requests: list[str] = []
         self.decision_artifact_requests: list[tuple[str, str]] = []
         self.genai = FakeGenAI(templates_by_uri)
@@ -509,6 +518,39 @@ def test_promote_accepts_a_verified_persisted_adopt_decision(tmp_path):
     # Verification fetches through the raw client: the fluent load would
     # link the candidate to any active run, model, or trace.
     assert mlflow.genai.linking_loads == []
+
+
+def test_promote_reports_a_missing_decision_artifact_as_blocked_evidence(tmp_path):
+    class MissingArtifactError(Exception):
+        error_code = "RESOURCE_DOES_NOT_EXIST"
+
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+    missing = MissingArtifactError("decision artifact does not exist")
+    mlflow.decision_artifact_error = missing
+
+    with pytest.raises(
+        PromptPromotionError, match="valid decision/decision.json"
+    ) as excinfo:
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+        )
+
+    assert excinfo.value.remediation is not None
+    assert isinstance(excinfo.value.__cause__, DecisionEvidenceError)
+    assert excinfo.value.__cause__.__cause__ is missing
+    assert mlflow.genai.alias is None
 
 
 def test_promote_refuses_in_memory_evidence_that_differs_from_the_run(tmp_path):

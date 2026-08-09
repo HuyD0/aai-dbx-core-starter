@@ -22,7 +22,11 @@ from typing import Any, Literal, Self
 from pydantic import Field, field_validator, model_validator
 
 from aai_core.contracts import ContractModel
-from aai_core.evaluation import GateResult, _is_placeholder
+from aai_core.evaluation import (
+    GateResult,
+    _is_missing_registry_error,
+    _is_placeholder,
+)
 from aai_core.exceptions import AaiCoreError
 from aai_core.experiments import (
     ExperimentManager,
@@ -242,7 +246,20 @@ def load_decision(
             "authorize promotion."
         )
 
-    artifact_path = client.download_artifacts(run_id, "decision/decision.json")
+    try:
+        artifact_path = client.download_artifacts(run_id, "decision/decision.json")
+    except Exception as error:
+        # A finished run without the decision artifact is invalid evidence,
+        # not a provider outage. Structured auth and transient codes override
+        # not-found wording inside the shared classifier and still propagate.
+        if not isinstance(error, FileNotFoundError) and not _is_missing_registry_error(
+            error
+        ):
+            raise
+        raise DecisionEvidenceError(
+            "The decision run does not contain a valid decision/decision.json "
+            "artifact."
+        ) from error
     try:
         record = DecisionRecord.model_validate_json(
             Path(artifact_path).read_text(encoding="utf-8")

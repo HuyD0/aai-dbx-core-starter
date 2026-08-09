@@ -83,13 +83,16 @@ class FakeDecisionClient:
 
     def download_artifacts(self, run_id, artifact_path):
         self.owner.downloads.append((run_id, artifact_path))
+        if self.owner.download_error is not None:
+            raise self.owner.download_error
         return str(self.owner.artifact)
 
 
 class FakeDecisionMlflow:
-    def __init__(self, *, run, artifact):
+    def __init__(self, *, run, artifact, download_error=None):
         self.run = run
         self.artifact = artifact
+        self.download_error = download_error
         self.requested_run_ids: list[str] = []
         self.downloads: list[tuple[str, str]] = []
 
@@ -425,6 +428,56 @@ def test_load_decision_rejects_contradictory_persisted_evidence(
 
     with pytest.raises(DecisionEvidenceError, match=match):
         load_decision("run-decision-1", mlflow_module=mlflow)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        FileNotFoundError("missing decision artifact"),
+        type(
+            "MissingArtifactError",
+            (Exception,),
+            {"error_code": "RESOURCE_DOES_NOT_EXIST"},
+        )("decision artifact does not exist"),
+    ],
+)
+def test_load_decision_converts_a_missing_artifact_to_stable_evidence_error(
+    tmp_path, missing
+):
+    mlflow = _persisted_mlflow(tmp_path, _record())
+    mlflow.download_error = missing
+
+    with pytest.raises(
+        DecisionEvidenceError, match="valid decision/decision.json"
+    ) as excinfo:
+        load_decision("run-decision-1", mlflow_module=mlflow)
+
+    assert excinfo.value.code == "aai_core.decisions.evidence_invalid"
+    assert excinfo.value.__cause__ is missing
+    assert mlflow.downloads == [("run-decision-1", "decision/decision.json")]
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        type(
+            "DeniedArtifactError",
+            (Exception,),
+            {"error_code": "PERMISSION_DENIED"},
+        )("decision artifact does not exist"),
+        ConnectionError("connection reset"),
+    ],
+)
+def test_load_decision_propagates_artifact_auth_and_transport_failures(
+    tmp_path, provider_error
+):
+    mlflow = _persisted_mlflow(tmp_path, _record())
+    mlflow.download_error = provider_error
+
+    with pytest.raises(type(provider_error)) as excinfo:
+        load_decision("run-decision-1", mlflow_module=mlflow)
+
+    assert excinfo.value is provider_error
 
 
 def test_load_decision_validates_run_ids_before_mlflow_access():
