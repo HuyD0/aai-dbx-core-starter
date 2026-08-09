@@ -1,6 +1,7 @@
 """Unit tests for the promotion gate and the CI exit-code contract."""
 
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -26,6 +27,7 @@ from aai_core.agentkit.gate import (
 )
 from aai_core.agentkit.results import (
     RESULTS_ATTEMPT_FILE,
+    RESULTS_ATTEMPT_LOCK_FILE,
     RESULTS_ATTEMPT_TRANSITION_FILE,
     ResultsRecord,
     begin_results_attempt,
@@ -268,9 +270,14 @@ def test_legacy_results_fallback_requires_no_attempt_metadata(tmp_path):
     assert loaded is not None
     assert loaded[0].run_id == "run-1"
     assert loaded[1] == path
-    assert not any(
-        entry.name.startswith(".attempt-") for entry in project.results_dir.iterdir()
-    )
+    assert {entry.name for entry in project.results_dir.iterdir()} == {
+        path.name,
+        RESULTS_ATTEMPT_LOCK_FILE,
+    }
+
+    # The reader-created lock is coordination, not attempt metadata; a later
+    # legacy read must still use the same compatibility fallback.
+    assert load_gate_results(project.results_dir) == loaded
 
 
 def test_pending_latest_attempt_blocks_an_older_passing_result(tmp_path):
@@ -404,10 +411,7 @@ def test_attempt_state_write_failure_leaves_the_gate_invalidated(tmp_path, monke
 
     def fail_state(path, document):
         calls.append(path)
-        if (
-            path.name.startswith(".attempt-")
-            and path.name != RESULTS_ATTEMPT_TRANSITION_FILE
-        ):
+        if results_module._is_attempt_state_name(path.name):
             raise OSError("disk full")
         write_contract(path, document)
 
@@ -417,8 +421,39 @@ def test_attempt_state_write_failure_leaves_the_gate_invalidated(tmp_path, monke
         begin_results_attempt(project.results_dir, command="compare")
 
     assert calls[0] == project.results_dir / RESULTS_ATTEMPT_TRANSITION_FILE
-    assert calls[1] == project.results_dir / RESULTS_ATTEMPT_FILE
-    assert calls[2].name.startswith(".attempt-")
+    assert results_module._is_attempt_state_name(calls[1].name)
+    with pytest.raises(ConfigError, match="did not finish initializing"):
+        load_gate_results(project.results_dir)
+
+
+def test_transition_write_failure_first_moves_an_old_pass_out_of_service(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import results as results_module
+
+    project = _project(tmp_path)
+    old = begin_results_attempt(project.results_dir, command="compare")
+    old_path = write_results(
+        project.results_dir,
+        _results(attempt_id=old.attempt_id),
+        attempt=old,
+    )
+    complete_results_attempt(project.results_dir, old, old_path)
+    assert load_gate_results(project.results_dir)[0].gate_passed
+    write_contract = results_module._write_contract_file
+
+    def fail_transition(path, document):
+        if path.name == RESULTS_ATTEMPT_TRANSITION_FILE:
+            raise OSError("transition write failed")
+        write_contract(path, document)
+
+    monkeypatch.setattr(results_module, "_write_contract_file", fail_transition)
+
+    with pytest.raises(OSError, match="transition write failed"):
+        begin_results_attempt(project.results_dir, command="compare")
+
+    assert not (project.results_dir / RESULTS_ATTEMPT_FILE).exists()
+    assert (project.results_dir / RESULTS_ATTEMPT_TRANSITION_FILE).exists()
     with pytest.raises(ConfigError, match="did not finish initializing"):
         load_gate_results(project.results_dir)
 
@@ -452,6 +487,79 @@ def test_pointer_write_failure_cannot_leave_an_old_pass_gate_eligible(
     assert not (project.results_dir / RESULTS_ATTEMPT_FILE).exists()
     assert (project.results_dir / RESULTS_ATTEMPT_TRANSITION_FILE).exists()
     with pytest.raises(ConfigError, match="did not finish initializing"):
+        load_gate_results(project.results_dir)
+
+
+def test_gate_read_and_attempt_begin_are_serialized_across_all_evidence_bytes(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import results as results_module
+
+    project = _project(tmp_path)
+    old = begin_results_attempt(project.results_dir, command="compare")
+    old_path = write_results(
+        project.results_dir,
+        _results(attempt_id=old.attempt_id),
+        attempt=old,
+    )
+    complete_results_attempt(project.results_dir, old, old_path)
+
+    reader_inside = Event()
+    release_reader = Event()
+    pointer_moved = Event()
+    writer_started = Event()
+    reader_results = []
+    reader_errors = []
+    writer_errors = []
+    parse_results = results_module._parse_results_bytes
+    replace = results_module.os.replace
+
+    def blocking_parse(path, payload):
+        if path == old_path:
+            reader_inside.set()
+            release_reader.wait(timeout=2)
+        return parse_results(path, payload)
+
+    def tracking_replace(source, destination):
+        if Path(destination).name == RESULTS_ATTEMPT_TRANSITION_FILE:
+            pointer_moved.set()
+        return replace(source, destination)
+
+    monkeypatch.setattr(results_module, "_parse_results_bytes", blocking_parse)
+    monkeypatch.setattr(results_module.os, "replace", tracking_replace)
+
+    def read_gate():
+        try:
+            reader_results.append(load_gate_results(project.results_dir))
+        except Exception as error:  # pragma: no cover - asserted below
+            reader_errors.append(error)
+
+    def begin_attempt():
+        writer_started.set()
+        try:
+            begin_results_attempt(project.results_dir, command="compare")
+        except Exception as error:  # pragma: no cover - asserted below
+            writer_errors.append(error)
+
+    reader = Thread(target=read_gate)
+    writer = Thread(target=begin_attempt)
+    reader.start()
+    assert reader_inside.wait(timeout=2)
+    writer.start()
+    assert writer_started.wait(timeout=2)
+    moved_while_reader_held_lock = pointer_moved.wait(timeout=0.2)
+    release_reader.set()
+    reader.join(timeout=2)
+    writer.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert not moved_while_reader_held_lock
+    assert pointer_moved.is_set()
+    assert reader_errors == []
+    assert writer_errors == []
+    assert reader_results[0][0].run_id == "run-1"
+    with pytest.raises(ConfigError, match="did not publish"):
         load_gate_results(project.results_dir)
 
 

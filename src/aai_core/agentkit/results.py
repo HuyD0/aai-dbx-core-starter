@@ -241,15 +241,18 @@ def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
     )
     pointer_path = directory / RESULTS_ATTEMPT_FILE
     transition_path = directory / RESULTS_ATTEMPT_TRANSITION_FILE
-    with _serialize_attempt_starts(directory):
-        # The transition marker is installed before touching the previous
-        # pointer.  Readers refuse while it exists.  It deliberately remains
-        # after any pointer/state/unlink failure, so no earlier pass becomes
-        # eligible just because beginning this attempt failed midway.
+    with _attempt_protocol_lock(directory, shared=False):
+        # Moving the prior pointer is the first mutation: it atomically makes
+        # an old pass ineligible without depending on a new write succeeding.
+        # Rewriting the marker binds it to this attempt; if that or any later
+        # step fails, the marker remains and readers refuse.
+        try:
+            os.replace(pointer_path, transition_path)
+        except FileNotFoundError:
+            pass
         _write_contract_file(transition_path, pointer.model_dump())
-        pointer_path.unlink(missing_ok=True)
-        _write_contract_file(pointer_path, pointer.model_dump())
         _write_attempt_state(directory, attempt)
+        _write_contract_file(pointer_path, pointer.model_dump())
         transition_path.unlink()
     return attempt
 
@@ -279,6 +282,14 @@ def complete_results_attempt(
 def load_gate_results(directory: Path) -> tuple[ResultsRecord, Path] | None:
     """The result bound to the latest attempt, with legacy fallback."""
 
+    # Hold the same lock as begin_results_attempt across the entire evidence
+    # read. A reader therefore returns the old completed attempt before a new
+    # begin, or observes the new pending attempt after it — never a mixture.
+    with _attempt_protocol_lock(directory, shared=True):
+        return _load_gate_results_locked(directory)
+
+
+def _load_gate_results_locked(directory: Path) -> tuple[ResultsRecord, Path] | None:
     transition_path = directory / RESULTS_ATTEMPT_TRANSITION_FILE
     if _path_exists(transition_path, purpose="evaluation-attempt transition"):
         raise ConfigError(
@@ -366,14 +377,15 @@ def _attempt_state_path(directory: Path, attempt_id: str) -> Path:
 
 
 @contextmanager
-def _serialize_attempt_starts(directory: Path) -> Iterator[None]:
-    """Serialize the small fail-closed pointer transition across processes."""
+def _attempt_protocol_lock(directory: Path, *, shared: bool) -> Iterator[None]:
+    """Serialize attempt transitions with full gate-evidence reads."""
 
     directory.mkdir(parents=True, exist_ok=True)
     lock_path = directory / RESULTS_ATTEMPT_LOCK_FILE
     with lock_path.open("a+b") as lock:
         if fcntl is not None:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            fcntl.flock(lock.fileno(), operation)
         try:
             yield
         finally:
@@ -395,16 +407,22 @@ def _has_attempt_metadata(directory: Path) -> bool:
     """Whether legacy newest-file fallback would cross a protocol boundary."""
 
     try:
-        return any(
-            entry.name.startswith(RESULTS_ATTEMPT_STATE_PREFIX)
-            for entry in directory.iterdir()
-        )
+        return any(_is_attempt_state_name(entry.name) for entry in directory.iterdir())
     except FileNotFoundError:
         return False
     except OSError as error:
         raise ConfigError(
             f"could not inspect evaluation-attempt metadata in {directory}: {error}"
         ) from error
+
+
+def _is_attempt_state_name(name: str) -> bool:
+    attempt_id = name.removeprefix(RESULTS_ATTEMPT_STATE_PREFIX)
+    return (
+        name.startswith(RESULTS_ATTEMPT_STATE_PREFIX)
+        and len(attempt_id) == 32
+        and all(character in "0123456789abcdef" for character in attempt_id)
+    )
 
 
 def _write_attempt_state(directory: Path, attempt: ResultsAttempt) -> None:
