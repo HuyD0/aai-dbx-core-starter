@@ -195,6 +195,23 @@ abstention path) then passes the same gate on the same terms.
     validator enforced, so a relabelled tier switches the source pin off),
     and by checking it judged them under *this* spec's policy.
 
+    **Every statement that mutates the target enforces this itself**, via
+    one shared `_require_authorised_write`. That function exists because
+    the alternative was found four separate times: the execute builder
+    learned to check the gate, then the ceiling, then the preflight, each
+    after a review noticed the notebook's call ordering was what had
+    really been protecting it — and then `resync_policy_sql` was written
+    and inherited none of it, because there was nothing to inherit.
+    Stamping "this release governs these values" onto production is an
+    authorisation, not a cleanup.
+
+    The one exception is `resync_strata_sql`, and its reason is written
+    where a reader will hit it: stratum labels are copied from source
+    columns, so relabelling asserts nothing about model quality, and a
+    *rejected* release is exactly when you may still need the failing
+    stratum labelled correctly in order to re-sample it. It still
+    requires the preflight to describe the snapshot it reads.
+
     **`build_execute_sql` re-runs all of it, plus the cost ceiling.** It is
     the function that emits the paid statement, so it does not assume the
     caller checked first: it calls `require_executable` and

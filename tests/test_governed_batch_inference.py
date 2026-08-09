@@ -1673,7 +1673,13 @@ def test_a_policy_only_release_reuses_the_predictions_it_has():
     assert "ai_spec_digest" not in predicate
 
     # The policy stamp is refreshed separately, without inference.
-    policy = gbi.resync_policy_sql(relaxed, snapshot_for(relaxed), run_id="policy-run")
+    policy = gbi.resync_policy_sql(
+        relaxed,
+        run_id="policy-run",
+        estimate=estimate_for(relaxed),
+        preflight=preflight_for(relaxed),
+        report=adopting_report(relaxed),
+    )
     assert f"target.ai_spec_digest = '{relaxed.spec_digest}'" in policy
     assert f"target.ai_inference_digest = '{relaxed.inference_digest}'" in policy
     assert "ai_query" not in policy
@@ -1724,7 +1730,13 @@ def test_the_policy_resync_leaves_edited_documents_alone():
     """A row whose source text changed is pending, and the run may never
     happen — stamping it would claim this release governs stale values."""
     spec = one_field_spec()
-    sql = gbi.resync_policy_sql(spec, snapshot_for(spec), run_id="policy-run")
+    sql = gbi.resync_policy_sql(
+        spec,
+        run_id="policy-run",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
+    )
     assert "target.ai_source_digest = sha2(source.doc_text, 256)" in sql
     assert f"target.ai_inference_digest = '{spec.inference_digest}'" in sql
     assert "ai_query" not in sql
@@ -1755,7 +1767,13 @@ def test_a_policy_only_release_keeps_both_run_references():
     """The values came from one run; the policy governing them now comes
     from another. Both are true, and collapsing them loses one."""
     spec = one_field_spec()
-    sql = gbi.resync_policy_sql(spec, snapshot_for(spec), run_id="policy-run")
+    sql = gbi.resync_policy_sql(
+        spec,
+        run_id="policy-run",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
+    )
     assert "target.ai_policy_run_id = 'policy-run'" in sql
     # The run that produced the values is left alone.
     assert "target.ai_run_id" not in sql
@@ -1837,7 +1855,11 @@ def test_the_run_record_exists_before_any_row_points_at_it():
     spec = one_field_spec()
     report = adopting_report(spec)
     reserve = gbi.run_metadata_reserve_sql(
-        spec, report, run_id="run-1", projected_cost_cad=1.0
+        spec,
+        report,
+        run_id="run-1",
+        estimate=estimate_matching(report, spec),
+        preflight=preflight_matching(report, spec),
     )
     # Reserved with the one unknowable field left open.
     assert "CAST(NULL AS BIGINT) AS target_table_version" in reserve
@@ -1848,6 +1870,96 @@ def test_the_run_record_exists_before_any_row_points_at_it():
     )
     assert "SET target_table_version = 9" in finalize
     assert "AND target_table_version IS NULL" in finalize
+
+
+def test_every_mutating_statement_enforces_its_own_authorisation():
+    """The policy resync stamps 'this release governs these values' onto
+    production, which is an authorisation, not a cleanup."""
+    spec = one_field_spec()
+    rejecting = gate(spec, score(records_for("s", correct=80, wrong=20), spec))
+    for build in (
+        lambda report: gbi.resync_policy_sql(
+            spec,
+            run_id="r",
+            estimate=estimate_matching(report, spec),
+            preflight=preflight_matching(report, spec),
+            report=report,
+        ),
+        lambda report: gbi.run_metadata_reserve_sql(
+            spec,
+            report,
+            run_id="r",
+            estimate=estimate_matching(report, spec),
+            preflight=preflight_matching(report, spec),
+        ),
+    ):
+        with pytest.raises(gbi.GateNotPassed):
+            build(rejecting)
+        assert build(adopting_report(spec))  # the adopting case still builds
+
+
+def test_the_strata_resync_stays_available_on_a_rejected_release():
+    """Labels are copied from source columns, so relabelling asserts
+    nothing about model quality — and a rejected release is exactly when
+    you may need the failing stratum labelled correctly to re-sample it."""
+    spec = one_field_spec()
+    snapshot = snapshot_for(spec, 12)
+    sql = gbi.resync_strata_sql(spec, snapshot)
+    assert "MERGE INTO" in sql  # no gate required, deliberately
+    # But it will not relabel from rows the run never checked.
+    with pytest.raises(gbi.EvidenceMismatch, match="never checked"):
+        gbi.resync_strata_sql(
+            spec, snapshot, preflight=preflight_for(spec, snapshot_for(spec, 99))
+        )
+
+
+def test_tier_three_reserves_provenance_without_a_gate():
+    """Its rows carry ai_run_id like any other, so they need a record —
+    and fabricating a gate to get one would be a lie in the audit trail."""
+    tier3 = one_field_spec(use_tier=3)
+    snapshot = snapshot_for(tier3)
+    sql = gbi.run_metadata_reserve_sql(
+        tier3,
+        None,
+        run_id="run-1",
+        estimate=estimate_for(tier3, snapshot),
+        preflight=preflight_for(tier3, snapshot),
+    )
+    assert "'not_required' AS gate_decision" in sql
+    assert "NULL AS approved_by" in sql
+
+    # A gated spec still cannot omit it.
+    gated = one_field_spec()
+    with pytest.raises(gbi.GateNotPassed, match="report is required"):
+        gbi.run_metadata_reserve_sql(
+            gated,
+            None,
+            run_id="run-1",
+            estimate=estimate_for(gated),
+            preflight=preflight_for(gated),
+        )
+
+
+def test_blank_strings_are_refused_wherever_they_would_be_believed():
+    """`min_length=1` rejects "" and accepts " ", which is how a
+    whitespace approver and a whitespace rollback plan both passed."""
+    with pytest.raises(ValidationError):
+        make_spec(use_tier=1, rollback_plan=" ")
+    with pytest.raises(ValidationError):
+        make_spec(name=" ")
+    with pytest.raises(ValidationError):
+        make_spec(prompt_template="   \n  ")
+    with pytest.raises(ValidationError):
+        gbi.InferenceIdentity(
+            inference_digest=" ", model_version="m", prompt_version="1"
+        )
+
+    # Surrounding whitespace is stripped, so one identifier has one spelling.
+    assert make_spec(name="  extraction  ").name == "extraction"
+    # The prompt template is the exception: its trailing newline separates
+    # the instructions from the document, so it must survive intact.
+    template = "Extract the fields.\n\nDOCUMENT:\n"
+    assert make_spec(prompt_template=template).prompt_template == template
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -2530,14 +2642,14 @@ def test_a_confidence_outside_zero_to_one_is_declined_not_trusted():
 def test_run_metadata_write_is_idempotent():
     """ai_run_id is the provenance join key, so a duplicate row fans out
     every downstream join — a retry must not create one."""
-    spec = make_spec()
-    scores = score(records_for("standard", correct=200), one_field_spec())
-    report = gate(one_field_spec(), scores)
+    spec = one_field_spec()
+    report = gate(spec, score(records_for("standard", correct=200), spec))
     sql = gbi.run_metadata_reserve_sql(
         spec,
         report,
         run_id="run-1",
-        projected_cost_cad=12.5,
+        estimate=estimate_matching(report, spec),
+        preflight=preflight_matching(report, spec),
     )
     assert sql.startswith("MERGE INTO main.finance_docs.batch_inference_runs")
     assert "ON target.run_id = source.run_id" in sql
@@ -2639,14 +2751,16 @@ def test_provenance_layers_are_generated():
         )
         for i in range(200)
     ]
+    metadata_report = gate(spec, score(records, spec))
     insert = gbi.run_metadata_reserve_sql(
         spec,
-        gate(spec, score(records, spec)),
+        metadata_report,
         run_id="run-123",
-        projected_cost_cad=12.5,
+        estimate=estimate_matching(metadata_report, spec),
+        preflight=preflight_matching(metadata_report, spec),
     )
     assert "'run-123' AS run_id" in insert
-    assert "12.5 AS projected_cost_cad" in insert
+    assert "AS projected_cost_cad" in insert
     # Reserved with the version still open — it is not knowable yet.
     assert "CAST(NULL AS BIGINT) AS target_table_version" in insert
     finalize = gbi.run_metadata_finalize_sql(
@@ -2737,6 +2851,7 @@ def test_approver_identity_is_recorded_in_evidence_but_never_in_a_tag(monkeypatc
         spec,
         approved,
         run_id="run-1",
-        projected_cost_cad=1.0,
+        estimate=estimate_matching(approved, spec),
+        preflight=preflight_matching(approved, spec),
     )
     assert approver in metadata_sql

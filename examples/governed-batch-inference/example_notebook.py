@@ -1267,7 +1267,7 @@ pending_sql = f"""
 # calls the row done — but the landed label would stay wrong forever, and
 # monitoring groups by it. Fix the labels directly rather than paying an
 # endpoint to regenerate identical values.
-spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT))
+spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT, preflight=PREFLIGHT))
 # A release that changes only judgment produces the predictions already
 # landed, so restart leaves those rows alone — but the table would still
 # name the older policy. This corrects the stamp without inference.
@@ -1281,7 +1281,8 @@ spark.sql(
         spec_v2,
         report_v2,
         run_id=RUN_ID,
-        projected_cost_cad=estimate_v2.projected_cost_cad,
+        estimate=estimate_v2,
+        preflight=PREFLIGHT,
     )
 )
 # Insert-only, so a reused run id leaves the *original* record standing
@@ -1293,7 +1294,15 @@ gbi.require_unique_run_id(
     ).count(),
 )
 
-spark.sql(gbi.resync_policy_sql(spec_v2, SOURCE_SNAPSHOT, run_id=RUN_ID))
+spark.sql(
+    gbi.resync_policy_sql(
+        spec_v2,
+        run_id=RUN_ID,
+        estimate=estimate_v2,
+        preflight=PREFLIGHT,
+        report=report_v2,
+    )
+)
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 

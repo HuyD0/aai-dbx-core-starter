@@ -43,16 +43,25 @@ import re
 from collections.abc import Mapping, Sequence
 from enum import IntEnum, StrEnum
 from statistics import NormalDist
+from typing import Annotated
 
 import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StringConstraints,
     ValidationError,
     field_validator,
     model_validator,
 )
+
+#: A string that must carry actual content. `min_length=1` alone rejects
+#: `""` and accepts `" "`, which is how a whitespace approver once
+#: satisfied a named-approver check and a whitespace rollback plan once
+#: satisfied tier 1. Surrounding whitespace is stripped as well, so two
+#: spellings of one identifier cannot both exist.
+NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 # ---------------------------------------------------------------------------
 # Constants and small helpers
@@ -235,9 +244,9 @@ class ReleaseIdentity(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    spec_digest: str = Field(min_length=1)
-    model_version: str = Field(min_length=1)
-    prompt_version: str = Field(min_length=1)
+    spec_digest: NonBlank
+    model_version: NonBlank
+    prompt_version: NonBlank
 
 
 class InferenceIdentity(BaseModel):
@@ -262,9 +271,9 @@ class InferenceIdentity(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    inference_digest: str = Field(min_length=1)
-    model_version: str = Field(min_length=1)
-    prompt_version: str = Field(min_length=1)
+    inference_digest: NonBlank
+    model_version: NonBlank
+    prompt_version: NonBlank
 
 
 class FieldSpec(BaseModel):
@@ -272,8 +281,8 @@ class FieldSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    name: str
-    description: str = Field(min_length=1)
+    name: NonBlank
+    description: NonBlank
     criticality: Criticality
     tolerable_error_rate: float = Field(gt=0.0, lt=1.0)
 
@@ -299,8 +308,8 @@ class BatchInferenceSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    spec_version: str = "1"
-    name: str
+    spec_version: NonBlank = "1"
+    name: NonBlank
     source_table: str
     target_table: str
     run_metadata_table: str
@@ -317,6 +326,10 @@ class BatchInferenceSpec(BaseModel):
     #: appended to it. It lives here so the identity can cover what the
     #: model actually received: ``prompt_version`` is a string the author
     #: types, and nothing stops it staying "1.0.0" across an edit.
+    #: Not `NonBlank`: the template must have content, but it must not be
+    #: stripped. Its trailing newline separates the instructions from the
+    #: document appended after it, so trimming would silently change the
+    #: request the model receives — and the inference digest with it.
     prompt_template: str = Field(min_length=1)
     #: Monotonic release counter, incremented whenever any part of the
     #: release changes. It is what lets the pipeline tell *newer* from
@@ -327,7 +340,7 @@ class BatchInferenceSpec(BaseModel):
     cost_ceiling_cad: float = Field(gt=0.0)
     abstain_threshold: float = Field(ge=0.0, le=1.0)
     confidence_level: float = Field(default=0.95, gt=0.5, lt=1.0)
-    rollback_plan: str | None = None
+    rollback_plan: NonBlank | None = None
 
     @field_validator("name")
     @classmethod
@@ -441,6 +454,13 @@ class BatchInferenceSpec(BaseModel):
     def gate_required(self) -> bool:
         """Tier 3 is cost tracking only — do not over-control it."""
         return self.use_tier != UseTier.EXPLORATORY
+
+    @field_validator("prompt_template")
+    @classmethod
+    def _prompt_has_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("prompt_template must contain instructions")
+        return value
 
     @property
     def spec_digest(self) -> str:
@@ -1080,7 +1100,7 @@ class EvaluationRecord(BaseModel):
     #: fewer distinct documents than its own numbers claim. The source
     #: preflight cannot see this: the duplication is created by the join,
     #: not present in the table.
-    key: str
+    key: NonBlank
     stratum: str
     inference: InferenceIdentity
     gold: Mapping[str, str | int | float | None]
@@ -1619,7 +1639,7 @@ class GateReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    spec_name: str
+    spec_name: NonBlank
     spec_digest: str
     use_tier: UseTier
     confidence_level: float
@@ -2442,7 +2462,10 @@ def require_migrated_target(
 
 
 def resync_strata_sql(
-    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+    spec: BatchInferenceSpec,
+    snapshot: SourceSnapshot | None = None,
+    *,
+    preflight: SourcePreflight | None = None,
 ) -> str:
     """Refresh landed stratum values from the source, without inference.
 
@@ -2457,7 +2480,23 @@ def resync_strata_sql(
     endpoint to regenerate identical output in order to correct a label.
     This statement updates the labels directly instead. Run it before the
     execute stage; it is cheap and touches only stratum columns.
+
+    **It deliberately does not require an adopting gate**, unlike
+    ``resync_policy_sql`` next door. Stratum labels are copied from source
+    columns, so this asserts nothing about model quality — and a release
+    the gate *rejected* is exactly when you may still need the labels
+    correct, to re-sample the stratum that failed. It does require the
+    preflight to describe the snapshot it reads, because relabelling from
+    rows the run never examined is still wrong. If a later change makes
+    the two resyncs symmetric for tidiness, this paragraph is the reason
+    not to.
     """
+    if preflight is not None and preflight.snapshot != snapshot:
+        raise EvidenceMismatch(
+            f"the preflight measured {preflight.snapshot} but this resync "
+            f"reads {snapshot}; the labels would come from rows that were "
+            "never checked"
+        )
     version = snapshot.version if snapshot else -1
     # The update advances the column it orders on, so the guard actually
     # moves: a corrected label with unchanged document text is skipped by
@@ -2513,6 +2552,88 @@ def target_columns(spec: BatchInferenceSpec) -> tuple[tuple[str, str], ...]:
     return tuple(columns)
 
 
+def _require_authorised_write(
+    spec: BatchInferenceSpec,
+    report: GateReport | None,
+    estimate: CostEstimate,
+    preflight: SourcePreflight,
+) -> SourceSnapshot:
+    """Everything that must hold before a statement may mutate the target.
+
+    This exists as one function because the alternative was found four
+    separate times: `build_execute_sql` learned to enforce the gate, then
+    the ceiling, then the preflight, each after a review noticed that the
+    notebook's call ordering — not the builder — was what had been
+    protecting it. `resync_policy_sql` was then written and inherited
+    none of it, because there was nothing to inherit. A new mutating
+    statement calls this and starts out safe; that is the point.
+
+    Returns the snapshot the caller must read, so the authorisation and
+    the data can never come from different places.
+    """
+    if spec.gate_required and report is None:
+        raise GateNotPassed(
+            f"tier {spec.use_tier} runs execute against the snapshot their "
+            "gate report describes, so the report is required to build the "
+            "statement"
+        )
+    # Checked for any supplied report, including tier 3's optional one,
+    # which `require_executable` deliberately waves through.
+    if report is not None and report.spec_digest != spec.spec_digest:
+        raise EvidenceMismatch(
+            "the report was produced for a different spec revision; its "
+            "source snapshot does not describe this run"
+        )
+    require_executable(spec, report, preflight)
+    # Gated runs are pinned by their evidence. Tier 3 has no evidence, so
+    # it is pinned by the thing that *is* its only control: the estimate.
+    snapshot = report.source_snapshot if report else estimate.source_snapshot
+    if snapshot is None:
+        raise EvidenceMismatch(
+            "a paid run reads a pinned snapshot; this estimate does not name "
+            "one, so nothing bounds the rows the statement would process"
+        )
+    if estimate.release != spec.release:
+        raise EvidenceMismatch(
+            "the cost estimate was computed for a different release; "
+            "re-estimate before authorising the spend"
+        )
+    # The projection is recomputed from its own inputs by the model, but
+    # the *ceiling* it is compared against is not that estimate's to
+    # choose. The spec declares the budget, exactly as it declares the
+    # gate policy; an artifact that raises its own ceiling clears itself.
+    if estimate.cost_ceiling_cad != spec.cost_ceiling_cad:
+        raise EvidenceMismatch(
+            f"the estimate was approved against a ceiling of "
+            f"{estimate.cost_ceiling_cad} CAD, but this spec declares "
+            f"{spec.cost_ceiling_cad} CAD. The budget is the spec's to set."
+        )
+    if estimate.source_snapshot != snapshot:
+        raise EvidenceMismatch(
+            f"the cost estimate describes {estimate.source_snapshot} but this "
+            f"run reads {snapshot}. A projection over different rows cannot "
+            "authorise this spend."
+        )
+    if preflight.snapshot != snapshot:
+        raise EvidenceMismatch(
+            f"the preflight measured {preflight.snapshot} but this run reads "
+            f"{snapshot}; the rows checked are not the rows to be processed"
+        )
+    # The preflight carries the only row count that came from the
+    # warehouse. Recomputing the projection proved the arithmetic was
+    # honest, not that its `row_count` was: halve the count and the price
+    # together and the estimate stays self-consistent while the pinned
+    # snapshot still holds a million rows.
+    if estimate.row_count != preflight.row_count:
+        raise EvidenceMismatch(
+            f"the estimate priced {estimate.row_count} row(s), but the "
+            f"preflight counted {preflight.row_count} in that snapshot. The "
+            "budget was approved for a different amount of work."
+        )
+    require_within_ceiling(estimate)
+    return snapshot
+
+
 def restart_predicate_sql(
     spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
 ) -> str:
@@ -2553,9 +2674,11 @@ def restart_predicate_sql(
 
 def resync_policy_sql(
     spec: BatchInferenceSpec,
-    snapshot: SourceSnapshot | None = None,
     *,
     run_id: str,
+    estimate: CostEstimate,
+    preflight: SourcePreflight,
+    report: GateReport | None = None,
 ) -> str:
     """Refresh which policy release governs already-correct predictions.
 
@@ -2574,12 +2697,20 @@ def resync_policy_sql(
     never started; stamping it here would leave production claiming this
     release governs values derived from text that no longer exists.
 
+    Stamping ``ai_spec_digest`` onto a production row asserts that *this
+    release governs these values* — an authorisation, not a cleanup — so
+    this goes through the same check the paid statement does. Without it
+    a rejecting or unapproved report could relabel the table as governed
+    by a release the gate refused, and the restart predicate would then
+    treat those rows as done.
+
     It also points ``ai_policy_run_id`` at this release's run, because
     otherwise the row would claim the new policy while every provenance
     join still resolved to the run that carried the old one — and no row
     would reference the new run record at all. ``ai_run_id`` keeps
     pointing at the run that produced the values, which remains true.
     """
+    snapshot = _require_authorised_write(spec, report, estimate, preflight)
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
 ON target.{spec.key_column} = source.{spec.key_column}
@@ -2681,88 +2812,7 @@ def build_execute_sql(
       to the exception queue instead of blocking everything else. The
       struct field is ``errorMessage`` (``response`` is null on failure).
     """
-    if spec.gate_required and report is None:
-        raise GateNotPassed(
-            f"tier {spec.use_tier} runs execute against the snapshot their "
-            "gate report describes, so the report is required to build the "
-            "statement"
-        )
-    # Checked for any supplied report, including tier 3's optional one,
-    # which `require_executable` deliberately waves through.
-    if report is not None and report.spec_digest != spec.spec_digest:
-        raise EvidenceMismatch(
-            "the report was produced for a different spec revision; its "
-            "source snapshot does not describe this run"
-        )
-    # This function *is* the paid statement, so it enforces the gate
-    # itself rather than trusting the caller to have done it. Checking
-    # only that a report exists and names the spec left a rejecting or
-    # unapproved one able to produce executable ai_query SQL — the
-    # notebook happened to call `require_executable` first, which made the
-    # gap invisible here while leaving every other caller of this reusable
-    # builder unprotected. A guard that depends on being called in the
-    # right order is not a guard.
-    require_executable(spec, report, preflight)
-    # Gated runs are pinned by their evidence. Tier 3 has no evidence, so
-    # it is pinned by the thing that *is* its only control: the estimate.
-    # Leaving that path unpinned meant the one tier governed by cost alone
-    # was the one that could read a table which had grown since the
-    # projection — defeating the control by the same mechanism the gated
-    # tiers were protected from two rounds ago.
-    snapshot = report.source_snapshot if report else estimate.source_snapshot
-    if snapshot is None:
-        raise EvidenceMismatch(
-            "a paid run reads a pinned snapshot; this estimate does not name "
-            "one, so nothing bounds the rows the statement would process"
-        )
-    # The same argument applies to money, and it applies at every tier —
-    # tier 3 is *only* cost-controlled, so it is the tier where a missing
-    # budget check matters most. An estimate is therefore not optional
-    # here: without one this function will happily emit a full-table
-    # ai_query over a hundred million rows.
-    if estimate.release != spec.release:
-        raise EvidenceMismatch(
-            "the cost estimate was computed for a different release; "
-            "re-estimate before authorising the spend"
-        )
-    # The projection is recomputed from its own inputs by the model, but
-    # the *ceiling* it is compared against is not that estimate's to
-    # choose. The spec declares the budget, exactly as it declares the
-    # gate policy; an artifact that raises its own ceiling clears itself.
-    if estimate.cost_ceiling_cad != spec.cost_ceiling_cad:
-        raise EvidenceMismatch(
-            f"the estimate was approved against a ceiling of "
-            f"{estimate.cost_ceiling_cad} CAD, but this spec declares "
-            f"{spec.cost_ceiling_cad} CAD. The budget is the spec's to set."
-        )
-    if estimate.source_snapshot != snapshot:
-        raise EvidenceMismatch(
-            f"the cost estimate describes {estimate.source_snapshot} but this "
-            f"run reads {snapshot}. A projection over different rows cannot "
-            "authorise this spend."
-        )
-    # The preflight is the third precondition this builder stopped
-    # trusting the caller to have met. Without it, a direct user gets a
-    # paid statement over a source with null keys, duplicate keys or null
-    # documents — each of which quietly breaks restart or the MERGE in a
-    # way that looks like it is working.
-    if preflight.snapshot != snapshot:
-        raise EvidenceMismatch(
-            f"the preflight measured {preflight.snapshot} but this run reads "
-            f"{snapshot}; the rows checked are not the rows to be processed"
-        )
-    # And it carries the only row count that came from the warehouse.
-    # Recomputing the projection proved the arithmetic was honest, not
-    # that its `row_count` was: halve the count and the price together
-    # and the estimate stays self-consistent while the pinned snapshot
-    # still holds a million rows.
-    if estimate.row_count != preflight.row_count:
-        raise EvidenceMismatch(
-            f"the estimate priced {estimate.row_count} row(s), but the "
-            f"preflight counted {preflight.row_count} in that snapshot. The "
-            "budget was approved for a different amount of work."
-        )
-    require_within_ceiling(estimate)
+    snapshot = _require_authorised_write(spec, report, estimate, preflight)
     source = _source_relation(spec, snapshot)
     source_version = snapshot.version if snapshot else -1
     restart = restart_predicate_sql(spec, snapshot)
@@ -2944,10 +2994,11 @@ def create_run_metadata_table_sql(spec: BatchInferenceSpec) -> str:
 
 def run_metadata_reserve_sql(
     spec: BatchInferenceSpec,
-    report: GateReport,
+    report: GateReport | None,
     *,
     run_id: str,
-    projected_cost_cad: float,
+    estimate: CostEstimate,
+    preflight: SourcePreflight,
 ) -> str:
     """Write the run record, keyed on ``run_id`` so a retry cannot duplicate it.
 
@@ -2977,8 +3028,27 @@ def run_metadata_reserve_sql(
     genuinely cannot be known until the write has happened.
     ``run_metadata_finalize_sql`` fills it in exactly once, and only from
     NULL, so nothing already recorded is ever revised.
+
+    The report and estimate go through the same authorisation check the
+    execute statement uses, rather than arriving as loose fragments. A
+    bare ``projected_cost_cad`` float and an unvalidated report let one
+    record combine this spec's YAML with another evaluation's gate
+    decision and an unrelated cost — and every landed row's ``ai_run_id``
+    resolves to that record, so the audit trail would be wrong precisely
+    where it is most consulted.
+
+    ``report`` may be ``None`` only for tier 3, which has no gate to
+    produce one; those rows still carry ``ai_run_id``, so they still need
+    a record to point at. The decision is stored as ``not_required``,
+    which is the truth rather than a fabricated adoption.
     """
-    approved = sql_string_literal(report.approved_by) if report.approved_by else "NULL"
+    _require_authorised_write(spec, report, estimate, preflight)
+    decision = report.decision.value if report else "not_required"
+    approved = (
+        sql_string_literal(report.approved_by)
+        if report and report.approved_by
+        else "NULL"
+    )
     return f"""MERGE INTO {spec.run_metadata_table} AS target
 USING (
   SELECT
@@ -2990,9 +3060,9 @@ USING (
     {sql_string_literal(spec.endpoint)} AS endpoint,
     {sql_string_literal(spec.model_version)} AS model_version,
     {sql_string_literal(spec.prompt_version)} AS prompt_version,
-    {sql_string_literal(report.decision.value)} AS gate_decision,
+    {sql_string_literal(decision)} AS gate_decision,
     {approved} AS approved_by,
-    {float(projected_cost_cad)} AS projected_cost_cad,
+    {float(estimate.projected_cost_cad)} AS projected_cost_cad,
     {sql_string_literal(spec.target_table)} AS target_table,
     CAST(NULL AS BIGINT) AS target_table_version,
     current_timestamp() AS executed_at
