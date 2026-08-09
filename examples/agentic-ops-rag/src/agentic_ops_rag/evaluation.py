@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Literal
 
+from pydantic import Field, field_serializer, field_validator
+
+from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.evaluation import (
+    GateFailure,
     GatePolicy,
     GateResult,
     MetricDirection,
@@ -15,6 +19,28 @@ from aai_core.evaluation import (
     apply_gate,
 )
 from agentic_ops_rag.contracts import EvaluationCase, RetrievalMode
+
+
+class ComparisonRecord(ContractModel):
+    """Strict evidence for one named baseline/change decision."""
+
+    hypothesis: str = Field(min_length=1)
+    baseline_configuration: str = Field(min_length=1)
+    change_configuration: str = Field(min_length=1)
+    baseline: Mapping[str, float]
+    change: Mapping[str, float]
+    result: Mapping[str, float]
+    decision: Literal["adopt", "reject", "inconclusive"]
+    failures: tuple[GateFailure, ...] = ()
+
+    @field_validator("baseline", "change", "result", mode="after")
+    @classmethod
+    def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
+        return freeze_value(value)
+
+    @field_serializer("baseline", "change", "result")
+    def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
+        return thaw_value(value)
 
 
 def load_cases(path: str | Path) -> tuple[EvaluationCase, ...]:
@@ -204,38 +230,51 @@ def comparison_record(
     *,
     baseline_configuration: str = "baseline",
     change_configuration: str = "change",
-) -> dict[str, Any]:
+) -> ComparisonRecord:
     report = release_gate(change, baseline_metrics=baseline)
-    return {
-        "hypothesis": (
-            "Hybrid retrieval plus semantic reranking improves retrieval quality "
-            "without violating access, action-approval, or latency policy."
+    return ComparisonRecord(
+        hypothesis=(
+            f"Changing retrieval from {baseline_configuration} to "
+            f"{change_configuration} improves retrieval quality without violating "
+            "access, action-approval, or latency policy."
         ),
-        "baseline_configuration": baseline_configuration,
-        "change_configuration": change_configuration,
-        "baseline": baseline,
-        "change": change,
-        "result": dict(report.metrics),
-        "decision": "adopt" if report.passed else "reject",
-        "failures": [failure.model_dump(mode="json") for failure in report.failures],
-    }
+        baseline_configuration=baseline_configuration,
+        change_configuration=change_configuration,
+        baseline=baseline,
+        change=change,
+        result=report.metrics,
+        decision="adopt" if report.passed else "reject",
+        failures=report.failures,
+    )
 
 
 def is_release_eligible(
     selected_configuration: str,
     *,
     absolute_gate: GateResult,
-    decision_record: Mapping[str, Any],
+    comparison: ComparisonRecord,
     source_state: str,
 ) -> bool:
     """Bind release eligibility to the exact recorded comparison decision."""
 
+    if comparison.__class__ is not ComparisonRecord:
+        return False
+    gate_metrics = dict(absolute_gate.metrics)
+    comparison_gate = release_gate(
+        dict(comparison.change),
+        baseline_metrics=dict(comparison.baseline),
+    )
     return (
         source_state == "clean"
         and absolute_gate.passed
-        and decision_record.get("change_configuration") == selected_configuration
-        and decision_record.get("decision") == "adopt"
-        and decision_record.get("failed_rules") == []
+        and comparison.change_configuration == selected_configuration
+        and dict(comparison.change) == gate_metrics
+        and dict(comparison.result) == gate_metrics
+        and dict(comparison_gate.metrics) == gate_metrics
+        and comparison_gate.failures == comparison.failures
+        and comparison_gate.passed
+        and comparison.decision == "adopt"
+        and not comparison.failures
     )
 
 

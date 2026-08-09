@@ -130,7 +130,11 @@ and [UPSTREAM_ADAPTATION.md](UPSTREAM_ADAPTATION.md) for the clean-room mapping.
 - Connected provider scores rank candidates but never prove that a candidate
   supports an answer. The application requires current evidence plus a
   deterministic identifier or query/evidence overlap and abstains when that
-  support is uncertain.
+  support is uncertain. Only individually supported results reach generation
+  and citations.
+- Connected traces distinguish provider candidates on `retriever.search` from
+  the exact post-rerank model evidence on `retriever.final_context`; stale or
+  unsupported candidates never masquerade as the model's context.
 - Release eligibility is bound to the exact comparison change and its recorded
   `adopt` decision; an absolute gate cannot release a regression-policy reject.
 - A notebook never moves a prompt alias, deploys an app, or executes an

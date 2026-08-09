@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from aai_core.providers import SearchResult, UnsupportedCapabilityError
+from aai_core.tracing import provider_span
 from agentic_ops_rag.contracts import (
     MeasurementSource,
     PipelineResult,
@@ -260,8 +261,38 @@ class OperationsRAGPipeline:
             mode=selected_mode.value,
             semantic_rerank=semantic_rerank,
         )
-        ranked = self._application_rerank(query, results)[:final_k]
-        answerable = self._has_support(query, ranked)
+        ranked = self._application_rerank(query, results)
+        supported = tuple(
+            result
+            for result in ranked
+            if self._result_has_support(
+                query,
+                result,
+                offline_fixture=offline_fixture,
+            )
+        )[:final_k]
+        with provider_span(
+            "retriever.final_context",
+            span_type="RERANKER",
+            attributes={
+                "aai.evidence_role": "model_context",
+                "aai.candidate_count": len(results),
+                "aai.final_context_count": len(supported),
+            },
+        ) as final_context_span:
+            if final_context_span is not None:
+                final_context_span.set_inputs(
+                    {
+                        "query": query,
+                        "candidate_document_ids": [
+                            result.document_id for result in results
+                        ],
+                    }
+                )
+                final_context_span.set_outputs(
+                    [result.as_mlflow_document() for result in supported]
+                )
+        answerable = bool(supported)
         proposed_action = None
         requires_approval = False
         if not answerable:
@@ -271,11 +302,11 @@ class OperationsRAGPipeline:
             )
             citations: tuple[str, ...] = ()
         else:
-            citations = tuple(result.document_id for result in ranked)
+            citations = tuple(result.document_id for result in supported)
             if self.answer_generator is None:
-                answer = " ".join(result.content for result in ranked)
+                answer = " ".join(result.content for result in supported)
             else:
-                answer = self.answer_generator(query, tuple(ranked)).strip()
+                answer = self.answer_generator(query, supported).strip()
                 if not answer:
                     raise ValueError("answer_generator returned a blank response")
             answer += " Sources: " + ", ".join(
@@ -304,19 +335,19 @@ class OperationsRAGPipeline:
             retrieval_mode=selected_mode,
             answer=answer,
             citations=citations,
-            retrieved_document_ids=tuple(result.document_id for result in ranked),
+            retrieved_document_ids=tuple(result.document_id for result in supported),
             retrieved_tenants=tuple(
-                str(result.metadata.get("tenant_id", "")) for result in ranked
+                str(result.metadata.get("tenant_id", "")) for result in supported
             ),
             retrieved_regions=tuple(
-                str(result.metadata.get("region", "")) for result in ranked
+                str(result.metadata.get("region", "")) for result in supported
             ),
             retrieved_allowed_groups=tuple(
                 _normalized_groups(result.metadata.get("allowed_groups"))
-                for result in ranked
+                for result in supported
             ),
             retrieved_active=tuple(
-                result.metadata.get("active") is True for result in ranked
+                result.metadata.get("active") is True for result in supported
             ),
             abstained=not answerable,
             proposed_action=proposed_action,
@@ -371,13 +402,15 @@ class OperationsRAGPipeline:
         )
 
     @staticmethod
-    def _has_support(query: str, results: Sequence[SearchResult]) -> bool:
-        if not results:
-            return False
-        top = results[0]
-        if "lexical_score" in top.metadata or "semantic_score" in top.metadata:
-            lexical = float(top.metadata.get("lexical_score", 0.0))
-            semantic = float(top.metadata.get("semantic_score", 0.0))
+    def _result_has_support(
+        query: str,
+        result: SearchResult,
+        *,
+        offline_fixture: bool,
+    ) -> bool:
+        if offline_fixture:
+            lexical = float(result.metadata.get("lexical_score", 0.0))
+            semantic = float(result.metadata.get("semantic_score", 0.0))
             return lexical >= 0.2 or semantic >= 0.18
 
         # Connected scores are ranking signals with provider-specific scales;
@@ -386,18 +419,18 @@ class OperationsRAGPipeline:
         # only retrieval abstains until an evaluated application-owned support
         # policy (or governed judge) supplies evidence.
         if not (
-            top.content.strip()
-            and top.source_uri
-            and top.chunk_id
-            and top.metadata.get("active") is True
+            result.content.strip()
+            and result.source_uri
+            and result.chunk_id
+            and result.metadata.get("active") is True
         ):
             return False
         evidence = " ".join(
             (
-                top.content,
-                str(top.metadata.get("title", "")),
-                str(top.metadata.get("service", "")),
-                str(top.metadata.get("runbook_code", "")),
+                result.content,
+                str(result.metadata.get("title", "")),
+                str(result.metadata.get("service", "")),
+                str(result.metadata.get("runbook_code", "")),
             )
         )
         identifiers = {match.group(0).lower() for match in _IDENTIFIER.finditer(query)}

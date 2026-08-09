@@ -751,11 +751,13 @@ path uses the same fail-closed authorization helper as the application: Azure
 uses an OData collection security filter, while Databricks standard endpoints
 use an ARRAY filter. Storage-optimized Databricks indexes must expose a
 platform-approved scalar ACL field before this lab can run. This evaluation
-keeps `candidate_k` equal to `final_k`, so the normalized documents on the SDK
-retriever span are exactly the evidence supplied to the answer model. The
-governed `predict_fn` span owns the complete invocation. MLflow's evaluation
-harness can otherwise enable OpenAI autologging temporarily, so this SDK-owned
-path disables that second tracing owner before either evaluation begins.
+records two truthful evidence stages even when `candidate_k` equals `final_k`:
+the SDK `RETRIEVER` span contains provider candidates, while the application
+`retriever.final_context` `RERANKER` span contains only current, supported
+documents supplied to the answer model after deduplication. The governed
+`predict_fn` span owns the complete invocation. MLflow's evaluation harness can
+otherwise enable OpenAI autologging temporarily, so this SDK-owned path disables
+that second tracing owner before either evaluation begins.
 """),
         c("""
 RUN_CONNECTED = False
@@ -963,11 +965,11 @@ comparison = comparison_record(
     baseline_configuration="B_vector",
     change_configuration="C_hybrid",
 )
-comparison
+comparison.model_dump(mode="json")
 """),
         c("""
 # YOUR TURN — TODO: make an evidence-backed lifecycle decision.
-if comparison["failures"]:
+if comparison.failures:
     learner_decision = "reject"
 elif not reports["C_hybrid"]:
     learner_decision = "inconclusive"
@@ -979,20 +981,20 @@ learner_decision
 # CHECK YOUR WORK
 assert learner_decision in {"adopt", "reject", "inconclusive"}
 if learner_decision == "adopt":
-    assert not comparison["failures"]
-elif comparison["failures"]:
+    assert not comparison.failures
+elif comparison.failures:
     assert learner_decision == "reject"
 "The decision follows the recorded gate evidence."
 """),
         c("""
 # Reference solution
-reference_decision = comparison["decision"]
+reference_decision = comparison.decision
 assert learner_decision == reference_decision
 decision_evidence = {
-    "baseline_configuration": comparison["baseline_configuration"],
-    "change_configuration": comparison["change_configuration"],
+    "baseline_configuration": comparison.baseline_configuration,
+    "change_configuration": comparison.change_configuration,
     "decision": reference_decision,
-    "failed_rules": comparison["failures"],
+    "failures": [failure.model_dump(mode="json") for failure in comparison.failures],
     "measurement_source": "simulated_offline_fixture",
 }
 decision_evidence
@@ -1029,12 +1031,12 @@ source_commit = (
 )
 source_state = "dirty" if state_result.stdout.strip() else "clean"
 
-selected_name = decision_evidence["change_configuration"]
+selected_name = comparison.change_configuration
 selected_gate = absolute_gates[selected_name]
 release_eligible = is_release_eligible(
     selected_name,
     absolute_gate=selected_gate,
-    decision_record=decision_evidence,
+    comparison=comparison,
     source_state=source_state,
 )
 release = None
@@ -1055,7 +1057,7 @@ if release_eligible:
         evaluation={
             "dataset": "synthetic-operations-regression-v1",
             "gate_passed": selected_gate.passed,
-            "comparison_decision": decision_evidence["decision"],
+            "comparison": comparison.model_dump(mode="json"),
             "metrics": reports[selected_name],
             "source_state": source_state,
         },

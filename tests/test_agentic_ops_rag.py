@@ -11,8 +11,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
+from pydantic import ValidationError
 
+from aai_core.evaluation import GateFailure, GateResult
 from aai_core.providers import SearchResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +60,8 @@ from agentic_ops_rag import (  # noqa: E402
     structural_chunks,
 )
 from agentic_ops_rag.evaluation import (  # noqa: E402
+    ComparisonRecord,
+    comparison_record,
     is_release_eligible,
     load_cases,
     release_gate,
@@ -227,7 +232,23 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
                         "effective_at": "2026-08-01",
                     },
                     provider=self.provider,
-                )
+                ),
+                SearchResult(
+                    document_id="unrelated-lower-result",
+                    content="The cafeteria menu changes every Thursday.",
+                    score=0.41,
+                    source_uri="synthetic://connected/unrelated",
+                    chunk_id="unrelated-chunk",
+                    metadata={
+                        "tenant_id": "tenant-alpha",
+                        "region": "eastus",
+                        "allowed_groups": ("ops-payments",),
+                        "active": True,
+                        "runbook_code": "OPS-CAFETERIA",
+                        "effective_at": "2026-08-02",
+                    },
+                    provider=self.provider,
+                ),
             ]
 
     retriever = ConnectedRetriever()
@@ -316,6 +337,10 @@ def test_connected_positive_score_without_deterministic_support_abstains():
                         "active": True,
                         "runbook_code": "OPS-CAFETERIA",
                         "effective_at": "2026-08-01",
+                        # A connected result must not be allowed to impersonate
+                        # the offline fixture's deterministic score contract.
+                        "lexical_score": 100.0,
+                        "semantic_score": 100.0,
                     },
                     provider=self.provider,
                 )
@@ -339,7 +364,7 @@ def test_connected_positive_score_without_deterministic_support_abstains():
 
     assert result.abstained
     assert not result.citations
-    assert result.retrieved_document_ids == ("unrelated-positive-hit",)
+    assert not result.retrieved_document_ids
     assert generator_calls == []
 
 
@@ -490,21 +515,45 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
                 "effective_at",
                 "score",
             ]
+            common = [
+                "tenant-alpha",
+                "eastus",
+                ["ops-payments"],
+            ]
             rows = [
                 [
-                    f"doc-{number}",
-                    f"Authorized connected evidence {number}.",
-                    f"synthetic://connected/doc-{number}",
-                    f"chunk-{number}",
-                    "tenant-alpha",
-                    "eastus",
-                    ["ops-payments"],
+                    "doc-unrelated",
+                    "The cafeteria menu changes every Thursday.",
+                    "synthetic://connected/unrelated",
+                    "chunk-unrelated",
+                    *common,
                     True,
-                    f"OPS-CONNECTED-{number}",
-                    f"2026-08-0{number}",
-                    score,
-                ]
-                for number, score in ((1, 0.9), (2, 0.8), (3, 0.7))
+                    "OPS-CAFETERIA",
+                    "2026-08-03",
+                    0.99,
+                ],
+                [
+                    "doc-stale",
+                    "Retired ERR-PAY-503 recovery evidence.",
+                    "synthetic://connected/stale",
+                    "chunk-stale",
+                    *common,
+                    False,
+                    "ERR-PAY-503",
+                    "2024-01-01",
+                    0.95,
+                ],
+                [
+                    "doc-current",
+                    "Current ERR-PAY-503 recovery evidence.",
+                    "synthetic://connected/current",
+                    "chunk-current",
+                    *common,
+                    True,
+                    "ERR-PAY-503",
+                    "2026-08-01",
+                    0.10,
+                ],
             ]
             return {
                 "manifest": {
@@ -596,7 +645,7 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
             return result.answer
 
         answer = predict_fn(
-            "Explain the connected evidence",
+            "Explain ERR-PAY-503",
             "tenant-alpha",
             "eastus",
             ["ops-payments"],
@@ -605,10 +654,8 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
         tracing._TRACE_STATE.reset(trace_state_token)
 
     assert autolog_calls == [{"disable": True}]
-    assert answer == (
-        "Generated only from authorized evidence. " "Sources: [doc-1], [doc-2], [doc-3]"
-    )
-    assert generated_from == [("doc-1", "doc-2", "doc-3")]
+    assert answer == ("Generated only from authorized evidence. Sources: [doc-current]")
+    assert generated_from == [("doc-current",)]
 
     roots = [span for span in spans if span.parent_id is None]
     assert len(roots) == 1
@@ -619,12 +666,31 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
     children = [span for span in spans if span.parent_id == root.span_id]
     assert [(span.name, span.span_type) for span in children] == [
         ("retriever.search", "RETRIEVER"),
+        ("retriever.final_context", "RERANKER"),
         ("model.generate", "LLM"),
     ]
-    retriever_span, model_span = children
-    assert [document["id"] for document in retriever_span.outputs] == list(
+    retriever_span, final_context_span, model_span = children
+    assert [document["id"] for document in retriever_span.outputs] == [
+        "doc-unrelated",
+        "doc-stale",
+        "doc-current",
+    ]
+    assert final_context_span.inputs == {
+        "query": "Explain ERR-PAY-503",
+        "candidate_document_ids": [
+            "doc-unrelated",
+            "doc-stale",
+            "doc-current",
+        ],
+    }
+    assert [document["id"] for document in final_context_span.outputs] == list(
         generated_from[0]
     )
+    assert final_context_span.attributes == {
+        "aai.evidence_role": "model_context",
+        "aai.candidate_count": 3,
+        "aai.final_context_count": 1,
+    }
     assert model_span.outputs == {"content": "Generated only from authorized evidence."}
     assert len([span for span in spans if span.span_type == "LLM"]) == 1
 
@@ -736,50 +802,114 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
     )
     absolute_gate = release_gate(metrics)
     assert absolute_gate.passed
-    rejected_change = {
-        "change_configuration": "C_hybrid",
-        "decision": "reject",
-        "failed_rules": [{"metric": "latency/p95_ms"}],
-    }
-    assert not is_release_eligible(
-        "C_hybrid",
-        absolute_gate=absolute_gate,
-        decision_record=rejected_change,
-        source_state="clean",
+    adopted_comparison = comparison_record(
+        metrics,
+        metrics,
+        baseline_configuration="B_vector",
+        change_configuration="C_hybrid",
     )
+    assert adopted_comparison.decision == "adopt"
+    assert not adopted_comparison.failures
+    assert "B_vector" in adopted_comparison.hypothesis
+    assert "C_hybrid" in adopted_comparison.hypothesis
+    assert "semantic rerank" not in adopted_comparison.hypothesis.lower()
 
-    adopted_change = {
-        "change_configuration": "C_hybrid",
-        "decision": "adopt",
-        "failed_rules": [],
-    }
     assert is_release_eligible(
         "C_hybrid",
         absolute_gate=absolute_gate,
-        decision_record=adopted_change,
-        source_state="clean",
-    )
-    assert not is_release_eligible(
-        "C_hybrid",
-        absolute_gate=absolute_gate,
-        decision_record={
-            "change_configuration": "C_hybrid",
-            "decision": "adopt",
-        },
+        comparison=adopted_comparison,
         source_state="clean",
     )
     assert not is_release_eligible(
         "D_hybrid_reranked",
         absolute_gate=absolute_gate,
-        decision_record=adopted_change,
+        comparison=adopted_comparison,
         source_state="clean",
     )
     assert not is_release_eligible(
         "C_hybrid",
         absolute_gate=absolute_gate,
-        decision_record=adopted_change,
+        comparison=adopted_comparison,
         source_state="dirty",
     )
+
+    for metric_field in ("change", "result"):
+        mismatched_comparison = adopted_comparison.model_copy(
+            update={metric_field: {**metrics, "latency/p95_ms": 0.0}}
+        )
+        assert not is_release_eligible(
+            "C_hybrid",
+            absolute_gate=absolute_gate,
+            comparison=mismatched_comparison,
+            source_state="clean",
+        )
+
+    for decision_update in (
+        {"decision": "reject"},
+        {"decision": "inconclusive"},
+        {"failures": (GateFailure(metric="latency/p95_ms", reason="regression"),)},
+    ):
+        assert not is_release_eligible(
+            "C_hybrid",
+            absolute_gate=absolute_gate,
+            comparison=adopted_comparison.model_copy(update=decision_update),
+            source_state="clean",
+        )
+
+    regressed_metrics = {
+        **metrics,
+        "latency/p95_ms": metrics["latency/p95_ms"] + 11.0,
+    }
+    regressed_absolute_gate = release_gate(regressed_metrics)
+    assert regressed_absolute_gate.passed
+    rejected_comparison = comparison_record(
+        metrics,
+        regressed_metrics,
+        baseline_configuration="B_vector",
+        change_configuration="C_hybrid",
+    )
+    assert rejected_comparison.decision == "reject"
+    forged_adopt = rejected_comparison.model_copy(
+        update={"decision": "adopt", "failures": ()}
+    )
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=regressed_absolute_gate,
+        comparison=forged_adopt,
+        source_state="clean",
+    )
+
+    # A stale adopted comparison must not override a current gate rejection,
+    # even when configuration labels and metric values are identical.
+    rejected_current_gate = GateResult(
+        metrics=absolute_gate.metrics,
+        failures=(
+            GateFailure(
+                metric="security/group_authorization",
+                reason="current policy rejects this evidence",
+            ),
+        ),
+    )
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=rejected_current_gate,
+        comparison=adopted_comparison,
+        source_state="clean",
+    )
+
+    assert not is_release_eligible(
+        "C_hybrid",
+        absolute_gate=absolute_gate,
+        comparison=adopted_comparison.model_dump(mode="json"),  # type: ignore[arg-type]
+        source_state="clean",
+    )
+
+    strict_payload = {
+        **adopted_comparison.model_dump(mode="json"),
+        "failed_rules": [],
+    }
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ComparisonRecord.model_validate_json(json.dumps(strict_payload))
 
 
 def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
@@ -857,6 +987,7 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "result = connected_pipeline.invoke(" in evaluation_source
     assert "candidate_k=3" in evaluation_source
     assert "final_k=3" in evaluation_source
+    assert "`retriever.final_context` `RERANKER` span" in evaluation_source
     assert '"expected_response": reference.answer' in evaluation_source
     assert "if not case.answerable or case.expects_action_proposal" in evaluation_source
 
@@ -868,8 +999,11 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     capstone_source = "\n".join(_source(cell) for cell in capstone_notebook["cells"])
     assert 'change_configuration="C_hybrid"' in capstone_source
     assert "release_eligible = is_release_eligible(" in capstone_source
+    assert "comparison=comparison" in capstone_source
+    assert "decision_record=" not in capstone_source
     assert "if release_eligible:" in capstone_source
-    assert '"comparison_decision": decision_evidence["decision"]' in capstone_source
+    assert '"comparison": comparison.model_dump(mode="json")' in capstone_source
+    assert '"failures": [' in capstone_source
 
 
 def test_all_default_notebook_paths_execute_without_network_or_credentials():
