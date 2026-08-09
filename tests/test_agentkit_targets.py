@@ -117,6 +117,40 @@ def test_uc_model_requires_a_non_empty_version_or_alias(tmp_path, reference):
 @pytest.mark.parametrize(
     "reference",
     (
+        "models:/main.eval.agent/champion",
+        "models:/main.eval.agent/latest",
+        "models:/main.eval.agent/v7",
+        "models:/main.eval.agent/-1",
+    ),
+)
+def test_uc_model_requires_a_numeric_slash_version(tmp_path, reference):
+    with pytest.raises(TargetResolutionError) as excinfo:
+        resolve_target(reference, root=tmp_path)
+
+    message = str(excinfo.value)
+    assert "nonnumeric Unity Catalog model version" in message
+    assert "/7" in message
+    assert "@champion" in message
+
+
+def test_locked_mlflow_classifies_nonnumeric_slash_selector_as_stage():
+    pytest.importorskip("mlflow")
+    from mlflow.store.artifact.utils.models import _parse_model_uri
+
+    staged = _parse_model_uri("models:/main.eval.agent/champion")
+    versioned = _parse_model_uri("models:/main.eval.agent/7")
+    aliased = _parse_model_uri("models:/main.eval.agent@champion")
+    logged = _parse_model_uri("models:/m-0123456789abcdef")
+
+    assert staged.stage == "champion" and staged.version is None
+    assert versioned.version == "7" and versioned.stage is None
+    assert aliased.alias == "champion" and aliased.stage is None
+    assert logged.model_id == "m-0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
         "https://",
         "http://",
         "https:///score",

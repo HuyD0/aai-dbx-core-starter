@@ -911,7 +911,15 @@ def _complete_events(value: Any, *, schema: str) -> bool:
         isinstance(event, Mapping)
         and _non_empty_string(event.get("name"))
         and _non_negative_integer(event.get(time_key))
-        and _otel_attributes(event.get("attributes", {}))
+        and (
+            "attributes" in event
+            and (
+                event.get("attributes") is None
+                or _otel_attributes(event.get("attributes"))
+            )
+            if schema == "v2"
+            else _otel_attributes(event.get("attributes", {}))
+        )
         for event in value
     )
 

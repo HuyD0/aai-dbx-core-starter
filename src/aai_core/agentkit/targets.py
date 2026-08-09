@@ -163,10 +163,10 @@ def _validated_model_uri(reference: str) -> str:
     """Reject an ambiguous registered-model URI before loading MLflow.
 
     MLflow 3 interprets ``models:/<value>`` without a selector as a logged
-    model id.  A three-part Unity Catalog name therefore does *not* name the
-    registered model a developer likely intended unless it carries a version
-    or alias. Logged-model ids remain valid, while UC references must select
-    the scored artifact explicitly.
+    model id. A three-part Unity Catalog name therefore does *not* name the
+    registered model a developer likely intended unless it carries a numeric
+    version or an ``@alias``. Logged-model ids remain valid, while UC
+    references must select the scored artifact explicitly.
     """
 
     if not reference.startswith("models:/"):
@@ -198,6 +198,19 @@ def _validated_model_uri(reference: str) -> str:
             remediation=(
                 "Select the exact registered-model version or alias, for example "
                 f"models:/{name}/7 or models:/{name}@champion."
+            ),
+        )
+    if (
+        is_three_part_uc_name
+        and selector_kind == "version"
+        and selector is not None
+        and not selector.isdigit()
+    ):
+        raise TargetResolutionError(
+            f"agent {reference!r} has a nonnumeric Unity Catalog model version",
+            remediation=(
+                f"Use a numeric version such as models:/{name}/7. "
+                f"To select an alias, use models:/{name}@champion."
             ),
         )
     if separator and (not name or selector is None or not selector.strip()):
