@@ -624,25 +624,61 @@ def _is_missing_registry_error(error: Exception) -> bool:
             continue
         return False
 
-    statuses = {status for item in errors for status in _http_status_codes(item)}
-    # A response is structured evidence too. Only 404 denotes absence; 401,
-    # 403, 429, 5xx, and every other non-404 response must propagate.
-    if any(status != 404 for status in statuses):
-        return False
+    statuses_by_error = {
+        id(item): frozenset(_http_status_codes(item)) for item in errors
+    }
+    statuses = {
+        status
+        for statuses_for_item in statuses_by_error.values()
+        for status in statuses_for_item
+    }
+    alias_missing = {
+        id(item)
+        for item, error_code in coded
+        if error_code in {"", "INVALID_PARAMETER_VALUE"}
+        and _is_missing_alias_shape(item)
+    }
+    # A response is structured evidence too. Only 404 denotes general
+    # absence; 401, 403, 429, 5xx, and every other non-404 response must
+    # propagate. MLflow's exact missing-alias exception is the documented
+    # special case: it uses INVALID_PARAMETER_VALUE/HTTP 400 for absence.
     if any(
-        _is_authoritative_non_absence_exception(item)
-        or _has_authoritative_non_absence_message(item)
+        status != 404
         for item in errors
+        if id(item) not in alias_missing
+        for status in statuses_by_error[id(item)]
     ):
         return False
+    # An explicit absence code/status outranks a generic type on that same
+    # exception. Databricks NotFound is an OSError, and httpx HTTPStatusError
+    # is an HTTPError; neither generic base may erase NOT_FOUND/404. A wrapper
+    # or nested exception without its own explicit absence remains an
+    # independent non-absence signal and wins across the chain.
+    explicitly_missing = {
+        id(item)
+        for item, error_code in coded
+        if error_code in missing_codes
+        or 404 in statuses_by_error[id(item)]
+        or _is_explicit_missing_exception_type(item)
+        or isinstance(item, FileNotFoundError)
+    }
+    for item in errors:
+        # Confirmed absence on this node outranks that node's generic base or
+        # incidental wording. A separate wrapper/nested node is still checked
+        # independently and can therefore veto absence for the whole chain.
+        if id(item) in explicitly_missing:
+            continue
+        if _is_authoritative_non_absence_exception(
+            item
+        ) or _has_authoritative_non_absence_message(item):
+            return False
     if 404 in statuses:
         return True
     if any(error_code in missing_codes for _, error_code in coded):
         return True
-    if any(
-        _is_missing_alias_shape(item) and error_code in {"", "INVALID_PARAMETER_VALUE"}
-        for item, error_code in coded
-    ):
+    if any(_is_explicit_missing_exception_type(item) for item in errors):
+        return True
+    if alias_missing:
         return True
     if any(isinstance(item, FileNotFoundError) for item in errors):
         return True
@@ -669,8 +705,12 @@ def _registry_exception_chain(error: Exception) -> tuple[Exception, ...]:
             "__cause__",
             "__context__",
             "cause",
+            "context",
             "error",
+            "exc_value",
+            "inner_exception",
             "original_error",
+            "original_exception",
             "exception",
         ):
             try:
@@ -683,11 +723,25 @@ def _registry_exception_chain(error: Exception) -> tuple[Exception, ...]:
 
 
 def _registry_error_code(error: Exception) -> str:
-    try:
-        raw = getattr(error, "error_code", None)
-    except Exception:  # noqa: BLE001 - opaque provider wrapper
-        return ""
-    return "" if raw is None else str(raw).strip().upper()
+    for attribute in ("error_code", "code"):
+        try:
+            raw = getattr(error, attribute, None)
+        except Exception:  # noqa: BLE001 - opaque provider wrapper
+            continue
+        if callable(raw):
+            try:
+                raw = raw()
+            except Exception:  # noqa: BLE001 - opaque provider wrapper
+                continue
+        if raw is None:
+            continue
+        name = getattr(raw, "name", None)
+        code = str(name if isinstance(name, str) else raw).strip().upper()
+        if code.startswith("STATUSCODE."):
+            code = code.removeprefix("STATUSCODE.")
+        if code:
+            return code
+    return ""
 
 
 def _registry_error_message(error: Exception) -> str:
@@ -705,6 +759,17 @@ def _is_missing_alias_shape(error: Exception) -> bool:
             _registry_error_message(error).upper(),
         )
         is not None
+    )
+
+
+def _is_explicit_missing_exception_type(error: Exception) -> bool:
+    """Recognize provider types whose exact name is itself absence evidence."""
+
+    names = {"notfound", "notfounderror", "resourcedoesnotexist"}
+    return any(
+        error_type.__name__.casefold() in names
+        for error_type in type(error).__mro__
+        if error_type not in {Exception, BaseException, object}
     )
 
 
@@ -768,6 +833,15 @@ def _is_authoritative_non_absence_exception(error: Exception) -> bool:
         "tlserror",
         "proxyerror",
         "protocolerror",
+        "httperror",
+        "requesterror",
+        "httpresponseerror",
+        "rpcerror",
+        "apierror",
+        "apicallerror",
+        "credential",
+        "quota",
+        "resourceexhausted",
         "ratelimit",
         "throttl",
         "serviceunavailable",
@@ -794,6 +868,13 @@ def _has_authoritative_non_absence_message(error: Exception) -> bool:
         "permission",
         "access denied",
         "invalid credential",
+        "invalid api key",
+        "api key is invalid",
+        "api key rejected",
+        "credential rejected",
+        "credentials rejected",
+        "insufficient privilege",
+        "insufficient permission",
         "connection",
         "timed out",
         "timeout",
@@ -806,6 +887,8 @@ def _has_authoritative_non_absence_message(error: Exception) -> bool:
         "ssl error",
         "proxy error",
         "rate limit",
+        "quota",
+        "resource exhausted",
         "too many requests",
         "throttl",
         "service unavailable",

@@ -185,6 +185,23 @@ def test_is_missing_prompt_error_recognizes_only_absence():
     assert is_missing_prompt_error(RegistryError("prompt does not exist"))
     assert is_missing_prompt_error(FileNotFoundError("prompt does not exist"))
     assert is_missing_prompt_error(FileNotFoundError("missing prompt artifact"))
+    databricks_not_found = type(
+        "NotFound",
+        (OSError,),
+        {"error_code": "RESOURCE_DOES_NOT_EXIST"},
+    )("prompt does not exist")
+    assert is_missing_prompt_error(databricks_not_found)
+    # Structured absence wins over contradictory wording on that same node;
+    # only an independent wrapper/nested failure may veto it.
+    assert is_missing_prompt_error(
+        RegistryError(
+            "invalid API key; prompt does not exist",
+            error_code="NOT_FOUND",
+        )
+    )
+    assert is_missing_prompt_error(
+        FileNotFoundError("service unavailable while reading prompt artifact")
+    )
     # Any structured non-absence code is authoritative. Falling through to
     # message wording here would swallow a real provider failure.
     assert not is_missing_prompt_error(
@@ -192,12 +209,12 @@ def test_is_missing_prompt_error_recognizes_only_absence():
     )
     # The file/SQL registries report a missing alias as
     # INVALID_PARAMETER_VALUE with "Registered model alias ... not found."
-    assert is_missing_prompt_error(
-        RegistryError(
-            "Registered model alias production not found.",
-            error_code="INVALID_PARAMETER_VALUE",
-        )
+    missing_alias = RegistryError(
+        "Registered model alias production not found.",
+        error_code="INVALID_PARAMETER_VALUE",
     )
+    missing_alias.response = SimpleNamespace(status_code=400)
+    assert is_missing_prompt_error(missing_alias)
     assert not is_missing_prompt_error(
         RegistryError("bad page token", error_code="INVALID_PARAMETER_VALUE")
     )
@@ -257,8 +274,18 @@ def test_is_missing_prompt_error_uses_actual_http_response_status(status, missin
         RuntimeError("connection reset: prompt does not exist"),
         RuntimeError("request timed out; prompt does not exist"),
         RuntimeError("HTTP 503: prompt does not exist"),
+        RuntimeError("invalid API key; prompt does not exist"),
+        RuntimeError("credentials rejected; prompt does not exist"),
+        RuntimeError("insufficient privileges; prompt does not exist"),
+        RuntimeError("quota exceeded; prompt does not exist"),
+        RuntimeError("rate limit reached; prompt does not exist"),
+        RuntimeError("service unavailable; prompt does not exist"),
         type("RateLimitError", (RuntimeError,), {})("prompt does not exist"),
         type("ProtocolError", (RuntimeError,), {})("prompt does not exist"),
+        type("RpcError", (RuntimeError,), {})("prompt does not exist"),
+        type("APIError", (RuntimeError,), {})("prompt does not exist"),
+        type("CredentialsError", (RuntimeError,), {})("prompt does not exist"),
+        type("QuotaExceededError", (RuntimeError,), {})("prompt does not exist"),
     ),
 )
 def test_is_missing_prompt_error_rejects_unstructured_failure_wrappers(error):
@@ -273,6 +300,121 @@ def test_is_missing_prompt_error_inspects_nested_provider_failures():
     outer.__cause__ = inner
 
     assert not is_missing_prompt_error(outer)
+
+
+def test_nested_unstructured_failure_overrides_explicit_outer_absence():
+    outer = type("NotFound", (RuntimeError,), {"error_code": "NOT_FOUND"})(
+        "prompt does not exist"
+    )
+    outer.inner_exception = RuntimeError("invalid API key; prompt does not exist")
+
+    assert not is_missing_prompt_error(outer)
+
+
+@pytest.mark.parametrize(
+    "attribute", ("cause", "context", "exc_value", "inner_exception")
+)
+def test_is_missing_prompt_error_traverses_common_wrapper_attributes(attribute):
+    outer = RuntimeError("prompt does not exist")
+    nested = PermissionError("insufficient privileges; prompt does not exist")
+    setattr(outer, attribute, nested)
+    nested.inner_exception = outer  # a provider cycle must stay bounded
+
+    assert not is_missing_prompt_error(outer)
+
+
+def test_explicit_nested_absence_survives_generic_oserror_but_not_a_wrapper():
+    missing = type(
+        "NotFound",
+        (OSError,),
+        {"error_code": "NOT_FOUND"},
+    )("prompt does not exist")
+    generic = RuntimeError("prompt does not exist")
+    generic.inner_exception = missing
+    assert is_missing_prompt_error(generic)
+
+    request_wrapper = type("RequestError", (RuntimeError,), {})("prompt does not exist")
+    request_wrapper.inner_exception = missing
+    assert not is_missing_prompt_error(request_wrapper)
+
+
+def test_actual_httpx_code_less_request_errors_propagate():
+    httpx = pytest.importorskip("httpx")
+    request = httpx.Request("GET", "https://registry.example/prompts/hidden")
+
+    assert not is_missing_prompt_error(httpx.HTTPError("prompt does not exist"))
+    assert not is_missing_prompt_error(
+        httpx.RequestError("prompt does not exist", request=request)
+    )
+    assert not is_missing_prompt_error(
+        httpx.HTTPError("Registered model alias production not found.")
+    )
+
+
+def test_actual_urllib3_http_error_propagates():
+    urllib3_exceptions = pytest.importorskip("urllib3.exceptions")
+
+    assert not is_missing_prompt_error(
+        urllib3_exceptions.HTTPError("prompt does not exist")
+    )
+
+
+def test_actual_azure_http_and_service_errors_use_status_and_type():
+    azure_exceptions = pytest.importorskip("azure.core.exceptions")
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.reason = "synthetic"
+            self.headers = {}
+
+    missing = azure_exceptions.HttpResponseError(
+        message="prompt does not exist", response=Response(404)
+    )
+    server = azure_exceptions.HttpResponseError(
+        message="prompt does not exist", response=Response(503)
+    )
+
+    assert is_missing_prompt_error(missing)
+    assert not is_missing_prompt_error(server)
+    assert not is_missing_prompt_error(
+        azure_exceptions.ServiceRequestError("prompt does not exist")
+    )
+
+
+def test_actual_grpc_and_google_api_wrappers_preserve_precedence():
+    grpc = pytest.importorskip("grpc")
+    google_exceptions = pytest.importorskip("google.api_core.exceptions")
+
+    class GrpcNotFound(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.NOT_FOUND
+
+    assert not is_missing_prompt_error(grpc.RpcError("prompt does not exist"))
+    assert is_missing_prompt_error(GrpcNotFound("prompt does not exist"))
+    assert is_missing_prompt_error(google_exceptions.NotFound("prompt does not exist"))
+    assert not is_missing_prompt_error(
+        google_exceptions.GoogleAPIError("prompt does not exist")
+    )
+    assert not is_missing_prompt_error(
+        google_exceptions.Unauthorized("prompt does not exist")
+    )
+    assert not is_missing_prompt_error(
+        google_exceptions.ResourceExhausted("prompt does not exist")
+    )
+
+
+def test_actual_databricks_not_found_is_not_lost_to_its_oserror_base():
+    databricks_errors = pytest.importorskip("databricks.sdk.errors")
+    missing = databricks_errors.NotFound("prompt does not exist")
+
+    assert is_missing_prompt_error(missing)
+
+    wrapper = type("CredentialsError", (RuntimeError,), {})(
+        "credentials rejected; prompt does not exist"
+    )
+    wrapper.exc_value = missing
+    assert not is_missing_prompt_error(wrapper)
 
 
 @pytest.mark.parametrize(

@@ -155,7 +155,13 @@ All notable changes to `aai-core` are documented here.
   deliberately says a protected prompt was not found. The classifier also
   inspects wrapped exceptions and HTTP response status: a genuine 404 remains
   absence, while 401, 403, 429, every 5xx, and other non-404 responses
-  propagate. The same shared predicate guards the dataset helper's create path.
+  propagate. Precedence is evaluated over the bounded, cycle-safe exception
+  chain: an explicit `NOT_FOUND`, `RESOURCE_DOES_NOT_EXIST`, 404, exact
+  provider `NotFound`, or MLflow missing-alias shape is not erased merely
+  because its own class also inherits `OSError`/`HTTPError`, while any nested
+  authentication, credentials, quota, HTTP/request, RPC/API, or transport
+  failure still propagates. The same shared predicate guards the dataset
+  helper's create path.
   `promote()` verifies the target version through `get_prompt_version()`,
   the only fetch with no lineage side effects — every `load_prompt`
   flavor, the client-level one included, links the loaded version to
