@@ -364,6 +364,37 @@ class ProjectContext:
             )
         return f"endpoints:/{deployment.strip()}"
 
+    def judge_model_identity(
+        self, logical_name: str | None = None, *, client: Any | None = None
+    ) -> str | None:
+        """What the judge endpoint currently serves, if it can be read.
+
+        ``endpoints:/pension-judge`` is a stable *name* pointing at a
+        mutable thing: the platform team can repoint it at another model
+        or promote a new version without the URI changing, and two runs
+        would then look comparable while being judged by different models.
+        This resolves the served entity so the comparison has something
+        immutable to compare.
+
+        Best effort by design. Reading an endpoint's configuration needs a
+        permission (`CAN_VIEW`) that a least-privilege CI principal
+        holding only `CAN_QUERY` may not have, and section 4 of AGENTS.md
+        forbids widening a grant to make a check work. When it cannot be
+        read the run says the judge could not be pinned rather than
+        pretending it verified one.
+        """
+
+        endpoint = self.judge_model_uri(logical_name).removeprefix("endpoints:/")
+        try:
+            if client is None:
+                from aai_core.identity import databricks_workspace_client
+
+                client = databricks_workspace_client()
+            served = client.serving_endpoints.get(endpoint)
+        except Exception:  # noqa: BLE001 - absent SDK, auth, or permission
+            return None
+        return _served_entity_identity(served)
+
 
 def _validate_scorer_references(config: AgentkitConfig) -> None:
     from aai_core.agentkit.catalog import CATALOG
@@ -406,3 +437,31 @@ def _validate_scorer_references(config: AgentkitConfig) -> None:
                             "scorer selected."
                         ),
                     )
+
+
+def _served_entity_identity(served: Any) -> str | None:
+    """A stable name for whatever a serving endpoint currently serves.
+
+    Reads the endpoint's config rather than its name: the entity name plus
+    version is what actually changes when the platform team repoints or
+    promotes a judge.
+    """
+
+    config = getattr(served, "config", None) or getattr(served, "pending_config", None)
+    entities = getattr(config, "served_entities", None) or getattr(
+        config, "served_models", None
+    )
+    parts = []
+    for entity in entities or ():
+        name = (
+            getattr(entity, "entity_name", None)
+            or getattr(entity, "model_name", None)
+            or getattr(entity, "name", None)
+        )
+        if not name:
+            continue
+        version = getattr(entity, "entity_version", None) or getattr(
+            entity, "model_version", None
+        )
+        parts.append(f"{name}/{version}" if version else str(name))
+    return ",".join(sorted(parts)) or None

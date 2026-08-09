@@ -194,9 +194,16 @@ def run_scoring(
         dataset = attach_answer_sheet(dataset, _answer_sheet_path(project, target))
 
     judge_model_uri = None
+    judge_model_identity = None
     judge_note = None if judges_enabled else _SMOKE_JUDGE_NOTE
     if judges_enabled:
         judge_model_uri = project.judge_model_uri()
+        # Best effort: an endpoint name is stable while the model behind
+        # it is not, so pin what it currently serves when the workspace
+        # will say. A least-privilege CI principal may hold CAN_QUERY
+        # without CAN_VIEW, and widening that grant to make a check work
+        # is exactly what section 4 of AGENTS.md forbids.
+        judge_model_identity = project.judge_model_identity()
     plan = select_scorers(
         dataset.shape,
         config,
@@ -268,11 +275,20 @@ def run_scoring(
                 rows=dataset.shape.row_count,
                 plan=plan,
                 judge_model=judge_model_uri,
+                judge_model_identity=judge_model_identity,
                 judges_enabled=judges_enabled,
                 allow_drift=allow_baseline_drift,
                 blocking=require_baseline,
             )
             warnings.extend(comparability)
+            if baseline.versions.judge_model_identity and not judge_model_identity:
+                # Silence here would read as "the judge is unchanged".
+                warnings.append(
+                    "the baseline was judged by "
+                    f"{baseline.versions.judge_model_identity}, but what the "
+                    "endpoint serves now could not be read, so a change "
+                    "behind the same endpoint name is unverified"
+                )
             if not comparable:
                 baseline = None
 
@@ -413,6 +429,8 @@ def run_scoring(
             }
             if judge_model_uri:
                 tags["aai.judge_model"] = judge_model_uri
+            if judge_model_identity:
+                tags["aai.judge_model_identity"] = judge_model_identity
             if judge_prompts:
                 tags["aai.judge_prompt_versions"] = ",".join(
                     f"{name}={uri}" for name, uri in sorted(judge_prompts.items())
@@ -436,6 +454,7 @@ def run_scoring(
         agent=target.normalized,
         scorers={spec.name: spec.version for spec in plan.specs},
         judge_model=judge_model_uri,
+        judge_model_identity=judge_model_identity,
         judge_prompts=judge_prompts,
         aai_core=_version(),
     )
@@ -561,6 +580,7 @@ def _enforce_comparability(
     rows: int,
     plan: ScorerPlan,
     judge_model: str | None,
+    judge_model_identity: str | None = None,
     judge_prompts: Mapping[str, str] | None = None,
     judges_enabled: bool = True,
     allow_drift: bool = False,
@@ -607,6 +627,7 @@ def _enforce_comparability(
             rows=rows,
             scorers={spec.name: spec.version for spec in plan.specs},
             judge_model=judge_model,
+            judge_model_identity=judge_model_identity,
             judges_enabled=judges_enabled,
         )
     if not failures:

@@ -272,3 +272,45 @@ def test_a_threshold_on_a_removed_scorer_is_still_refused(tmp_path):
         )
 
     assert "thresholds" in str(excinfo.value)
+
+
+def test_judge_identity_reads_the_served_entity(tmp_path):
+    """What the endpoint serves, not what it is called."""
+
+    from types import SimpleNamespace
+
+    served = SimpleNamespace(
+        config=SimpleNamespace(
+            served_entities=[
+                SimpleNamespace(entity_name="main.models.judge", entity_version="3")
+            ]
+        )
+    )
+    client = SimpleNamespace(serving_endpoints=SimpleNamespace(get=lambda name: served))
+    project = ProjectContext(
+        config=_config(),
+        settings=dev_settings(
+            models={"judge-model": {"provider": "databricks", "deployment": "j"}}
+        ),
+        root=tmp_path,
+    )
+
+    assert project.judge_model_identity(client=client) == "main.models.judge/3"
+
+
+def test_an_unreadable_endpoint_yields_no_identity(tmp_path):
+    from types import SimpleNamespace
+
+    def _denied(name):
+        raise PermissionError("requires CAN_VIEW")
+
+    client = SimpleNamespace(serving_endpoints=SimpleNamespace(get=_denied))
+    project = ProjectContext(
+        config=_config(),
+        settings=dev_settings(
+            models={"judge-model": {"provider": "databricks", "deployment": "j"}}
+        ),
+        root=tmp_path,
+    )
+
+    assert project.judge_model_identity(client=client) is None

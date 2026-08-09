@@ -247,6 +247,13 @@ a changed scope (full versus sample), a changed or missing scorer, a changed
 judge model, or a judge prompt whose alias has moved stops the run and asks you
 to re-establish the baseline.
 
+"The judge model changed" means the model, not the name. A governed
+`endpoints:/judge` is a stable name for a mutable thing — the platform team
+can repoint it or promote a new version behind it — so a run records what the
+endpoint actually served when the workspace will say. Reading that needs
+`CAN_VIEW` on the endpoint, which a least-privilege CI principal may not
+have; when it cannot be read the run says so instead of implying it checked.
+
 Two of those are worth spelling out. **Removing a scorer also removes its
 threshold**, so `scorers.remove` would otherwise let a comparison pass without
 that evidence and say nothing — the scorer set has to match, not just the

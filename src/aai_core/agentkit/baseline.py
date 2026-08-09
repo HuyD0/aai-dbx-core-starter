@@ -40,6 +40,9 @@ class BaselineVersions(ContractModel):
     agent: str = Field(min_length=1)
     scorers: Mapping[str, int] = Field(default_factory=dict)
     judge_model: str | None = None
+    # What the judge endpoint actually served, when it could be read. The
+    # endpoint URI is a stable name for a mutable thing; this is the thing.
+    judge_model_identity: str | None = None
     judge_prompts: Mapping[str, str] = Field(default_factory=dict)
     aai_core: str = Field(min_length=1)
 
@@ -180,6 +183,7 @@ def comparability_failures(
     rows: int,
     scorers: Mapping[str, int] | None = None,
     judge_model: str | None = None,
+    judge_model_identity: str | None = None,
     judge_prompts: Mapping[str, str] | None = None,
     judges_enabled: bool = True,
 ) -> list[str]:
@@ -228,6 +232,15 @@ def comparability_failures(
     recorded_judge = record.versions.judge_model
     if judge_model and recorded_judge and recorded_judge != judge_model:
         failures.append(f"the judge model changed ({recorded_judge} -> {judge_model})")
+    # The endpoint name can stay put while the model behind it moves, so
+    # the resolved identity is what actually says "same judge".
+    was_identity = record.versions.judge_model_identity
+    if was_identity and judge_model_identity and was_identity != judge_model_identity:
+        failures.append(
+            f"the judge endpoint now serves {judge_model_identity} but the "
+            f"baseline was scored by {was_identity}, so it is not the same "
+            "judge"
+        )
     if judge_prompts is not None:
         failures.extend(_prompt_failures(record, dict(judge_prompts)))
     return failures
@@ -391,6 +404,7 @@ def _baseline_from_run(
             agent=tags.get("aai.agent_target", _LEGACY_PLACEHOLDER),
             scorers=scorers,
             judge_model=tags.get("aai.judge_model"),
+            judge_model_identity=tags.get("aai.judge_model_identity"),
             judge_prompts=judge_prompts,
             aai_core=tags.get("aai.agentkit_version", _LEGACY_PLACEHOLDER),
         ),

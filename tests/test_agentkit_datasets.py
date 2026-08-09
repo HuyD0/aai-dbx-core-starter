@@ -761,3 +761,75 @@ def test_the_preview_is_still_used_when_there_are_no_spans(tmp_path):
     assert _trace_request({"info": {"request_preview": "the question"}}) == (
         "the question"
     )
+
+
+def _top_level_span_trace(question, answer):
+    """The layout that puts `spans` at the top level, not under `data`."""
+
+    return {
+        "info": {
+            "request_preview": "TRUNCATED PREFIX " + "x" * 200,
+            "response_preview": "truncated answer",
+        },
+        "spans": [
+            {
+                "span_id": "1",
+                "type": "LLM",
+                "inputs": {"question": question},
+                "outputs": answer,
+            }
+        ],
+    }
+
+
+def test_identity_reads_top_level_spans_before_the_preview(tmp_path):
+    """`_spans` supports both layouts; the identity lookup must use it.
+
+    Reading only `data.spans` meant a top-level-spans payload fell through
+    to the truncated preview, so two different questions sharing a prefix
+    collided on the digest — the exact failure the previous fix set out to
+    remove, still reachable through the other layout.
+    """
+
+    _write_dataset(
+        tmp_path, [_top_level_span_trace("part-time staff?", "a")] * 10, name="a.json"
+    )
+    _write_dataset(
+        tmp_path, [_top_level_span_trace("seasonal staff?", "a")] * 10, name="b.json"
+    )
+
+    first = load_dataset("a.json", root=tmp_path)
+    second = load_dataset("b.json", root=tmp_path)
+
+    assert first.digest != second.digest
+
+
+def test_the_token_estimate_reads_the_full_response(tmp_path):
+    """A truncated response_preview under-counts the tokens a judge sees."""
+
+    from aai_core.agentkit.datasets import trace_judge_text
+
+    answer = "The full answer that the preview would have cut short. " * 20
+    trace = {
+        "info": {"response_preview": "The full answer that the previe..."},
+        "data": {
+            "spans": [
+                {"span_id": "1", "type": "LLM", "inputs": {"q": "x"}, "outputs": answer}
+            ]
+        },
+    }
+
+    text = trace_judge_text(trace)
+
+    assert answer in text
+    assert len(text) > len(answer)
+
+
+def test_the_response_preview_is_still_the_fallback():
+    from aai_core.agentkit.datasets import trace_judge_text
+
+    text = trace_judge_text(
+        {"info": {"request_preview": "q", "response_preview": "the only answer"}}
+    )
+
+    assert "the only answer" in text

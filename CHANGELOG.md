@@ -174,6 +174,22 @@ All notable changes to `aai-core` are documented here.
   comparability. Trace-only baselines recorded before this change will
   report a digest difference once and need re-establishing.
 
+  Trace reading goes through one helper for both layouts. The identity
+  lookup read only `data.spans`, so a payload carrying `spans` at the top
+  level still fell through to the truncated preview — the same collision
+  the previous fix set out to remove, reachable through the other shape.
+  The token estimate likewise prefers the full response and the root span's
+  output over `response_preview`, and a plain-text span output is no longer
+  dropped for failing to parse as JSON. A comparison also pins *what the
+  judge endpoint serves*, not just its name: a governed
+  `endpoints:/judge` can be repointed or have a new version promoted behind
+  it, and two runs would otherwise look comparable while being scored by
+  different models. The identity is read best-effort — a least-privilege CI
+  principal may hold `CAN_QUERY` without `CAN_VIEW`, and widening that
+  grant to make a check work is not the answer — so an unreadable endpoint
+  is reported rather than enforced, and a baseline that pinned one says
+  plainly when the current run could not verify it.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

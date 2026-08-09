@@ -154,30 +154,74 @@ def _trace_request(trace: Any) -> Any:
     document = _trace_document(trace)
     if document is None:
         return None
-    data = document.get("data")
-    spans = data.get("spans") if isinstance(data, Mapping) else None
-    if isinstance(spans, Sequence) and not isinstance(spans, (str, bytes)):
-        for span in spans:
-            if not isinstance(span, Mapping):
-                continue
-            if span.get("parent_span_id", span.get("parentSpanId")) is not None:
-                continue
-            for candidate in (
-                span.get("inputs"),
-                (
-                    (span.get("attributes") or {}).get("mlflow.spanInputs")
-                    if isinstance(span.get("attributes"), Mapping)
-                    else None
-                ),
-            ):
-                if _is_populated(candidate):
-                    return _plain(candidate)
+    for span in _root_spans(trace):
+        inputs = _span_field(span, ("inputs", "input"), "mlflow.spanInputs")
+        if inputs is not None:
+            return _plain(inputs)
     info = document.get("info")
     if isinstance(info, Mapping):
         for key in ("request", "request_preview"):
             value = info.get(key)
             if _is_populated(value):
                 return _plain(value)
+    return None
+
+
+def _trace_response(trace: Any) -> Any:
+    """What the trace answered, preferring the untruncated form.
+
+    ``response_preview`` carries the same truncation caveat the request
+    preview does, so a long answer read from it would be under-counted in
+    the judge-token estimate the developer approves.
+    """
+
+    for span in _root_spans(trace):
+        outputs = _span_outputs(span)
+        if outputs is not None:
+            return _plain(outputs)
+    document = _trace_document(trace)
+    info = document.get("info") if document is not None else None
+    if isinstance(info, Mapping):
+        for key in ("response", "response_preview"):
+            value = info.get(key)
+            if _is_populated(value):
+                return _plain(value)
+    return None
+
+
+def _root_spans(trace: Any) -> list[Mapping[str, Any]]:
+    """Spans with no parent, from either trace layout.
+
+    Goes through ``_spans`` rather than reading ``data.spans`` directly:
+    that helper already handles the top-level ``spans`` layout, and a
+    second reader that handles only one of them is how the full inputs
+    stayed invisible while the truncated preview got used instead.
+    """
+
+    return [
+        span
+        for span in _spans(trace)
+        if span.get("parent_span_id", span.get("parentSpanId")) is None
+    ]
+
+
+def _span_field(
+    span: Mapping[str, Any], keys: Sequence[str], attribute: str
+) -> Any | None:
+    """A span field, from the plain key or the serialized attribute."""
+
+    candidates = [span.get(key) for key in keys]
+    attributes = span.get("attributes")
+    if isinstance(attributes, Mapping):
+        candidates.append(attributes.get(attribute))
+    for candidate in candidates:
+        if isinstance(candidate, (str, bytes)):
+            try:
+                candidate = json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
+        if _is_populated(candidate):
+            return candidate
     return None
 
 
@@ -573,13 +617,9 @@ def trace_judge_text(trace: Any) -> str:
     request = _trace_request(trace)
     if request is not None:
         parts.append(request)
-    info = document.get("info")
-    if isinstance(info, Mapping):
-        for key in ("response_preview", "response"):
-            value = info.get(key)
-            if _is_populated(value):
-                parts.append(_plain(value))
-                break
+    response = _trace_response(trace)
+    if response is not None:
+        parts.append(response)
     for span in _spans(trace):
         if _is_retriever(span):
             documents = _span_outputs(span)
@@ -669,7 +709,10 @@ def _span_outputs(span: Mapping[str, Any]) -> Any | None:
             try:
                 candidate = json.loads(candidate)
             except (ValueError, TypeError):
-                continue
+                # Not the serialized-JSON form, so it is a plain answer
+                # string. Dropping it here lost the whole response from
+                # the token estimate.
+                pass
         if _is_populated(candidate):
             found.append(candidate)
     # A list of documents is the shape both callers want; prefer it over a

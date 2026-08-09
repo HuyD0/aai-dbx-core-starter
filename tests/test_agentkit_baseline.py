@@ -553,3 +553,84 @@ def test_a_run_baseline_restores_its_judge_prompt_versions():
             judge_prompts={"pension_domain_policy": "prompts:/cat.sch.p/9"},
         )
     )
+
+
+def test_a_repointed_judge_endpoint_is_not_comparable():
+    """The endpoint name is stable; what it serves is not.
+
+    A governed `endpoints:/judge` can be repointed at another model, or
+    have a new version promoted behind it, without the URI changing — and
+    two runs would then look comparable while being scored by different
+    judges.
+    """
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_model="endpoints:/pension-judge",
+            judge_model_identity="main.models.judge/3",
+            aai_core="0.4.0",
+        )
+    )
+
+    failures = comparability_failures(
+        record,
+        dataset=_dataset(),
+        mode="full",
+        rows=10,
+        judge_model="endpoints:/pension-judge",
+        judge_model_identity="main.models.judge/4",
+    )
+
+    assert any("not the same judge" in failure for failure in failures)
+
+
+def test_the_same_served_entity_stays_comparable():
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_model_identity="main.models.judge/3",
+            aai_core="0.4.0",
+        )
+    )
+
+    assert (
+        comparability_failures(
+            record,
+            dataset=_dataset(),
+            mode="full",
+            rows=10,
+            judge_model_identity="main.models.judge/3",
+        )
+        == []
+    )
+
+
+def test_an_unreadable_judge_identity_does_not_block():
+    """A permission the CI principal may not hold must not fail the run.
+
+    Section 4 of AGENTS.md forbids widening a grant to make a check pass,
+    so an unreadable endpoint config is reported, not enforced.
+    """
+
+    record = _record(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 1},
+            judge_model_identity="main.models.judge/3",
+            aai_core="0.4.0",
+        )
+    )
+
+    assert (
+        comparability_failures(
+            record,
+            dataset=_dataset(),
+            mode="full",
+            rows=10,
+            judge_model_identity=None,
+        )
+        == []
+    )
