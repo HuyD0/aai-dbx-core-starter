@@ -440,7 +440,7 @@ def test_eval_submit_rejects_plan_before_running_the_bundle_job(
 
     assert code == 1
     assert commands == []
-    assert "--submit cannot be combined" in capsys.readouterr().err
+    assert "--submit cannot carry" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -467,8 +467,46 @@ def test_eval_submit_rejects_local_scoring_overrides_before_project_loading(
 
     assert code == 1
     error = capsys.readouterr().err
-    assert "--submit cannot be combined" in error
+    assert "--submit cannot carry" in error
     assert override[0] in error
+
+
+@pytest.mark.parametrize(
+    ("source", "via_symlink"),
+    [
+        ("argument", False),
+        ("environment", False),
+        ("argument", True),
+        ("environment", True),
+    ],
+    ids=("argument", "environment", "argument-symlink", "environment-symlink"),
+)
+def test_eval_submit_rejects_an_alternate_config_before_project_loading(
+    project_dir, capsys, monkeypatch, source, via_symlink
+):
+    alternate = project_dir / "alternate.yaml"
+    alternate.write_text((project_dir / "agentkit.yaml").read_text())
+    locator = alternate
+    if via_symlink:
+        links = project_dir / "links"
+        links.mkdir()
+        locator = links / "agentkit.yaml"
+        locator.symlink_to(alternate)
+    argv = ("--config", str(locator)) if source == "argument" else ()
+    if source == "environment":
+        monkeypatch.setenv("AGENTKIT_CONFIG", str(locator))
+
+    def fail_project(arguments):
+        raise AssertionError("an alternate config must fail before project loading")
+
+    monkeypatch.setattr("aai_core.agentkit.cli._project", fail_project)
+
+    code = main(["eval", "--submit", *argv])
+
+    assert code == 1
+    error = capsys.readouterr().err
+    assert "--submit cannot carry" in error
+    assert ("AGENTKIT_CONFIG" if source == "environment" else "--config") in error
 
 
 def test_cli_imports_no_heavy_dependencies():
