@@ -9,6 +9,17 @@ from typing import Any
 
 from aai_core.tags import ResourceContext
 
+# Structured codes that are authoritatively NOT absence. Registry services
+# often word permission denials as "does not exist" to avoid disclosing an
+# inaccessible prompt, so these must override any message marker below.
+_NON_MISSING_ERROR_CODES = {
+    "PERMISSION_DENIED",
+    "UNAUTHENTICATED",
+    "UNAUTHORIZED",
+    "TEMPORARILY_UNAVAILABLE",
+    "REQUEST_LIMIT_EXCEEDED",
+}
+
 
 @dataclass(frozen=True)
 class PromptReference:
@@ -122,3 +133,30 @@ class PromptManager:
 def _prompt_tag_key(key: str) -> str:
     normalized = sub(r"[.,\-=/ :]+", "_", str(key)).strip("_")
     return f"aai_{normalized}"
+
+
+def is_missing_prompt_error(error: Exception) -> bool:
+    """True only when a registry error authoritatively means absence.
+
+    Authentication, permission, rate-limit, and transient registry failures
+    return ``False`` even when their message uses non-disclosure wording such
+    as "does not exist". Callers may therefore fall back to bundled content
+    only for a genuinely missing prompt or alias.
+    """
+
+    error_code = str(getattr(error, "error_code", "")).strip().upper()
+    if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
+        return True
+    if error_code in _NON_MISSING_ERROR_CODES:
+        return False
+    message = str(error).upper()
+    if any(
+        marker in message
+        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    ):
+        return True
+    # The file and SQL registries report a missing alias as
+    # INVALID_PARAMETER_VALUE with "Registered model alias ... not found."
+    # Recognize that narrow shape without treating arbitrary invalid input as
+    # absence.
+    return "ALIAS" in message and "NOT FOUND" in message

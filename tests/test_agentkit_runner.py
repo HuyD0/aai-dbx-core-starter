@@ -1206,6 +1206,206 @@ def _with_prompt_judge(tmp_path):
     return ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
 
 
+class _PromptRegistryError(RuntimeError):
+    def __init__(self, message, *, error_code=""):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class _RecordingPromptManager:
+    def __init__(self, *, prompt=None, error=None):
+        self.prompt = prompt
+        self.error = error
+        self.calls = []
+
+    def load(self, name, *, alias):
+        self.calls.append((name, alias))
+        if self.error is not None:
+            raise self.error
+        return self.prompt
+
+    def qualify(self, name):
+        return f"cat.sch.{name}"
+
+
+def _prompt_lookup_failures():
+    return (
+        pytest.param(
+            _PromptRegistryError(
+                "prompt does not exist", error_code="PERMISSION_DENIED"
+            ),
+            id="permission",
+        ),
+        pytest.param(
+            _PromptRegistryError("token expired", error_code="UNAUTHENTICATED"),
+            id="unauthenticated",
+        ),
+        pytest.param(
+            _PromptRegistryError("slow down", error_code="REQUEST_LIMIT_EXCEEDED"),
+            id="rate-limit",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "service unavailable", error_code="TEMPORARILY_UNAVAILABLE"
+            ),
+            id="transient",
+        ),
+        pytest.param(ConnectionError("connection reset"), id="transport"),
+    )
+
+
+def _use_registered_prompt(project, monkeypatch):
+    manager = _RecordingPromptManager(
+        prompt=SimpleNamespace(
+            uri="prompts:/cat.sch.agentkit_judge_domain_policy/3",
+            template="registered domain policy",
+        )
+    )
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: manager,
+    )
+    return manager
+
+
+def test_a_missing_judge_prompt_uses_one_cached_bundled_fallback(tmp_path, monkeypatch):
+    project = _with_prompt_judge(tmp_path)
+    missing = _PromptRegistryError("hidden", error_code="NOT_FOUND")
+    manager = _RecordingPromptManager(error=missing)
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: manager,
+    )
+    mlflow = FakeMlflow()
+
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=mlflow,
+    )
+
+    assert manager.calls == [("agentkit_judge_domain_policy", "production")]
+    scorer = next(
+        scorer
+        for scorer in mlflow.evaluate_calls[0]["scorers"]
+        if getattr(scorer, "name", None) == "pension_domain_policy"
+    )
+    assert "Never disclose personal contact information" in scorer.instructions
+    assert "aai.judge_prompt_versions" not in mlflow.tags
+    baseline, _ = load_baseline(project.baseline_path)
+    assert dict(baseline.versions.judge_prompts) == {}
+
+
+@pytest.mark.parametrize("error", _prompt_lookup_failures())
+def test_prompt_lookup_failures_refuse_baseline_before_scoring_or_evidence(
+    tmp_path, monkeypatch, error
+):
+    from aai_core.agentkit import catalog as catalog_module
+
+    project = _with_prompt_judge(tmp_path)
+    manager = _RecordingPromptManager(error=error)
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: manager,
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "build_scorer",
+        lambda *args, **kwargs: pytest.fail("a scorer was constructed"),
+    )
+    mlflow = FakeMlflow()
+
+    with pytest.raises(type(error)) as excinfo:
+        run_scoring(
+            project,
+            establish_baseline=True,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert excinfo.value is error
+    assert manager.calls == [("agentkit_judge_domain_policy", "production")]
+    assert mlflow.evaluate_calls == []
+    assert mlflow.experiment is None
+    assert mlflow.tags == {}
+    assert mlflow.run_artifacts == []
+    assert not project.results_dir.exists()
+    assert not project.baseline_path.exists()
+
+
+@pytest.mark.parametrize("error", _prompt_lookup_failures())
+def test_prompt_lookup_failures_refuse_comparison_without_new_evidence(
+    tmp_path, monkeypatch, error
+):
+    from aai_core.agentkit import catalog as catalog_module
+
+    project = _with_prompt_judge(tmp_path)
+    registered = _RecordingPromptManager(
+        prompt=SimpleNamespace(
+            uri="prompts:/cat.sch.agentkit_judge_domain_policy/3",
+            template="registered domain policy",
+        )
+    )
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: registered,
+    )
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+    baseline_before = project.baseline_path.read_bytes()
+    results_before = {
+        path.name: path.read_bytes() for path in project.results_dir.iterdir()
+    }
+
+    failing = _RecordingPromptManager(error=error)
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: failing,
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "build_scorer",
+        lambda *args, **kwargs: pytest.fail("a scorer was constructed"),
+    )
+    mlflow = FakeMlflow(run_id="run-2")
+
+    with pytest.raises(type(error)) as excinfo:
+        run_scoring(
+            project,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert excinfo.value is error
+    assert failing.calls == [("agentkit_judge_domain_policy", "production")]
+    assert mlflow.evaluate_calls == []
+    assert mlflow.experiment is None
+    assert mlflow.tags == {}
+    assert mlflow.run_artifacts == []
+    assert project.baseline_path.read_bytes() == baseline_before
+    assert {
+        path.name: path.read_bytes() for path in project.results_dir.iterdir()
+    } == results_before
+
+
 def test_prompt_resolution_is_shared_by_provenance_and_scorer(tmp_path, monkeypatch):
     """The recorded URI and executed instructions come from one lookup."""
 
@@ -1261,6 +1461,7 @@ def test_a_moved_judge_prompt_refuses_before_any_judge_call(tmp_path, monkeypatc
     from aai_core.agentkit import runner as runner_module
 
     project = _with_prompt_judge(tmp_path)
+    _use_registered_prompt(project, monkeypatch)
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
@@ -1300,6 +1501,7 @@ def test_an_unchanged_judge_prompt_compares_cleanly(tmp_path, monkeypatch):
     from aai_core.agentkit import runner as runner_module
 
     project = _with_prompt_judge(tmp_path)
+    _use_registered_prompt(project, monkeypatch)
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",
@@ -1329,6 +1531,7 @@ def test_prompt_drift_can_be_overridden_and_is_recorded(tmp_path, monkeypatch):
     from aai_core.agentkit import runner as runner_module
 
     project = _with_prompt_judge(tmp_path)
+    _use_registered_prompt(project, monkeypatch)
     monkeypatch.setattr(
         runner_module,
         "_resolved_prompt_versions",

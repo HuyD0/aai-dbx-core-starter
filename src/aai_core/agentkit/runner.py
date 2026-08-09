@@ -68,6 +68,7 @@ from aai_core.agentkit.results import ResultsRecord, publish_results, write_resu
 from aai_core.agentkit.targets import TargetKind, build_predict_fn, resolve_target
 from aai_core.evaluation import GateResult, apply_gate
 from aai_core.experiments import ExperimentRunMetadata, RunPurpose
+from aai_core.prompts import is_missing_prompt_error
 
 WORKERS_ENV = "MLFLOW_GENAI_EVAL_MAX_WORKERS"
 SCORER_WORKERS_ENV = "MLFLOW_GENAI_EVAL_MAX_SCORER_WORKERS"
@@ -991,7 +992,9 @@ class _PromptLoader:
         if key not in self._resolved:
             try:
                 self._resolved[key] = self._manager.load(name, alias=alias)
-            except Exception:
+            except Exception as error:
+                if not is_missing_prompt_error(error):
+                    raise
                 # A judge prompt that is not registered yet falls back to the
                 # catalog's bundled instructions. Cache that fallback too: a
                 # retry must not make provenance and execution disagree.
