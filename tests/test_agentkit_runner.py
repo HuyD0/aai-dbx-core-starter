@@ -22,7 +22,12 @@ from aai_core.agentkit.errors import (
     TargetInvocationError,
     TargetResolutionError,
 )
-from aai_core.agentkit.gate import EXIT_ERROR, EXIT_PASS, EXIT_THRESHOLD_FAILED
+from aai_core.agentkit.gate import (
+    EXIT_ERROR,
+    EXIT_PASS,
+    EXIT_THRESHOLD_FAILED,
+    run_gate,
+)
 from aai_core.agentkit.results import load_latest_results
 from aai_core.agentkit.runner import (
     SCORER_WORKERS_ENV,
@@ -1120,7 +1125,7 @@ def test_recorded_run_attaches_its_results_record(tmp_path):
         environ={},
     )
 
-    assert mlflow.run_artifacts == [("run-1", outcome.results_path.name, "agentkit")]
+    assert mlflow.run_artifacts == [("run-1", "results.json", "agentkit")]
     assert any(
         "agentkit evidence --run run-1" in message for message in outcome.messages
     )
@@ -1157,6 +1162,13 @@ def test_unpublishable_evidence_fails_the_run(tmp_path):
     assert "could not attach the results record" in message
     # The verdict is not hidden by the failure that follows it.
     assert "gate passed" in message
+    assert load_latest_results(project.results_dir) is None
+    assert not project.baseline_path.exists()
+
+    report, code, gate_message = run_gate(project)
+    assert report is None
+    assert code == EXIT_ERROR
+    assert "agentkit compare" in gate_message
 
 
 def test_local_scoring_needs_no_publication(tmp_path):

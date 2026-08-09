@@ -15,6 +15,8 @@ the answer to "show me what this version scored", from any machine.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -119,14 +121,30 @@ class ResultsRecord(ContractModel):
         )
 
 
+def _results_document(record: ResultsRecord) -> str:
+    return json.dumps(record.model_dump(), indent=2, sort_keys=True, default=str) + "\n"
+
+
+def _write_results_file(path: Path, record: ResultsRecord) -> None:
+    path.write_text(_results_document(record), encoding="utf-8")
+
+
 def write_results(directory: Path, record: ResultsRecord) -> Path:
+    """Atomically expose a completed local results record."""
+
     directory.mkdir(parents=True, exist_ok=True)
     stamp = record.recorded_at.replace(":", "").replace("-", "")
     path = directory / f"{stamp}-{record.command}.json"
-    path.write_text(
-        json.dumps(record.model_dump(), indent=2, sort_keys=True, default=str) + "\n",
-        encoding="utf-8",
+    descriptor, scratch_name = tempfile.mkstemp(
+        dir=directory, prefix=f".{path.name}.", suffix=".tmp"
     )
+    os.close(descriptor)
+    scratch = Path(scratch_name)
+    try:
+        _write_results_file(scratch, record)
+        os.replace(scratch, path)
+    finally:
+        scratch.unlink(missing_ok=True)
     return path
 
 
@@ -141,17 +159,23 @@ def read_results(path: Path) -> ResultsRecord:
         raise ConfigError(f"{path} is not a valid results record: {error}") from error
 
 
-def publish_results(mlflow_module: Any, run_id: str, path: Path) -> str | None:
+def publish_results(
+    mlflow_module: Any, run_id: str, record: ResultsRecord
+) -> str | None:
     """Attach the results record to its MLflow run.
 
-    Best effort by design: the record is already on disk and the gate has
-    already been decided, so a tracking-store hiccup here must not turn a
-    scored run into a failed one. The caller reports what happened.
+    The timestamped local filename is useful for retaining several runs, but
+    the run artifact has one stable contract: ``agentkit/results.json``.
+    Stage that canonical basename outside the gate-visible local results
+    directory so a failed upload cannot leave a passing record behind.
     """
 
     try:
-        client = mlflow_module.MlflowClient()
-        client.log_artifact(run_id, str(path), artifact_path=RESULTS_ARTIFACT_DIR)
+        with tempfile.TemporaryDirectory(prefix="aai-agentkit-results-") as staged:
+            path = Path(staged) / RESULTS_ARTIFACT_FILE
+            _write_results_file(path, record)
+            client = mlflow_module.MlflowClient()
+            client.log_artifact(run_id, str(path), artifact_path=RESULTS_ARTIFACT_DIR)
     except Exception as error:  # pragma: no cover - network/credential paths
         return f"could not attach the results record to run {run_id}: {error}"
     return None
@@ -182,7 +206,17 @@ def fetch_results(run_id: str, *, mlflow_module: Any | None = None) -> ResultsRe
                 "locally and opens no run."
             ),
         ) from error
-    return read_results(Path(local))
+    record = read_results(Path(local))
+    if record.run_id != run_id:
+        raise ConfigError(
+            f"run {run_id} carries an agentkit results record for "
+            f"{record.run_id!r}, not that run",
+            remediation=(
+                "Re-run the evaluation so MLflow receives evidence bound "
+                "to the exact run that produced it."
+            ),
+        )
+    return record
 
 
 def load_latest_results(directory: Path) -> tuple[ResultsRecord, Path] | None:

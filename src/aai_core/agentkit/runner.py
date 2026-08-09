@@ -540,12 +540,11 @@ def run_scoring(
         warnings=tuple(warnings),
         judges_enabled=judges_enabled,
     )
-    results_path = write_results(project.results_dir, results)
     if mlflow is not None and run_id:
         # `.aai/agentkit/results/` is the filesystem this run happened on.
         # For the deployment-job gate that is a job cluster the approver
         # cannot reach, so the record travels with the run.
-        failure = publish_results(mlflow, run_id, results_path)
+        failure = publish_results(mlflow, run_id, results)
         if failure:
             # This used to be a warning, on the reasoning that the record
             # was already on disk and the gate already decided. That
@@ -567,6 +566,11 @@ def run_scoring(
         outcome.messages.append(
             f"Evidence for this run: agentkit evidence --run {run_id}"
         )
+
+    # Only a durably published remote run (or an entirely local run) becomes
+    # gate-visible evidence. If publication failed above, no passing JSON is
+    # left for a later `agentkit gate` invocation to mistake for success.
+    results_path = write_results(project.results_dir, results)
 
     if establish_baseline:
         write_baseline(

@@ -22,7 +22,11 @@ from aai_core.agentkit.datasets import (
     dataset_digest,
     effective_dataset,
 )
-from aai_core.agentkit.errors import BaselineMissingError, ConfigError
+from aai_core.agentkit.errors import (
+    BaselineIncomparableError,
+    BaselineMissingError,
+    ConfigError,
+)
 
 
 def _record(**overrides):
@@ -60,6 +64,32 @@ def _dataset(digest="abc123", rows=10):
             expectation_keys=(),
             has_traces=False,
             strata_values={},
+        ),
+    )
+
+
+def _remote_run(
+    run_id="run-9", *, status="FINISHED", tags=None, metrics=None, experiment_id="42"
+):
+    governed_tags = {
+        "aai.run_purpose": "baseline",
+        "aai.agentkit_version": "0.4.0",
+        "aai.dataset": "golden.json",
+        "aai.dataset_digest": "abc123",
+        "aai.dataset_rows": "10",
+        "aai.scope_mode": "full",
+        "aai.scope_rows": "10",
+        "aai.agent_target": "src/app/example_agent.py:respond",
+        "aai.recorded_at": "2026-08-02T10:00:00Z",
+        "aai.change_id": "abc1234",
+        "aai.scorer_versions": "keyword_coverage=1",
+    }
+    governed_tags.update(tags or {})
+    return SimpleNamespace(
+        info=SimpleNamespace(run_id=run_id, experiment_id=experiment_id, status=status),
+        data=SimpleNamespace(
+            metrics=({"keyword_coverage/mean": 0.8} if metrics is None else metrics),
+            tags=governed_tags,
         ),
     )
 
@@ -121,23 +151,23 @@ def test_selection_precedence_flag_then_config_then_file(tmp_path):
     path = tmp_path / "baseline.json"
     write_baseline(path, _record())
 
-    run = SimpleNamespace(
-        info=SimpleNamespace(experiment_id="7"),
-        data=SimpleNamespace(
+    def get_run(run_id):
+        return _remote_run(
+            run_id,
+            experiment_id="7",
             metrics={"correctness/mean": 0.9},
             tags={
-                "aai.dataset": "golden.json",
                 "aai.dataset_digest": "ddd",
                 "aai.dataset_rows": "12",
+                "aai.scope_rows": "12",
                 "aai.scorer_versions": "correctness=1,safety=1",
                 "aai.judge_model": "endpoints:/judge",
                 "aai.agent_target": "endpoints:/agent",
-                "aai.agentkit_version": "0.4.0",
                 "aai.change_id": "abc",
             },
-        ),
-    )
-    fake_mlflow = SimpleNamespace(get_run=lambda run_id: run)
+        )
+
+    fake_mlflow = SimpleNamespace(get_run=get_run)
 
     from_flag, _ = select_baseline(
         baseline_path=path,
@@ -421,21 +451,13 @@ def test_a_run_baseline_keeps_the_scope_it_was_scored_at(tmp_path):
     a repeat of the same command.
     """
 
-    run = SimpleNamespace(
-        info=SimpleNamespace(experiment_id="42"),
-        data=SimpleNamespace(
-            tags={
-                "aai.dataset": "golden.json",
-                "aai.dataset_digest": "abc123",
-                "aai.dataset_rows": "20",
-                "aai.scope_mode": "sample",
-                "aai.scope_rows": "20",
-                "aai.scorer_versions": "keyword_coverage=1",
-                "aai.agent_target": "src/app/example_agent.py:respond",
-                "aai.recorded_at": "2026-08-02T10:00:00Z",
-            },
-            metrics={"keyword_coverage/mean": 0.8},
-        ),
+    run = _remote_run(
+        "run-9",
+        tags={
+            "aai.dataset_rows": "20",
+            "aai.scope_mode": "sample",
+            "aai.scope_rows": "20",
+        },
     )
     fake = SimpleNamespace(get_run=lambda run_id: run)
 
@@ -455,26 +477,43 @@ def test_a_run_baseline_keeps_the_scope_it_was_scored_at(tmp_path):
     )
 
 
-def test_a_run_baseline_without_scope_tags_reads_as_full(tmp_path):
-    """Runs recorded before the scope tags existed still load."""
-
-    run = SimpleNamespace(
-        info=SimpleNamespace(experiment_id="42"),
-        data=SimpleNamespace(
-            tags={"aai.dataset_rows": "10", "aai.dataset_digest": "abc123"},
-            metrics={},
+@pytest.mark.parametrize(
+    ("run", "reason"),
+    [
+        (_remote_run(status="RUNNING"), "not FINISHED"),
+        (
+            SimpleNamespace(
+                info=SimpleNamespace(
+                    run_id="run-9", experiment_id="42", status="FINISHED"
+                ),
+                data=SimpleNamespace(tags={}, metrics={"arbitrary/mean": 1.0}),
+            ),
+            "lacks AgentKit baseline lineage tags",
         ),
-    )
-    fake = SimpleNamespace(get_run=lambda run_id: run)
+        (_remote_run("another-run"), "returned run 'another-run'"),
+        (_remote_run(tags={"aai.run_purpose": "result"}), "not 'baseline'"),
+        (_remote_run(tags={"aai.scope_mode": ""}), "aai.scope_mode"),
+        (_remote_run(metrics={}), "no scored metrics"),
+        (
+            _remote_run(tags={"aai.scorer_versions": "keyword_coverage=unknown"}),
+            "positive integer",
+        ),
+    ],
+)
+def test_an_explicit_remote_baseline_must_be_finished_governed_evidence(
+    tmp_path, run, reason
+):
+    """Remote runs get no legacy fallback: they are an untrusted boundary."""
 
-    record, _ = select_baseline(
-        baseline_path=tmp_path / "missing.json",
-        flag_run_id="run-9",
-        mlflow_module=fake,
-    )
+    with pytest.raises(BaselineIncomparableError) as excinfo:
+        select_baseline(
+            baseline_path=tmp_path / "missing.json",
+            flag_run_id="run-9",
+            mlflow_module=SimpleNamespace(get_run=lambda run_id: run),
+        )
 
-    assert record.scope.mode == "full"
-    assert record.scope.rows == 10
+    assert reason in str(excinfo.value)
+    assert "--establish-baseline" in str(excinfo.value)
 
 
 def _prompt_record():
@@ -602,20 +641,12 @@ def test_a_sample_of_the_recorded_dataset_is_not_a_changed_dataset():
 def test_a_run_baseline_restores_its_judge_prompt_versions():
     """The prompt drift check is dead without this."""
 
-    run = SimpleNamespace(
-        info=SimpleNamespace(experiment_id="42"),
-        data=SimpleNamespace(
-            metrics={"keyword_coverage/mean": 0.7},
-            tags={
-                "aai.dataset": "golden.json",
-                "aai.dataset_digest": "abc123",
-                "aai.dataset_rows": "10",
-                "aai.scorer_versions": "keyword_coverage=1",
-                "aai.judge_prompt_versions": (
-                    "pension_domain_policy=prompts:/cat.sch.p/3"
-                ),
-            },
-        ),
+    run = _remote_run(
+        "run-abc",
+        metrics={"keyword_coverage/mean": 0.7},
+        tags={
+            "aai.judge_prompt_versions": "pension_domain_policy=prompts:/cat.sch.p/3"
+        },
     )
     mlflow = SimpleNamespace(get_run=lambda run_id: run)
 

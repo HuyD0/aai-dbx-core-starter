@@ -18,10 +18,27 @@ from typing import Any, Literal
 from pydantic import Field, ValidationError, field_serializer, field_validator
 
 from aai_core.agentkit.datasets import LoadedDataset
-from aai_core.agentkit.errors import BaselineMissingError, ConfigError
+from aai_core.agentkit.errors import (
+    BaselineIncomparableError,
+    BaselineMissingError,
+    ConfigError,
+)
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 
 _LEGACY_PLACEHOLDER = "unknown"
+_REMOTE_BASELINE_TAGS = (
+    "aai.run_purpose",
+    "aai.agentkit_version",
+    "aai.dataset",
+    "aai.dataset_digest",
+    "aai.dataset_rows",
+    "aai.scope_mode",
+    "aai.scope_rows",
+    "aai.agent_target",
+    "aai.recorded_at",
+    "aai.change_id",
+    "aai.scorer_versions",
+)
 
 
 class BaselineScope(ContractModel):
@@ -384,13 +401,64 @@ def _baseline_from_run(
             f"could not fetch baseline run {run_id!r} ({origin}): {error}",
             remediation="Check the run id and your MLflow authentication.",
         ) from error
+    info = getattr(run, "info", None)
+    returned_run_id = str(getattr(info, "run_id", "") or "")
+    if returned_run_id != run_id:
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            f"the tracking store returned run {returned_run_id!r}",
+        )
+    status = str(getattr(info, "status", "") or "").upper()
+    if status != "FINISHED":
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            f"its status is {status or 'unknown'}, not FINISHED",
+        )
     tags = dict(getattr(run.data, "tags", {}) or {})
     metrics = dict(getattr(run.data, "metrics", {}) or {})
-    scorers = {
-        name: int(version)
-        for name, version in _tag_pairs(tags.get("aai.scorer_versions"))
-        if version.isdigit()
-    }
+    missing = [
+        name
+        for name in _REMOTE_BASELINE_TAGS
+        if not isinstance(tags.get(name), str) or not tags[name].strip()
+    ]
+    if missing:
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            "it lacks AgentKit baseline lineage tags: " + ", ".join(missing),
+        )
+    if tags["aai.run_purpose"] != "baseline":
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            f"aai.run_purpose is {tags['aai.run_purpose']!r}, not 'baseline'",
+        )
+    scope_mode = tags["aai.scope_mode"]
+    if scope_mode not in {"full", "sample"}:
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            f"aai.scope_mode is {scope_mode!r}, not 'full' or 'sample'",
+        )
+    dataset_rows = _positive_tag_int(tags, "aai.dataset_rows", run_id, origin)
+    scope_rows = _positive_tag_int(tags, "aai.scope_rows", run_id, origin)
+    if not metrics:
+        raise _invalid_remote_baseline(run_id, origin, "it carries no scored metrics")
+    scorer_pairs = _strict_tag_pairs(
+        tags["aai.scorer_versions"],
+        name="aai.scorer_versions",
+        run_id=run_id,
+        origin=origin,
+    )
+    if any(not version.isdigit() or int(version) < 1 for _, version in scorer_pairs):
+        raise _invalid_remote_baseline(
+            run_id,
+            origin,
+            "aai.scorer_versions must assign a positive integer to every scorer",
+        )
+    scorers = {name: int(version) for name, version in scorer_pairs}
     # The run recorded which judge instructions it used; not reading them
     # back would leave every run-fetched baseline with an empty prompt map,
     # and a check that cannot fire is not a check.
@@ -398,32 +466,70 @@ def _baseline_from_run(
     return BaselineRecord(
         schema_version=1,
         run_id=run_id,
-        experiment_id=str(getattr(run.info, "experiment_id", "")) or None,
-        recorded_at=tags.get("aai.recorded_at", _LEGACY_PLACEHOLDER),
+        experiment_id=str(getattr(info, "experiment_id", "")) or None,
+        recorded_at=tags["aai.recorded_at"],
         dataset=BaselineDataset(
-            ref=tags.get("aai.dataset", _LEGACY_PLACEHOLDER),
-            digest=tags.get("aai.dataset_digest", _LEGACY_PLACEHOLDER),
-            rows=int(tags.get("aai.dataset_rows", "0") or 0),
+            ref=tags["aai.dataset"],
+            digest=tags["aai.dataset_digest"],
+            rows=dataset_rows,
         ),
-        # The run records its own scope. Assuming "full" would make a
-        # sampled baseline fetched by run id incomparable with the very
-        # sampled run that produced it.
         scope=BaselineScope(
-            mode="sample" if tags.get("aai.scope_mode") == "sample" else "full",
-            rows=int(tags.get("aai.scope_rows") or tags.get("aai.dataset_rows") or 0),
+            mode=scope_mode,
+            rows=scope_rows,
         ),
         metrics=metrics,
         versions=BaselineVersions(
-            agent=tags.get("aai.agent_target", _LEGACY_PLACEHOLDER),
+            agent=tags["aai.agent_target"],
             scorers=scorers,
             judge_model=tags.get("aai.judge_model"),
             judge_model_identity=tags.get("aai.judge_model_identity"),
             judge_prompts=judge_prompts,
-            aai_core=tags.get("aai.agentkit_version", _LEGACY_PLACEHOLDER),
+            aai_core=tags["aai.agentkit_version"],
         ),
         recorded_by=origin,
-        change_id=tags.get("aai.change_id", _LEGACY_PLACEHOLDER),
+        change_id=tags["aai.change_id"],
     )
+
+
+def _invalid_remote_baseline(
+    run_id: str, origin: str, reason: str
+) -> BaselineIncomparableError:
+    return BaselineIncomparableError(
+        f"run {run_id!r} ({origin}) is not valid AgentKit baseline evidence: {reason}",
+        remediation=(
+            "Use the run id emitted by a completed "
+            "`agentkit compare --establish-baseline` run. Committed legacy "
+            "baseline files remain readable, but ungoverned remote runs do not."
+        ),
+    )
+
+
+def _positive_tag_int(
+    tags: Mapping[str, Any], name: str, run_id: str, origin: str
+) -> int:
+    try:
+        value = int(tags[name])
+    except (TypeError, ValueError) as error:
+        raise _invalid_remote_baseline(
+            run_id, origin, f"{name} is not an integer"
+        ) from error
+    if value < 1:
+        raise _invalid_remote_baseline(run_id, origin, f"{name} must be at least 1")
+    return value
+
+
+def _strict_tag_pairs(
+    value: str, *, name: str, run_id: str, origin: str
+) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for item in value.split(","):
+        key, separator, recorded = item.partition("=")
+        if not separator or not key.strip() or not recorded.strip():
+            raise _invalid_remote_baseline(
+                run_id, origin, f"{name} contains a malformed entry {item!r}"
+            )
+        pairs.append((key.strip(), recorded.strip()))
+    return pairs
 
 
 def _tag_pairs(value: str | None) -> list[tuple[str, str]]:
