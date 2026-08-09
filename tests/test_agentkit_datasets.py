@@ -939,7 +939,16 @@ def test_a_traced_row_without_expectations_is_still_valid(tmp_path):
     assert validate_dataset(dataset, minimum_rows=1) == []
 
 
-@pytest.mark.parametrize("trace", ["not-json", {"unrelated": "object"}])
+@pytest.mark.parametrize(
+    "trace",
+    [
+        "not-json",
+        {"unrelated": "object"},
+        {"spans": [{}]},
+        {"spans": [{"inputs": {"question": "q"}}]},
+    ],
+    ids=("invalid-json", "unrelated-object", "empty-span", "id-less-root-span"),
+)
 def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
     rows = [{"inputs": {"question": "q"}, "trace": trace}]
     _write_dataset(tmp_path, rows)
@@ -958,6 +967,10 @@ def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
     [
         {
             "info": {"request": {"question": "q"}},
+            "data": {"spans": []},
+        },
+        {
+            "info": {"request_preview": json.dumps({"question": "q"})},
             "data": {"spans": []},
         },
         {
@@ -989,7 +1002,12 @@ def test_populated_malformed_traces_fail_local_validation(tmp_path, trace):
             }
         ),
     ],
-    ids=("info-request", "top-level-root-span", "serialized-with-expectation"),
+    ids=(
+        "info-request",
+        "info-request-preview",
+        "top-level-root-span",
+        "serialized-with-expectation",
+    ),
 )
 def test_supported_trace_shapes_pass_local_validation(tmp_path, trace):
     rows = [{"inputs": {"question": "q"}, "trace": trace}]
