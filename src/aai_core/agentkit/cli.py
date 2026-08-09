@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -262,6 +263,8 @@ def _cmd_smoke(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_eval(arguments: argparse.Namespace) -> int:
+    from aai_core.agentkit.config import CONFIG_ENV, CONFIG_FILENAME
+
     submit_only_flags = [
         flag
         for flag, selected in (
@@ -275,11 +278,23 @@ def _cmd_eval(arguments: argparse.Namespace) -> int:
         )
         if selected
     ]
+    config_path = arguments.config
+    config_source = "--config"
+    if config_path is None and os.environ.get(CONFIG_ENV):
+        config_path = os.environ[CONFIG_ENV]
+        config_source = CONFIG_ENV
+    if config_path is not None:
+        try:
+            canonical_config = Path(config_path).resolve().name == CONFIG_FILENAME
+        except (OSError, RuntimeError):
+            canonical_config = False
+        if not canonical_config:
+            submit_only_flags.append(config_source)
     if arguments.submit and submit_only_flags:
         from aai_core.agentkit.errors import ConfigError
 
         raise ConfigError(
-            "--submit cannot be combined with local scoring option(s): "
+            "--submit cannot carry local-only option(s): "
             + ", ".join(submit_only_flags),
             remediation=(
                 "Run the option locally without `--submit`, or remove it and "
