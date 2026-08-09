@@ -782,6 +782,10 @@ def evaluation_records(spec) -> list:
         )
         records.append(
             gbi.EvaluationRecord(
+                # The document this record judges. Two gold rows for one
+                # document would otherwise be counted as two independent
+                # observations, narrowing every interval built from them.
+                key=row.doc_id,
                 stratum=row.layout,
                 # Stamped where the prediction was produced. Scoring
                 # verifies it against the spec being gated, so v1 output
@@ -912,6 +916,7 @@ for row in naive_rows:
     predicted, abstained = simulate_extraction(row.doc_id, row.layout, gold, "1.0.0")
     naive_records.append(
         gbi.EvaluationRecord(
+            key=row.doc_id,
             stratum=row.layout,
             inference=spec_v1.inference,
             gold=gold,
@@ -1266,7 +1271,7 @@ spark.sql(gbi.resync_strata_sql(spec_v2, SOURCE_SNAPSHOT))
 # A release that changes only judgment produces the predictions already
 # landed, so restart leaves those rows alone — but the table would still
 # name the older policy. This corrects the stamp without inference.
-spark.sql(gbi.resync_policy_sql(spec_v2, SOURCE_SNAPSHOT))
+spark.sql(gbi.resync_policy_sql(spec_v2, SOURCE_SNAPSHOT, run_id=RUN_ID))
 
 print(f"pending before run: {spark.sql(pending_sql).first().pending:,}")
 
@@ -1316,6 +1321,7 @@ else:
         )
         record["ai_error"] = None
         record["ai_run_id"] = RUN_ID
+        record["ai_policy_run_id"] = RUN_ID
         record["ai_spec_digest"] = spec_v2.spec_digest
         record["ai_model_version"] = spec_v2.model_version
         record["ai_prompt_version"] = spec_v2.prompt_version
@@ -1425,6 +1431,18 @@ spark.sql(
         projected_cost_cad=estimate_v2.projected_cost_cad,
         target_table_version=int(target_version),
     )
+)
+# The write is insert-only, so a retry is a no-op and the record can
+# never be rewritten — which means a reused run id leaves the *original*
+# record standing while this run's rows point at it. Silent, unless
+# someone looks.
+gbi.require_unique_run_id(
+    spec_v2,
+    spark.sql(
+        gbi.run_metadata_conflict_sql(
+            spec_v2, run_id=RUN_ID, target_table_version=int(target_version)
+        )
+    ).count(),
 )
 
 mlflow.log_metric("target_table_version", int(target_version))

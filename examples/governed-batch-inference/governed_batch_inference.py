@@ -72,6 +72,14 @@ PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ai_abstain_reason", "STRING"),
     ("ai_error", "STRING"),
     ("ai_run_id", "STRING"),
+    #: The run whose *policy* governs this row, when that is not the run
+    #: that produced it. A policy-only release re-stamps the spec digest
+    #: without re-inferring, so `ai_run_id` still points at the run that
+    #: made the values — which is true and worth keeping — while the gate
+    #: and cost record that authorise the row today live under a
+    #: different run. Both references are real; collapsing them would
+    #: lose whichever one was overwritten.
+    ("ai_policy_run_id", "STRING"),
     ("ai_spec_digest", "STRING"),
     ("ai_model_version", "STRING"),
     ("ai_prompt_version", "STRING"),
@@ -1040,6 +1048,16 @@ class EvaluationRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    #: The sampled source key this record judges. Carried so that
+    #: duplicated evidence can be *detected*: an evaluation set is
+    #: assembled by joining the sample to a gold table, and a gold table
+    #: with two adjudications for one document silently yields two
+    #: records. Scoring counts both, the Wilson interval narrows as
+    #: though the sample were larger than it is, and a gate adopts on
+    #: fewer distinct documents than its own numbers claim. The source
+    #: preflight cannot see this: the duplication is created by the join,
+    #: not present in the table.
+    key: str
     stratum: str
     inference: InferenceIdentity
     gold: Mapping[str, str | int | float | None]
@@ -1396,6 +1414,31 @@ def score_extraction(
                 f"{inference.inference_digest[:12]}…). Re-run inference for "
                 "the release being gated."
             )
+    # One document, one vote. An evaluation set is built by joining the
+    # sample to a gold table, and a gold table holding two adjudications
+    # for a document yields two records of it — which scoring would count
+    # as two independent observations. Nothing downstream could notice:
+    # the counts are consistent, the intervals are correctly computed for
+    # the n they are given, and that n is simply wrong. The interval
+    # narrows, the lower bound rises, and the gate adopts on fewer
+    # distinct documents than its own evidence claims.
+    #
+    # This is deliberately a refusal, not a de-duplication. Two rows for
+    # one key mean the join is wrong or the gold set has an unresolved
+    # disagreement, and silently keeping one of them would pick an
+    # adjudication arbitrarily.
+    seen: dict[str, int] = {}
+    for record in records:
+        seen[record.key] = seen.get(record.key, 0) + 1
+    repeated = sorted(key for key, count in seen.items() if count > 1)
+    if repeated:
+        raise EvidenceMismatch(
+            f"{len(repeated)} document(s) appear more than once in the "
+            f"evaluation set, first {repeated[:3]}. Each would be counted as "
+            "independent evidence, narrowing every interval built from it. "
+            "Resolve the duplicate gold rows or fix the join before scoring."
+        )
+
     by_stratum: dict[str, list[EvaluationRecord]] = {}
     for record in records:
         by_stratum.setdefault(record.stratum, []).append(record)
@@ -2486,7 +2529,10 @@ def restart_predicate_sql(
 
 
 def resync_policy_sql(
-    spec: BatchInferenceSpec, snapshot: SourceSnapshot | None = None
+    spec: BatchInferenceSpec,
+    snapshot: SourceSnapshot | None = None,
+    *,
+    run_id: str,
 ) -> str:
     """Refresh which policy release governs already-correct predictions.
 
@@ -2504,6 +2550,12 @@ def resync_policy_sql(
     the row was inferred is *pending*, and the run may be interrupted or
     never started; stamping it here would leave production claiming this
     release governs values derived from text that no longer exists.
+
+    It also points ``ai_policy_run_id`` at this release's run, because
+    otherwise the row would claim the new policy while every provenance
+    join still resolved to the run that carried the old one — and no row
+    would reference the new run record at all. ``ai_run_id`` keeps
+    pointing at the run that produced the values, which remains true.
     """
     return f"""MERGE INTO {spec.target_table} AS target
 USING {_source_relation(spec, snapshot)} AS source
@@ -2515,7 +2567,8 @@ WHEN MATCHED
   AND NOT (target.ai_spec_digest <=> {sql_string_literal(spec.spec_digest)})
   THEN UPDATE SET
     target.ai_spec_digest = {sql_string_literal(spec.spec_digest)},
-    target.ai_release_sequence = {int(spec.release_sequence)}"""
+    target.ai_release_sequence = {int(spec.release_sequence)},
+    target.ai_policy_run_id = {sql_string_literal(run_id)}"""
 
 
 def build_execute_sql(
@@ -2792,6 +2845,7 @@ USING (
       ELSE error_message
     END AS ai_error,
     {sql_string_literal(run_id)} AS ai_run_id,
+    {sql_string_literal(run_id)} AS ai_policy_run_id,
     {digest_literal} AS ai_spec_digest,
     {model_literal} AS ai_model_version,
     {prompt_literal} AS ai_prompt_version,
@@ -2880,6 +2934,16 @@ def run_metadata_upsert_sql(
     landed row uses to reach this table, so a duplicate fans out every
     downstream join and can tie one run to two recorded table versions —
     it corrupts the provenance record rather than merely repeating it.
+
+    The matched branch is deliberately absent. A run record describes
+    something that already happened, so there is nothing about it a later
+    call may legitimately revise: updating on match meant a retry after
+    another commit — or an accidentally reused ``run_id`` — rewrote the
+    spec, gate, cost and table version that the rows carrying that
+    ``ai_run_id`` were produced under, silently repointing them at a
+    release they never ran. Insert-only makes the retry a true no-op and
+    the record immutable; ``require_run_metadata_consistent`` is how a
+    conflicting reuse is *found*, because SQL cannot raise here.
     """
     approved = sql_string_literal(report.approved_by) if report.approved_by else "NULL"
     return f"""MERGE INTO {spec.run_metadata_table} AS target
@@ -2901,8 +2965,40 @@ USING (
     current_timestamp() AS executed_at
 ) AS source
 ON target.run_id = source.run_id
-WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *"""
+
+
+def run_metadata_conflict_sql(
+    spec: BatchInferenceSpec,
+    *,
+    run_id: str,
+    target_table_version: int,
+) -> str:
+    """Find an existing run record this run would have contradicted.
+
+    The upsert is insert-only, so a reused ``run_id`` leaves the original
+    record standing rather than overwriting it — correct, but silent. Run
+    this after it: any row returned means two different runs claimed one
+    id, and every landed row carrying it now resolves to the wrong one.
+    """
+    return f"""SELECT run_id, spec_digest, target_table_version
+FROM {spec.run_metadata_table}
+WHERE run_id = {sql_string_literal(run_id)}
+  AND NOT (
+    spec_digest <=> {sql_string_literal(spec.spec_digest)}
+    AND target_table_version <=> {int(target_table_version)}
+  )"""
+
+
+def require_unique_run_id(spec: BatchInferenceSpec, conflicting_rows: int) -> None:
+    """Refuse to carry on when a run id already describes a different run."""
+    if conflicting_rows:
+        raise EvidenceMismatch(
+            f"{spec.run_metadata_table} already holds a different run under "
+            "this run_id. The record is immutable and was left intact, so "
+            "the rows this run just landed now point at another run's spec "
+            "and table version. Use a fresh run id."
+        )
 
 
 # ---------------------------------------------------------------------------

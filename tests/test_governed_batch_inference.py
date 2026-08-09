@@ -9,6 +9,7 @@ deliberate over-sampling of rare strata, and the tier-1 human sign-off.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -76,9 +77,14 @@ PLACEHOLDER_INFERENCE = gbi.InferenceIdentity(
 def records_for(stratum, *, correct=0, wrong=0, abstained=0, hallucinated=0):
     """Single-field evaluation records with controlled outcome counts."""
 
+    counter = itertools.count()
+
     def record(**kwargs):
         return gbi.EvaluationRecord(
-            stratum=stratum, inference=PLACEHOLDER_INFERENCE, **kwargs
+            key=f"{stratum}-{next(counter)}",
+            stratum=stratum,
+            inference=PLACEHOLDER_INFERENCE,
+            **kwargs,
         )
 
     rows = []
@@ -218,12 +224,14 @@ def adopting_report(spec, *, source_snapshot=None):
     """
     records = [
         gbi.EvaluationRecord(
+            key=f"doc-{i}",
             stratum="standard",
             inference=PLACEHOLDER_INFERENCE,
             gold={field.name: "v" for field in spec.fields},
             predicted={field.name: "v" for field in spec.fields},
         )
-    ] * 200
+        for i in range(200)
+    ]
     if source_snapshot is None and spec.gate_required:
         source_snapshot = snapshot_for(spec)
     report = gbi.evaluate_gate(
@@ -621,12 +629,14 @@ def test_gate_refuses_evidence_missing_a_field_or_the_weighted_row():
     spec = make_spec()  # two fields
     records = [
         gbi.EvaluationRecord(
+            key=f"doc-{i}",
             stratum="standard",
             inference=PLACEHOLDER_INFERENCE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )
-    ] * 200
+        for i in range(200)
+    ]
     scores = score(records, spec)
     assert gate(spec, scores).decision == gbi.GateDecision.ADOPT
 
@@ -786,12 +796,14 @@ def test_execution_needs_a_report_that_judged_every_field():
     spec = make_spec()  # two fields
     records = [
         gbi.EvaluationRecord(
+            key=f"doc-{i}",
             stratum="standard",
             inference=PLACEHOLDER_INFERENCE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )
-    ] * 200
+        for i in range(200)
+    ]
     report = gate(spec, score(records, spec))
     gbi.require_executable(spec, report, preflight_for(spec))
 
@@ -959,13 +971,14 @@ def test_execution_reads_the_delta_version_the_evidence_describes():
             score(
                 [
                     gbi.EvaluationRecord(
+                        key=f"doc-{i}",
                         stratum="standard",
                         inference=PLACEHOLDER_INFERENCE,
                         gold={f.name: "v" for f in spec.fields},
                         predicted={f.name: "v" for f in spec.fields},
                     )
-                ]
-                * 200,
+                    for i in range(200)
+                ],
                 spec,
             ),
             source_snapshot=gbi.SourceSnapshot(table="main.other.docs", version=1),
@@ -1109,13 +1122,14 @@ def test_gated_evidence_must_record_its_source_version():
     scores = score(
         [
             gbi.EvaluationRecord(
+                key=f"doc-{i}",
                 stratum="standard",
                 inference=PLACEHOLDER_INFERENCE,
                 gold={f.name: "v" for f in spec.fields},
                 predicted={f.name: "v" for f in spec.fields},
             )
-        ]
-        * 200,
+            for i in range(200)
+        ],
         spec,
     )
     assert spec.gate_required
@@ -1134,13 +1148,14 @@ def score_for(spec):
     return score(
         [
             gbi.EvaluationRecord(
+                key=f"doc-{i}",
                 stratum="standard",
                 inference=PLACEHOLDER_INFERENCE,
                 gold={f.name: "v" for f in spec.fields},
                 predicted={f.name: "v" for f in spec.fields},
             )
-        ]
-        * 200,
+            for i in range(200)
+        ],
         spec,
     )
 
@@ -1635,7 +1650,7 @@ def test_a_policy_only_release_reuses_the_predictions_it_has():
     assert "ai_spec_digest" not in predicate
 
     # The policy stamp is refreshed separately, without inference.
-    policy = gbi.resync_policy_sql(relaxed, snapshot_for(relaxed))
+    policy = gbi.resync_policy_sql(relaxed, snapshot_for(relaxed), run_id="policy-run")
     assert f"target.ai_spec_digest = '{relaxed.spec_digest}'" in policy
     assert f"target.ai_inference_digest = '{relaxed.inference_digest}'" in policy
     assert "ai_query" not in policy
@@ -1686,10 +1701,65 @@ def test_the_policy_resync_leaves_edited_documents_alone():
     """A row whose source text changed is pending, and the run may never
     happen — stamping it would claim this release governs stale values."""
     spec = one_field_spec()
-    sql = gbi.resync_policy_sql(spec, snapshot_for(spec))
+    sql = gbi.resync_policy_sql(spec, snapshot_for(spec), run_id="policy-run")
     assert "target.ai_source_digest = sha2(source.doc_text, 256)" in sql
     assert f"target.ai_inference_digest = '{spec.inference_digest}'" in sql
     assert "ai_query" not in sql
+
+
+def test_duplicated_evidence_is_refused_before_it_narrows_an_interval():
+    """A gold table with two adjudications for one document yields two
+    records, and nothing downstream can tell: the counts are consistent
+    and the interval is correctly computed for an n that is wrong."""
+    spec = one_field_spec()
+    honest = records_for("s", correct=95, wrong=5)
+    clean = score(honest, spec)
+    physical = next(s for s in clean if s.stratum != gbi.WEIGHTED)
+    assert physical.n_asserted == 100
+
+    # Duplicate every record: the same 100 documents, counted twice.
+    with pytest.raises(gbi.EvidenceMismatch, match="appear more than once"):
+        score(honest + honest, spec)
+
+    # The reason it matters: doubling n lifts the lower bound, which is
+    # the number the gate actually reads.
+    doubled = gbi.wilson_interval(190, 200, spec.confidence_level)
+    assert doubled.lower > physical.precision.lower
+    assert doubled.point == pytest.approx(physical.precision.point)
+
+
+def test_a_policy_only_release_keeps_both_run_references():
+    """The values came from one run; the policy governing them now comes
+    from another. Both are true, and collapsing them loses one."""
+    spec = one_field_spec()
+    sql = gbi.resync_policy_sql(spec, snapshot_for(spec), run_id="policy-run")
+    assert "target.ai_policy_run_id = 'policy-run'" in sql
+    # The run that produced the values is left alone.
+    assert "target.ai_run_id" not in sql
+    # A fresh run stamps both, since it is its own policy run.
+    execute = gbi.build_execute_sql(
+        spec,
+        run_id="run-1",
+        estimate=estimate_for(spec),
+        preflight=preflight_for(spec),
+        report=adopting_report(spec),
+    )
+    assert "'run-1' AS ai_run_id" in execute
+    assert "'run-1' AS ai_policy_run_id" in execute
+    assert ("ai_policy_run_id", "STRING") in gbi.target_columns(spec)
+
+
+def test_a_reused_run_id_is_found_rather_than_silently_overwritten():
+    """The record is immutable, so the conflict has to be detectable."""
+    spec = make_spec()
+    check = gbi.run_metadata_conflict_sql(spec, run_id="run-1", target_table_version=7)
+    assert "WHERE run_id = 'run-1'" in check
+    assert f"spec_digest <=> '{spec.spec_digest}'" in check
+    assert "target_table_version <=> 7" in check
+
+    gbi.require_unique_run_id(spec, 0)  # the clean case proceeds
+    with pytest.raises(gbi.EvidenceMismatch, match="already holds a different run"):
+        gbi.require_unique_run_id(spec, 1)
 
 
 def test_the_weighted_label_is_reserved_for_the_aggregate_row():
@@ -1796,6 +1866,7 @@ def test_rejection_outranks_inconclusive_across_fields():
     for row in records_for("s", correct=80, wrong=20):
         records.append(
             gbi.EvaluationRecord(
+                key=row.key,
                 stratum="s",
                 inference=PLACEHOLDER_INFERENCE,
                 gold={**row.gold, "g": "v"},
@@ -2383,7 +2454,10 @@ def test_run_metadata_write_is_idempotent():
     )
     assert sql.startswith("MERGE INTO main.finance_docs.batch_inference_runs")
     assert "ON target.run_id = source.run_id" in sql
-    assert "WHEN MATCHED THEN UPDATE SET *" in sql
+    # Insert-only: a run record describes something that already
+    # happened, so a retry is a no-op and the row can never be rewritten.
+    assert "WHEN MATCHED" not in sql
+    assert "WHEN NOT MATCHED THEN INSERT *" in sql
     assert "WHEN NOT MATCHED THEN INSERT *" in sql
     assert "INSERT INTO" not in sql
     # Every column of the metadata table is supplied, by name.
@@ -2470,12 +2544,14 @@ def test_provenance_layers_are_generated():
     assert "spec_yaml STRING" in ddl and "gate_decision STRING" in ddl
     records = [
         gbi.EvaluationRecord(
+            key=f"doc-{i}",
             stratum="standard",
             inference=PLACEHOLDER_INFERENCE,
             gold={"issuer_name": "v", "account_id": "v"},
             predicted={"issuer_name": "v", "account_id": "v"},
         )
-    ] * 200
+        for i in range(200)
+    ]
     insert = gbi.run_metadata_upsert_sql(
         spec,
         gate(spec, score(records, spec)),
