@@ -11,7 +11,8 @@ import sys
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from importlib.metadata import PathDistribution
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ import pytest
 from aai_local_finetuning import training
 
 _REVISION = "a" * 40
+_ORIGINAL_SYS_PATH = tuple(sys.path)
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,93 @@ def _successful_mlx_run(
 def training_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(training, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(training, "require_apple_silicon", lambda: None)
+    install_root = tmp_path / "site-packages"
+    package_root = install_root / "manifest_runtime"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text(
+        '"""Synthetic manifest-test runtime."""\n',
+        encoding="utf-8",
+    )
+    metadata_root = install_root / "manifest_runtime-1.0.0.dist-info"
+    metadata_root.mkdir()
+    (metadata_root / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: manifest-runtime\nVersion: 1.0.0\n",
+        encoding="utf-8",
+    )
+    (metadata_root / "RECORD").write_text(
+        (
+            "manifest_runtime/__init__.py,,\n"
+            "manifest_runtime-1.0.0.dist-info/METADATA,,\n"
+            "manifest_runtime-1.0.0.dist-info/RECORD,,\n"
+        ),
+        encoding="utf-8",
+    )
+    distribution = PathDistribution(metadata_root)
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (distribution,),
+    )
+    base_prefix = Path(sys.base_prefix).resolve(strict=True)
+    stdlib_roots = tuple(training._python_stdlib_root_tokens())
+    initial_module_names = frozenset(training.sys.modules)
+    inherited_loaded_modules = training._runtime_loaded_modules
+    allowed_module_roots = (
+        *stdlib_roots,
+        (tmp_path / "src").resolve(strict=False),
+        install_root.resolve(strict=True),
+    )
+
+    def loaded_modules() -> tuple[tuple[str, object], ...]:
+        selected: list[tuple[str, object]] = []
+        for name, module in inherited_loaded_modules():
+            if name not in initial_module_names:
+                selected.append((name, module))
+                continue
+            spec = getattr(module, "__spec__", None)
+            origin = getattr(spec, "origin", None)
+            if spec is None or origin in {"built-in", "frozen"}:
+                selected.append((name, module))
+                continue
+            if origin is None:
+                locations = tuple(getattr(spec, "submodule_search_locations", ()) or ())
+                if not locations:
+                    selected.append((name, module))
+                    continue
+                paths = tuple(
+                    Path(location).resolve(strict=False) for location in locations
+                )
+            else:
+                paths = (Path(origin).resolve(strict=False),)
+            if all(
+                any(
+                    path == root or path.is_relative_to(root)
+                    for root in allowed_module_roots
+                )
+                for path in paths
+            ):
+                selected.append((name, module))
+        return tuple(selected)
+
+    monkeypatch.setattr(training, "_runtime_loaded_modules", loaded_modules)
+    stdlib_paths: list[str] = []
+    for raw_path in _ORIGINAL_SYS_PATH:
+        path = Path(raw_path or os.getcwd())
+        if not path.is_absolute():
+            path = Path(os.path.abspath(path))
+        if path in stdlib_roots or path in training._python_missing_stdlib_archives(
+            base_prefix
+        ):
+            stdlib_paths.append(path.as_posix())
+    monkeypatch.setattr(
+        training.sys,
+        "path",
+        [
+            (tmp_path / "src").as_posix(),
+            install_root.as_posix(),
+            *stdlib_paths,
+        ],
+    )
     return tmp_path
 
 
@@ -209,6 +298,42 @@ def test_success_manifest_binds_all_model_data_and_adapter_bytes(
     assert snapshot.manifest_sha256 == _sha256(snapshot.raw_manifest_bytes)
     assert ".training-" not in " ".join(evidence.command)
     assert _verify(inputs) == manifest
+
+
+def test_training_child_ignores_mutable_python_import_overrides(
+    training_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _write_training_inputs(training_root)
+    malicious_root = training_root / "unbound-pythonpath"
+    fake_mlx = malicious_root / "mlx_lm"
+    fake_mlx.mkdir(parents=True)
+    (fake_mlx / "__main__.py").write_text(
+        "raise RuntimeError('unbound mlx_lm executed')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", malicious_root.as_posix())
+
+    def isolated_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        assert not any(name.upper().startswith("PYTHON") for name in environment)
+        assert command[:4] == [sys.executable, "-I", "-m", "mlx_lm"]
+        original = os.environ["PYTHONPATH"]
+        os.environ["PYTHONPATH"] = (malicious_root / "replacement").as_posix()
+        os.environ["PYTHONPATH"] = original
+        staging = Path(command[command.index("--adapter-path") + 1])
+        (staging / "adapters.safetensors").write_bytes(b"isolated-adapter")
+        (staging / "adapter_config.json").write_text('{"rank":8}\n')
+        return subprocess.CompletedProcess(command, 0, stdout="Train loss 1.0\n")
+
+    monkeypatch.setattr(training.subprocess, "run", isolated_run)
+    evidence = _run(inputs)
+
+    assert evidence.command[:4] == ["<python>", "-I", "-m", "mlx_lm"]
 
 
 def test_custom_configuration_requires_explicit_trusted_inputs(
@@ -298,6 +423,7 @@ def test_resume_adapter_is_rejected_until_its_bytes_can_be_bound(
         ("model", "model files changed"),
         ("data", "data files changed"),
         ("model_restored", "model files changed"),
+        ("runtime_restored", "runtime package set changed"),
     ),
 )
 def test_every_training_input_is_rechecked_after_subprocess(
@@ -317,11 +443,18 @@ def test_every_training_input_is_rechecked_after_subprocess(
             (inputs.model_dir / "model.safetensors").write_bytes(b"changed-model")
         elif changed_input == "data":
             (inputs.data_dir / "train.jsonl").write_bytes(b'{"changed":true}\n')
-        else:
+        elif changed_input == "model_restored":
             model = inputs.model_dir / "model.safetensors"
             original = model.read_bytes()
             model.write_bytes(b"temporarily-changed-model")
             model.write_bytes(original)
+        else:
+            runtime = (
+                training_root / "site-packages" / "manifest_runtime" / "__init__.py"
+            )
+            original = runtime.read_bytes()
+            runtime.write_bytes(b'VALUE = "temporarily changed"\n')
+            runtime.write_bytes(original)
 
     monkeypatch.setattr(
         training.subprocess,
@@ -531,20 +664,39 @@ def test_verifier_rejects_runtime_package_set_changed_after_training(
     inputs = _write_training_inputs(training_root)
     monkeypatch.setattr(training.subprocess, "run", _successful_mlx_run())
     _run(inputs)
-    captured = training._capture_runtime_packages()
-    changed = tuple(
-        package for package in captured if package.name != "aai-runtime-mutation-test"
-    ) + (
-        training.RuntimePackageEvidence(
-            name="aai-runtime-mutation-test",
-            version="1.0.0",
-            payload_file_count=1,
-            payload_size_bytes=10,
-            payload_files_sha256="f" * 64,
-        ),
-    )
-    changed = tuple(sorted(changed, key=lambda package: package.name))
-    monkeypatch.setattr(training, "_capture_runtime_packages", lambda: changed)
+    capture_snapshot = training.capture_execution_snapshot
+
+    def changed_snapshot() -> training.ExecutionSnapshot:
+        snapshot = capture_snapshot()
+        contract = snapshot.execution_contract
+        changed = contract.runtime_packages + (
+            training.RuntimePackageEvidence(
+                name="zz-runtime-mutation-test",
+                version="1.0.0",
+                payload_file_count=1,
+                payload_size_bytes=10,
+                payload_files_sha256="f" * 64,
+            ),
+        )
+        changed_contract = training.ExecutionContract(
+            python_version=contract.python_version,
+            python_implementation=contract.python_implementation,
+            operating_system=contract.operating_system,
+            machine=contract.machine,
+            source_files=contract.source_files,
+            source_files_sha256=contract.source_files_sha256,
+            runtime_packages=changed,
+            runtime_packages_sha256=training._evidence_sequence_sha256(changed),
+        )
+        return replace(
+            snapshot,
+            execution_contract=changed_contract,
+            execution_contract_sha256=training.execution_contract_sha256(
+                changed_contract
+            ),
+        )
+
+    monkeypatch.setattr(training, "capture_execution_snapshot", changed_snapshot)
 
     with pytest.raises(training.TrainingManifestError, match="runtime package set"):
         _verify(inputs)

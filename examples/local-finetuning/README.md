@@ -167,11 +167,42 @@ Runtime capture supports ordinary path-based editables and the standard
 setuptools PEP 660 finder form. Other executable `.pth` files fail closed except
 for exact, syntax-validated bootstrap forms emitted by the locked setuptools,
 coverage, and virtualenv toolchain; virtualenv's distribution-less bootstrap is
-content-bound as environment evidence. The setuptools `strict` editable mode
-is deliberately unsupported because its generated symlink/hardlink tree cannot
-be represented as portable strict evidence without also binding link
-identities; use the standard finder or path editable mode when producing
-governed runs.
+content-bound as environment evidence. Effective `sys.path` precedence and
+covered module origins are bound portably; unmatched roots, overlapping import
+names, and shadowed origins fail closed. When the project directory itself is
+the interpreter entry, its Python import surface is content-bound as separate
+environment evidence. Runtime-significant distribution metadata includes
+canonical `RECORD` and entry-point evidence. Generated launchers remain
+portable only after their traversal target is proven to stay inside the Python
+environment, with their machine-specific hash/size fields normalized.
+
+Active source-equivalent `.pyc` caches are validated in an isolated no-site
+Python process and tracked transiently; stale caches that Python will ignore
+remain identity-tracked. Recognized active pytest-instrumented caches are bound
+by a relocation-stable semantic digest; unknown sourceless or active
+source-mismatched bytecode fails closed. Every lexical path component must be a
+physical directory or file: environments reached through an ancestor symlink are
+unsupported, so invoke the physical path instead. The setuptools `strict`
+editable mode is also deliberately unsupported because its generated
+symlink/hardlink tree cannot be represented as portable strict evidence; use
+the standard finder or path editable mode when producing governed runs.
+Python modules loaded after the evidence guard initializes are also checked
+against the top-level code object observed when they execute; modules already
+present at initialization require a normal, active, source-equivalent bytecode
+cache as proof of the code Python loaded. A preloaded source module with no
+cache, an instrumenting loader, or a stale cache fails closed. If runtime source
+changes in a long-lived notebook or REPL, restart the Python process before
+creating new evidence: a snapshot will not bind replacement bytes to stale code
+that is still resident in memory. Arbitrary spec-less and originless modules are
+rejected, and both importer/hook activation order and governed module
+import/reload/removal activity are checked across the operation. Native or
+other non-source modules loaded later fail closed unless their pre-load file
+identity was established.
+
+MLX-LM training launches the captured Python executable in isolated mode and
+passes a fixed child environment with every `PYTHON*` override removed. This
+means a caller's mutable `PYTHONPATH`, current project directory, or user site
+cannot substitute a different `mlx_lm` implementation during training.
 
 The governed source boundary is the reusable `src/aai_local_finetuning` package
 plus `scripts/render_notebooks.py` and `scripts/notebook_pedagogy.py`. Generated

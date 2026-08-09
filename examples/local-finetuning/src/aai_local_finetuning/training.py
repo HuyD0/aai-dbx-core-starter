@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ast
+import csv
 import hashlib
 import importlib.machinery
 import importlib.metadata
+import importlib.util
+import io
 import json
 import os
 import platform
@@ -14,13 +17,15 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
+import types
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -95,6 +100,248 @@ if os.getenv("COVERAGE_PROCESS_START") or os.getenv("COVERAGE_PROCESS_CONFIG"):
         pass
     else:
         coverage.process_startup(slug="pth")
+"""
+_BYTECODE_VALIDATOR_SCRIPT = r"""
+import importlib.util
+import io
+import hashlib
+import json
+import marshal
+import re
+import struct
+import sys
+import types
+from pathlib import Path
+
+
+def canonical(code):
+    constants = tuple(
+        canonical(value) if isinstance(value, types.CodeType) else value
+        for value in code.co_consts
+    )
+    return code.replace(co_filename="<runtime-bytecode>", co_consts=constants)
+
+
+def load_code(raw):
+    if len(raw) < 16 or raw[:4] != importlib.util.MAGIC_NUMBER:
+        raise ValueError("invalid or foreign bytecode header")
+    flags = int.from_bytes(raw[4:8], "little")
+    if flags & ~3 or flags == 2:
+        raise ValueError("unsupported bytecode flags")
+    stream = io.BytesIO(raw[16:])
+    code = marshal.load(stream)
+    if stream.tell() != len(raw) - 16 or not isinstance(code, types.CodeType):
+        raise ValueError("bytecode payload is not one complete code object")
+    return canonical(code)
+
+
+def source_path(path):
+    if path.parent.name == "__pycache__":
+        try:
+            return Path(importlib.util.source_from_cache(str(path))), "standard"
+        except ValueError:
+            match = re.fullmatch(
+                r"(.+)\.cpython-\d+-pytest-\d+(?:\.\d+)*\.pyc",
+                path.name,
+            )
+            if match:
+                return path.parent.parent / f"{match.group(1)}.py", "pytest"
+            return None, "unknown"
+    return path.with_suffix(".py"), "legacy"
+
+
+def semantic(value):
+    if isinstance(value, types.CodeType):
+        return {
+            "type": "code",
+            "argcount": value.co_argcount,
+            "posonlyargcount": value.co_posonlyargcount,
+            "kwonlyargcount": value.co_kwonlyargcount,
+            "nlocals": value.co_nlocals,
+            "stacksize": value.co_stacksize,
+            "flags": value.co_flags,
+            "code": value.co_code.hex(),
+            "consts": [semantic(item) for item in value.co_consts],
+            "names": list(value.co_names),
+            "varnames": list(value.co_varnames),
+            "filename": "<runtime-bytecode>",
+            "name": value.co_name,
+            "qualname": value.co_qualname,
+            "firstlineno": value.co_firstlineno,
+            "linetable": value.co_linetable.hex(),
+            "exceptiontable": value.co_exceptiontable.hex(),
+            "freevars": list(value.co_freevars),
+            "cellvars": list(value.co_cellvars),
+        }
+    if value is None:
+        return {"type": "none"}
+    if value is Ellipsis:
+        return {"type": "ellipsis"}
+    if isinstance(value, bool):
+        return {"type": "bool", "value": value}
+    if isinstance(value, int):
+        return {"type": "int", "value": str(value)}
+    if isinstance(value, float):
+        return {"type": "float", "value": struct.pack(">d", value).hex()}
+    if isinstance(value, complex):
+        return {
+            "type": "complex",
+            "real": struct.pack(">d", value.real).hex(),
+            "imag": struct.pack(">d", value.imag).hex(),
+        }
+    if isinstance(value, str):
+        return {"type": "str", "value": value}
+    if isinstance(value, bytes):
+        return {"type": "bytes", "value": value.hex()}
+    if isinstance(value, tuple):
+        return {"type": "tuple", "value": [semantic(item) for item in value]}
+    if isinstance(value, frozenset):
+        items = [semantic(item) for item in value]
+        return {
+            "type": "frozenset",
+            "value": sorted(
+                items,
+                key=lambda item: json.dumps(
+                    item,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        }
+    raise ValueError(f"unsupported bytecode constant type: {type(value).__name__}")
+
+
+def semantic_sha256(code):
+    payload = json.dumps(
+        semantic(code),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def validate(path):
+    source, kind = source_path(path)
+    if source is None or not source.is_file():
+        raise ValueError("sourceless or unrecognized bytecode is unsupported")
+    raw = path.read_bytes()
+    if len(raw) < 16 or raw[:4] != importlib.util.MAGIC_NUMBER:
+        raise ValueError("invalid or foreign bytecode header")
+    flags = int.from_bytes(raw[4:8], "little")
+    if flags & ~3 or flags == 2:
+        raise ValueError("unsupported bytecode flags")
+    source_bytes = source.read_bytes()
+    if flags == 0:
+        details = source.stat()
+        expected_header = (
+            (int(details.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little")
+            + (len(source_bytes) & 0xFFFFFFFF).to_bytes(4, "little")
+        )
+        if raw[8:16] != expected_header:
+            return {"status": "inactive-stale"}
+    elif flags & 2 and raw[8:16] != importlib.util.source_hash(source_bytes):
+        return {"status": "inactive-stale"}
+    match = re.search(r"\.opt-([012])\.", path.name)
+    optimize = int(match.group(1)) if match else 0
+    cached = load_code(raw)
+    compiled = compile(
+        source_bytes,
+        "<runtime-bytecode>",
+        "exec",
+        dont_inherit=True,
+        optimize=optimize,
+    )
+    expected = canonical(compiled)
+    if cached == expected:
+        return {"status": "source-equivalent"}
+    if kind != "pytest":
+        raise ValueError("cached bytecode differs semantically from captured source")
+    return {
+        "status": "instrumented",
+        "semantic_sha256": semantic_sha256(cached),
+    }
+
+
+requests = json.load(sys.stdin)
+results = []
+for raw_path in requests:
+    try:
+        results.append({"path": raw_path, **validate(Path(raw_path))})
+    except Exception as error:
+        results.append({"path": raw_path, "error": str(error)})
+json.dump(results, sys.stdout, sort_keys=True, separators=(",", ":"))
+"""
+_SETUPTOOLS_FINDER_TEMPLATE = """\
+from __future__ import annotations
+import sys
+from importlib.machinery import ModuleSpec, PathFinder
+from importlib.machinery import all_suffixes as module_suffixes
+from importlib.util import spec_from_file_location
+from itertools import chain
+from pathlib import Path
+
+MAPPING: dict[str, str] = {mapping!r}
+NAMESPACES: dict[str, list[str]] = {namespaces!r}
+PATH_PLACEHOLDER = {name!r} + ".__path_hook__"
+
+
+class _EditableFinder:
+    @classmethod
+    def find_spec(cls, fullname: str, path=None, target=None) -> ModuleSpec | None:
+        if fullname in MAPPING:
+            pkg_path = MAPPING[fullname]
+            return cls._find_spec(fullname, Path(pkg_path))
+        parent, _, child = fullname.rpartition(".")
+        if parent and parent in MAPPING:
+            return PathFinder.find_spec(fullname, path=[MAPPING[parent]])
+        return None
+
+    @classmethod
+    def _find_spec(cls, fullname: str, candidate_path: Path) -> ModuleSpec | None:
+        init = candidate_path / "__init__.py"
+        candidates = (candidate_path.with_suffix(x) for x in module_suffixes())
+        for candidate in chain([init], candidates):
+            if candidate.exists():
+                return spec_from_file_location(fullname, candidate)
+        return None
+
+
+class _EditableNamespaceFinder:
+    @classmethod
+    def _path_hook(cls, path) -> type[_EditableNamespaceFinder]:
+        if path == PATH_PLACEHOLDER:
+            return cls
+        raise ImportError
+
+    @classmethod
+    def _paths(cls, fullname: str) -> list[str]:
+        paths = NAMESPACES[fullname]
+        if not paths and fullname in MAPPING:
+            paths = [MAPPING[fullname]]
+        return [*paths, PATH_PLACEHOLDER]
+
+    @classmethod
+    def find_spec(cls, fullname: str, target=None) -> ModuleSpec | None:
+        if fullname in NAMESPACES:
+            spec = ModuleSpec(fullname, None, is_package=True)
+            spec.submodule_search_locations = cls._paths(fullname)
+            return spec
+        return None
+
+    @classmethod
+    def find_module(cls, _fullname) -> None:
+        return None
+
+
+def install():
+    if not any(finder == _EditableFinder for finder in sys.meta_path):
+        sys.meta_path.append(_EditableFinder)
+    if not NAMESPACES:
+        return
+    if not any(hook == _EditableNamespaceFinder._path_hook for hook in sys.path_hooks):
+        sys.path_hooks.append(_EditableNamespaceFinder._path_hook)
+    if PATH_PLACEHOLDER not in sys.path:
+        sys.path.append(PATH_PLACEHOLDER)
 """
 
 
@@ -338,6 +585,8 @@ class ValidatedTrainingSnapshot:
 @dataclass(frozen=True, slots=True)
 class _CapturedFile:
     evidence: TrainingFileEvidence
+    physical_path: Path = field(repr=False)
+    physical_size_bytes: int
     device: int
     inode: int
     modified_ns: int
@@ -354,8 +603,44 @@ class _CapturedDirectory:
 
 
 @dataclass(frozen=True, slots=True)
+class _CapturedPhysicalFile:
+    path: Path
+    size_bytes: int
+    device: int
+    inode: int
+    modified_ns: int
+    changed_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedModuleState:
+    name: str
+    origin: _CapturedPhysicalFile
+    module: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedImportHooks:
+    portable: tuple[str, ...]
+    objects: tuple[object, ...] = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedExecutable:
+    path: Path
+    link_mode: int
+    link_size: int
+    link_device: int
+    link_inode: int
+    link_modified_ns: int
+    link_changed_ns: int
+    target: _CapturedPhysicalFile
+
+
+@dataclass(frozen=True, slots=True)
 class _CapturedRuntimeTree:
     files: tuple[tuple[str, Path], ...]
+    bytecode_files: tuple[tuple[str, Path], ...]
     directories: tuple[_CapturedDirectory, ...]
 
 
@@ -366,6 +651,25 @@ class _RuntimePathConfiguration:
     exposed_trees: tuple[tuple[str, Path], ...]
     observed_directories: tuple[Path, ...]
     consumed_paths: frozenset[Path]
+    import_bindings: tuple[_RuntimeImportBinding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeImportBinding:
+    name: str
+    physical_path: Path
+    kind: Literal["module", "package", "namespace"]
+    exposure: Literal["direct", "path", "finder"]
+    search_root: Path | None
+    namespace_placeholder: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedImportSurface:
+    persistent_files: tuple[_CapturedFile, ...]
+    transient_files: tuple[_CapturedFile, ...]
+    directories: tuple[_CapturedDirectory, ...]
+    import_bindings: tuple[_RuntimeImportBinding, ...]
 
 
 @dataclass(slots=True)
@@ -375,6 +679,8 @@ class _RuntimeCaptureContext:
     files: dict[Path, _CapturedFile] = field(default_factory=dict)
     trees: dict[Path, _CapturedRuntimeTree] = field(default_factory=dict)
     directories: dict[Path, _CapturedDirectory] = field(default_factory=dict)
+    bytecode_files: dict[Path, _CapturedFile] = field(default_factory=dict)
+    bytecode_semantics: dict[Path, str | None] = field(default_factory=dict)
 
     def capture_file(self, path: Path, display_path: str) -> _CapturedFile:
         captured = self.files.get(path)
@@ -392,6 +698,15 @@ class _RuntimeCaptureContext:
                 self.observe_directory(directory)
         return captured
 
+    def capture_bytecode(self, path: Path, logical_path: str) -> _CapturedFile:
+        display_path = _runtime_payload_display_path(
+            f"validated-bytecode/{logical_path}"
+        )
+        captured = self.capture_file(path, display_path)
+        if path not in self.bytecode_files:
+            self.bytecode_files[path] = captured
+        return captured
+
     def observe_directory(self, captured: _CapturedDirectory) -> None:
         previous = self.directories.setdefault(captured.path, captured)
         if previous != captured:
@@ -401,12 +716,26 @@ class _RuntimeCaptureContext:
             )
 
     def verify_directories(self) -> None:
+        self.validate_bytecode()
         for path, captured in sorted(self.directories.items()):
             if _capture_directory_identity(path) != captured:
                 raise RuntimeError(
                     "runtime package directory changed while it was captured: "
                     f"{path}"
                 )
+        for path, captured in sorted(self.files.items()):
+            if not _captured_file_identity_matches(captured):
+                raise RuntimeError(
+                    f"runtime package file changed while it was captured: {path}"
+                )
+
+    def validate_bytecode(self) -> dict[Path, str | None]:
+        missing = tuple(
+            sorted(set(self.bytecode_files).difference(self.bytecode_semantics))
+        )
+        if missing:
+            self.bytecode_semantics.update(_validate_runtime_bytecode(missing))
+        return self.bytecode_semantics
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,7 +746,53 @@ class _RuntimeDistribution:
     install_root: Path
     install_root_identity: _CapturedDirectory
     payload_files: tuple[_CapturedFile, ...]
+    transient_files: tuple[_CapturedFile, ...]
     runtime_roots: tuple[_CapturedDirectory, ...]
+    import_bindings: tuple[_RuntimeImportBinding, ...]
+    import_environment: _CapturedImportEnvironment | None = None
+    inventory_backed: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedImportEnvironment:
+    signature: str
+    active_tokens: tuple[str, ...]
+    root_tokens: tuple[tuple[Path, str], ...]
+    protected_origins: tuple[tuple[str, str], ...]
+    origin_paths: tuple[tuple[Path, str], ...]
+    namespace_placeholders: tuple[str, ...]
+    captured_files: tuple[_CapturedPhysicalFile, ...]
+    loaded_modules: tuple[_LoadedModuleState, ...]
+    meta_path: _CapturedImportHooks
+    path_hooks: _CapturedImportHooks
+    execution_counts: tuple[tuple[Path, int], ...]
+
+
+_RUNTIME_PROVENANCE_LOCK = threading.Lock()
+_RUNTIME_EXECUTED_MODULE_CODE: dict[Path, list[types.CodeType]] = {}
+_RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW: set[Path] = set()
+_RUNTIME_EXECUTION_COUNTS: dict[Path, int] = {}
+_RUNTIME_IMPORTED_NATIVE_FILES: dict[
+    tuple[str, Path],
+    list[_CapturedPhysicalFile],
+] = {}
+_RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW: set[tuple[str, Path]] = set()
+_RUNTIME_INITIAL_MODULE_FILES: dict[
+    tuple[str, Path],
+    _CapturedPhysicalFile,
+] = {}
+_RUNTIME_INITIAL_SPECLESS_MODULES: dict[str, object] = {}
+_RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES = 8_192
+_RUNTIME_PROVENANCE_CACHE: OrderedDict[tuple[object, ...], None] = OrderedDict()
+_RUNTIME_SOURCE_CACHE_VALIDATION: OrderedDict[tuple[object, ...], None] = OrderedDict()
+_RUNTIME_PROVENANCE_AUDIT_INSTALLED = False
+_RUNTIME_SPECLESS_MODULE_NAMES = frozenset(
+    {"__main__", "cython_runtime", "typing.io", "typing.re"}
+)
+_RUNTIME_SPECLESS_PARENT_ALIASES = {
+    "pyexpat.errors": ("pyexpat", "errors"),
+    "pyexpat.model": ("pyexpat", "model"),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,9 +808,13 @@ class ExecutionSnapshot:
     execution_contract: ExecutionContract
     execution_contract_sha256: str
     _source_files: tuple[_CapturedFile, ...] = field(repr=False)
+    _source_transient_files: tuple[_CapturedFile, ...] = field(repr=False)
+    _source_directories: tuple[_CapturedDirectory, ...] = field(repr=False)
     _runtime_package_metadata: tuple[_CapturedFile, ...] = field(repr=False)
     _runtime_package_payloads: tuple[_CapturedFile, ...] = field(repr=False)
     _runtime_package_roots: tuple[_CapturedDirectory, ...] = field(repr=False)
+    _runtime_metadata_paths: tuple[Path, ...] = field(repr=False)
+    _import_environment: _CapturedImportEnvironment = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,8 +851,11 @@ class _TrainingPlan:
     data_manifest_relative_path: str
     data_manifest_sha256: str
     source_files: tuple[_CapturedFile, ...]
+    execution_snapshot: ExecutionSnapshot
     execution_contract: ExecutionContract
     execution_contract_sha256: str
+    child_python: _CapturedExecutable
+    child_environment: tuple[tuple[str, str], ...] = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -751,6 +1133,69 @@ def require_apple_silicon() -> None:
         raise RuntimeError("MLX-LM training requires macOS on Apple silicon")
 
 
+def _capture_child_python() -> _CapturedExecutable:
+    path = Path(sys.executable)
+    if not path.is_absolute():
+        raise RuntimeError("Python executable path must be absolute")
+    _require_no_lexical_symlink_components(
+        path.parent,
+        label="Python executable parent",
+    )
+    linked = path.lstat()
+    if not (stat.S_ISREG(linked.st_mode) or stat.S_ISLNK(linked.st_mode)):
+        raise ValueError(f"Python executable is not a regular file: {path}")
+    target_path = path.resolve(strict=True)
+    target = _capture_physical_file_identity(
+        target_path,
+        label="Python executable target",
+    )
+    return _CapturedExecutable(
+        path=path,
+        link_mode=linked.st_mode,
+        link_size=linked.st_size,
+        link_device=linked.st_dev,
+        link_inode=linked.st_ino,
+        link_modified_ns=linked.st_mtime_ns,
+        link_changed_ns=linked.st_ctime_ns,
+        target=target,
+    )
+
+
+def _captured_executable_matches(captured: _CapturedExecutable) -> bool:
+    if Path(sys.executable) != captured.path:
+        return False
+    try:
+        linked = captured.path.lstat()
+        target_path = captured.path.resolve(strict=True)
+        target = _capture_physical_file_identity(
+            target_path,
+            label="Python executable target",
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return (
+        linked.st_mode == captured.link_mode
+        and linked.st_size == captured.link_size
+        and linked.st_dev == captured.link_device
+        and linked.st_ino == captured.link_inode
+        and linked.st_mtime_ns == captured.link_modified_ns
+        and linked.st_ctime_ns == captured.link_changed_ns
+        and target == captured.target
+    )
+
+
+def _child_environment() -> tuple[tuple[str, str], ...]:
+    """Return a fixed environment with Python import overrides removed."""
+
+    return tuple(
+        sorted(
+            (name, value)
+            for name, value in os.environ.items()
+            if not name.upper().startswith("PYTHON")
+        )
+    )
+
+
 def run_lora(
     *,
     iterations: int | None = None,
@@ -801,6 +1246,7 @@ def _run_lora_locked(
     try:
         command = [
             sys.executable,
+            "-I",
             "-m",
             "mlx_lm",
             "lora",
@@ -809,6 +1255,7 @@ def _run_lora_locked(
         ]
         recorded_command = [
             "<python>",
+            "-I",
             "-m",
             "mlx_lm",
             "lora",
@@ -828,9 +1275,12 @@ def _run_lora_locked(
             plan.target_adapter_path,
             evidence_path,
         )
+        if not _captured_executable_matches(plan.child_python):
+            raise RuntimeError("Python executable changed before MLX-LM launch")
         result = subprocess.run(
             command,
             cwd=PROJECT_ROOT,
+            env=dict(plan.child_environment),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1141,7 +1591,9 @@ def _build_training_plan(
         raise RuntimeError("base-model directory changed while it was captured")
     data_files = _capture_directory_files(data_path, "training data")
     _require_dataset_files(data_files)
-    source_files, execution_contract = _capture_execution_contract()
+    execution_snapshot = capture_execution_snapshot()
+    source_files = execution_snapshot._source_files
+    execution_contract = execution_snapshot.execution_contract
 
     configured_iterations = configured.get("iters")
     if not isinstance(configured_iterations, int) or configured_iterations < 1:
@@ -1168,6 +1620,8 @@ def _build_training_plan(
         raise ValueError("training configuration must contain JSON values") from error
 
     data_manifest = _evidence_by_path(data_files)["manifest.json"]
+    child_python = _capture_child_python()
+    child_environment = _child_environment()
     return _TrainingPlan(
         config_path=config,
         config_file=config_file,
@@ -1187,8 +1641,11 @@ def _build_training_plan(
         data_manifest_relative_path=(f"{contract.data_path}/manifest.json"),
         data_manifest_sha256=data_manifest.evidence.sha256,
         source_files=source_files,
+        execution_snapshot=execution_snapshot,
         execution_contract=execution_contract,
         execution_contract_sha256=_model_sha256(execution_contract),
+        child_python=child_python,
+        child_environment=child_environment,
     )
 
 
@@ -1436,6 +1893,8 @@ def _require_unchanged_adapter_outputs(
 
 
 def _require_unchanged_training_inputs(plan: _TrainingPlan) -> None:
+    if not _captured_executable_matches(plan.child_python):
+        raise RuntimeError("Python executable changed while MLX-LM was running")
     try:
         current_config, _ = _capture_file_bytes(
             plan.config_path,
@@ -1477,26 +1936,35 @@ def _require_unchanged_training_inputs(plan: _TrainingPlan) -> None:
     if current_data != plan.data_files:
         raise RuntimeError("training data files changed while MLX-LM was running")
     try:
-        current_source, current_execution = _capture_execution_contract()
+        recheck_execution_snapshot(plan.execution_snapshot)
     except (OSError, RuntimeError, ValueError) as error:
         raise RuntimeError(
             "source code or runtime package set changed while MLX-LM was running"
         ) from error
-    if current_source != plan.source_files:
-        raise RuntimeError("source code changed while MLX-LM was running")
-    if current_execution.runtime_packages != plan.execution_contract.runtime_packages:
-        raise RuntimeError("runtime package set changed while MLX-LM was running")
-    if current_execution != plan.execution_contract:
+    if (
+        plan.execution_snapshot.execution_contract != plan.execution_contract
+        or plan.execution_snapshot._source_files != plan.source_files
+    ):
         raise RuntimeError(
-            "source/runtime execution contract changed while MLX-LM was running"
+            "captured source/runtime execution contract is internally inconsistent"
         )
 
 
 def _capture_execution_contract() -> _CapturedExecutionContract:
     """Capture portable source bytes and installed distribution payloads."""
 
-    source_files = _capture_governed_source_files()
-    packages = _capture_runtime_packages()
+    context = _RuntimeCaptureContext()
+    source_files, _source_transient, _source_directories = (
+        _capture_governed_source_state(context=context)
+    )
+    distributions = _runtime_distribution_inventory(context=context)
+    source_files = _bind_instrumented_bytecode(
+        source_files,
+        _source_transient,
+        context=context,
+    )
+    context.verify_directories()
+    packages = tuple(item.evidence for item in distributions)
     contract = _build_execution_contract(source_files, packages)
     return source_files, contract
 
@@ -1530,45 +1998,120 @@ def capture_execution_contract() -> ExecutionContract:
 def capture_execution_snapshot() -> ExecutionSnapshot:
     """Capture portable evidence plus transient identities for later rechecking."""
 
-    source_files = _capture_governed_source_files()
-    distributions = _runtime_distribution_inventory()
+    context = _RuntimeCaptureContext()
+    source_files, source_transient_files, source_directories = (
+        _capture_governed_source_state(context=context)
+    )
+    distributions = _runtime_distribution_inventory(context=context)
+    source_files = _bind_instrumented_bytecode(
+        source_files,
+        source_transient_files,
+        context=context,
+    )
+    context.verify_directories()
     packages = tuple(item.evidence for item in distributions)
     contract = _build_execution_contract(source_files, packages)
     package_metadata, package_payloads, package_roots = _runtime_package_state(
         distributions
     )
+    import_environments = tuple(
+        item.import_environment
+        for item in distributions
+        if item.import_environment is not None
+    )
+    if len(import_environments) != 1:
+        raise RuntimeError("runtime import environment evidence is not unique")
+    runtime_metadata_paths = tuple(
+        sorted(
+            (item.metadata_path for item in distributions if item.inventory_backed),
+            key=lambda path: path.as_posix(),
+        )
+    )
     return ExecutionSnapshot(
         execution_contract=contract,
         execution_contract_sha256=execution_contract_sha256(contract),
         _source_files=source_files,
+        _source_transient_files=source_transient_files,
+        _source_directories=source_directories,
         _runtime_package_metadata=package_metadata,
         _runtime_package_payloads=package_payloads,
         _runtime_package_roots=package_roots,
+        _runtime_metadata_paths=runtime_metadata_paths,
+        _import_environment=import_environments[0],
     )
 
 
 def recheck_execution_snapshot(snapshot: ExecutionSnapshot) -> ExecutionSnapshot:
     """Fail when source/runtime identity changed, even if bytes were restored."""
 
+    captured_digest = execution_contract_sha256(snapshot.execution_contract)
+    if captured_digest != snapshot.execution_contract_sha256:
+        raise RuntimeError("captured execution snapshot is internally inconsistent")
+    if tuple(item.evidence for item in snapshot._source_files) != (
+        snapshot.execution_contract.source_files
+    ):
+        raise RuntimeError("captured execution snapshot is internally inconsistent")
     try:
-        current = capture_execution_snapshot()
+        files = (
+            *snapshot._source_files,
+            *snapshot._source_transient_files,
+            *snapshot._runtime_package_metadata,
+            *snapshot._runtime_package_payloads,
+        )
+        checked_files: set[Path] = set()
+        for captured in files:
+            if captured.physical_path in checked_files:
+                continue
+            checked_files.add(captured.physical_path)
+            if not _captured_file_identity_matches(captured):
+                raise RuntimeError("captured runtime file identity changed")
+        directories = {
+            item.path: item
+            for item in (
+                *snapshot._source_directories,
+                *snapshot._runtime_package_roots,
+            )
+        }
+        for path, captured in directories.items():
+            if _capture_directory_identity(path) != captured:
+                raise RuntimeError("captured runtime directory identity changed")
+        if _current_runtime_metadata_paths() != snapshot._runtime_metadata_paths:
+            raise RuntimeError("installed runtime package inventory changed")
+        current_tokens, _active_paths, active_path_tokens = _active_import_search_state(
+            dict(snapshot._import_environment.root_tokens),
+            allowed_namespace_placeholders=frozenset(
+                snapshot._import_environment.namespace_placeholders
+            ),
+        )
+        current_signature = hashlib.sha256(
+            json.dumps(
+                list(current_tokens),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()
+        if current_signature != snapshot._import_environment.signature:
+            raise RuntimeError("active Python import precedence changed")
+        _require_unchanged_import_hooks(
+            snapshot._import_environment.meta_path,
+            tuple(sys.meta_path),
+            label="sys.meta_path",
+        )
+        _require_unchanged_import_hooks(
+            snapshot._import_environment.path_hooks,
+            tuple(sys.path_hooks),
+            label="sys.path_hooks",
+        )
+        _reject_import_precedence_overlaps(
+            active_path_tokens,
+            dict(snapshot._import_environment.protected_origins),
+        )
+        _validate_loaded_module_origins(snapshot._import_environment)
+        _require_bounded_runtime_execution(snapshot._import_environment)
     except (OSError, RuntimeError, ValueError) as error:
         raise RuntimeError(
             "source code or runtime package files changed during the operation"
         ) from error
-    captured_digest = execution_contract_sha256(snapshot.execution_contract)
-    if captured_digest != snapshot.execution_contract_sha256:
-        raise RuntimeError("captured execution snapshot is internally inconsistent")
-    if (
-        current.execution_contract != snapshot.execution_contract
-        or current._source_files != snapshot._source_files
-        or current._runtime_package_metadata != snapshot._runtime_package_metadata
-        or current._runtime_package_payloads != snapshot._runtime_package_payloads
-        or current._runtime_package_roots != snapshot._runtime_package_roots
-    ):
-        raise RuntimeError(
-            "source code or runtime package files changed during the operation"
-        )
     return snapshot
 
 
@@ -1677,30 +2220,66 @@ def base_model_execution_contract_sha256(
     return _model_sha256(contract)
 
 
-def _capture_governed_source_files() -> tuple[_CapturedFile, ...]:
+def _capture_governed_source_state(
+    *,
+    context: _RuntimeCaptureContext | None = None,
+) -> tuple[
+    tuple[_CapturedFile, ...],
+    tuple[_CapturedFile, ...],
+    tuple[_CapturedDirectory, ...],
+]:
+    capture_context = context or _RuntimeCaptureContext()
     source_root = _project_path(_SOURCE_PACKAGE_PATH.as_posix(), "source package")
     if not source_root.is_dir() or source_root.is_symlink():
         raise FileNotFoundError(f"source package directory is missing: {source_root}")
-    paths: list[Path] = []
-    for path in source_root.rglob("*"):
-        if path.is_symlink():
-            raise ValueError(f"source package contains a symbolic link: {path}")
-        if path.is_file() and path.suffix == ".py":
-            paths.append(path)
-        elif path.exists() and not path.is_file() and not path.is_dir():
-            raise ValueError(f"source package contains a non-regular path: {path}")
-    if not paths:
+    tree = capture_context.capture_tree(source_root)
+    paths = [path for _relative, path in tree.files]
+    if not any(path.suffix == ".py" for path in paths):
         raise FileNotFoundError(
             f"source package contains no Python files: {source_root}"
         )
-    paths.extend(
+    notebook_paths = tuple(
         _project_path(relative.as_posix(), "notebook source")
         for relative in _NOTEBOOK_SOURCE_PATHS
     )
-    return tuple(
-        _capture_file(path, _project_relative(path))
-        for path in sorted(paths, key=_project_relative)
+    notebook_directories: list[_CapturedDirectory] = []
+    for directory in sorted({path.parent for path in notebook_paths}):
+        notebook_directories.append(
+            _capture_directory_identity(directory, label="notebook source directory")
+        )
+    files = tuple(
+        capture_context.capture_file(path, _project_relative(path))
+        for path in sorted((*paths, *notebook_paths), key=_project_relative)
     )
+    for captured_directory in notebook_directories:
+        after = _capture_directory_identity(
+            captured_directory.path,
+            label="notebook source directory",
+        )
+        if after != captured_directory:
+            raise RuntimeError(
+                "notebook source directory changed while it was captured: "
+                f"{captured_directory.path}"
+            )
+        capture_context.observe_directory(captured_directory)
+    transient_files = tuple(
+        capture_context.capture_bytecode(path, _project_relative(path))
+        for _relative, path in tree.bytecode_files
+    )
+    directories = tuple(
+        sorted(
+            (*tree.directories, *notebook_directories),
+            key=lambda item: item.path.as_posix(),
+        )
+    )
+    if context is None:
+        files = _bind_instrumented_bytecode(
+            files,
+            transient_files,
+            context=capture_context,
+        )
+        capture_context.verify_directories()
+    return files, transient_files, directories
 
 
 def _capture_runtime_packages() -> tuple[RuntimePackageEvidence, ...]:
@@ -1725,6 +2304,7 @@ def _runtime_package_state(
     for distribution in distributions:
         metadata_files.append(distribution.metadata_file)
         payload_files.extend(distribution.payload_files)
+        payload_files.extend(distribution.transient_files)
         for root in (
             distribution.install_root_identity,
             *distribution.runtime_roots,
@@ -1754,7 +2334,10 @@ def _runtime_package_state(
     )
 
 
-def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
+def _runtime_distribution_inventory(
+    *,
+    context: _RuntimeCaptureContext | None = None,
+) -> tuple[_RuntimeDistribution, ...]:
     """Return distinct metadata installations in a deterministic order.
 
     Provider libraries can temporarily add a vendored distribution root to
@@ -1764,12 +2347,16 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
     metadata path.
     """
 
-    context = _RuntimeCaptureContext()
+    capture_context = context or _RuntimeCaptureContext()
     by_metadata_path: dict[Path, _RuntimeDistribution] = {}
     owned_top_levels: dict[Path, set[str]] = {}
     for distribution in importlib.metadata.distributions():
         inventory = _require_distribution_file_inventory(distribution)
         located_root = Path(distribution.locate_file(""))
+        _require_no_lexical_symlink_components(
+            located_root,
+            label="runtime package installation root",
+        )
         if located_root.is_symlink():
             raise ValueError(
                 f"runtime package installation root is a symbolic link: {located_root}"
@@ -1779,7 +2366,7 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
             install_root,
             label="runtime package installation root",
         )
-        context.observe_directory(install_root_identity)
+        capture_context.observe_directory(install_root_identity)
         owned_top_levels.setdefault(install_root, set()).update(
             _distribution_owned_top_levels(inventory)
         )
@@ -1791,12 +2378,17 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
         )
         if resolved_metadata in by_metadata_path:
             continue
-        payload_files, runtime_roots = _capture_runtime_package_payloads(
+        (
+            payload_files,
+            transient_files,
+            runtime_roots,
+            import_bindings,
+        ) = _capture_runtime_package_payloads(
             distribution,
             install_root=install_root,
             inventory=inventory,
             metadata_path=resolved_metadata,
-            context=context,
+            context=capture_context,
         )
         evidence = _runtime_package_evidence(distribution, payload_files)
         metadata_display_path = (
@@ -1806,14 +2398,16 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
         captured = _RuntimeDistribution(
             evidence=evidence,
             metadata_path=resolved_metadata,
-            metadata_file=context.capture_file(
+            metadata_file=capture_context.capture_file(
                 resolved_metadata,
                 metadata_display_path,
             ),
             install_root=install_root,
             install_root_identity=install_root_identity,
             payload_files=payload_files,
+            transient_files=transient_files,
             runtime_roots=runtime_roots,
+            import_bindings=import_bindings,
         )
         by_metadata_path[resolved_metadata] = captured
     unowned_entries = _runtime_installation_unowned_entries(owned_top_levels)
@@ -1821,23 +2415,33 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
         bootstrap = _capture_virtualenv_bootstrap(
             install_root,
             entries=entries,
-            context=context,
+            context=capture_context,
         )
         if bootstrap.metadata_path in by_metadata_path:
             raise RuntimeError(
                 "runtime environment bootstrap collides with distribution metadata"
             )
         by_metadata_path[bootstrap.metadata_path] = bootstrap
-    context.verify_directories()
-    return tuple(
+    captured_distributions = _bind_distribution_bytecode(
+        tuple(by_metadata_path.values()),
+        context=capture_context,
+    )
+    import_environment = _capture_import_environment(
+        captured_distributions,
+        context=capture_context,
+    )
+    result = tuple(
         sorted(
-            by_metadata_path.values(),
+            (*captured_distributions, import_environment),
             key=lambda item: (
                 *_runtime_package_sort_key(item.evidence),
                 item.metadata_path.as_posix(),
             ),
         )
     )
+    if context is None:
+        capture_context.verify_directories()
+    return result
 
 
 def _runtime_package_evidence(
@@ -1871,6 +2475,1727 @@ def _runtime_package_sort_key(
     )
 
 
+def _bind_instrumented_bytecode(
+    persistent_files: tuple[_CapturedFile, ...],
+    bytecode_files: tuple[_CapturedFile, ...],
+    *,
+    context: _RuntimeCaptureContext,
+) -> tuple[_CapturedFile, ...]:
+    semantics = context.validate_bytecode()
+    markers = [
+        _captured_file_with_canonical_bytes(
+            captured,
+            captured.evidence.path,
+            f"python-bytecode-semantic-v1:{digest}".encode("ascii"),
+        )
+        for captured in bytecode_files
+        if (digest := semantics[captured.physical_path]) is not None
+    ]
+    return tuple(
+        sorted(
+            (*persistent_files, *markers),
+            key=lambda item: item.evidence.path,
+        )
+    )
+
+
+def _bind_distribution_bytecode(
+    distributions: tuple[_RuntimeDistribution, ...],
+    *,
+    context: _RuntimeCaptureContext,
+) -> tuple[_RuntimeDistribution, ...]:
+    result: list[_RuntimeDistribution] = []
+    for distribution in distributions:
+        payload_files = _bind_instrumented_bytecode(
+            distribution.payload_files,
+            distribution.transient_files,
+            context=context,
+        )
+        evidence_files = tuple(item.evidence for item in payload_files)
+        evidence = RuntimePackageEvidence(
+            name=distribution.evidence.name,
+            version=distribution.evidence.version,
+            payload_file_count=len(payload_files),
+            payload_size_bytes=sum(item.size_bytes for item in evidence_files),
+            payload_files_sha256=_evidence_sequence_sha256(evidence_files),
+        )
+        result.append(
+            replace(
+                distribution,
+                evidence=evidence,
+                payload_files=payload_files,
+            )
+        )
+    return tuple(result)
+
+
+def _capture_loaded_module_bytecode_caches(
+    protected_origins: dict[str, str],
+    *,
+    context: _RuntimeCaptureContext,
+) -> tuple[_CapturedFile, ...]:
+    captured: dict[Path, _CapturedFile] = {}
+    for module_name, module in _runtime_loaded_modules():
+        if module_name.partition(".")[0] not in protected_origins:
+            continue
+        spec = getattr(module, "__spec__", None)
+        if spec is None:
+            continue
+        try:
+            source_path = _loaded_module_origin_path(spec)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if source_path is None or source_path.suffix != ".py":
+            continue
+        raw_cache = getattr(module, "__cached__", None)
+        if not isinstance(raw_cache, str) or not raw_cache:
+            continue
+        cache_path = Path(raw_cache)
+        if not cache_path.is_absolute():
+            cache_path = Path(os.path.abspath(cache_path))
+        _require_no_lexical_symlink_components(
+            cache_path,
+            label="loaded module bytecode cache",
+        )
+        if cache_path.is_symlink() or not cache_path.is_file():
+            continue
+        cache_path = cache_path.resolve(strict=True)
+        logical_path = "loaded-module/" + module_name.replace(".", "/") + ".pyc"
+        captured[cache_path] = context.capture_bytecode(cache_path, logical_path)
+        context.observe_directory(
+            _capture_directory_identity(
+                cache_path.parent,
+                label="loaded module bytecode directory",
+            )
+        )
+    return tuple(
+        captured[path] for path in sorted(captured, key=lambda item: item.as_posix())
+    )
+
+
+def _portable_import_hook(item: object, *, label: str) -> str:
+    if isinstance(item, type):
+        kind = "class"
+        module = getattr(item, "__module__", None)
+        qualname = getattr(item, "__qualname__", None)
+    elif isinstance(item, types.MethodType):
+        kind = "method"
+        function = item.__func__
+        owner = item.__self__
+        module = getattr(function, "__module__", None)
+        qualname = getattr(function, "__qualname__", None)
+        owner_type = owner if isinstance(owner, type) else type(owner)
+        owner_module = getattr(owner_type, "__module__", None)
+        owner_qualname = getattr(owner_type, "__qualname__", None)
+        if not isinstance(owner_module, str) or not isinstance(owner_qualname, str):
+            raise RuntimeError(f"{label} contains an unidentifiable bound method")
+        qualname = f"{owner_module}.{owner_qualname}:{qualname}"
+    elif isinstance(item, types.FunctionType):
+        kind = "function"
+        module = getattr(item, "__module__", None)
+        qualname = getattr(item, "__qualname__", None)
+    else:
+        kind = "instance"
+        item_type = type(item)
+        module = getattr(item_type, "__module__", None)
+        qualname = getattr(item_type, "__qualname__", None)
+    if (
+        not isinstance(module, str)
+        or not module
+        or not isinstance(qualname, str)
+        or not qualname
+    ):
+        raise RuntimeError(f"{label} contains an unidentifiable import hook")
+    return f"{kind}:{module}:{qualname}"
+
+
+def _capture_import_hooks(
+    items: tuple[object, ...],
+    *,
+    label: str,
+) -> _CapturedImportHooks:
+    return _CapturedImportHooks(
+        portable=tuple(_portable_import_hook(item, label=label) for item in items),
+        objects=items,
+    )
+
+
+def _require_unchanged_import_hooks(
+    captured: _CapturedImportHooks,
+    current: tuple[object, ...],
+    *,
+    label: str,
+) -> None:
+    observed = _capture_import_hooks(current, label=label)
+    if observed.portable != captured.portable or len(current) != len(captured.objects):
+        raise RuntimeError(f"{label} import precedence changed")
+    pairs = zip(current, captured.objects, strict=True)
+    if any(actual is not expected for actual, expected in pairs):
+        raise RuntimeError(f"{label} import hook identity changed")
+
+
+def _runtime_execution_counts() -> tuple[tuple[Path, int], ...]:
+    with _RUNTIME_PROVENANCE_LOCK:
+        return tuple(
+            sorted(
+                _RUNTIME_EXECUTION_COUNTS.items(),
+                key=lambda item: item[0].as_posix(),
+            )
+        )
+
+
+def _capture_import_environment(
+    distributions: tuple[_RuntimeDistribution, ...],
+    *,
+    context: _RuntimeCaptureContext,
+) -> _RuntimeDistribution:
+    """Bind effective import precedence and the covered origin for each name."""
+
+    if not distributions:
+        raise RuntimeError("installed runtime package set is empty")
+    by_install_root: dict[Path, list[_RuntimeDistribution]] = {}
+    by_path_root: dict[Path, list[_RuntimeDistribution]] = {}
+    for distribution in distributions:
+        by_install_root.setdefault(distribution.install_root, []).append(distribution)
+        for binding in distribution.import_bindings:
+            if binding.exposure == "path":
+                if binding.search_root is None:
+                    raise RuntimeError("runtime path import is missing its search root")
+                by_path_root.setdefault(binding.search_root, []).append(distribution)
+
+    governed_root = _project_path(
+        _SOURCE_PACKAGE_PATH.as_posix(),
+        "source package",
+    )
+    governed_search_root = governed_root.parent
+    governed_name = governed_root.name
+    governed_token = _project_import_token(governed_search_root)
+    root_tokens = _python_stdlib_root_tokens()
+    for prefix, grouped in (
+        ("packages", by_install_root),
+        ("editable-path", by_path_root),
+    ):
+        for root, providers in grouped.items():
+            canonical = json.dumps(
+                [
+                    item.evidence.model_dump(mode="json")
+                    for item in sorted(
+                        {item.metadata_path: item for item in providers}.values(),
+                        key=lambda item: _runtime_package_sort_key(item.evidence),
+                    )
+                ],
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            token = (
+                governed_token
+                if prefix == "editable-path" and root == governed_search_root
+                else f"{prefix}:{hashlib.sha256(canonical).hexdigest()}"
+            )
+            previous = root_tokens.setdefault(root, token)
+            if previous != token:
+                raise RuntimeError("runtime import root has ambiguous ownership")
+
+    previous = root_tokens.setdefault(governed_search_root, governed_token)
+    if previous != governed_token:
+        raise RuntimeError("governed source import root has ambiguous ownership")
+
+    active_candidates = _active_existing_search_roots()
+    governed_surface = _capture_python_import_surface(
+        governed_search_root,
+        logical_prefix="governed-source-entry",
+        context=context,
+    )
+    surfaces: list[tuple[Path, str, _CapturedImportSurface]] = [
+        (governed_search_root, governed_token, governed_surface)
+    ]
+    project_root = PROJECT_ROOT.resolve(strict=True)
+    environment_scripts = Path(sysconfig.get_path("scripts")).resolve(strict=True)
+    for surface_root, role in (
+        (project_root, "project-entry"),
+        (environment_scripts, "environment-scripts"),
+    ):
+        if surface_root not in active_candidates or surface_root in root_tokens:
+            continue
+        surface = _capture_python_import_surface(
+            surface_root,
+            logical_prefix=role,
+            context=context,
+        )
+        token = _captured_import_surface_token(
+            surface,
+            root=surface_root,
+            role=role,
+        )
+        root_tokens[surface_root] = token
+        surfaces.append((surface_root, token, surface))
+
+    allowed_namespace_placeholders = frozenset(
+        binding.namespace_placeholder
+        for distribution in distributions
+        for binding in distribution.import_bindings
+        if binding.namespace_placeholder is not None
+    )
+
+    active_tokens, active_paths, active_path_tokens = _active_import_search_state(
+        root_tokens,
+        allowed_namespace_placeholders=allowed_namespace_placeholders,
+    )
+    active_install_roots = set(by_install_root).intersection(active_paths)
+    protected: dict[str, set[str]] = {}
+    protected_owners: dict[str, set[tuple[str, Path]]] = {}
+    origin_paths: dict[tuple[Path, str], None] = {}
+    canonical_bindings: list[tuple[str, str, str, str]] = []
+    for distribution in distributions:
+        if distribution.install_root not in active_install_roots:
+            continue
+        finder_token = (
+            "editable-finder:"
+            + hashlib.sha256(
+                json.dumps(
+                    distribution.evidence.model_dump(mode="json"),
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("ascii")
+            ).hexdigest()
+        )
+        for binding in distribution.import_bindings:
+            if (
+                binding.name == governed_name
+                and binding.physical_path.resolve(strict=True) == governed_root
+            ):
+                mechanism = governed_token
+                origin_root = governed_search_root
+                relative = governed_root.name
+                owner = ("governed", governed_search_root)
+            elif binding.exposure == "direct":
+                mechanism = root_tokens[distribution.install_root]
+                origin_root = distribution.install_root
+                relative = binding.physical_path.relative_to(origin_root).as_posix()
+                owner = ("root", origin_root)
+            elif binding.exposure == "path":
+                assert binding.search_root is not None
+                if binding.search_root not in active_paths:
+                    raise RuntimeError(
+                        "runtime path configuration is not present in active sys.path: "
+                        f"{binding.search_root}"
+                    )
+                mechanism = root_tokens[binding.search_root]
+                origin_root = binding.search_root
+                relative = binding.physical_path.relative_to(origin_root).as_posix()
+                owner = ("root", origin_root)
+            else:
+                mechanism = finder_token
+                origin_root = binding.physical_path
+                relative = f"finder/{binding.name}/{binding.kind}"
+                owner = ("finder", distribution.metadata_path)
+            protected.setdefault(binding.name, set()).add(mechanism)
+            protected_owners.setdefault(binding.name, set()).add(owner)
+            origin_paths[(origin_root, mechanism)] = None
+            canonical_bindings.append((binding.name, mechanism, binding.kind, relative))
+
+    surface_persistent_files: list[_CapturedFile] = []
+    surface_transient_files: list[_CapturedFile] = []
+    surface_directories: dict[Path, _CapturedDirectory] = {}
+    for surface_root, mechanism, surface in surfaces:
+        surface_persistent_files.extend(surface.persistent_files)
+        surface_transient_files.extend(surface.transient_files)
+        for directory in surface.directories:
+            surface_directories[directory.path] = directory
+        for binding in surface.import_bindings:
+            if (
+                surface_root == governed_search_root
+                and binding.name == governed_name
+                and binding.physical_path.resolve(strict=True) == governed_root
+            ):
+                continue
+            protected.setdefault(binding.name, set()).add(mechanism)
+            protected_owners.setdefault(binding.name, set()).add(("root", surface_root))
+            origin_paths[(surface_root, mechanism)] = None
+            relative = binding.physical_path.relative_to(surface_root).as_posix()
+            canonical_bindings.append((binding.name, mechanism, binding.kind, relative))
+
+    protected.setdefault(governed_name, set()).add(governed_token)
+    protected_owners.setdefault(governed_name, set()).add(
+        ("governed", governed_search_root)
+    )
+    origin_paths[(governed_search_root, governed_token)] = None
+    # An embedding caller may supply a governed project root after this package
+    # was imported. Retain the package's actual source root as an equivalent
+    # governed origin; the normal application resolves both paths identically.
+    loaded_source_root = Path(__file__).resolve(strict=True).parents[1]
+    origin_paths[(loaded_source_root, governed_token)] = None
+    canonical_bindings.append(
+        (governed_name, governed_token, "package", governed_root.name)
+    )
+
+    for root, token in active_path_tokens:
+        if not token.startswith("python-runtime:"):
+            origin_paths[(root, token)] = None
+            captured_root = _capture_directory_identity(
+                root,
+                label="governed Python import root",
+            )
+            context.observe_directory(captured_root)
+            surface_directories.setdefault(root, captured_root)
+
+    overlaps = {
+        name
+        for name, mechanisms in protected.items()
+        if len(mechanisms) != 1 or len(protected_owners.get(name, ())) != 1
+    }
+    if overlaps:
+        raise RuntimeError(
+            "runtime import names have overlapping origins: "
+            + ", ".join(sorted(overlaps))
+        )
+    protected_origins = {
+        name: next(iter(mechanisms)) for name, mechanisms in protected.items()
+    }
+    _reject_import_precedence_overlaps(
+        active_path_tokens,
+        protected_origins,
+    )
+    surface_transient_files.extend(
+        _capture_loaded_module_bytecode_caches(
+            protected_origins,
+            context=context,
+        )
+    )
+    context.validate_bytecode()
+    meta_path = _capture_import_hooks(tuple(sys.meta_path), label="sys.meta_path")
+    path_hooks = _capture_import_hooks(
+        tuple(sys.path_hooks),
+        label="sys.path_hooks",
+    )
+    state_payload = {
+        "schema": 2,
+        "active_sys_path": list(active_tokens),
+        "meta_path": list(meta_path.portable),
+        "path_hooks": list(path_hooks.portable),
+        "origins": sorted(canonical_bindings),
+    }
+    canonical = json.dumps(
+        state_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    anchor = min(distributions, key=lambda item: item.metadata_path.as_posix())
+    marker = _captured_file_with_canonical_bytes(
+        anchor.metadata_file,
+        _runtime_payload_display_path("python-import-environment.json"),
+        canonical,
+    )
+    payload_files = tuple(
+        sorted(
+            (marker, *surface_persistent_files),
+            key=lambda item: item.evidence.path,
+        )
+    )
+    payload_evidence = tuple(item.evidence for item in payload_files)
+    evidence = RuntimePackageEvidence(
+        name="python-import-environment",
+        version="1",
+        payload_file_count=len(payload_files),
+        payload_size_bytes=sum(item.size_bytes for item in payload_evidence),
+        payload_files_sha256=_evidence_sequence_sha256(payload_evidence),
+    )
+    captured_files = _captured_physical_file_set(
+        (
+            *context.files.values(),
+            *(
+                captured
+                for distribution in distributions
+                for captured in (
+                    distribution.metadata_file,
+                    *distribution.payload_files,
+                    *distribution.transient_files,
+                )
+            ),
+            *surface_persistent_files,
+            *surface_transient_files,
+        )
+    )
+    state = _CapturedImportEnvironment(
+        signature=hashlib.sha256(
+            json.dumps(
+                list(active_tokens),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest(),
+        active_tokens=active_tokens,
+        root_tokens=tuple(
+            sorted(root_tokens.items(), key=lambda item: item[0].as_posix())
+        ),
+        protected_origins=tuple(sorted(protected_origins.items())),
+        origin_paths=tuple(
+            sorted(origin_paths, key=lambda item: (item[0].as_posix(), item[1]))
+        ),
+        namespace_placeholders=tuple(sorted(allowed_namespace_placeholders)),
+        captured_files=captured_files,
+        loaded_modules=(),
+        meta_path=meta_path,
+        path_hooks=path_hooks,
+        execution_counts=_runtime_execution_counts(),
+    )
+    state = replace(
+        state,
+        loaded_modules=_validate_loaded_module_origins(
+            state,
+            tuple(origin_paths),
+            capture_initial=True,
+        ),
+    )
+    return _RuntimeDistribution(
+        evidence=evidence,
+        metadata_path=anchor.metadata_path.with_name(
+            anchor.metadata_path.name + ".import-environment"
+        ),
+        metadata_file=marker,
+        install_root=anchor.install_root,
+        install_root_identity=anchor.install_root_identity,
+        payload_files=payload_files,
+        transient_files=tuple(
+            sorted(
+                surface_transient_files,
+                key=lambda item: item.evidence.path,
+            )
+        ),
+        runtime_roots=tuple(
+            surface_directories[path]
+            for path in sorted(surface_directories, key=lambda item: item.as_posix())
+        ),
+        import_bindings=(),
+        import_environment=state,
+        inventory_backed=False,
+    )
+
+
+def _current_runtime_metadata_paths() -> tuple[Path, ...]:
+    """Rediscover distribution identities without rehashing their payload trees."""
+
+    paths: set[Path] = set()
+    for distribution in importlib.metadata.distributions():
+        inventory = _require_distribution_file_inventory(distribution)
+        located_root = Path(distribution.locate_file(""))
+        _require_no_lexical_symlink_components(
+            located_root,
+            label="runtime package installation root",
+        )
+        install_root = located_root.resolve(strict=True)
+        metadata_path = _distribution_metadata_path(distribution, inventory)
+        paths.add(
+            _require_runtime_location(
+                metadata_path,
+                install_root=install_root,
+                label="runtime package metadata",
+            )
+        )
+    return tuple(sorted(paths, key=lambda path: path.as_posix()))
+
+
+def _project_import_token(path: Path) -> str:
+    project_root = PROJECT_ROOT.resolve(strict=True)
+    relative = path.relative_to(project_root)
+    return "project:" + (relative.as_posix() if relative.parts else ".")
+
+
+def _python_stdlib_root_tokens() -> dict[Path, str]:
+    """Return only the interpreter roots that are valid stdlib search entries."""
+
+    configured = (
+        ("stdlib", sysconfig.get_path("stdlib")),
+        ("extensions", sysconfig.get_config_var("DESTSHARED")),
+    )
+    roles_by_root: dict[Path, list[str]] = {}
+    for role, raw_path in configured:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise RuntimeError(f"Python {role} import root is unavailable")
+        candidate = Path(raw_path)
+        _require_no_lexical_symlink_components(
+            candidate,
+            label=f"Python {role} import root",
+        )
+        if candidate.is_symlink():
+            raise ValueError(
+                f"Python {role} import root is a symbolic link: {candidate}"
+            )
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError(
+                f"Python {role} import root is not a directory: {candidate}"
+            )
+        roles_by_root.setdefault(resolved, []).append(role)
+    return {
+        root: "python-runtime:" + "+".join(sorted(roles))
+        for root, roles in roles_by_root.items()
+    }
+
+
+def _python_missing_stdlib_archives(base_prefix: Path) -> dict[Path, str]:
+    version = f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+    candidates = (
+        base_prefix / version,
+        base_prefix / "lib" / version,
+    )
+    return {
+        candidate: f"python-runtime-missing-zip:{index}"
+        for index, candidate in enumerate(candidates, 1)
+    }
+
+
+def _active_existing_search_roots() -> frozenset[Path]:
+    """Resolve existing filesystem entries only to select roots for capture."""
+
+    roots: set[Path] = set()
+    for raw_entry in sys.path:
+        if not isinstance(raw_entry, str) or raw_entry.endswith(".__path_hook__"):
+            continue
+        candidate = Path(raw_entry or os.getcwd())
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved.is_dir():
+            roots.add(resolved)
+    return frozenset(roots)
+
+
+def _capture_python_import_surface(
+    root: Path,
+    *,
+    logical_prefix: str,
+    context: _RuntimeCaptureContext,
+) -> _CapturedImportSurface:
+    """Capture code reachable through a governed interpreter entry directory."""
+
+    root_before = _capture_directory_identity(root, label="Python entry import root")
+    context.observe_directory(root_before)
+    persistent: dict[str, _CapturedFile] = {}
+    transient: dict[str, _CapturedFile] = {}
+    directories: dict[Path, _CapturedDirectory] = {root: root_before}
+    bindings: list[_RuntimeImportBinding] = []
+
+    def logical_path(relative: PurePosixPath) -> str:
+        return PurePosixPath(logical_prefix, relative).as_posix()
+
+    def add_regular_file(path: Path, relative: PurePosixPath) -> bool:
+        binding = _runtime_import_binding(path)
+        if binding is None and path.suffix != ".pyc":
+            return False
+        portable = logical_path(relative)
+        if path.suffix == ".pyc":
+            transient[portable] = context.capture_bytecode(path, portable)
+        else:
+            persistent[portable] = context.capture_file(
+                path,
+                _runtime_payload_display_path(portable),
+            )
+        return True
+
+    def add_package_tree(path: Path, relative: PurePosixPath) -> None:
+        tree = context.capture_tree(path)
+        for directory in tree.directories:
+            directories[directory.path] = directory
+        for child, physical in tree.files:
+            child_relative = relative / PurePosixPath(child)
+            portable = logical_path(child_relative)
+            persistent[portable] = context.capture_file(
+                physical,
+                _runtime_payload_display_path(portable),
+            )
+        for child, physical in tree.bytecode_files:
+            child_relative = relative / PurePosixPath(child)
+            portable = logical_path(child_relative)
+            transient[portable] = context.capture_bytecode(physical, portable)
+
+    def visit_namespace(path: Path, relative: PurePosixPath) -> None:
+        before = _capture_directory_identity(path, label="Python namespace directory")
+        context.observe_directory(before)
+        directories[path] = before
+        with os.scandir(path) as entries:
+            ordered_entries = sorted(entries, key=lambda item: item.name)
+        for entry in ordered_entries:
+            physical = Path(entry.path)
+            child_relative = relative / entry.name
+            if entry.is_symlink():
+                if (
+                    _is_importable_top_level(physical)
+                    or physical.suffix == ".pyc"
+                    or entry.name == "__pycache__"
+                ):
+                    raise ValueError(
+                        "Python entry import surface contains a symbolic link: "
+                        f"{physical}"
+                    )
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if entry.name == "__pycache__":
+                    cache_before = _capture_directory_identity(
+                        physical,
+                        label="Python entry bytecode cache",
+                    )
+                    context.observe_directory(cache_before)
+                    directories[physical] = cache_before
+                    with os.scandir(physical) as cache_entries:
+                        ordered_cache = sorted(
+                            cache_entries, key=lambda item: item.name
+                        )
+                    for cache_entry in ordered_cache:
+                        cache_path = Path(cache_entry.path)
+                        if cache_entry.is_symlink() or not cache_entry.is_file(
+                            follow_symlinks=False
+                        ):
+                            raise ValueError(
+                                "Python entry bytecode cache contains an unsupported "
+                                f"path: {cache_path}"
+                            )
+                        if cache_path.suffix != ".pyc":
+                            raise ValueError(
+                                "Python entry bytecode cache contains a non-bytecode "
+                                f"file: {cache_path}"
+                            )
+                        add_regular_file(cache_path, child_relative / cache_entry.name)
+                    cache_after = _capture_directory_identity(
+                        physical,
+                        label="Python entry bytecode cache",
+                    )
+                    if cache_after != cache_before:
+                        raise RuntimeError(
+                            "Python entry bytecode cache changed while it was "
+                            f"captured: {physical}"
+                        )
+                    continue
+                if not entry.name.isidentifier():
+                    continue
+                initializer = physical / "__init__.py"
+                if initializer.is_symlink():
+                    raise ValueError(
+                        "Python entry package initializer is a symbolic link: "
+                        f"{initializer}"
+                    )
+                if initializer.is_file():
+                    add_package_tree(physical, child_relative)
+                else:
+                    visit_namespace(physical, child_relative)
+            elif entry.is_file(follow_symlinks=False):
+                add_regular_file(physical, child_relative)
+            else:
+                raise ValueError(
+                    "Python entry import surface contains a non-regular path: "
+                    f"{physical}"
+                )
+        after = _capture_directory_identity(path, label="Python namespace directory")
+        if after != before:
+            raise RuntimeError(
+                f"Python namespace directory changed while it was captured: {path}"
+            )
+
+    with os.scandir(root) as entries:
+        root_entries = sorted(entries, key=lambda item: item.name)
+    for entry in root_entries:
+        path = Path(entry.path)
+        relative = PurePosixPath(entry.name)
+        if entry.is_symlink():
+            if _is_importable_top_level(path) or path.suffix == ".pyc":
+                raise ValueError(
+                    f"Python entry import root contains a symbolic link: {path}"
+                )
+            continue
+        if entry.is_dir(follow_symlinks=False) and entry.name == "__pycache__":
+            visit_namespace(path, relative)
+            continue
+        binding = _runtime_import_binding(
+            path,
+            exposure="path",
+            search_root=root,
+        )
+        if binding is None:
+            continue
+        if path.is_dir():
+            initializer = path / "__init__.py"
+            if initializer.is_symlink():
+                raise ValueError(
+                    "Python entry package initializer is a symbolic link: "
+                    f"{initializer}"
+                )
+            if initializer.is_file():
+                add_package_tree(path, relative)
+            else:
+                visit_namespace(path, relative)
+        else:
+            add_regular_file(path, relative)
+        bindings.append(binding)
+    root_after = _capture_directory_identity(root, label="Python entry import root")
+    if root_after != root_before:
+        raise RuntimeError(f"Python entry import root changed while captured: {root}")
+    persistent_result = tuple(persistent[path] for path in sorted(persistent))
+    transient_result = tuple(transient[path] for path in sorted(transient))
+    persistent_result = _bind_instrumented_bytecode(
+        persistent_result,
+        transient_result,
+        context=context,
+    )
+    return _CapturedImportSurface(
+        persistent_files=persistent_result,
+        transient_files=transient_result,
+        directories=tuple(
+            directories[path]
+            for path in sorted(directories, key=lambda item: item.as_posix())
+        ),
+        import_bindings=tuple(
+            sorted(
+                bindings, key=lambda item: (item.name, item.physical_path.as_posix())
+            )
+        ),
+    )
+
+
+def _captured_import_surface_token(
+    surface: _CapturedImportSurface,
+    *,
+    root: Path,
+    role: str,
+) -> str:
+    canonical = {
+        "schema": 1,
+        "role": role,
+        "files": [
+            item.evidence.model_dump(mode="json") for item in surface.persistent_files
+        ],
+        "directories": sorted(
+            directory.path.relative_to(root).as_posix()
+            for directory in surface.directories
+        ),
+        "bindings": sorted(
+            (
+                binding.name,
+                binding.kind,
+                binding.physical_path.relative_to(root).as_posix(),
+            )
+            for binding in surface.import_bindings
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            canonical,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+    return f"{role}:{digest}"
+
+
+def _active_import_search_state(
+    root_tokens: dict[Path, str],
+    *,
+    allowed_namespace_placeholders: frozenset[str],
+) -> tuple[
+    tuple[str, ...],
+    frozenset[Path],
+    tuple[tuple[Path, str], ...],
+]:
+    """Canonicalize only effective sys.path entries, preserving precedence."""
+
+    base_prefix = Path(sys.base_prefix).resolve(strict=True)
+    tokens: list[str] = []
+    active_paths: set[Path] = set()
+    active_path_tokens: list[tuple[Path, str]] = []
+    seen: set[Path | str] = set()
+    for raw_entry in sys.path:
+        if not isinstance(raw_entry, str):
+            raise ValueError("active Python import root must be a string path")
+        if raw_entry.endswith(".__path_hook__") and re.fullmatch(
+            r"__editable__\.[A-Za-z0-9_.-]+\.finder\.__path_hook__",
+            raw_entry,
+        ):
+            if raw_entry not in allowed_namespace_placeholders:
+                raise ValueError(
+                    "active setuptools namespace hook is not covered by "
+                    f"editable evidence: {raw_entry}"
+                )
+            marker = f"setuptools-namespace:{raw_entry}"
+            if marker not in seen:
+                seen.add(marker)
+                tokens.append(marker)
+            continue
+        candidate = Path(raw_entry or os.getcwd())
+        if not candidate.is_absolute():
+            candidate = Path(os.path.abspath(candidate))
+        _require_no_lexical_symlink_components(
+            candidate,
+            label="active Python import root",
+        )
+        if not candidate.exists():
+            missing_archives = _python_missing_stdlib_archives(base_prefix)
+            if candidate not in missing_archives:
+                raise ValueError(
+                    f"active Python import root does not exist: {candidate}"
+                )
+            token = missing_archives[candidate]
+            if token not in seen:
+                seen.add(token)
+                tokens.append(token)
+            continue
+        if candidate.is_symlink():
+            raise ValueError(
+                f"active Python import root is a symbolic link: {candidate}"
+            )
+        resolved = candidate.resolve(strict=True)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved in root_tokens:
+            token = root_tokens[resolved]
+        else:
+            raise ValueError(
+                f"active Python import root is not governed by evidence: {resolved}"
+            )
+        if resolved.is_file():
+            raise ValueError(f"active Python import archive is unsupported: {resolved}")
+        if not resolved.is_dir():
+            raise ValueError(
+                f"active Python import root is not a directory: {resolved}"
+            )
+        active_paths.add(resolved)
+        active_path_tokens.append((resolved, token))
+        tokens.append(token)
+    return tuple(tokens), frozenset(active_paths), tuple(active_path_tokens)
+
+
+def _reject_import_precedence_overlaps(
+    active_path_tokens: tuple[tuple[Path, str], ...],
+    protected_origins: dict[str, str],
+) -> None:
+    for path, token in active_path_tokens:
+        for name, expected in protected_origins.items():
+            if token == expected:
+                continue
+            if _runtime_import_candidate(path, name) is not None:
+                raise RuntimeError(
+                    "active Python import precedence can shadow governed runtime "
+                    f"name {name!r}: {path}"
+                )
+
+
+def _runtime_import_candidate(root: Path, name: str) -> Path | None:
+    package = root / name
+    if package.is_symlink():
+        raise ValueError(
+            f"active Python import root contains a symbolic-link candidate: {package}"
+        )
+    if package.is_dir():
+        return package
+    for suffix in (".py", ".pyc", *importlib.machinery.EXTENSION_SUFFIXES):
+        candidate = root / f"{name}{suffix}"
+        if candidate.is_symlink():
+            raise ValueError(
+                "active Python import root contains a symbolic-link candidate: "
+                f"{candidate}"
+            )
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _validate_loaded_module_origins(
+    state: _CapturedImportEnvironment,
+    origin_paths: tuple[tuple[Path, str], ...] | None = None,
+    *,
+    capture_initial: bool = False,
+) -> tuple[_LoadedModuleState, ...]:
+    # Initial capture passes exact finder/source roots. Recheck reconstructs the
+    # direct/path roots from the stable root-token mapping below.
+    roots = list(origin_paths if origin_paths is not None else state.origin_paths)
+    expected = dict(state.protected_origins)
+    captured_by_path = {item.path: item for item in state.captured_files}
+    initial_modules = {item.name: item for item in state.loaded_modules}
+    if len(initial_modules) != len(state.loaded_modules):
+        raise RuntimeError("captured loaded-module state contains duplicate names")
+    loaded_modules = _runtime_loaded_modules()
+    _prevalidate_loaded_source_caches(
+        loaded_modules,
+        expected=expected,
+        captured_by_path=captured_by_path,
+    )
+    observed_initial: set[str] = set()
+    captured_modules: list[_LoadedModuleState] = []
+    for module_name, module in loaded_modules:
+        top_level = module_name.partition(".")[0]
+        expected_token = expected.get(top_level)
+        spec = getattr(module, "__spec__", None)
+        if expected_token is None:
+            if spec is None:
+                _require_supported_spec_less_module(module_name, module)
+            else:
+                _reject_unbound_loaded_origin(
+                    module_name,
+                    spec,
+                    state=state,
+                )
+            continue
+        if spec is None:
+            raise RuntimeError(f"loaded module lacks origin metadata: {module_name}")
+        origin = getattr(spec, "origin", None)
+        if origin in {"built-in", "frozen"}:
+            raise RuntimeError(
+                f"loaded module origin violates captured precedence: {module_name}"
+            )
+        if origin is None:
+            locations = tuple(getattr(spec, "submodule_search_locations", ()) or ())
+            if not locations:
+                raise RuntimeError(
+                    f"loaded module lacks a resolvable origin: {module_name}"
+                )
+            for location in locations:
+                if (
+                    expected_token.startswith("editable-finder:")
+                    and re.fullmatch(
+                        r"__editable__\.[A-Za-z0-9_.-]+\.finder\.__path_hook__",
+                        str(location),
+                    )
+                    and str(location) in state.namespace_placeholders
+                ):
+                    continue
+                actual_token = _loaded_origin_token(Path(location), roots)
+                if actual_token != expected_token:
+                    raise RuntimeError(
+                        "loaded namespace origin violates captured precedence: "
+                        f"{module_name}"
+                    )
+            continue
+        path = _loaded_module_origin_path(spec)
+        if path is None:
+            raise RuntimeError(f"loaded module lacks a file origin: {module_name}")
+        actual_token = _loaded_origin_token(path, roots)
+        if actual_token != expected_token:
+            raise RuntimeError(
+                f"loaded module origin violates captured precedence: {module_name}"
+            )
+        initial = initial_modules.get(module_name)
+        captured = _validate_loaded_module_file(
+            module_name,
+            module,
+            path,
+            captured_by_path=captured_by_path,
+            initial=initial,
+        )
+        if initial is not None:
+            observed_initial.add(module_name)
+        if capture_initial:
+            captured_modules.append(captured)
+
+    if not capture_initial:
+        missing = set(initial_modules).difference(observed_initial)
+        if missing:
+            raise RuntimeError(
+                "loaded modules present at evidence capture were removed: "
+                + ", ".join(sorted(missing))
+            )
+    return tuple(sorted(captured_modules, key=lambda item: item.name))
+
+
+def _supported_spec_less_module_name(name: str) -> bool:
+    return (
+        name in _RUNTIME_SPECLESS_MODULE_NAMES
+        or re.fullmatch(
+            r"_cython_\d+(?:_\d+)+",
+            name,
+        )
+        is not None
+    )
+
+
+def _require_supported_spec_less_module(name: str, module: object) -> None:
+    initial = _RUNTIME_INITIAL_SPECLESS_MODULES.get(name)
+    parent_alias = _RUNTIME_SPECLESS_PARENT_ALIASES.get(name)
+    if parent_alias is not None:
+        parent = sys.modules.get(parent_alias[0])
+        if parent is not None and getattr(parent, parent_alias[1], None) is module:
+            return
+    if (
+        not _supported_spec_less_module_name(name)
+        or initial is None
+        or module is not initial
+    ):
+        raise RuntimeError(f"loaded module lacks origin metadata: {name}")
+
+
+def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> None:
+    baseline = dict(state.execution_counts)
+    current = dict(_runtime_execution_counts())
+    changed = {
+        path: (baseline.get(path, 0), count)
+        for path, count in current.items()
+        if count > baseline.get(path, 0)
+    }
+    if not changed:
+        return
+
+    roots = list(state.root_tokens)
+    initial_paths = {item.origin.path for item in state.loaded_modules}
+    loaded_paths: set[Path] = set()
+    for _name, module in _runtime_loaded_modules():
+        spec = getattr(module, "__spec__", None)
+        if spec is None:
+            continue
+        try:
+            path = _loaded_module_origin_path(spec)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path is not None:
+            loaded_paths.add(path)
+
+    for path, (before, after) in sorted(
+        changed.items(),
+        key=lambda item: item[0].as_posix(),
+    ):
+        matched = _matched_loaded_origin(path, roots)
+        if matched is not None and matched[1].startswith("python-runtime:"):
+            continue
+        if before or path in initial_paths or after - before > 1:
+            raise RuntimeError(
+                f"governed module code executed again during the operation: {path}"
+            )
+        if path not in loaded_paths:
+            raise RuntimeError(
+                "governed module code was executed and then removed during the "
+                f"operation: {path}"
+            )
+
+
+def _validate_loaded_module_file(
+    module_name: str,
+    module: object,
+    path: Path,
+    *,
+    captured_by_path: dict[Path, _CapturedPhysicalFile],
+    initial: _LoadedModuleState | None,
+) -> _LoadedModuleState:
+    expected = captured_by_path.get(path)
+    if expected is None:
+        raise RuntimeError(
+            f"loaded module file is not bound to captured bytes: {module_name}"
+        )
+    current = _capture_physical_file_identity(path, label="loaded module origin")
+    if current != expected:
+        raise RuntimeError(
+            f"loaded module file identity differs from captured bytes: {module_name}"
+        )
+    if initial is not None and (
+        module is not initial.module or current != initial.origin
+    ):
+        raise RuntimeError(
+            f"loaded module identity changed during the operation: {module_name}"
+        )
+    _require_loaded_code_provenance(
+        module_name,
+        module,
+        path,
+        current,
+        captured_by_path=captured_by_path,
+    )
+    return _LoadedModuleState(name=module_name, origin=current, module=module)
+
+
+def _reject_unbound_loaded_origin(
+    module_name: str,
+    spec: object,
+    *,
+    state: _CapturedImportEnvironment,
+) -> None:
+    """Reject standard imports from governed roots without a captured binding."""
+
+    origin = getattr(spec, "origin", None)
+    if origin in {None, "built-in", "frozen"}:
+        if origin is not None:
+            return
+        locations = tuple(getattr(spec, "submodule_search_locations", ()) or ())
+        if not locations:
+            raise RuntimeError(
+                f"loaded module lacks a resolvable origin: {module_name}"
+            )
+        for location in locations:
+            if str(location).endswith(".__path_hook__"):
+                if str(location) not in state.namespace_placeholders:
+                    raise RuntimeError(
+                        "loaded namespace uses an unbound path hook: " f"{module_name}"
+                    )
+                continue
+            _reject_unbound_loaded_path(
+                module_name,
+                Path(location),
+                state=state,
+            )
+        return
+    path = _loaded_module_origin_path(spec)
+    if path is None:
+        raise RuntimeError(f"loaded module lacks a file origin: {module_name}")
+    _reject_unbound_loaded_path(
+        module_name,
+        path,
+        state=state,
+    )
+
+
+def _reject_unbound_loaded_path(
+    module_name: str,
+    path: Path,
+    *,
+    state: _CapturedImportEnvironment,
+) -> None:
+    roots = list(state.root_tokens)
+    matched = _matched_loaded_origin(path, roots)
+    if matched is None:
+        raise RuntimeError(
+            f"loaded module origin is outside every captured root: {module_name}"
+        )
+    _root, token = matched
+    if token.startswith("python-runtime:"):
+        return
+    raise RuntimeError(
+        f"loaded module is not bound to captured import evidence: {module_name}"
+    )
+
+
+def _runtime_loaded_modules() -> tuple[tuple[str, object], ...]:
+    """Return a stable view of loaded modules for origin validation."""
+
+    return tuple(sys.modules.items())
+
+
+def _loaded_module_origin_path(spec: object) -> Path | None:
+    origin = getattr(spec, "origin", None)
+    if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+        return None
+    path = Path(origin)
+    if not path.is_absolute():
+        path = Path(os.path.abspath(path))
+    if path.parent.name == "__pycache__" and path.suffix == ".pyc":
+        try:
+            source = Path(importlib.util.source_from_cache(path.as_posix()))
+        except ValueError:
+            pass
+        else:
+            if source.is_file():
+                path = source
+    _require_no_lexical_symlink_components(path, label="loaded module origin")
+    if path.is_symlink():
+        raise ValueError(f"loaded module origin is a symbolic link: {path}")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"loaded module origin is not a regular file: {path}")
+    return resolved
+
+
+def _captured_physical_file_set(
+    captures: Iterator[_CapturedFile] | tuple[_CapturedFile, ...],
+) -> tuple[_CapturedPhysicalFile, ...]:
+    by_path: dict[Path, _CapturedPhysicalFile] = {}
+    for captured in captures:
+        physical = _physical_file_from_capture(captured)
+        previous = by_path.setdefault(physical.path, physical)
+        if previous != physical:
+            raise RuntimeError(
+                "captured runtime file has inconsistent physical identities: "
+                f"{physical.path}"
+            )
+    return tuple(by_path[path] for path in sorted(by_path, key=Path.as_posix))
+
+
+def _physical_file_from_capture(captured: _CapturedFile) -> _CapturedPhysicalFile:
+    return _CapturedPhysicalFile(
+        path=captured.physical_path,
+        size_bytes=captured.physical_size_bytes,
+        device=captured.device,
+        inode=captured.inode,
+        modified_ns=captured.modified_ns,
+        changed_ns=captured.changed_ns,
+    )
+
+
+def _capture_physical_file_identity(
+    path: Path,
+    *,
+    label: str,
+) -> _CapturedPhysicalFile:
+    _require_no_lexical_symlink_components(path, label=label)
+    details = path.lstat()
+    if stat.S_ISLNK(details.st_mode):
+        raise ValueError(f"{label} is a symbolic link: {path}")
+    if not stat.S_ISREG(details.st_mode):
+        raise ValueError(f"{label} is not a regular file: {path}")
+    return _CapturedPhysicalFile(
+        path=path,
+        size_bytes=details.st_size,
+        device=details.st_dev,
+        inode=details.st_ino,
+        modified_ns=details.st_mtime_ns,
+        changed_ns=details.st_ctime_ns,
+    )
+
+
+def _runtime_exec_audit_hook(event: str, args: tuple[object, ...]) -> None:
+    """Retain the exact top-level Python code objects executed after import."""
+
+    if event == "import" and len(args) >= 2 and isinstance(args[0], str):
+        name = args[0]
+        raw_path = args[1]
+        if isinstance(raw_path, str):
+            path = Path(raw_path)
+        elif raw_path is None and len(args) >= 3:
+            path = _find_native_import_candidate(name, args[2])
+            if path is None:
+                return
+        else:
+            return
+        if not path.is_absolute():
+            path = Path(os.path.abspath(path))
+        path = path.resolve(strict=False)
+        if path.suffix == ".py":
+            return
+        try:
+            captured = _capture_physical_file_identity(
+                path,
+                label="imported native module origin",
+            )
+        except (OSError, RuntimeError, ValueError):
+            return
+        _record_runtime_execution(path)
+        _record_native_import_identity(name, captured)
+        return
+    if event != "exec" or len(args) != 1 or not isinstance(args[0], types.CodeType):
+        return
+    code = args[0]
+    if code.co_name != "<module>":
+        return
+    raw_path = code.co_filename
+    if not raw_path or raw_path.startswith("<"):
+        return
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(os.path.abspath(path))
+    path = path.resolve(strict=False)
+    with _RUNTIME_PROVENANCE_LOCK:
+        _RUNTIME_EXECUTION_COUNTS[path] = _RUNTIME_EXECUTION_COUNTS.get(path, 0) + 1
+        observed = _RUNTIME_EXECUTED_MODULE_CODE.setdefault(path, [])
+        if len(observed) >= 64:
+            _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW.add(path)
+            return
+        observed.append(code)
+    _record_neighbor_native_candidates(path)
+
+
+def _record_runtime_execution(path: Path) -> None:
+    with _RUNTIME_PROVENANCE_LOCK:
+        _RUNTIME_EXECUTION_COUNTS[path] = _RUNTIME_EXECUTION_COUNTS.get(path, 0) + 1
+
+
+def _find_native_import_candidate(name: str, raw_roots: object) -> Path | None:
+    """Resolve an ordinary extension-module candidate before its loader runs."""
+
+    if not isinstance(raw_roots, (list, tuple)):
+        return None
+    parts = name.split(".")
+    if not all(part.isidentifier() for part in parts):
+        return None
+    candidates: set[Path] = set()
+    for raw_root in raw_roots:
+        if not isinstance(raw_root, str) or raw_root.endswith(".__path_hook__"):
+            continue
+        root = Path(raw_root or os.getcwd())
+        if not root.is_absolute():
+            root = Path(os.path.abspath(root))
+        module_stem = root.joinpath(*parts[:-1], parts[-1])
+        package_stem = root.joinpath(*parts, "__init__")
+        for stem in (module_stem, package_stem):
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+                candidate = stem.with_name(stem.name + suffix)
+                if candidate.is_file() and not candidate.is_symlink():
+                    candidates.add(candidate.resolve(strict=True))
+    if len(candidates) != 1:
+        return None
+    return next(iter(candidates))
+
+
+def _record_neighbor_native_candidates(source_path: Path) -> None:
+    """Bind extension siblings before Python package code can import them."""
+
+    directory = source_path.parent
+    package_parts: list[str] = []
+    cursor = directory
+    while (cursor / "__init__.py").is_file() and cursor.name.isidentifier():
+        package_parts.insert(0, cursor.name)
+        cursor = cursor.parent
+    if not package_parts:
+        return
+    try:
+        entries = tuple(directory.iterdir())
+    except OSError:
+        return
+    for candidate in entries:
+        suffix = next(
+            (
+                value
+                for value in sorted(
+                    importlib.machinery.EXTENSION_SUFFIXES,
+                    key=len,
+                    reverse=True,
+                )
+                if candidate.name.endswith(value)
+            ),
+            None,
+        )
+        if suffix is None or candidate.is_symlink() or not candidate.is_file():
+            continue
+        stem = candidate.name[: -len(suffix)]
+        if stem == "__init__":
+            name = ".".join(package_parts)
+        elif stem.isidentifier():
+            name = ".".join((*package_parts, stem))
+        else:
+            continue
+        try:
+            captured = _capture_physical_file_identity(
+                candidate.resolve(strict=True),
+                label="package native module candidate",
+            )
+        except (OSError, RuntimeError, ValueError):
+            continue
+        _record_native_import_identity(name, captured)
+
+
+def _record_native_import_identity(
+    name: str,
+    captured: _CapturedPhysicalFile,
+) -> None:
+    key = (name, captured.path)
+    with _RUNTIME_PROVENANCE_LOCK:
+        observed_files = _RUNTIME_IMPORTED_NATIVE_FILES.setdefault(key, [])
+        if captured in observed_files:
+            return
+        if len(observed_files) >= 64:
+            _RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW.add(key)
+            return
+        observed_files.append(captured)
+
+
+def _install_runtime_provenance_audit() -> None:
+    """Establish the one-time loaded-module boundary for this interpreter."""
+
+    global _RUNTIME_PROVENANCE_AUDIT_INSTALLED
+    with _RUNTIME_PROVENANCE_LOCK:
+        if _RUNTIME_PROVENANCE_AUDIT_INSTALLED:
+            return
+        initial: dict[tuple[str, Path], _CapturedPhysicalFile] = {}
+        for name, module in sys.modules.items():
+            spec = getattr(module, "__spec__", None)
+            if spec is None:
+                if _supported_spec_less_module_name(name):
+                    _RUNTIME_INITIAL_SPECLESS_MODULES[name] = module
+                continue
+            try:
+                path = _loaded_module_origin_path(spec)
+                if path is None:
+                    continue
+                initial[(name, path)] = _capture_physical_file_identity(
+                    path,
+                    label="initial loaded module origin",
+                )
+            except (OSError, RuntimeError, ValueError):
+                # An unsafe or already-missing origin remains unproven and will
+                # fail closed if it participates in governed execution later.
+                continue
+        _RUNTIME_INITIAL_MODULE_FILES.update(initial)
+        sys.addaudithook(_runtime_exec_audit_hook)
+        _RUNTIME_PROVENANCE_AUDIT_INSTALLED = True
+
+
+def _prevalidate_loaded_source_caches(
+    loaded_modules: tuple[tuple[str, object], ...],
+    *,
+    expected: dict[str, str],
+    captured_by_path: dict[Path, _CapturedPhysicalFile],
+) -> None:
+    pending: list[tuple[tuple[object, ...], Path, str]] = []
+    for module_name, module in loaded_modules:
+        if module_name.partition(".")[0] not in expected:
+            continue
+        spec = getattr(module, "__spec__", None)
+        if spec is None:
+            continue
+        try:
+            path = _loaded_module_origin_path(spec)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path is None or path.suffix != ".py":
+            continue
+        current = captured_by_path.get(path)
+        if current is None:
+            continue
+        with _RUNTIME_PROVENANCE_LOCK:
+            executed = bool(_RUNTIME_EXECUTED_MODULE_CODE.get(path))
+            native_files = bool(_RUNTIME_IMPORTED_NATIVE_FILES.get((module_name, path)))
+            initial = _RUNTIME_INITIAL_MODULE_FILES.get((module_name, path))
+        if executed or native_files or initial != current:
+            continue
+        cache = _capture_loaded_source_cache(
+            module_name,
+            module,
+            captured_by_path=captured_by_path,
+        )
+        key = (module_name, path, current, cache)
+        with _RUNTIME_PROVENANCE_LOCK:
+            if key in _RUNTIME_SOURCE_CACHE_VALIDATION:
+                _RUNTIME_SOURCE_CACHE_VALIDATION.move_to_end(key)
+                continue
+        pending.append((key, cache.path, module_name))
+
+    if not pending:
+        return
+    unique_paths = tuple(dict.fromkeys(path for _key, path, _name in pending))
+    try:
+        details = _validate_runtime_bytecode_details(unique_paths)
+    except (RuntimeError, ValueError) as error:
+        raise RuntimeError(
+            "loaded Python code does not match captured source bytes"
+        ) from error
+    for key, path, module_name in pending:
+        status, _digest = details[path]
+        if status != "source-equivalent":
+            raise RuntimeError(
+                "loaded Python code does not match captured source bytes: "
+                f"{module_name}"
+            )
+        _cache_source_validation(key)
+
+
+def _cache_source_validation(key: tuple[object, ...]) -> None:
+    with _RUNTIME_PROVENANCE_LOCK:
+        _RUNTIME_SOURCE_CACHE_VALIDATION[key] = None
+        _RUNTIME_SOURCE_CACHE_VALIDATION.move_to_end(key)
+        while (
+            len(_RUNTIME_SOURCE_CACHE_VALIDATION)
+            > _RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES
+        ):
+            _RUNTIME_SOURCE_CACHE_VALIDATION.popitem(last=False)
+
+
+def _require_loaded_code_provenance(
+    module_name: str,
+    module: object,
+    path: Path,
+    current: _CapturedPhysicalFile,
+    *,
+    captured_by_path: dict[Path, _CapturedPhysicalFile],
+) -> None:
+    with _RUNTIME_PROVENANCE_LOCK:
+        overflow = path in _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW
+        executed = tuple(_RUNTIME_EXECUTED_MODULE_CODE.get(path, ()))
+        native_key = (module_name, path)
+        native_overflow = native_key in _RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW
+        native_files = tuple(_RUNTIME_IMPORTED_NATIVE_FILES.get(native_key, ()))
+        initial = _RUNTIME_INITIAL_MODULE_FILES.get((module_name, path))
+        pre_audit_cache = None
+        if (
+            not executed
+            and not native_files
+            and initial == current
+            and path.suffix == ".py"
+        ):
+            pre_audit_cache = _capture_loaded_source_cache(
+                module_name,
+                module,
+                captured_by_path=captured_by_path,
+            )
+        cache_key = (
+            module_name,
+            path,
+            current,
+            tuple(id(code) for code in executed),
+            native_files,
+            initial,
+            pre_audit_cache,
+        )
+        if cache_key in _RUNTIME_PROVENANCE_CACHE:
+            _RUNTIME_PROVENANCE_CACHE.move_to_end(cache_key)
+            return
+    if overflow or native_overflow:
+        raise RuntimeError(
+            f"loaded module execution provenance overflowed: {module_name}"
+        )
+    if executed:
+        if path.suffix != ".py":
+            raise RuntimeError(
+                f"loaded non-source module lacks import provenance: {module_name}"
+            )
+        current_code = _source_module_semantic_code(path, current)
+        executed_code = {_canonical_code_object(code) for code in executed}
+        if executed_code != {current_code}:
+            raise RuntimeError(
+                "loaded Python code does not match captured source bytes: "
+                f"{module_name}"
+            )
+        _cache_runtime_provenance(cache_key)
+        return
+    if native_files:
+        if set(native_files) != {current}:
+            raise RuntimeError(
+                "loaded native code does not match captured module bytes: "
+                f"{module_name}"
+            )
+        _cache_runtime_provenance(cache_key)
+        return
+    if initial == current and path.suffix != ".py":
+        _cache_runtime_provenance(cache_key)
+        return
+    if initial == current and pre_audit_cache is not None:
+        source_cache_key = (module_name, path, current, pre_audit_cache)
+        with _RUNTIME_PROVENANCE_LOCK:
+            source_cache_validated = (
+                source_cache_key in _RUNTIME_SOURCE_CACHE_VALIDATION
+            )
+        if not source_cache_validated:
+            status, _digest = _validate_runtime_bytecode_details(
+                (pre_audit_cache.path,)
+            )[pre_audit_cache.path]
+            if status != "source-equivalent":
+                raise RuntimeError(
+                    "loaded Python code does not match captured source bytes: "
+                    f"{module_name}"
+                )
+            _cache_source_validation(source_cache_key)
+        _cache_runtime_provenance(cache_key)
+        return
+    raise RuntimeError(
+        "loaded module predates execution evidence without matching import "
+        f"provenance: {module_name}"
+    )
+
+
+def _capture_loaded_source_cache(
+    module_name: str,
+    module: object,
+    *,
+    captured_by_path: dict[Path, _CapturedPhysicalFile],
+) -> _CapturedPhysicalFile:
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(spec, "loader", None)
+    if not isinstance(loader, importlib.machinery.SourceFileLoader):
+        raise RuntimeError(
+            f"pre-evidence Python module has an unsupported loader: {module_name}"
+        )
+    raw_cache = getattr(module, "__cached__", None)
+    if not isinstance(raw_cache, str) or not raw_cache:
+        raise RuntimeError(
+            f"pre-evidence Python module lacks an active bytecode cache: {module_name}"
+        )
+    cache_path = Path(raw_cache)
+    if not cache_path.is_absolute():
+        cache_path = Path(os.path.abspath(cache_path))
+    _require_no_lexical_symlink_components(
+        cache_path,
+        label="loaded module bytecode cache",
+    )
+    if cache_path.is_symlink() or cache_path.suffix != ".pyc":
+        raise ValueError(f"loaded module bytecode cache is unsupported: {module_name}")
+    cache_path = cache_path.resolve(strict=True)
+    expected = captured_by_path.get(cache_path)
+    if expected is None:
+        raise RuntimeError(
+            f"loaded module bytecode cache is not bound to evidence: {module_name}"
+        )
+    current = _capture_physical_file_identity(
+        cache_path,
+        label="loaded module bytecode cache",
+    )
+    if current != expected:
+        raise RuntimeError(
+            f"loaded module bytecode cache changed while captured: {module_name}"
+        )
+    return current
+
+
+def _cache_runtime_provenance(cache_key: tuple[object, ...]) -> None:
+    with _RUNTIME_PROVENANCE_LOCK:
+        _RUNTIME_PROVENANCE_CACHE[cache_key] = None
+        _RUNTIME_PROVENANCE_CACHE.move_to_end(cache_key)
+        while len(_RUNTIME_PROVENANCE_CACHE) > _RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES:
+            _RUNTIME_PROVENANCE_CACHE.popitem(last=False)
+
+
+def _source_module_semantic_code(
+    path: Path,
+    expected: _CapturedPhysicalFile,
+) -> types.CodeType:
+    display = (
+        "loaded-module-source/"
+        + hashlib.sha256(path.as_posix().encode("utf-8")).hexdigest()
+    )
+    captured, raw = _capture_file_bytes(path, display)
+    if _physical_file_from_capture(captured) != expected:
+        raise RuntimeError(f"loaded module source changed while read: {path}")
+    try:
+        code = compile(
+            raw,
+            path.as_posix(),
+            "exec",
+            dont_inherit=True,
+            optimize=sys.flags.optimize,
+        )
+    except (SyntaxError, ValueError) as error:
+        raise ValueError(f"loaded module source cannot be compiled: {path}") from error
+    return _canonical_code_object(code)
+
+
+def _canonical_code_object(code: types.CodeType) -> types.CodeType:
+    def canonical(value: object) -> object:
+        if isinstance(value, types.CodeType):
+            return value.replace(
+                co_filename="<runtime-module>",
+                co_consts=tuple(canonical(item) for item in value.co_consts),
+            )
+        return value
+
+    normalized = canonical(code)
+    assert isinstance(normalized, types.CodeType)
+    return normalized
+
+
+def _loaded_origin_token(
+    path: Path,
+    roots: list[tuple[Path, str]],
+) -> str:
+    matched = _matched_loaded_origin(path, roots)
+    if matched is None:
+        raise RuntimeError(f"loaded module origin is outside captured roots: {path}")
+    _root, token = matched
+    return token
+
+
+def _matched_loaded_origin(
+    path: Path,
+    roots: list[tuple[Path, str]],
+) -> tuple[Path, str] | None:
+    _require_no_lexical_symlink_components(path, label="loaded module origin")
+    resolved = path.resolve(strict=True)
+    matching = [
+        (root, token)
+        for root, token in roots
+        if resolved == root or resolved.is_relative_to(root)
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda item: len(item[0].parts))
+
+
 def _capture_runtime_package_payloads(
     distribution: importlib.metadata.Distribution,
     *,
@@ -1878,7 +4203,12 @@ def _capture_runtime_package_payloads(
     inventory: tuple[importlib.metadata.PackagePath, ...],
     metadata_path: Path | None = None,
     context: _RuntimeCaptureContext | None = None,
-) -> tuple[tuple[_CapturedFile, ...], tuple[_CapturedDirectory, ...]]:
+) -> tuple[
+    tuple[_CapturedFile, ...],
+    tuple[_CapturedFile, ...],
+    tuple[_CapturedDirectory, ...],
+    tuple[_RuntimeImportBinding, ...],
+]:
     """Hash runtime metadata and complete import roots using portable names.
 
     Wheel ``RECORD`` is an inventory seed, not an authority over the live
@@ -1900,8 +4230,10 @@ def _capture_runtime_package_payloads(
     )
     explicit_paths: dict[str, Path] = {}
     captured_files: dict[str, _CapturedFile] = {}
+    transient_files: dict[str, _CapturedFile] = {}
     runtime_trees: dict[str, Path] = {}
     configured_directories: set[Path] = set()
+    import_bindings: dict[tuple[str, Path], _RuntimeImportBinding] = {}
     seen_record_paths: set[tuple[bool, str]] = set()
     inside_record_paths: set[Path] = set()
     prepared_inventory: list[tuple[str, bool, Path | None]] = []
@@ -1922,10 +4254,19 @@ def _capture_runtime_package_payloads(
                 install_root=install_root,
                 label="external runtime package path",
             )
-            if _is_external_runtime_bookkeeping(record_path):
+            portable_external = _external_runtime_environment_path(
+                resolved_external,
+                install_root=install_root,
+            )
+            if _is_external_runtime_bookkeeping(portable_external):
                 continue
-            if PurePosixPath(record_path).suffix in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES:
-                explicit_paths[f"runtime-external/{record_path}"] = resolved_external
+            if (
+                PurePosixPath(portable_external).suffix
+                in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES
+            ):
+                explicit_paths[f"runtime-external/{portable_external}"] = (
+                    resolved_external
+                )
                 continue
             raise ValueError(
                 "installed distribution path escapes its installation root "
@@ -1966,6 +4307,8 @@ def _capture_runtime_package_payloads(
             _add_runtime_path(runtime_trees, tree_name, tree_path)
         configured_directories.update(configuration.observed_directories)
         consumed_paths.update(configuration.consumed_paths)
+        for binding in configuration.import_bindings:
+            import_bindings[(binding.name, binding.physical_path)] = binding
 
     top_level_paths: dict[str, Path] = {}
     for record_path, is_top_level, located in prepared_inventory:
@@ -1991,8 +4334,27 @@ def _capture_runtime_package_payloads(
                     f"top-level parent: {record_path}"
                 )
             _add_runtime_path(explicit_paths, record_path, located)
+        binding = _runtime_import_binding(
+            top_level_path,
+            exposure="direct",
+            search_root=install_root,
+        )
+        if binding is not None:
+            import_bindings[(binding.name, binding.physical_path)] = binding
 
     metadata_root = resolved_metadata.parent
+    record_capture = _capture_runtime_record(
+        metadata_root,
+        distribution=distribution,
+        install_root=install_root,
+        context=capture_context,
+    )
+    if record_capture is not None:
+        _add_runtime_capture(
+            captured_files,
+            f"{metadata_root.name}/RECORD",
+            record_capture,
+        )
     _add_runtime_path(
         runtime_trees,
         metadata_root.name,
@@ -2018,9 +4380,21 @@ def _capture_runtime_package_payloads(
             ):
                 continue
             _add_runtime_path(explicit_paths, logical_path, physical_path)
+        for relative_path, physical_path in tree.bytecode_files:
+            logical_path = PurePosixPath(tree_name, relative_path).as_posix()
+            transient_files[logical_path] = capture_context.capture_bytecode(
+                physical_path,
+                logical_path,
+            )
 
     for logical_path, path in sorted(explicit_paths.items()):
         if logical_path in captured_files:
+            continue
+        if path.suffix == ".pyc":
+            transient_files[logical_path] = capture_context.capture_bytecode(
+                path,
+                logical_path,
+            )
             continue
         captured_files[logical_path] = capture_context.capture_file(
             path,
@@ -2029,9 +4403,25 @@ def _capture_runtime_package_payloads(
     if not captured_files:
         name = distribution.metadata.get("Name") or "<unknown>"
         raise RuntimeError(f"installed distribution runtime payload is empty: {name}")
+    persistent_result = tuple(captured_files[path] for path in sorted(captured_files))
+    transient_result = tuple(transient_files[path] for path in sorted(transient_files))
+    if context is None:
+        persistent_result = _bind_instrumented_bytecode(
+            persistent_result,
+            transient_result,
+            context=capture_context,
+        )
     result = (
-        tuple(captured_files[path] for path in sorted(captured_files)),
+        persistent_result,
+        transient_result,
         tuple(tree_identities[path] for path in sorted(tree_identities)),
+        tuple(
+            import_bindings[key]
+            for key in sorted(
+                import_bindings,
+                key=lambda item: (item[0], item[1].as_posix()),
+            )
+        ),
     )
     if context is None:
         capture_context.verify_directories()
@@ -2142,7 +4532,18 @@ def _capture_virtualenv_bootstrap(
         install_root=install_root,
         install_root_identity=context.directories[install_root],
         payload_files=payload_files,
+        transient_files=(),
         runtime_roots=(),
+        import_bindings=(
+            _RuntimeImportBinding(
+                name="_virtualenv",
+                physical_path=by_name["_virtualenv.py"],
+                kind="module",
+                exposure="direct",
+                search_root=install_root,
+            ),
+        ),
+        inventory_backed=False,
     )
 
 
@@ -2160,6 +4561,8 @@ def _is_importable_top_level(path: Path) -> bool:
         return True
     if name.endswith(".py"):
         return name[:-3].isidentifier()
+    if name.endswith(".pyc"):
+        return name[:-4].isidentifier()
     for suffix in sorted(
         importlib.machinery.EXTENSION_SUFFIXES,
         key=len,
@@ -2168,6 +4571,76 @@ def _is_importable_top_level(path: Path) -> bool:
         if name.endswith(suffix):
             return name[: -len(suffix)].isidentifier()
     return False
+
+
+def _runtime_import_binding(
+    path: Path,
+    *,
+    exposure: Literal["direct", "path", "finder"] = "direct",
+    search_root: Path | None = None,
+) -> _RuntimeImportBinding | None:
+    """Describe the top-level import a regular path can provide."""
+
+    name = path.name
+    if path.is_dir() and not path.is_symlink() and name.isidentifier():
+        kind: Literal["package", "namespace"] = (
+            "package" if (path / "__init__.py").is_file() else "namespace"
+        )
+        return _RuntimeImportBinding(
+            name=name,
+            physical_path=path,
+            kind=kind,
+            exposure=exposure,
+            search_root=search_root,
+        )
+    if not path.is_file() or path.is_symlink():
+        return None
+    if name.endswith(".py") and name[:-3].isidentifier():
+        return _RuntimeImportBinding(
+            name=name[:-3],
+            physical_path=path,
+            kind="module",
+            exposure=exposure,
+            search_root=search_root,
+        )
+    if name.endswith(".pyc") and name[:-4].isidentifier():
+        return _RuntimeImportBinding(
+            name=name[:-4],
+            physical_path=path,
+            kind="module",
+            exposure=exposure,
+            search_root=search_root,
+        )
+    for suffix in sorted(
+        importlib.machinery.EXTENSION_SUFFIXES,
+        key=len,
+        reverse=True,
+    ):
+        if name.endswith(suffix) and name[: -len(suffix)].isidentifier():
+            return _RuntimeImportBinding(
+                name=name[: -len(suffix)],
+                physical_path=path,
+                kind="module",
+                exposure=exposure,
+                search_root=search_root,
+            )
+    return None
+
+
+def _runtime_search_root_bindings(root: Path) -> tuple[_RuntimeImportBinding, ...]:
+    bindings = [
+        binding
+        for path in sorted(root.iterdir(), key=lambda item: item.name)
+        if (
+            binding := _runtime_import_binding(
+                path,
+                exposure="path",
+                search_root=root,
+            )
+        )
+        is not None
+    ]
+    return tuple(bindings)
 
 
 def _distribution_record_path(
@@ -2222,6 +4695,104 @@ def _is_runtime_metadata_payload(record_path: str) -> bool:
     return relative[-1] not in _RUNTIME_NON_PAYLOAD_METADATA_FILES
 
 
+def _capture_runtime_record(
+    metadata_root: Path,
+    *,
+    distribution: importlib.metadata.Distribution,
+    install_root: Path,
+    context: _RuntimeCaptureContext,
+) -> _CapturedFile | None:
+    """Bind RECORD semantics without persisting machine-specific launcher hashes."""
+
+    record_path = metadata_root / "RECORD"
+    if not record_path.exists():
+        return None
+    display_path = _runtime_payload_display_path(f"{metadata_root.name}/RECORD")
+    raw_capture, raw = _capture_file_bytes(record_path, display_path)
+    previous = context.files.setdefault(record_path, raw_capture)
+    if previous != raw_capture:
+        raise RuntimeError(
+            f"runtime package RECORD changed while it was captured: {record_path}"
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"runtime package RECORD is not UTF-8: {record_path}"
+        ) from error
+
+    canonical_rows: list[tuple[str, str, str]] = []
+    seen_paths: set[tuple[bool, str]] = set()
+    try:
+        rows = csv.reader(io.StringIO(text, newline=""), strict=True)
+        for row_number, row in enumerate(rows, 1):
+            if len(row) != 3 or not row[0]:
+                raise ValueError(
+                    f"runtime package RECORD row {row_number} is malformed: "
+                    f"{record_path}"
+                )
+            portable_path, outside_install_root = _distribution_record_path(
+                importlib.metadata.PackagePath(row[0])
+            )
+            if outside_install_root:
+                resolved_external = _require_external_runtime_location(
+                    Path(
+                        distribution.locate_file(importlib.metadata.PackagePath(row[0]))
+                    ),
+                    install_root=install_root,
+                    label="external runtime package RECORD path",
+                )
+                portable_path = _external_runtime_environment_path(
+                    resolved_external,
+                    install_root=install_root,
+                )
+                if not _is_external_runtime_bookkeeping(portable_path) and (
+                    PurePosixPath(portable_path).suffix
+                    not in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES
+                ):
+                    raise ValueError(
+                        "runtime package RECORD path escapes its installation "
+                        "root without a portable runtime mapping: "
+                        f"{row[0]}"
+                    )
+            key = (outside_install_root, portable_path)
+            if key in seen_paths:
+                raise ValueError(
+                    "runtime package RECORD contains duplicate canonical paths: "
+                    f"{record_path}"
+                )
+            seen_paths.add(key)
+            hash_value, size_value = row[1:]
+            if hash_value and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*=[A-Za-z0-9_-]+",
+                hash_value,
+            ):
+                raise ValueError(
+                    f"runtime package RECORD row {row_number} has an invalid hash: "
+                    f"{record_path}"
+                )
+            if size_value and (not size_value.isascii() or not size_value.isdecimal()):
+                raise ValueError(
+                    f"runtime package RECORD row {row_number} has an invalid size: "
+                    f"{record_path}"
+                )
+            prefix = "outside" if outside_install_root else "inside"
+            if outside_install_root and _is_external_runtime_bookkeeping(portable_path):
+                hash_value = "<portable-external-bookkeeping>" if hash_value else ""
+                size_value = "<portable-external-bookkeeping>" if size_value else ""
+            canonical_rows.append((f"{prefix}:{portable_path}", hash_value, size_value))
+    except csv.Error as error:
+        raise ValueError(
+            f"runtime package RECORD is malformed: {record_path}"
+        ) from error
+    canonical = json.dumps(
+        canonical_rows,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return _captured_file_with_canonical_bytes(raw_capture, display_path, canonical)
+
+
 def _is_external_runtime_bookkeeping(record_path: str) -> bool:
     parts = PurePosixPath(record_path).parts
     return any(
@@ -2236,6 +4807,7 @@ def _require_runtime_location(
     install_root: Path,
     label: str,
 ) -> Path:
+    _require_no_lexical_symlink_components(path, label=label)
     if path.is_symlink():
         raise ValueError(f"{label} is a symbolic link: {path}")
     resolved = path.resolve(strict=True)
@@ -2252,10 +4824,25 @@ def _require_external_runtime_location(
     install_root: Path,
     label: str,
 ) -> Path:
+    _require_no_lexical_symlink_components(path, label=label)
     if path.is_symlink():
         raise ValueError(f"{label} is a symbolic link: {path}")
     resolved = path.resolve(strict=True)
-    environment_roots = {Path(sys.prefix).resolve(strict=True)}
+    environment_roots = _runtime_environment_roots(install_root)
+    if not any(resolved.is_relative_to(root) for root in environment_roots):
+        raise ValueError(f"{label} escapes the Python environment: {path}")
+    if not resolved.is_file():
+        raise ValueError(f"{label} is not a regular file: {path}")
+    return resolved
+
+
+def _runtime_environment_roots(install_root: Path) -> frozenset[Path]:
+    prefix = Path(sys.prefix)
+    _require_no_lexical_symlink_components(
+        prefix,
+        label="Python environment prefix",
+    )
+    environment_roots = {prefix.resolve(strict=True)}
     parts = install_root.parts
     if (
         len(parts) >= 4
@@ -2266,11 +4853,49 @@ def _require_external_runtime_location(
         environment_roots.add(install_root.parents[2])
     elif len(parts) >= 3 and parts[-2:] == ("Lib", "site-packages"):
         environment_roots.add(install_root.parents[1])
-    if not any(resolved.is_relative_to(root) for root in environment_roots):
-        raise ValueError(f"{label} escapes the Python environment: {path}")
-    if not resolved.is_file():
-        raise ValueError(f"{label} is not a regular file: {path}")
-    return resolved
+    return frozenset(environment_roots)
+
+
+def _external_runtime_environment_path(
+    path: Path,
+    *,
+    install_root: Path,
+) -> str:
+    relatives = [
+        path.relative_to(root)
+        for root in _runtime_environment_roots(install_root)
+        if path.is_relative_to(root)
+    ]
+    if not relatives:
+        raise ValueError(
+            f"external runtime path escapes the Python environment: {path}"
+        )
+    relative = min(relatives, key=lambda item: (len(item.parts), item.as_posix()))
+    if not relative.parts:
+        raise ValueError(f"external runtime path is the Python environment: {path}")
+    return relative.as_posix()
+
+
+def _require_no_lexical_symlink_components(path: Path, *, label: str) -> None:
+    """Reject mutable lexical links before canonical path resolution."""
+
+    lexical = path if path.is_absolute() else Path.cwd() / path
+    anchor = Path(lexical.anchor)
+    component = anchor
+    for part in lexical.parts[1:]:
+        if part == "..":
+            component = component.parent
+            continue
+        component /= part
+        try:
+            details = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(details.st_mode):
+            raise ValueError(
+                f"{label} has an unsupported lexical symbolic-link component: "
+                f"{component}; use the physical path instead"
+            )
 
 
 def _runtime_payload_display_path(logical_path: str) -> str:
@@ -2324,9 +4949,9 @@ def _capture_runtime_path_configuration(
         raise ValueError(f"runtime path configuration is not UTF-8: {path}") from error
 
     effective_lines = [
-        (line_number, raw_line.strip())
+        (line_number, raw_line.rstrip())
         for line_number, raw_line in enumerate(text.splitlines(), 1)
-        if raw_line.strip() and not raw_line.strip().startswith("#")
+        if raw_line.rstrip() and not raw_line.startswith("#")
     ]
     executable_lines = [
         (line_number, line)
@@ -2357,6 +4982,7 @@ def _capture_runtime_path_configuration(
                 exposed_trees=(),
                 observed_directories=(),
                 consumed_paths=frozenset({path}),
+                import_bindings=(),
             )
         return _capture_setuptools_finder_configuration(
             path,
@@ -2370,9 +4996,13 @@ def _capture_runtime_path_configuration(
     canonical_lines: list[str] = []
     exposed_trees: list[tuple[str, Path]] = []
     path_key = hashlib.sha256(record_path.encode("utf-8")).hexdigest()
-    for line_number, line in effective_lines:
+    for ordinal, (_line_number, line) in enumerate(effective_lines, 1):
         candidate = Path(line)
         located = candidate if candidate.is_absolute() else install_root / candidate
+        _require_no_lexical_symlink_components(
+            located,
+            label="runtime import root",
+        )
         if located.is_symlink():
             raise ValueError(f"runtime import root is a symbolic link: {located}")
         resolved = located.resolve(strict=True)
@@ -2385,8 +5015,8 @@ def _capture_runtime_path_configuration(
                 "setuptools strict editable symlink-tree mode is unsupported; "
                 "use the standard finder or path editable mode"
             )
-        tree_name = f"runtime-path/{path_key}/{line_number:06d}"
-        canonical_lines.append(f"path:{line_number:06d}")
+        tree_name = f"runtime-path/{path_key}/{ordinal:06d}"
+        canonical_lines.append(f"path:{ordinal:06d}")
         exposed_trees.append((tree_name, resolved))
 
     canonical = "\n".join(canonical_lines).encode("utf-8")
@@ -2396,6 +5026,8 @@ def _capture_runtime_path_configuration(
             sha256=hashlib.sha256(canonical).hexdigest(),
             size_bytes=len(canonical),
         ),
+        physical_path=raw_capture.physical_path,
+        physical_size_bytes=raw_capture.physical_size_bytes,
         device=raw_capture.device,
         inode=raw_capture.inode,
         modified_ns=raw_capture.modified_ns,
@@ -2407,6 +5039,11 @@ def _capture_runtime_path_configuration(
         exposed_trees=tuple(exposed_trees),
         observed_directories=(),
         consumed_paths=frozenset({path}),
+        import_bindings=tuple(
+            binding
+            for _tree_name, root in exposed_trees
+            for binding in _runtime_search_root_bindings(root)
+        ),
     )
 
 
@@ -2508,6 +5145,7 @@ def _capture_setuptools_finder_configuration(
         finder_source,
         path=finder_path,
         expected_module=expected_module,
+        expected_finder_name=f"{path.stem}.finder",
     )
 
     canonical_pth = f"setuptools-finder:{expected_module}".encode()
@@ -2528,6 +5166,17 @@ def _capture_setuptools_finder_configuration(
     )
     explicit_files: list[tuple[str, Path]] = []
     exposed_trees: list[tuple[str, Path]] = []
+    namespace_placeholder = f"{path.stem}.finder.__path_hook__" if namespaces else None
+    import_bindings: list[_RuntimeImportBinding] = [
+        _RuntimeImportBinding(
+            name=expected_module,
+            physical_path=finder_path,
+            kind="module",
+            exposure="direct",
+            search_root=install_root,
+            namespace_placeholder=namespace_placeholder,
+        )
+    ]
     for qualified_name, raw_source in sorted(mapping.items()):
         logical = PurePosixPath(
             prefix,
@@ -2544,6 +5193,17 @@ def _capture_setuptools_finder_configuration(
         else:
             suffix = "".join(source.suffixes) or ".py"
             explicit_files.append((logical + suffix, source))
+        if "." not in qualified_name:
+            import_bindings.append(
+                _RuntimeImportBinding(
+                    name=qualified_name,
+                    physical_path=source,
+                    kind="module" if source_type == "file" else "package",
+                    exposure="finder",
+                    search_root=None,
+                    namespace_placeholder=namespace_placeholder,
+                )
+            )
     for qualified_name, raw_roots in sorted(namespaces.items()):
         for index, raw_root in enumerate(raw_roots):
             root = _require_editable_source_directory(
@@ -2557,6 +5217,17 @@ def _capture_setuptools_finder_configuration(
                 f"{index:06d}",
             ).as_posix()
             exposed_trees.append((logical, root))
+            if "." not in qualified_name:
+                import_bindings.append(
+                    _RuntimeImportBinding(
+                        name=qualified_name,
+                        physical_path=root,
+                        kind="namespace",
+                        exposure="finder",
+                        search_root=None,
+                        namespace_placeholder=namespace_placeholder,
+                    )
+                )
     return _RuntimePathConfiguration(
         captured_files=(
             (record_path, pth_capture),
@@ -2568,6 +5239,7 @@ def _capture_setuptools_finder_configuration(
             sorted({path.parent for _logical, path in explicit_files})
         ),
         consumed_paths=frozenset({path, finder_path}),
+        import_bindings=tuple(import_bindings),
     )
 
 
@@ -2598,6 +5270,7 @@ def _parse_setuptools_finder(
     *,
     path: Path,
     expected_module: str,
+    expected_finder_name: str,
 ) -> tuple[bytes, dict[str, str], dict[str, list[str]]]:
     try:
         tree = ast.parse(source, filename=path.as_posix(), mode="exec")
@@ -2628,6 +5301,22 @@ def _parse_setuptools_finder(
         )
     mapping = _literal_finder_mapping(assignments["MAPPING"], path=path)
     namespaces = _literal_finder_namespaces(assignments["NAMESPACES"], path=path)
+    expected_tree = ast.parse(
+        _SETUPTOOLS_FINDER_TEMPLATE.format(
+            mapping=mapping,
+            namespaces=namespaces,
+            name=expected_finder_name,
+        ),
+        mode="exec",
+    )
+    if ast.dump(tree, include_attributes=False) != ast.dump(
+        expected_tree,
+        include_attributes=False,
+    ):
+        raise ValueError(
+            "setuptools editable finder implementation is not the supported "
+            f"locked template: {path}"
+        )
     _mask_finder_paths(assignments["MAPPING"], kind="mapping")
     _mask_finder_paths(assignments["NAMESPACES"], kind="namespace")
     if any(
@@ -2741,6 +5430,7 @@ def _resolve_setuptools_mapping_source(
     allow_namespace_directory: bool,
 ) -> tuple[Literal["file", "tree"], Path]:
     candidate = Path(raw_path)
+    _require_no_lexical_symlink_components(candidate, label=label)
     if candidate.is_symlink():
         raise ValueError(f"{label} is a symbolic link: {candidate}")
     package_initializer = candidate / "__init__.py"
@@ -2765,6 +5455,7 @@ def _resolve_setuptools_mapping_source(
 
 def _require_editable_source_directory(raw_path: str, *, label: str) -> Path:
     candidate = Path(raw_path)
+    _require_no_lexical_symlink_components(candidate, label=label)
     if candidate.is_symlink():
         raise ValueError(f"{label} is a symbolic link: {candidate}")
     resolved = candidate.resolve(strict=True)
@@ -2775,9 +5466,15 @@ def _require_editable_source_directory(raw_path: str, *, label: str) -> Path:
 
 def _capture_runtime_tree(root: Path) -> _CapturedRuntimeTree:
     files: list[tuple[str, Path]] = []
+    bytecode_files: list[tuple[str, Path]] = []
     directories: list[_CapturedDirectory] = []
 
-    def visit(directory: Path, relative: PurePosixPath) -> None:
+    def visit(
+        directory: Path,
+        relative: PurePosixPath,
+        *,
+        in_bytecode_cache: bool,
+    ) -> None:
         before = _capture_directory_identity(
             directory,
             label="runtime package import directory",
@@ -2792,18 +5489,30 @@ def _capture_runtime_tree(root: Path) -> _CapturedRuntimeTree:
                 raise ValueError(
                     f"runtime package import root contains a symlink: {path}"
                 )
-            if entry.name in _RUNTIME_TRANSIENT_DIRECTORIES and entry.is_dir(
-                follow_symlinks=False
-            ):
-                continue
             if entry.is_dir(
                 follow_symlinks=False
             ) and _is_non_runtime_metadata_directory(logical_path):
                 continue
             if entry.is_dir(follow_symlinks=False):
-                visit(path, child_relative)
+                if in_bytecode_cache:
+                    raise ValueError(
+                        "runtime bytecode cache contains a nested directory: " f"{path}"
+                    )
+                visit(
+                    path,
+                    child_relative,
+                    in_bytecode_cache=entry.name in _RUNTIME_TRANSIENT_DIRECTORIES,
+                )
             elif entry.is_file(follow_symlinks=False):
-                files.append((child_relative.as_posix(), path))
+                if path.suffix == ".pyc":
+                    bytecode_files.append((child_relative.as_posix(), path))
+                elif in_bytecode_cache:
+                    raise ValueError(
+                        "runtime bytecode cache contains a non-bytecode file: "
+                        f"{path}"
+                    )
+                else:
+                    files.append((child_relative.as_posix(), path))
             else:
                 raise ValueError(
                     "runtime package import root contains a non-regular path: "
@@ -2819,9 +5528,10 @@ def _capture_runtime_tree(root: Path) -> _CapturedRuntimeTree:
             )
         directories.append(after)
 
-    visit(root, PurePosixPath())
+    visit(root, PurePosixPath(), in_bytecode_cache=False)
     return _CapturedRuntimeTree(
         files=tuple(sorted(files)),
+        bytecode_files=tuple(sorted(bytecode_files)),
         directories=tuple(sorted(directories, key=lambda item: item.path.as_posix())),
     )
 
@@ -2880,6 +5590,7 @@ def _capture_directory_identity(
     *,
     label: str = "runtime package root",
 ) -> _CapturedDirectory:
+    _require_no_lexical_symlink_components(path, label=label)
     details = path.lstat()
     if stat.S_ISLNK(details.st_mode):
         raise ValueError(f"{label} is a symbolic link: {path}")
@@ -2936,6 +5647,8 @@ def _captured_file_with_display_path(
             sha256=captured.evidence.sha256,
             size_bytes=captured.evidence.size_bytes,
         ),
+        physical_path=captured.physical_path,
+        physical_size_bytes=captured.physical_size_bytes,
         device=captured.device,
         inode=captured.inode,
         modified_ns=captured.modified_ns,
@@ -2955,6 +5668,8 @@ def _captured_file_with_canonical_bytes(
             sha256=hashlib.sha256(canonical).hexdigest(),
             size_bytes=len(canonical),
         ),
+        physical_path=captured.physical_path,
+        physical_size_bytes=captured.physical_size_bytes,
         device=captured.device,
         inode=captured.inode,
         modified_ns=captured.modified_ns,
@@ -2978,6 +5693,92 @@ def _capture_file_bytes(path: Path, display_path: str) -> tuple[_CapturedFile, b
     return captured, raw
 
 
+def _validate_runtime_bytecode_details(
+    paths: tuple[Path, ...],
+) -> dict[Path, tuple[str, str | None]]:
+    if not paths:
+        return {}
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-c", _BYTECODE_VALIDATOR_SCRIPT],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = process.communicate(
+            json.dumps([path.as_posix() for path in paths]),
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("isolated runtime bytecode validation timed out") from error
+    if process.returncode != 0:
+        raise RuntimeError(
+            "isolated runtime bytecode validation failed: "
+            + (stderr.strip() or f"exit {process.returncode}")
+        )
+    try:
+        results = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "isolated runtime bytecode validation returned invalid output"
+        ) from error
+    expected_paths = [path.as_posix() for path in paths]
+    if (
+        not isinstance(results, list)
+        or not all(isinstance(item, dict) for item in results)
+        or [item.get("path") for item in results] != expected_paths
+    ):
+        raise RuntimeError("isolated runtime bytecode validation was incomplete")
+    failures = [
+        f"{item['path']}: {item['error']}"
+        for item in results
+        if isinstance(item, dict) and "error" in item
+    ]
+    if failures:
+        raise ValueError("runtime bytecode validation failed: " + "; ".join(failures))
+    details: dict[Path, tuple[str, str | None]] = {}
+    for path, item in zip(paths, results, strict=True):
+        status = item.get("status")
+        digest = item.get("semantic_sha256")
+        if status in {"source-equivalent", "inactive-stale"} and digest is None:
+            details[path] = (status, None)
+        elif (
+            status == "instrumented"
+            and isinstance(digest, str)
+            and re.fullmatch(_SHA256_PATTERN, digest)
+        ):
+            details[path] = (status, digest)
+        else:
+            raise RuntimeError("isolated runtime bytecode validation was incomplete")
+    return details
+
+
+def _validate_runtime_bytecode(paths: tuple[Path, ...]) -> dict[Path, str | None]:
+    return {
+        path: digest
+        for path, (_status, digest) in _validate_runtime_bytecode_details(paths).items()
+    }
+
+
+def _captured_file_identity_matches(captured: _CapturedFile) -> bool:
+    _require_no_lexical_symlink_components(
+        captured.physical_path,
+        label="captured file",
+    )
+    details = captured.physical_path.lstat()
+    return (
+        stat.S_ISREG(details.st_mode)
+        and details.st_dev == captured.device
+        and details.st_ino == captured.inode
+        and details.st_size == captured.physical_size_bytes
+        and details.st_mtime_ns == captured.modified_ns
+        and details.st_ctime_ns == captured.changed_ns
+    )
+
+
 def _capture_open_file(
     path: Path,
     display_path: str,
@@ -2988,6 +5789,7 @@ def _capture_open_file(
     _require_safe_relative_path(display_path, "captured file")
     if include_bytes and use_runtime_digest_cache:
         raise ValueError("captured bytes cannot use the runtime digest cache")
+    _require_no_lexical_symlink_components(path, label="captured file")
     if path.is_symlink():
         raise ValueError(f"symbolic links are not valid training inputs: {path}")
     flags = os.O_RDONLY
@@ -3068,6 +5870,8 @@ def _capture_open_file(
             sha256=digest_hex,
             size_bytes=size_bytes,
         ),
+        physical_path=path,
+        physical_size_bytes=after.st_size,
         device=after.st_dev,
         inode=after.st_ino,
         modified_ns=after.st_mtime_ns,
@@ -3084,6 +5888,8 @@ def _evidence_by_path(
 
 def _project_path(value: str | Path, label: str) -> Path:
     candidate = Path(value)
+    lexical = candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
+    _require_no_lexical_symlink_components(lexical, label=label)
     resolved = (
         candidate.resolve()
         if candidate.is_absolute()
@@ -3269,3 +6075,6 @@ def _write_bytes_atomic(path: Path, content: bytes) -> None:
 
 def _write_json_atomic(path: Path, evidence: BaseModel) -> None:
     _write_bytes_atomic(path, _model_json_bytes(evidence))
+
+
+_install_runtime_provenance_audit()

@@ -6,13 +6,15 @@ import hashlib
 import importlib.util
 import json
 import os
+import py_compile
 import shutil
+import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from importlib.metadata import PackagePath, PathDistribution
 from inspect import Parameter, signature
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -35,6 +37,77 @@ from aai_local_finetuning.evaluation import (
     start_evaluation_session,
 )
 from aai_local_finetuning.evaluation import session as evaluation_session_module
+
+_ORIGINAL_SYS_PATH = tuple(sys.path)
+
+
+def _activate_test_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    project_root: Path,
+    install_root: Path,
+    exposed_roots: tuple[Path, ...] = (),
+) -> None:
+    """Make a synthetic distribution inventory match effective import roots."""
+
+    base_prefix = Path(sys.base_prefix).resolve(strict=True)
+    stdlib_roots = tuple(training._python_stdlib_root_tokens())
+    initial_module_names = frozenset(training.sys.modules)
+    inherited_loaded_modules = training._runtime_loaded_modules
+    allowed_module_roots = (
+        *stdlib_roots,
+        (project_root / "src").resolve(strict=True),
+        install_root.resolve(strict=True),
+        *(path.resolve(strict=True) for path in exposed_roots),
+    )
+
+    def loaded_modules() -> tuple[tuple[str, object], ...]:
+        selected: list[tuple[str, object]] = []
+        for name, module in inherited_loaded_modules():
+            if name not in initial_module_names:
+                selected.append((name, module))
+                continue
+            spec = getattr(module, "__spec__", None)
+            origin = getattr(spec, "origin", None)
+            if spec is None or origin in {None, "built-in", "frozen"}:
+                locations = tuple(getattr(spec, "submodule_search_locations", ()) or ())
+                if not locations:
+                    selected.append((name, module))
+                    continue
+                paths = tuple(
+                    Path(location).resolve(strict=False) for location in locations
+                )
+            else:
+                paths = (Path(origin).resolve(strict=False),)
+            if all(
+                any(
+                    path == root or path.is_relative_to(root)
+                    for root in allowed_module_roots
+                )
+                for path in paths
+            ):
+                selected.append((name, module))
+        return tuple(selected)
+
+    monkeypatch.setattr(training, "_runtime_loaded_modules", loaded_modules)
+    stdlib_entries: list[str] = []
+    for raw_entry in _ORIGINAL_SYS_PATH:
+        candidate = Path(raw_entry or os.getcwd())
+        if not candidate.is_absolute():
+            candidate = Path(os.path.abspath(candidate))
+        missing_archives = training._python_missing_stdlib_archives(base_prefix)
+        if candidate in stdlib_roots or candidate in missing_archives:
+            stdlib_entries.append(candidate.as_posix())
+    monkeypatch.setattr(
+        training.sys,
+        "path",
+        [
+            (project_root / "src").as_posix(),
+            install_root.as_posix(),
+            *(path.as_posix() for path in exposed_roots),
+            *stdlib_entries,
+        ],
+    )
 
 
 @dataclass(frozen=True)
@@ -147,6 +220,11 @@ def governed_runtime(
         training.importlib.metadata,
         "distributions",
         lambda: (distribution,),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=project_root,
+        install_root=metadata_path.parent.parent,
     )
     return GovernedRuntime(
         project_root=project_root,
@@ -418,17 +496,22 @@ def test_prestarted_session_rejects_installed_package_payload_mutation(
     governed_runtime: GovernedRuntime,
 ) -> None:
     session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
-    package = session.execution_contract.runtime_packages[0]
+    package = next(
+        item
+        for item in session.execution_contract.runtime_packages
+        if item.name == "session-runtime"
+    )
     runtime_files = (
         governed_runtime.package_payload_path,
         governed_runtime.metadata_path,
         governed_runtime.entry_points_path,
+        governed_runtime.metadata_path.with_name("RECORD"),
     )
     original = governed_runtime.package_payload_path.read_bytes()
 
     assert package.payload_file_count == len(runtime_files)
-    assert package.payload_size_bytes == sum(
-        len(path.read_bytes()) for path in runtime_files
+    assert package.payload_size_bytes > sum(
+        len(path.read_bytes()) for path in runtime_files[:-1]
     )
     governed_runtime.package_payload_path.write_bytes(b"x" * len(original))
 
@@ -490,8 +573,27 @@ def test_execution_capture_rejects_wholly_unrecorded_top_level_import(
         start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
 
 
+def test_execution_capture_rejects_unowned_top_level_sourceless_bytecode(
+    governed_runtime: GovernedRuntime,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "rogue.py"
+    source.write_text('VALUE = "rogue"\n', encoding="utf-8")
+    pyc_path = governed_runtime.metadata_path.parent.parent / "rogue.pyc"
+    py_compile.compile(
+        source.as_posix(),
+        cfile=pyc_path.as_posix(),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+
+    with pytest.raises(RuntimeError, match="without distribution inventory ownership"):
+        training.capture_execution_snapshot()
+
+
 def test_virtualenv_distributionless_bootstrap_is_content_bound(
     governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_root = governed_runtime.metadata_path.parent.parent
     (install_root / "_virtualenv.pth").write_text(
@@ -500,6 +602,7 @@ def test_virtualenv_distributionless_bootstrap_is_content_bound(
     )
     bootstrap = install_root / "_virtualenv.py"
     bootstrap.write_text('VALUE = "generated bootstrap"\n', encoding="utf-8")
+    monkeypatch.delitem(training.sys.modules, "_virtualenv", raising=False)
 
     session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
 
@@ -576,6 +679,228 @@ def test_nested_runtime_directory_identity_detects_create_import_delete(
         recheck_evaluation_session(session)
 
 
+def test_nested_governed_source_identity_detects_create_import_delete(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    nested = governed_runtime.source_path.parent / "nested"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("", encoding="utf-8")
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    transient = nested / "transient.py"
+    transient.write_text('VALUE = "briefly imported"\n', encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "_transient_governed_module",
+        transient,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    transient.unlink()
+    shutil.rmtree(nested / "__pycache__", ignore_errors=True)
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_runtime_bytecode_must_be_semantically_equal_to_captured_source(
+    governed_runtime: GovernedRuntime,
+    tmp_path: Path,
+) -> None:
+    pyc_path = Path(
+        py_compile.compile(
+            governed_runtime.package_payload_path.as_posix(),
+            doraise=True,
+        )
+    )
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    recheck_evaluation_session(session)
+
+    replacement_source = tmp_path / "replacement.py"
+    replacement_source.write_text('VALUE = "unbound bytecode"\n', encoding="utf-8")
+    py_compile.compile(
+        replacement_source.as_posix(),
+        cfile=pyc_path.as_posix(),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+    with pytest.raises(ValueError, match="cached bytecode differs semantically"):
+        training.capture_execution_snapshot()
+
+
+def test_inactive_stale_bytecode_is_identity_tracked_but_not_executed(
+    governed_runtime: GovernedRuntime,
+    tmp_path: Path,
+) -> None:
+    replacement_source = tmp_path / "replacement.py"
+    replacement_source.write_text('VALUE = "inactive bytecode"\n', encoding="utf-8")
+    cache = governed_runtime.package_payload_path.parent / "__pycache__"
+    cache.mkdir()
+    pyc_path = cache / (f"__init__.{sys.implementation.cache_tag}.pyc")
+    py_compile.compile(
+        replacement_source.as_posix(),
+        cfile=pyc_path.as_posix(),
+        doraise=True,
+    )
+    raw = pyc_path.read_bytes()
+    pyc_path.write_bytes(raw[:8] + (b"\x00" * 8) + raw[16:])
+
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    recheck_evaluation_session(session)
+
+
+def test_runtime_bytecode_identity_is_rechecked_even_when_bytes_are_restored(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    pyc_path = Path(
+        py_compile.compile(
+            governed_runtime.package_payload_path.as_posix(),
+            doraise=True,
+        )
+    )
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+
+    _replace_with_original_bytes(pyc_path)
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_instrumented_bytecode_evidence_is_relocation_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def instrumented_distribution(prefix: str) -> tuple[PathDistribution, Path]:
+        install_root = tmp_path / prefix / "site-packages"
+        distribution, _metadata, _entry_points, package_payload = _write_distribution(
+            install_root,
+            name="session-runtime",
+            version="1.0.0",
+        )
+        replacement = tmp_path / f"{prefix}-rewritten.py"
+        replacement.write_text('VALUE = "instrumented"\n', encoding="utf-8")
+        cache = package_payload.parent / "__pycache__"
+        cache.mkdir()
+        pyc_path = cache / (f"__init__.{sys.implementation.cache_tag}-pytest-9.1.1.pyc")
+        py_compile.compile(
+            replacement.as_posix(),
+            cfile=pyc_path.as_posix(),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+        return distribution, install_root
+
+    first, first_root = instrumented_distribution("first-environment")
+    second, second_root = instrumented_distribution("second-environment")
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (first,),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=first_root,
+    )
+    first_evidence = training._capture_runtime_packages()
+
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (second,),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=second_root,
+    )
+
+    assert training._capture_runtime_packages() == first_evidence
+
+
+def test_record_hash_mutation_changes_evidence_but_launcher_hash_is_portable(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record_path = governed_runtime.metadata_path.with_name("RECORD")
+    distribution = PathDistribution(record_path.parent)
+    install_root = record_path.parent.parent
+    prefix = install_root.parent
+    launcher = prefix / "bin" / "session-runtime"
+    launcher.parent.mkdir()
+    launcher.write_text("machine-specific launcher\n", encoding="utf-8")
+    monkeypatch.setattr(training.sys, "prefix", prefix.as_posix())
+    original = record_path.read_text(encoding="utf-8")
+    external_row = "../bin/session-runtime,sha256=machineA,10\n"
+    record_path.write_text(original + external_row, encoding="utf-8")
+    first = training._capture_runtime_record(
+        record_path.parent,
+        distribution=distribution,
+        install_root=install_root,
+        context=training._RuntimeCaptureContext(),
+    )
+    assert first is not None
+
+    record_path.write_text(
+        original + "../bin/session-runtime,sha256=machineB,999\n",
+        encoding="utf-8",
+    )
+    relocated = training._capture_runtime_record(
+        record_path.parent,
+        distribution=distribution,
+        install_root=install_root,
+        context=training._RuntimeCaptureContext(),
+    )
+    assert relocated is not None
+    assert relocated.evidence == first.evidence
+
+    record_path.write_text(
+        original.replace(
+            "session_runtime/__init__.py,,",
+            "session_runtime/__init__.py,sha256=changed,7",
+        ),
+        encoding="utf-8",
+    )
+    mutated = training._capture_runtime_record(
+        record_path.parent,
+        distribution=distribution,
+        install_root=install_root,
+        context=training._RuntimeCaptureContext(),
+    )
+    assert mutated is not None
+    assert mutated.evidence != first.evidence
+
+
+def test_prestarted_session_rejects_record_only_mutation(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    record_path = governed_runtime.metadata_path.with_name("RECORD")
+    record_path.write_text(
+        record_path.read_text(encoding="utf-8").replace(
+            "session_runtime/__init__.py,,",
+            "session_runtime/__init__.py,sha256=changed,7",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_identity_first_recheck_does_not_rehash_runtime_payloads(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = training.capture_execution_snapshot()
+
+    def unexpected_hash(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("stable recheck must not hash payload bytes")
+
+    monkeypatch.setattr(training, "_capture_runtime_payload_file", unexpected_hash)
+
+    assert training.recheck_execution_snapshot(snapshot) is snapshot
+
+
 def test_external_console_launcher_record_is_portable_bookkeeping(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -598,20 +923,24 @@ def test_external_console_launcher_record_is_portable_bookkeeping(
     icon.write_bytes(b"icon bookkeeping")
     monkeypatch.setattr(training.sys, "prefix", prefix.as_posix())
     inventory = training._require_distribution_file_inventory(distribution)
-    before, _before_roots = training._capture_runtime_package_payloads(
-        distribution,
-        install_root=install_root.resolve(strict=True),
-        inventory=inventory,
+    before, _before_bytecode, _before_roots, _before_imports = (
+        training._capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root.resolve(strict=True),
+            inventory=inventory,
+        )
     )
-    with_launcher, _launcher_roots = training._capture_runtime_package_payloads(
-        distribution,
-        install_root=install_root.resolve(strict=True),
-        inventory=inventory
-        + (
-            PackagePath("../../../bin/session-runtime"),
-            PackagePath("../../../share/applications/session.desktop"),
-            PackagePath("../../../share/icons/session.png"),
-        ),
+    with_launcher, _launcher_bytecode, _launcher_roots, _launcher_imports = (
+        training._capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root.resolve(strict=True),
+            inventory=inventory
+            + (
+                PackagePath("../../../bin/session-runtime"),
+                PackagePath("../../../share/applications/session.desktop"),
+                PackagePath("../../../share/icons/session.png"),
+            ),
+        )
     )
 
     assert with_launcher == before
@@ -648,13 +977,13 @@ def test_external_runtime_archive_is_content_bound(
     inventory = training._require_distribution_file_inventory(distribution)
     inventory += (PackagePath("../../../share/py4j/runtime.jar"),)
 
-    before, _roots = training._capture_runtime_package_payloads(
+    before, _bytecode, _roots, _imports = training._capture_runtime_package_payloads(
         distribution,
         install_root=install_root.resolve(strict=True),
         inventory=inventory,
     )
     archive.write_bytes(b"changed archive")
-    after, _roots = training._capture_runtime_package_payloads(
+    after, _bytecode, _roots, _imports = training._capture_runtime_package_payloads(
         distribution,
         install_root=install_root.resolve(strict=True),
         inventory=inventory,
@@ -667,7 +996,7 @@ def test_editable_import_root_uses_portable_content_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def editable_distribution(prefix: str) -> PathDistribution:
+    def editable_distribution(prefix: str) -> tuple[PathDistribution, Path, Path]:
         source_root = tmp_path / f"{prefix}-checkout" / "src"
         package_root = source_root / "session_runtime"
         package_root.mkdir(parents=True)
@@ -683,7 +1012,14 @@ def test_editable_import_root_uses_portable_content_evidence(
             encoding="utf-8",
         )
         editable_path = install_root / "_editable_impl_session_runtime.pth"
-        editable_path.write_text(str(source_root) + "\n", encoding="utf-8")
+        editable_path.write_text(
+            (
+                f"# relocated checkout {prefix}\n\n{source_root}\n"
+                if prefix.startswith("first")
+                else f"\n{source_root}\n# relocated checkout {prefix}\n"
+            ),
+            encoding="utf-8",
+        )
         (distribution_root / "RECORD").write_text(
             (
                 "_editable_impl_session_runtime.pth,,\n"
@@ -692,10 +1028,20 @@ def test_editable_import_root_uses_portable_content_evidence(
             ),
             encoding="utf-8",
         )
-        return PathDistribution(distribution_root)
+        return PathDistribution(distribution_root), install_root, source_root
 
-    first = editable_distribution("first-environment")
-    second = editable_distribution("second-environment")
+    first, first_install_root, first_source_root = editable_distribution(
+        "first-environment"
+    )
+    second, second_install_root, second_source_root = editable_distribution(
+        "second-environment"
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=first_install_root,
+        exposed_roots=(first_source_root,),
+    )
     monkeypatch.setattr(
         training.importlib.metadata,
         "distributions",
@@ -707,6 +1053,12 @@ def test_editable_import_root_uses_portable_content_evidence(
         "distributions",
         lambda: (second,),
     )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=second_install_root,
+        exposed_roots=(second_source_root,),
+    )
 
     assert training._capture_runtime_packages() == first_evidence
 
@@ -717,7 +1069,7 @@ def test_setuptools_finder_editable_is_portable_and_binds_mapped_sources(
 ) -> None:
     def finder_distribution(
         prefix: str,
-    ) -> tuple[PathDistribution, Path, Path, Path]:
+    ) -> tuple[PathDistribution, Path, Path, Path, Path]:
         checkout = tmp_path / f"{prefix}-checkout"
         package_root = checkout / "src" / "session_runtime"
         package_root.mkdir(parents=True)
@@ -754,18 +1106,13 @@ def test_setuptools_finder_editable_is_portable_and_binds_mapped_sources(
         )
         finder_path = install_root / f"{finder_name}.py"
         finder_path.write_text(
-            (
-                "from pathlib import Path\n"
-                "MAPPING: dict[str, str] = "
-                f"{{'session_runtime': {str(package_root)!r}, "
-                f"'renamed': {str(module_stem)!r}}}\n"
-                "NAMESPACES: dict[str, list[str]] = "
-                f"{{'session_namespace': [{str(namespace_root)!r}]}}\n"
-                f"PATH_PLACEHOLDER = {('__editable__.session_runtime-1.0.0.finder')!r} "
-                '+ ".__path_hook__"\n'
-                "class _EditableFinder:\n    pass\n"
-                "class _EditableNamespaceFinder:\n    pass\n"
-                "def install():\n    return None\n"
+            training._SETUPTOOLS_FINDER_TEMPLATE.format(
+                name="__editable__.session_runtime-1.0.0.finder",
+                mapping={
+                    "session_runtime": package_root.as_posix(),
+                    "renamed": module_stem.as_posix(),
+                },
+                namespaces={"session_namespace": [namespace_root.as_posix()]},
             ),
             encoding="utf-8",
         )
@@ -780,24 +1127,78 @@ def test_setuptools_finder_editable_is_portable_and_binds_mapped_sources(
         )
         return (
             PathDistribution(distribution_root),
+            install_root,
             package_payload,
             module_path,
             namespace_root / "feature.py",
         )
 
-    first, first_package, first_module, first_namespace = finder_distribution(
-        "first-environment"
+    first, first_install_root, first_package, first_module, first_namespace = (
+        finder_distribution("first-environment")
     )
-    second, _second_package, _second_module, _second_namespace = finder_distribution(
-        "second-environment"
+    second, second_install_root, _second_package, _second_module, _second_namespace = (
+        finder_distribution("second-environment")
     )
+    finder_name = "__editable___session_runtime_1_0_0_finder"
+    original_meta_path = list(training.sys.meta_path)
+    original_path_hooks = list(training.sys.path_hooks)
+
+    def activate(install_root: Path) -> None:
+        _activate_test_runtime(
+            monkeypatch,
+            project_root=training.PROJECT_ROOT,
+            install_root=install_root,
+        )
+        monkeypatch.setattr(training.sys, "meta_path", list(original_meta_path))
+        monkeypatch.setattr(training.sys, "path_hooks", list(original_path_hooks))
+        finder_path = install_root / f"{finder_name}.py"
+        spec = importlib.util.spec_from_file_location(finder_name, finder_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(training.sys.modules, finder_name, module)
+        spec.loader.exec_module(module)
+        module.install()
+        assert (
+            "__editable__.session_runtime-1.0.0.finder.__path_hook__"
+            in training.sys.path
+        )
+
+    activate(first_install_root)
     monkeypatch.setattr(training.importlib.metadata, "distributions", lambda: (first,))
     first_evidence = training._capture_runtime_packages()
+    first_inventory = training._runtime_distribution_inventory()
+    import_state = next(
+        item.import_environment
+        for item in first_inventory
+        if item.import_environment is not None
+    )
+    assert any(finder_name in item for item in import_state.meta_path.portable)
+    monkeypatch.setattr(
+        training.sys,
+        "meta_path",
+        [
+            item
+            for item in training.sys.meta_path
+            if finder_name
+            not in training._portable_import_hook(
+                item,
+                label="test finder",
+            )
+        ],
+    )
+    with pytest.raises(RuntimeError, match="sys.meta_path import precedence changed"):
+        training._require_unchanged_import_hooks(
+            import_state.meta_path,
+            tuple(training.sys.meta_path),
+            label="sys.meta_path",
+        )
     monkeypatch.setattr(training.importlib.metadata, "distributions", lambda: (second,))
+    activate(second_install_root)
 
     assert training._capture_runtime_packages() == first_evidence
 
     monkeypatch.setattr(training.importlib.metadata, "distributions", lambda: (first,))
+    activate(first_install_root)
     first_package.write_text('VALUE = "mutated"\n', encoding="utf-8")
     assert training._capture_runtime_packages() != first_evidence
     first_package.write_text('VALUE = "portable"\n', encoding="utf-8")
@@ -815,6 +1216,21 @@ def test_setuptools_finder_editable_is_portable_and_binds_mapped_sources(
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="MAPPING is not literal"):
+        training._capture_runtime_packages()
+
+    finder_path.write_text(
+        training._SETUPTOOLS_FINDER_TEMPLATE.format(
+            name="__editable__.session_runtime-1.0.0.finder",
+            mapping={
+                "session_runtime": first_package.parent.as_posix(),
+                "renamed": first_module.with_suffix("").as_posix(),
+            },
+            namespaces={"session_namespace": [first_namespace.parent.as_posix()]},
+        )
+        + "\nEXTERNAL_BEHAVIOR = __import__('os').getcwd()\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="supported locked template"):
         training._capture_runtime_packages()
 
 
@@ -864,6 +1280,457 @@ def test_setuptools_strict_editable_tree_is_explicitly_unsupported(
         )
 
 
+def test_runtime_capture_rejects_lexical_ancestor_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    physical_root = tmp_path / "physical" / "site-packages"
+    distribution, _metadata, _entry_points, _payload = _write_distribution(
+        physical_root,
+        name="session-runtime",
+        version="1.0.0",
+    )
+    linked_root = tmp_path / "linked-site-packages"
+    linked_root.symlink_to(physical_root, target_is_directory=True)
+    linked_distribution = PathDistribution(linked_root / Path(distribution._path).name)
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (linked_distribution,),
+    )
+
+    with pytest.raises(ValueError, match="lexical symbolic-link component"):
+        training._capture_runtime_packages()
+
+
+def test_runtime_capture_rejects_symlink_hidden_before_parent_traversal(
+    tmp_path: Path,
+) -> None:
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(physical, target_is_directory=True)
+    traversed = linked / ".." / physical.name
+
+    with pytest.raises(ValueError, match="lexical symbolic-link component"):
+        training._require_no_lexical_symlink_components(
+            traversed,
+            label="test path",
+        )
+
+
+def test_active_import_precedence_is_portable_and_order_sensitive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, _metadata, _entry_points, _payload = _write_distribution(
+        tmp_path / "first" / "site-packages",
+        name="first-runtime",
+        version="1.0.0",
+    )
+    second, _metadata, _entry_points, _payload = _write_distribution(
+        tmp_path / "second" / "site-packages",
+        name="second-runtime",
+        version="1.0.0",
+    )
+    first_root = Path(first.locate_file("")).resolve(strict=True)
+    second_root = Path(second.locate_file("")).resolve(strict=True)
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (first, second),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=first_root,
+        exposed_roots=(second_root,),
+    )
+    before = training._capture_runtime_packages()
+
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=second_root,
+        exposed_roots=(first_root,),
+    )
+    after = training._capture_runtime_packages()
+
+    assert tuple(
+        item for item in before if item.name != "python-import-environment"
+    ) == (tuple(item for item in after if item.name != "python-import-environment"))
+    assert before != after
+
+
+def test_active_import_roots_reject_overlapping_owned_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, _metadata, _entry_points, _payload = _write_distribution(
+        tmp_path / "first" / "site-packages",
+        name="overlap-runtime",
+        version="1.0.0",
+    )
+    second, _metadata, _entry_points, _payload = _write_distribution(
+        tmp_path / "second" / "site-packages",
+        name="overlap-runtime",
+        version="2.0.0",
+    )
+    first_root = Path(first.locate_file("")).resolve(strict=True)
+    second_root = Path(second.locate_file("")).resolve(strict=True)
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (first, second),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=first_root,
+        exposed_roots=(second_root,),
+    )
+
+    with pytest.raises(RuntimeError, match="overlapping origins"):
+        training._capture_runtime_packages()
+
+
+def test_identical_evidence_in_distinct_roots_is_still_an_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, _metadata, _entry_points, _payload = _write_distribution(
+        tmp_path / "first" / "site-packages",
+        name="same-runtime",
+        version="1.0.0",
+    )
+    second, _metadata, _entry_points, _payload = _write_distribution(
+        tmp_path / "second" / "site-packages",
+        name="same-runtime",
+        version="1.0.0",
+    )
+    first_root = Path(first.locate_file("")).resolve(strict=True)
+    second_root = Path(second.locate_file("")).resolve(strict=True)
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (first, second),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=first_root,
+        exposed_roots=(second_root,),
+    )
+
+    with pytest.raises(RuntimeError, match="overlapping origins"):
+        training._capture_runtime_packages()
+
+
+def test_active_import_search_rejects_unmatched_root(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unmatched = tmp_path / "unmatched"
+    unmatched.mkdir()
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=governed_runtime.project_root,
+        install_root=governed_runtime.metadata_path.parent.parent,
+        exposed_roots=(unmatched,),
+    )
+
+    with pytest.raises(ValueError, match="not governed by evidence"):
+        training.capture_execution_snapshot()
+
+
+def test_active_import_search_rejects_arbitrary_project_subdirectory(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unmatched = governed_runtime.project_root / "helpers"
+    unmatched.mkdir()
+    (unmatched / "untracked.py").write_text('VALUE = "untracked"\n', encoding="utf-8")
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=governed_runtime.project_root,
+        install_root=governed_runtime.metadata_path.parent.parent,
+        exposed_roots=(unmatched,),
+    )
+
+    with pytest.raises(ValueError, match="not governed by evidence"):
+        training.capture_execution_snapshot()
+
+
+def test_active_import_search_rejects_arbitrary_base_prefix_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        training.sys,
+        "path",
+        [Path(training.sys.base_prefix).resolve(strict=True).as_posix()],
+    )
+
+    with pytest.raises(ValueError, match="not governed by evidence"):
+        training._active_import_search_state(
+            training._python_stdlib_root_tokens(),
+            allowed_namespace_placeholders=frozenset(),
+        )
+
+
+def test_active_project_entry_module_is_content_and_identity_bound(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = governed_runtime.project_root / "project_helper.py"
+    helper.write_text('VALUE = "captured"\n', encoding="utf-8")
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=governed_runtime.project_root,
+        install_root=governed_runtime.metadata_path.parent.parent,
+        exposed_roots=(governed_runtime.project_root,),
+    )
+    training.sys.modules.pop("project_helper", None)
+    try:
+        module = importlib.import_module("project_helper")
+        assert module.VALUE == "captured"
+        snapshot = training.capture_execution_snapshot()
+        helper.write_text('VALUE = "mutated"\n', encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="changed during the operation"):
+            training.recheck_execution_snapshot(snapshot)
+    finally:
+        training.sys.modules.pop("project_helper", None)
+
+
+def test_loaded_unbound_module_from_governed_search_root_is_rejected(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = training.capture_execution_snapshot()
+    helper = governed_runtime.project_root / "src" / "unbound_helper.py"
+    helper.write_text('VALUE = "unbound"\n', encoding="utf-8")
+    module = ModuleType("unbound_helper")
+    module.__spec__ = SimpleNamespace(
+        origin=helper.as_posix(),
+        submodule_search_locations=None,
+    )
+    monkeypatch.setitem(training.sys.modules, "unbound_helper", module)
+
+    with pytest.raises(RuntimeError, match="not bound to captured import evidence"):
+        training._validate_loaded_module_origins(snapshot._import_environment)
+
+
+def test_loaded_unbound_module_outside_every_captured_root_is_rejected(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_helper.py"
+    outside.write_text('VALUE = "outside"\n', encoding="utf-8")
+    module = ModuleType("outside_helper")
+    module.__spec__ = SimpleNamespace(
+        origin=outside.as_posix(),
+        submodule_search_locations=None,
+    )
+    monkeypatch.setitem(training.sys.modules, "outside_helper", module)
+
+    with pytest.raises(RuntimeError, match="outside every captured root"):
+        training.capture_execution_snapshot()
+
+
+def test_loaded_originless_module_is_rejected(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("originless_helper")
+    module.__spec__ = SimpleNamespace(
+        origin=None,
+        submodule_search_locations=None,
+    )
+    monkeypatch.setitem(training.sys.modules, "originless_helper", module)
+
+    with pytest.raises(RuntimeError, match="lacks a resolvable origin"):
+        training.capture_execution_snapshot()
+
+
+def test_loaded_spec_less_dynamic_module_is_rejected(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("spec_less_helper")
+    module.__spec__ = None
+    module.VALUE = "already executed"  # type: ignore[attr-defined]
+    monkeypatch.setitem(training.sys.modules, "spec_less_helper", module)
+
+    with pytest.raises(RuntimeError, match="lacks origin metadata"):
+        training.capture_execution_snapshot()
+
+
+def test_protected_originless_submodule_cannot_forge_loader_provenance(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forged_loader_type = type(
+        "ForgedLoader",
+        (),
+        {"__module__": "session_runtime.loader"},
+    )
+    module = ModuleType("session_runtime.unbound_runtime")
+    module.__spec__ = SimpleNamespace(
+        origin=None,
+        loader=forged_loader_type(),
+        submodule_search_locations=None,
+    )
+    monkeypatch.setitem(
+        training.sys.modules,
+        "session_runtime.unbound_runtime",
+        module,
+    )
+
+    with pytest.raises(RuntimeError, match="lacks a resolvable origin"):
+        training.capture_execution_snapshot()
+
+
+def test_capture_rejects_source_changed_after_module_execution(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    source = governed_runtime.package_payload_path
+    source.write_text('VALUE = "executed"\n', encoding="utf-8")
+    training.sys.modules.pop("session_runtime", None)
+    try:
+        module = importlib.import_module("session_runtime")
+        assert module.VALUE == "executed"
+        source.write_text('VALUE = "replacement"\n', encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="does not match captured source bytes"):
+            training.capture_execution_snapshot()
+    finally:
+        training.sys.modules.pop("session_runtime", None)
+
+
+def test_capture_rejects_source_changed_before_provenance_audit(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = governed_runtime.package_payload_path
+    source.write_text('VALUE = "loaded-before-audit"\n', encoding="utf-8")
+    training.sys.modules.pop("session_runtime", None)
+    try:
+        module = importlib.import_module("session_runtime")
+        assert module.VALUE == "loaded-before-audit"
+        resolved = source.resolve(strict=True)
+        monkeypatch.delitem(
+            training._RUNTIME_EXECUTED_MODULE_CODE,
+            resolved,
+            raising=False,
+        )
+        source.write_text('VALUE = "captured-after-audit"\n', encoding="utf-8")
+        monkeypatch.setitem(
+            training._RUNTIME_INITIAL_MODULE_FILES,
+            ("session_runtime", resolved),
+            training._capture_physical_file_identity(
+                resolved,
+                label="synthetic pre-audit module",
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="does not match captured source bytes"):
+            training.capture_execution_snapshot()
+    finally:
+        training.sys.modules.pop("session_runtime", None)
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    ("remove", "replace_restore", "new_replace_restore"),
+)
+def test_recheck_rejects_transient_governed_module_execution(
+    governed_runtime: GovernedRuntime,
+    lifecycle: str,
+) -> None:
+    helper = governed_runtime.project_root / "src" / "transient_helper.py"
+    helper.write_text('VALUE = "captured"\n', encoding="utf-8")
+    training.sys.modules.pop("transient_helper", None)
+    if lifecycle == "new_replace_restore":
+        py_compile.compile(helper.as_posix(), doraise=True)
+        baseline = None
+    else:
+        baseline = importlib.import_module("transient_helper")
+        training.sys.modules.pop("transient_helper", None)
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    replacement = importlib.import_module("transient_helper")
+    assert replacement.VALUE == "captured"
+    if lifecycle == "remove":
+        training.sys.modules.pop("transient_helper", None)
+    elif lifecycle == "new_replace_restore":
+        training.sys.modules.pop("transient_helper", None)
+        baseline = importlib.import_module("transient_helper")
+        training.sys.modules["transient_helper"] = replacement
+    else:
+        assert baseline is not None
+        training.sys.modules["transient_helper"] = baseline
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+    training.sys.modules.pop("transient_helper", None)
+
+
+@pytest.mark.parametrize("hook_name", ("meta_path", "path_hooks"))
+def test_recheck_binds_import_hook_activation_and_order(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    hook_name: str,
+) -> None:
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    current = list(getattr(training.sys, hook_name))
+    assert len(current) > 1
+    monkeypatch.setattr(training.sys, hook_name, list(reversed(current)))
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+@pytest.mark.parametrize("drift", ("mutate", "delete"))
+def test_preexisting_governed_sibling_remains_bound_after_module_removal(
+    governed_runtime: GovernedRuntime,
+    drift: str,
+) -> None:
+    helper = governed_runtime.project_root / "src" / "sibling_helper.py"
+    helper.write_text('VALUE = "captured"\n', encoding="utf-8")
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    module = importlib.import_module("sibling_helper")
+    assert module.VALUE == "captured"
+    training.sys.modules.pop("sibling_helper", None)
+    if drift == "mutate":
+        helper.write_text('VALUE = "mutated"\n', encoding="utf-8")
+    else:
+        helper.unlink()
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_loaded_module_origin_must_match_captured_import_root(
+    governed_runtime: GovernedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    shadow = tmp_path / "shadow" / "session_runtime.py"
+    shadow.parent.mkdir()
+    shadow.write_text('VALUE = "shadow"\n', encoding="utf-8")
+    module = ModuleType("session_runtime")
+    module.__spec__ = SimpleNamespace(
+        origin=shadow.as_posix(),
+        submodule_search_locations=None,
+    )
+    monkeypatch.setitem(training.sys.modules, "session_runtime", module)
+
+    with pytest.raises(RuntimeError, match="loaded module origin"):
+        training.capture_execution_snapshot()
+
+
 def test_runtime_capture_deduplicates_shared_namespace_tree_and_file_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -909,6 +1776,11 @@ def test_runtime_capture_deduplicates_shared_namespace_tree_and_file_reads(
         training.importlib.metadata,
         "distributions",
         lambda: (first, second),
+    )
+    _activate_test_runtime(
+        monkeypatch,
+        project_root=training.PROJECT_ROOT,
+        install_root=install_root,
     )
 
     training._capture_runtime_packages()
@@ -987,6 +1859,7 @@ def test_session_preserves_distinct_vendored_versions_with_the_same_name(
     assert tuple(
         (package.name, package.version)
         for package in session.execution_contract.runtime_packages
+        if package.name != "python-import-environment"
     ) == (
         ("session-runtime", "0.9.0"),
         ("session-runtime", "1.0.0"),
