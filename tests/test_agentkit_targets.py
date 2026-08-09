@@ -133,6 +133,36 @@ def test_local_callable_single_argument(tmp_path):
     assert predict(prompt="hi") == "echo hi"
 
 
+def test_local_callable_single_argument_rejects_extra_input_fields(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(question):\n    return f'echo {question}'\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    with pytest.raises(TargetContractError) as excinfo:
+        predict(question="hello", context="required context")
+
+    message = str(excinfo.value)
+    assert "context" in message
+    assert "question" in message
+
+
+def test_local_callable_single_argument_with_var_keyword_accepts_extra_fields(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(question, **context):\n"
+        "    return f\"{question}:{context['tone']}\"\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    assert predict(question="hello", tone="formal") == "hello:formal"
+
+
 @pytest.mark.parametrize(
     "source",
     (

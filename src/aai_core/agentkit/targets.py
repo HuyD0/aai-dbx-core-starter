@@ -557,21 +557,23 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
             if single_argument:
                 parameter = parameters[0]
                 name = parameter.name
-                if name in inputs:
-                    value = inputs[name]
-                elif len(inputs) == 1:
-                    value = next(iter(inputs.values()))
-                else:
-                    raise TargetContractError(
-                        f"{target.ref!r} takes one argument {name!r} but the "
-                        f"dataset inputs have keys {sorted(inputs)}"
+                if len(inputs) == 1:
+                    value = (
+                        inputs[name] if name in inputs else next(iter(inputs.values()))
                     )
-                if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
-                    arguments: tuple[Any, ...] = ()
-                    keywords = {name: value}
+                    if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+                        arguments: tuple[Any, ...] = ()
+                        keywords = {name: value}
+                    else:
+                        arguments = (value,)
+                        keywords = {}
                 else:
-                    arguments = (value,)
-                    keywords = {}
+                    # Do not discard row fields merely because the target's
+                    # declared argument is present. Binding the complete
+                    # mapping makes an incomplete agent contract fail before
+                    # the target or any judges are invoked.
+                    arguments = ()
+                    keywords = dict(inputs)
             else:
                 arguments = ()
                 keywords = dict(inputs)
