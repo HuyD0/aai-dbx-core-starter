@@ -137,6 +137,15 @@ def test_fetch_results_normalizes_malformed_artifacts(tmp_path, artifact_kind):
         fetch_results("run-1", mlflow_module=fake)
 
 
+def test_fetch_results_normalizes_an_embedded_nul_artifact_path():
+    fake = SimpleNamespace(
+        artifacts=SimpleNamespace(download_artifacts=lambda **kwargs: "bad\0path")
+    )
+
+    with pytest.raises(ConfigError, match="could not read results record"):
+        fetch_results("run-1", mlflow_module=fake)
+
+
 def test_read_results_normalizes_io_errors(tmp_path, monkeypatch):
     path = tmp_path / "results.json"
     path.write_text(_record("run-1").model_dump_json(), encoding="utf-8")
