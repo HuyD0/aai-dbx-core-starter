@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 
@@ -22,6 +23,10 @@ def is_missing_scalar(value: Any) -> bool:
         return False
     if isinstance(value, Sequence):
         return False
+    if isinstance(value, Decimal):
+        # Decimal signaling NaNs raise InvalidOperation when compared. The
+        # explicit predicate handles both quiet and signaling NaNs safely.
+        return value.is_nan()
     shape = getattr(value, "shape", None)
     if shape not in (None, ()):
         return False

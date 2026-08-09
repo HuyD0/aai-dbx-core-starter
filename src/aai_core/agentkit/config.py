@@ -397,6 +397,14 @@ class ProjectContext:
 
 
 def _validate_scorer_references(config: AgentkitConfig) -> None:
+    contradictory = sorted(set(config.scorers.add) & set(config.scorers.remove))
+    if contradictory:
+        raise ConfigError(
+            "the same scorer cannot appear in both scorers.add and "
+            "scorers.remove: " + ", ".join(contradictory),
+            remediation="Keep each scorer in only one selection list.",
+        )
+
     from aai_core.agentkit.catalog import CATALOG
 
     known = {spec.name for spec in CATALOG}

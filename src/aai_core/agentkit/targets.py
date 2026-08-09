@@ -143,7 +143,7 @@ def preflight_target(
     so users are not asked to approve a run whose local target cannot work.
     """
 
-    if target.kind is TargetKind.LOCAL_CALLABLE:
+    if target.kind is TargetKind.LOCAL_CALLABLE and require_invocation:
         if target.path is not None:
             _preflight_local_file(target)
         else:
@@ -164,49 +164,29 @@ def _preflight_local_file(target: Target) -> None:
         ) from error
 
     attribute = target.attribute or ""
-    literal_non_callable = False
-    async_declared = False
-    dynamic_binding = False
+    binding = "absent"
+    dynamic_attributes = False
     for node in module.body:
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == attribute:
-            async_declared = True
+        outcome = _top_level_binding(node, attribute)
+        if outcome is not None:
+            binding = outcome
             continue
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-            if node.name == attribute:
-                return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name == "__getattr__":
-                dynamic_binding = True
+                dynamic_attributes = True
+            if _definition_has_import_time_effect(node):
+                binding = "unknown"
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(_binds_name(item, attribute) for item in targets):
-                value = node.value
-                if value is None or isinstance(
-                    value,
-                    (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
-                ):
-                    literal_non_callable = True
-                else:
-                    # A lambda, call, name, attribute, or subscript may
-                    # resolve to a callable. Runtime construction remains
-                    # the authoritative check.
-                    return
             if node.value is not None and any(
                 isinstance(item, (ast.Call, ast.NamedExpr))
                 for item in ast.walk(node.value)
             ):
-                dynamic_binding = True
+                binding = "unknown"
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.ImportFrom) and any(
                 alias.name == "*" for alias in node.names
             ):
-                dynamic_binding = True
-            if any(
-                (alias.asname or alias.name.rpartition(".")[2]) == attribute
-                for alias in node.names
-            ):
-                # Imported objects cannot be classified without executing
-                # their module, so the runtime constructor remains the check.
-                return
+                binding = "unknown"
         elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             # Module docstring or another inert literal.
             continue
@@ -216,18 +196,22 @@ def _preflight_local_file(target: Target) -> None:
             # Conditional definitions, try/except imports, exec-like calls,
             # module __getattr__, and other dynamic module code make absence
             # unknowable without executing application code.
-            dynamic_binding = True
+            binding = "unknown"
 
-    if dynamic_binding:
+    if binding in {"callable", "unknown"}:
         return
-    if async_declared:
+    if binding == "async":
         raise TargetContractError(
             f"{target.ref!r}: {attribute!r} is async, but AgentKit's "
             "local target adapter is synchronous",
             remediation="Expose a synchronous wrapper that returns the final answer.",
         )
+    if binding == "absent" and dynamic_attributes:
+        return
     detail = (
-        "is declared but is not callable" if literal_non_callable else "is not declared"
+        "is declared but is not callable"
+        if binding == "non-callable"
+        else "is not declared"
     )
     raise TargetResolutionError(
         f"{target.ref!r}: {attribute!r} {detail} in {target.path}"
@@ -236,25 +220,37 @@ def _preflight_local_file(target: Target) -> None:
 
 def _preflight_local_module(target: Target) -> None:
     module_name = target.ref.rpartition(":")[0]
-    search_path = None
-    specification = None
-    qualified = ""
     parts = module_name.split(".")
-    for index, part in enumerate(parts):
-        qualified = f"{qualified}.{part}" if qualified else part
-        specification = importlib.machinery.PathFinder.find_spec(qualified, search_path)
-        if specification is None and index == 0:
-            specification = importlib.util.find_spec(qualified)
-        if specification is None:
-            raise TargetResolutionError(
-                f"could not find local agent module {module_name!r}"
-            )
+    specification = importlib.machinery.PathFinder.find_spec(parts[0])
+    if specification is None:
+        try:
+            specification = importlib.util.find_spec(parts[0])
+        except (AttributeError, ImportError, ModuleNotFoundError, ValueError):
+            # A custom finder or a pre-populated sys.modules entry can make
+            # the answer unknowable without importing application code.
+            return
+    if specification is None:
+        raise TargetResolutionError(
+            f"could not find local agent module {module_name!r}"
+        )
+
+    qualified = parts[0]
+    for part in parts[1:]:
         locations = specification.submodule_search_locations
-        if index < len(parts) - 1 and locations is None:
-            raise TargetResolutionError(
-                f"local agent module {qualified!r} is not a package"
+        if locations is None:
+            return
+        qualified = f"{qualified}.{part}"
+        try:
+            specification = importlib.machinery.PathFinder.find_spec(
+                qualified, list(locations)
             )
-        search_path = list(locations) if locations is not None else None
+        except (AttributeError, ImportError, ModuleNotFoundError, ValueError):
+            return
+        if specification is None:
+            # Importing a package can extend or replace __path__ (for example
+            # via pkgutil.extend_path), so a miss in its static location is
+            # not proof that the nested module cannot be imported.
+            return
     origin = getattr(specification, "origin", None)
     if isinstance(origin, str) and origin.endswith(".py"):
         _preflight_local_file(
@@ -266,6 +262,141 @@ def _preflight_local_module(target: Target) -> None:
                 attribute=target.attribute,
             )
         )
+
+
+def _top_level_binding(node: ast.stmt, name: str) -> str | None:
+    """Classify a statement's final direct binding without executing it.
+
+    Only outcomes Python makes syntactically certain are rejected. Decorators,
+    imports, destructuring, calls, and control flow stay unknown and are left
+    to the runtime adapter.
+    """
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if node.name != name:
+            return None
+        if node.decorator_list:
+            return "unknown"
+        return "async" if isinstance(node, ast.AsyncFunctionDef) else "callable"
+    if isinstance(node, ast.Assign):
+        if any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            return _assigned_value_kind(node.value)
+        if any(_binds_name(target, name) for target in node.targets):
+            return "unknown"
+        return None
+    if isinstance(node, ast.AnnAssign):
+        if not isinstance(node.target, ast.Name) or node.target.id != name:
+            return None
+        # A bare annotation does not bind the name at runtime.
+        return None if node.value is None else _assigned_value_kind(node.value)
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if any(
+            (alias.asname or alias.name.rpartition(".")[2]) == name
+            for alias in node.names
+        ):
+            return "unknown"
+        return None
+    if isinstance(node, ast.AugAssign) and _binds_name(node.target, name):
+        return "unknown"
+    if isinstance(node, ast.Delete) and any(
+        _binds_name(target, name) for target in node.targets
+    ):
+        return "absent"
+    return None
+
+
+def _assigned_value_kind(value: ast.expr) -> str:
+    if isinstance(value, ast.Lambda):
+        return "callable"
+    if isinstance(value, (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple)):
+        return "non-callable"
+    return "unknown"
+
+
+def _definition_has_import_time_effect(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+) -> bool:
+    """Ignore dormant function bodies while inspecting import-time code."""
+
+    # Applying even a bare-name decorator executes arbitrary code.
+    if node.decorator_list:
+        return True
+    type_parameters = tuple(getattr(node, "type_params", ()))
+    if isinstance(node, ast.ClassDef):
+        # Resolving a base/metaclass and constructing a subclass can invoke
+        # user code. The class body itself also executes during import.
+        if node.bases or node.keywords:
+            return True
+        if any(_expression_has_effect(item) for item in type_parameters):
+            return True
+        return any(_class_statement_has_import_time_effect(item) for item in node.body)
+
+    expressions: list[ast.AST] = [*node.args.defaults, *type_parameters]
+    expressions.extend(item for item in node.args.kw_defaults if item is not None)
+    expressions.extend(
+        argument.annotation
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        )
+        if argument.annotation is not None
+    )
+    for argument in (node.args.vararg, node.args.kwarg):
+        if argument is not None and argument.annotation is not None:
+            expressions.append(argument.annotation)
+    if node.returns is not None:
+        expressions.append(node.returns)
+    return any(_expression_has_effect(item) for item in expressions)
+
+
+def _class_statement_has_import_time_effect(node: ast.stmt) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return _definition_has_import_time_effect(node)
+    if isinstance(node, (ast.Pass, ast.Import, ast.ImportFrom)):
+        return False
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+        return False
+    if isinstance(node, ast.Assign):
+        simple_targets = all(isinstance(target, ast.Name) for target in node.targets)
+        return not simple_targets or _expression_has_effect(node.value)
+    if isinstance(node, ast.AnnAssign):
+        if not isinstance(node.target, ast.Name):
+            return True
+        return _expression_has_effect(node.annotation) or (
+            node.value is not None and _expression_has_effect(node.value)
+        )
+    # Control flow, global writes, comprehensions used as statements, and
+    # exec-like constructs can affect the module namespace when the class
+    # body runs. Runtime loading remains authoritative for those shapes.
+    return True
+
+
+def _expression_has_effect(node: ast.AST) -> bool:
+    """Find executed calls/bindings without descending into lambda bodies."""
+
+    class EffectVisitor(ast.NodeVisitor):
+        found = False
+
+        def visit_Call(self, call: ast.Call) -> None:  # noqa: N802
+            self.found = True
+
+        def visit_NamedExpr(self, expression: ast.NamedExpr) -> None:  # noqa: N802
+            self.found = True
+
+        def visit_Lambda(self, expression: ast.Lambda) -> None:  # noqa: N802
+            for default in expression.args.defaults:
+                self.visit(default)
+            for default in expression.args.kw_defaults:
+                if default is not None:
+                    self.visit(default)
+
+    visitor = EffectVisitor()
+    visitor.visit(node)
+    return visitor.found
 
 
 def _binds_name(target: ast.AST, name: str) -> bool:
@@ -516,11 +647,11 @@ def _http_call(
             raise TargetInvocationError(
                 f"HTTP target returned {error.code} for {target.normalized}",
                 remediation=_AUTH_REMEDIATIONS.get(error.code),
-            ) from error
-        except urllib.error.URLError as error:
+            ) from None
+        except urllib.error.URLError:
             raise TargetInvocationError(
-                f"could not reach {target.normalized}: {error.reason}"
-            ) from error
+                f"could not reach {target.normalized}"
+            ) from None
         try:
             document = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -634,25 +765,60 @@ class _CredentialSafeRedirects(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is None or not req.get_header("Authorization"):
-            return redirected
-        if _origin(req.full_url) != _origin(redirected.full_url):
+        source = _redirect_origin(req.full_url)
+        destination = _redirect_origin(newurl)
+        credentialed = bool(req.get_header("Authorization"))
+        if credentialed and (
+            source is None
+            or destination is None
+            or source != destination
+            or _url_has_userinfo(newurl)
+        ):
+            destination_text = _format_origin(destination)
             raise TargetInvocationError(
-                f"{req.full_url} redirected to a different origin "
-                f"({_origin(redirected.full_url)}) while carrying the token "
-                f"from request_mapping.auth_env",
+                "credentialed HTTP target redirected to a different origin"
+                f"{destination_text}; redirect refused",
                 remediation=(
                     "Point `agent:` at the endpoint that answers directly, or "
                     "drop request_mapping.auth_env if it needs no token."
                 ),
             )
-        return redirected
+        try:
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+        except (TypeError, ValueError, urllib.error.HTTPError):
+            raise TargetInvocationError(
+                "HTTP target redirect could not be followed"
+                f"{_format_origin(destination)}"
+            ) from None
 
 
-def _origin(url: str) -> str:
-    parts = urllib.parse.urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}".lower()
+def _redirect_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        scheme = parts.scheme.lower()
+        hostname = parts.hostname
+        if scheme not in {"http", "https"} or not hostname:
+            return None
+        port = parts.port or (443 if scheme == "https" else 80)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return scheme, hostname.lower(), port
+
+
+def _format_origin(origin: tuple[str, str, int] | None) -> str:
+    if origin is None:
+        return ""
+    scheme, hostname, port = origin
+    safe_hostname = f"[{hostname}]" if ":" in hostname else hostname
+    return f" ({scheme}://{safe_hostname}:{port})"
+
+
+def _url_has_userinfo(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return parts.username is not None or parts.password is not None
+    except (AttributeError, TypeError, ValueError):
+        return True
 
 
 _OPENER = urllib.request.build_opener(_CredentialSafeRedirects)

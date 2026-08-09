@@ -206,6 +206,81 @@ def test_local_callable_preflight_accepts_a_conditional_definition(tmp_path):
     assert predict(question="hello") == "hello"
 
 
+def test_non_invoking_preflight_skips_local_callable_contract_checks(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "async def respond(question):\n    return question\n"
+    )
+    file_target = resolve_target("agent.py:respond", root=tmp_path)
+    module_target = resolve_target(
+        "definitely_missing_aai_recorded_target:respond", root=tmp_path
+    )
+
+    preflight_target(file_target, project=_project(tmp_path), require_invocation=False)
+    preflight_target(
+        module_target, project=_project(tmp_path), require_invocation=False
+    )
+
+
+def test_local_callable_preflight_uses_the_final_top_level_binding(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(question):\n" "    return question\n" "respond = None\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    with pytest.raises(TargetResolutionError, match="not callable"):
+        preflight_target(target, project=_project(tmp_path))
+
+    (tmp_path / "agent.py").write_text(
+        "def respond(question):\n"
+        "    return question\n"
+        "async def respond(question):\n"
+        "    return question\n"
+    )
+    with pytest.raises(TargetContractError, match="synchronous"):
+        preflight_target(target, project=_project(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "unrelated_definition",
+    (
+        "def unrelated():\n    helper()\n",
+        "class Unrelated:\n    def method(self):\n        helper()\n",
+    ),
+)
+def test_dormant_unrelated_function_bodies_do_not_hide_a_bad_final_binding(
+    tmp_path, unrelated_definition
+):
+    (tmp_path / "agent.py").write_text("respond = None\n" + unrelated_definition)
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    with pytest.raises(TargetResolutionError, match="not callable"):
+        preflight_target(target, project=_project(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "async def respond(question):\n"
+        "    return question\n"
+        "def respond(question):\n"
+        "    return question\n",
+        "respond, other = (None, 1)\n",
+        "def decorate(function):\n"
+        "    return function\n"
+        "@decorate\n"
+        "async def respond(question):\n"
+        "    return question\n",
+    ),
+)
+def test_local_callable_preflight_defers_unknown_or_final_sync_bindings(
+    tmp_path, source
+):
+    (tmp_path / "agent.py").write_text(source)
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    preflight_target(target, project=_project(tmp_path))
+
+
 def test_missing_module_target_fails_preflight(tmp_path):
     target = resolve_target(
         "definitely_missing_aai_agent_module:respond", root=tmp_path
@@ -213,6 +288,34 @@ def test_missing_module_target_fails_preflight(tmp_path):
 
     with pytest.raises(TargetResolutionError, match="could not find"):
         preflight_target(target, project=_project(tmp_path))
+
+
+def test_nested_module_preflight_defers_dynamic_package_paths(tmp_path, monkeypatch):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    package = "agentkit_extended_path_fixture"
+    (first / package).mkdir(parents=True)
+    (second / package).mkdir(parents=True)
+    (first / package / "__init__.py").write_text(
+        "from pkgutil import extend_path\n"
+        "__path__ = extend_path(__path__, __name__)\n"
+    )
+    (second / package / "agent.py").write_text(
+        "def respond(question):\n    return question\n"
+    )
+    monkeypatch.syspath_prepend(str(second))
+    monkeypatch.syspath_prepend(str(first))
+    target = resolve_target(f"{package}.agent:respond", root=tmp_path)
+
+    try:
+        preflight_target(target, project=_project(tmp_path))
+        predict = build_predict_fn(
+            target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+        )
+        assert predict(question="hello") == "hello"
+    finally:
+        sys.modules.pop(f"{package}.agent", None)
+        sys.modules.pop(package, None)
 
 
 def test_async_local_callable_fails_before_invocation(tmp_path):
@@ -310,7 +413,13 @@ def test_http_adapter_missing_response_path_lists_keys_not_bodies(tmp_path):
 
 def test_http_adapter_translates_http_errors(tmp_path):
     def transport(request):
-        raise urllib.error.HTTPError(request.full_url, 401, "unauthorized", None, None)
+        raise urllib.error.HTTPError(
+            "https://user:password@redirect.example/private?token=secret",
+            401,
+            "unauthorized",
+            None,
+            None,
+        )
 
     target = resolve_target("https://host/score", root=tmp_path)
     predict = build_predict_fn(
@@ -322,8 +431,13 @@ def test_http_adapter_translates_http_errors(tmp_path):
 
     with pytest.raises(TargetInvocationError) as excinfo:
         predict(question="q")
-    assert "401" in str(excinfo.value)
-    assert "auth" in str(excinfo.value).lower()
+    message = str(excinfo.value)
+    assert "401" in message
+    assert "auth" in message.lower()
+    assert "password" not in message
+    assert "redirect.example" not in message
+    assert "token=secret" not in message
+    assert excinfo.value.__cause__ is None
 
 
 def test_http_adapter_rejects_non_json(tmp_path):
@@ -507,6 +621,49 @@ def test_a_token_never_follows_a_redirect_to_another_origin():
     assert "token-value" not in message
 
 
+def test_redirect_refusal_only_reports_a_sanitized_destination_origin():
+    destination = (
+        "https://redirect-user:redirect-password@attacker.example:8443/"
+        "collect/private?signature=redirect-secret#fragment"
+    )
+
+    with pytest.raises(TargetInvocationError) as excinfo:
+        _redirect(
+            "https://agent.internal/score",
+            destination,
+            authorization="Bearer token-value",
+        )
+
+    message = str(excinfo.value)
+    assert "https://attacker.example:8443" in message
+    for sensitive in (
+        "redirect-user",
+        "redirect-password",
+        "collect/private",
+        "signature",
+        "redirect-secret",
+        "fragment",
+        "token-value",
+    ):
+        assert sensitive not in message
+
+
+def test_malformed_redirect_refusal_does_not_echo_the_destination():
+    destination = "https://attacker.example:secret-port/private?token=secret"
+
+    with pytest.raises(TargetInvocationError) as excinfo:
+        _redirect(
+            "https://agent.internal/score",
+            destination,
+            authorization="Bearer token-value",
+        )
+
+    message = str(excinfo.value)
+    assert "attacker.example" not in message
+    assert "secret-port" not in message
+    assert "token=secret" not in message
+
+
 def test_a_same_origin_redirect_still_follows_with_the_token():
     redirected = _redirect(
         "https://agent.internal/score",
@@ -516,6 +673,16 @@ def test_a_same_origin_redirect_still_follows_with_the_token():
 
     assert redirected is not None
     assert redirected.full_url == "https://agent.internal/v2/score"
+
+
+def test_a_default_explicit_port_is_the_same_redirect_origin():
+    redirected = _redirect(
+        "https://agent.internal/score",
+        "https://agent.internal:443/v2/score",
+        authorization="Bearer token-value",
+    )
+
+    assert redirected is not None
 
 
 def test_an_unauthenticated_redirect_is_not_our_business():

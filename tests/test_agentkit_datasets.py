@@ -696,7 +696,7 @@ def test_dataframe_nulls_read_as_missing(tmp_path):
 def test_missing_recognises_every_null_sentinel():
     from aai_core.agentkit.datasets import _is_missing, _is_populated
 
-    absent = [None, float("nan"), Decimal("NaN"), NAType()]
+    absent = [None, float("nan"), Decimal("NaN"), Decimal("sNaN"), NAType()]
     try:
         import numpy as np
 

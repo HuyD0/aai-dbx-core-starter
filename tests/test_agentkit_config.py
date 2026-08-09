@@ -129,6 +129,19 @@ def test_unknown_scorer_in_add_lists_the_catalog(tmp_path):
     assert "scorers ls" in message
 
 
+def test_same_scorer_cannot_be_added_and_removed_during_config_load(tmp_path):
+    path = _write(
+        tmp_path,
+        MINIMAL
+        + "scorers:\n"
+        + "  add: [keyword_coverage]\n"
+        + "  remove: [keyword_coverage]\n",
+    )
+
+    with pytest.raises(ConfigError, match="both scorers.add and scorers.remove"):
+        load_config(path)
+
+
 @pytest.mark.parametrize("key", ["keyword_coverage", "keyword_coverage/mean"])
 def test_removing_a_thresholded_scorer_fails(tmp_path, key):
     path = _write(
