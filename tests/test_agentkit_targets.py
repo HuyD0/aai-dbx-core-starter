@@ -133,6 +133,99 @@ def test_local_callable_single_argument(tmp_path):
     assert predict(prompt="hi") == "echo hi"
 
 
+@pytest.mark.parametrize(
+    "source",
+    (
+        "def respond(*, question):\n    return f'echo {question}'\n",
+        (
+            "from functools import wraps\n"
+            "def preserve_signature(function):\n"
+            "    @wraps(function)\n"
+            "    def wrapped(*args, **kwargs):\n"
+            "        return function(*args, **kwargs)\n"
+            "    return wrapped\n"
+            "@preserve_signature\n"
+            "def respond(*, question):\n"
+            "    return f'echo {question}'\n"
+        ),
+        (
+            "class Responder:\n"
+            "    def __call__(self, *, question):\n"
+            "        return f'echo {question}'\n"
+            "respond = Responder()\n"
+        ),
+    ),
+)
+def test_local_callable_single_keyword_only_argument(tmp_path, source):
+    (tmp_path / "agent.py").write_text(source)
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    preflight_target(target, project=_project(tmp_path))
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    assert predict(question="hello") == "echo hello"
+    # The existing sole-input fallback also maps to a keyword-only parameter.
+    assert predict(prompt="hi") == "echo hi"
+
+
+def test_local_callable_dynamic_signature_failure_is_a_contract_error(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "class ExplodingSignature:\n"
+        "    def __get__(self, instance, owner):\n"
+        "        raise RuntimeError('dynamic signature failed')\n"
+        "class Responder:\n"
+        "    __signature__ = ExplodingSignature()\n"
+        "    def __call__(self, *, question):\n"
+        "        return question\n"
+        "respond = Responder()\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    mlflow = SimpleNamespace(
+        trace=lambda function: pytest.fail("signature failure reached MLflow tracing")
+    )
+
+    with pytest.raises(TargetContractError) as excinfo:
+        build_predict_fn(target, project=_project(tmp_path), mlflow_module=mlflow)
+
+    assert "could not inspect" in str(excinfo.value)
+    assert "dynamic signature failed" not in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "def respond(question, /):\n    return f'echo {question}'\n",
+        "def respond(question, *rest):\n    return f'echo {question}:{len(rest)}'\n",
+    ),
+)
+def test_local_callable_single_positional_shapes_keep_the_sole_input_fallback(
+    tmp_path, source
+):
+    (tmp_path / "agent.py").write_text(source)
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    assert predict(prompt="hello").startswith("echo hello")
+
+
+def test_local_callable_var_keyword_keeps_the_input_mapping(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(**inputs):\n"
+        "    return f\"{inputs['question']}:{inputs['tone']}\"\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    assert predict(question="hello", tone="formal") == "hello:formal"
+
+
 def test_local_callable_keyword_arguments(tmp_path):
     (tmp_path / "agent.py").write_text(
         "def respond(question, tone):\n    return f'{tone}: {question}'\n"
@@ -155,6 +248,23 @@ def test_local_callable_contract_mismatch(tmp_path):
     with pytest.raises(TargetContractError) as excinfo:
         predict(alpha="a", beta="b")
     assert "question" in str(excinfo.value)
+
+
+def test_local_callable_unsatisfied_signature_is_a_contract_error(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def respond(*, question, tone):\n    return f'{tone}: {question}'\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    with pytest.raises(TargetContractError) as excinfo:
+        predict(question="hello")
+
+    message = str(excinfo.value)
+    assert "tone" in message
+    assert "question" in message
 
 
 def test_local_callable_runtime_error_wraps(tmp_path):
