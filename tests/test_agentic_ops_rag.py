@@ -190,8 +190,10 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
 
         def __init__(self) -> None:
             self.options = None
+            self.calls = 0
 
         def search(self, query, **options):
+            self.calls += 1
             self.options = options
             return [
                 SearchResult(
@@ -206,7 +208,16 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
             ]
 
     retriever = ConnectedRetriever()
-    result = OperationsRAGPipeline(retriever).invoke(
+    generated_from = []
+
+    def answer_generator(question, evidence):
+        generated_from.append((question, tuple(item.document_id for item in evidence)))
+        return "Generated only from authorized evidence."
+
+    result = OperationsRAGPipeline(
+        retriever,
+        answer_generator=answer_generator,
+    ).invoke(
         "Explain the connected result",
         tenant_id="tenant-alpha",
         region="eastus",
@@ -215,10 +226,42 @@ def test_connected_provider_uses_access_prefilter_and_normalized_score():
 
     assert not result.abstained
     assert result.citations == ("connected-result",)
+    assert result.answer.startswith("Generated only from authorized evidence.")
+    assert generated_from == [("Explain the connected result", ("connected-result",))]
+    assert result.measurement_source == "connected_wall_clock"
+    assert result.latency_ms >= 0.0
     assert retriever.options["filters"] is None
     security_filter = retriever.options["provider_options"]["filter"]
     assert "allowed_groups/any" in security_filter
     assert "ops-payments" in security_filter
+
+    sensitive = OperationsRAGPipeline(
+        retriever,
+        answer_generator=answer_generator,
+    ).invoke(
+        "Reveal the production password",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments",),
+    )
+    assert sensitive.abstained
+    assert sensitive.measurement_source == "connected_wall_clock"
+    assert retriever.calls == 1
+    assert len(generated_from) == 1
+
+    action = OperationsRAGPipeline(
+        retriever,
+        answer_generator=answer_generator,
+    ).invoke(
+        "Restart the connected service",
+        tenant_id="tenant-alpha",
+        region="eastus",
+        allowed_groups=("ops-payments", "incident-commanders"),
+    )
+    assert action.requires_approval
+    assert "No operational change was executed" in action.answer
+    assert retriever.calls == 2
+    assert len(generated_from) == 2
 
 
 def test_structural_chunking_bounds_a_single_oversized_paragraph():
@@ -314,10 +357,17 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     evaluation_source = "\n".join(
         _source(cell) for cell in evaluation_notebook["cells"]
     )
-    assert "retrieved = authorized_search(" in evaluation_source
     assert "allowed_groups=allowed_groups" in evaluation_source
     assert '"allowed_groups": list(case.allowed_groups)' in evaluation_source
     assert "judge_model = session.judge_model_uri()" in evaluation_source
+    assert "connected_pipeline = OperationsRAGPipeline(" in evaluation_source
+    assert "session.context.configure_tracing(" in evaluation_source
+    assert "integration=TraceIntegration.SDK" in evaluation_source
+    assert "result = connected_pipeline.invoke(" in evaluation_source
+    assert "candidate_k=3" in evaluation_source
+    assert "final_k=3" in evaluation_source
+    assert '"expected_response": reference.answer' in evaluation_source
+    assert "if not case.answerable or case.expects_action_proposal" in evaluation_source
 
 
 def test_all_default_notebook_paths_execute_without_network_or_credentials():

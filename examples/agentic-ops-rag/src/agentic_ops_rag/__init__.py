@@ -3,6 +3,7 @@
 from agentic_ops_rag.chunking import structural_chunks
 from agentic_ops_rag.contracts import (
     EvaluationCase,
+    MeasurementSource,
     OperationDocument,
     PipelineResult,
     QueryKind,
@@ -18,6 +19,7 @@ from agentic_ops_rag.pipeline import (
 
 __all__ = [
     "EvaluationCase",
+    "MeasurementSource",
     "OfflineOperationsRetriever",
     "OperationDocument",
     "OperationsRAGPipeline",

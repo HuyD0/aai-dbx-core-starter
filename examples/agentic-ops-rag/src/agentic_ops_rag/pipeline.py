@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 
 from aai_core.providers import SearchResult, UnsupportedCapabilityError
-from agentic_ops_rag.contracts import PipelineResult, QueryKind, RetrievalMode
+from agentic_ops_rag.contracts import (
+    MeasurementSource,
+    PipelineResult,
+    QueryKind,
+    RetrievalMode,
+)
 
 _IDENTIFIER = re.compile(r"\b(?:ERR|INC|OPS|RUN)-[A-Z0-9-]{2,}\b", re.IGNORECASE)
 _ACTION = re.compile(
@@ -138,8 +144,14 @@ class OperationsRAGPipeline:
     scope, evidence shape, action approval, and release metrics remain stable.
     """
 
-    def __init__(self, retriever) -> None:
+    def __init__(
+        self,
+        retriever,
+        *,
+        answer_generator: Callable[[str, Sequence[SearchResult]], str] | None = None,
+    ) -> None:
         self.retriever = retriever
+        self.answer_generator = answer_generator
 
     def invoke(
         self,
@@ -153,6 +165,8 @@ class OperationsRAGPipeline:
         final_k: int = 3,
         semantic_rerank: bool = False,
     ) -> PipelineResult:
+        started_at = time.perf_counter()
+        offline_fixture = getattr(self.retriever, "provider", "") == "offline_fixture"
         if not query.strip():
             raise ValueError("query must not be blank")
         if not 0 < final_k <= candidate_k:
@@ -169,7 +183,16 @@ class OperationsRAGPipeline:
                     "secret-recovery and incident-escalation process."
                 ),
                 abstained=True,
-                latency_ms=4.0,
+                latency_ms=(
+                    4.0
+                    if offline_fixture
+                    else (time.perf_counter() - started_at) * 1000.0
+                ),
+                measurement_source=(
+                    MeasurementSource.SIMULATED_OFFLINE_FIXTURE
+                    if offline_fixture
+                    else MeasurementSource.CONNECTED_WALL_CLOCK
+                ),
             )
         results = authorized_search(
             self.retriever,
@@ -193,8 +216,13 @@ class OperationsRAGPipeline:
             citations: tuple[str, ...] = ()
         else:
             citations = tuple(result.document_id for result in ranked)
-            evidence = " ".join(result.content for result in ranked)
-            answer = f"{evidence} Sources: " + ", ".join(
+            if self.answer_generator is None:
+                answer = " ".join(result.content for result in ranked)
+            else:
+                answer = self.answer_generator(query, tuple(ranked)).strip()
+                if not answer:
+                    raise ValueError("answer_generator returned a blank response")
+            answer += " Sources: " + ", ".join(
                 f"[{document_id}]" for document_id in citations
             )
             if query_kind is QueryKind.PROPOSE_ACTION:
@@ -204,11 +232,16 @@ class OperationsRAGPipeline:
                     " No operational change was executed; the proposed action "
                     "requires an approved human checkpoint."
                 )
-        latency_ms = self._simulated_latency(
-            selected_mode,
-            candidate_count=len(results),
-            semantic_rerank=semantic_rerank,
-        )
+        if offline_fixture:
+            latency_ms = self._simulated_latency(
+                selected_mode,
+                candidate_count=len(results),
+                semantic_rerank=semantic_rerank,
+            )
+            measurement_source = MeasurementSource.SIMULATED_OFFLINE_FIXTURE
+        else:
+            latency_ms = (time.perf_counter() - started_at) * 1000.0
+            measurement_source = MeasurementSource.CONNECTED_WALL_CLOCK
         return PipelineResult(
             query=query,
             query_kind=query_kind,
@@ -223,6 +256,7 @@ class OperationsRAGPipeline:
             proposed_action=proposed_action,
             requires_approval=requires_approval,
             latency_ms=latency_ms,
+            measurement_source=measurement_source,
         )
 
     @staticmethod

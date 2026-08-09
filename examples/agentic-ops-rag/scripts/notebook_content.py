@@ -739,14 +739,16 @@ dataset, trace policy, model, index, and cost owner are approved. The connected
 path uses the same fail-closed authorization helper as the application: Azure
 uses an OData collection security filter, while Databricks standard endpoints
 use an ARRAY filter. Storage-optimized Databricks indexes must expose a
-platform-approved scalar ACL field before this lab can run.
+platform-approved scalar ACL field before this lab can run. This evaluation
+keeps `candidate_k` equal to `final_k`, so the normalized documents on the SDK
+retriever span are exactly the evidence supplied to the answer model.
 """),
         c("""
 RUN_CONNECTED = False
 connected_evaluation = None
 if RUN_CONNECTED:
     import mlflow
-    from agentic_ops_rag import authorized_search
+    from agentic_ops_rag import OperationsRAGPipeline
     from mlflow.genai.scorers import (
         RetrievalGroundedness,
         RetrievalRelevance,
@@ -754,23 +756,17 @@ if RUN_CONNECTED:
         Safety,
     )
 
+    from aai_core.tracing import TraceIntegration
+
+    if RUN_MLFLOW:
+        raise RuntimeError(
+            "Restart the kernel before connected evaluation: local SQLite tracing "
+            "and connected tracing cannot share one process."
+        )
+    session.context.configure_tracing(integration=TraceIntegration.SDK)
     resources = session.connected_components(allow_network=True)
 
-    def predict_fn(
-        question: str,
-        tenant_id: str,
-        region: str,
-        allowed_groups: list[str],
-    ) -> str:
-        retrieved = authorized_search(
-            resources["retriever"],
-            question,
-            tenant_id=tenant_id,
-            region=region,
-            allowed_groups=allowed_groups,
-            mode="hybrid",
-            top_k=8,
-        )
+    def generate_answer(question: str, retrieved) -> str:
         context = mlflow_documents(retrieved)
         response = resources["model"].generate(
             [
@@ -781,9 +777,38 @@ if RUN_CONNECTED:
         )
         return response.content
 
+    connected_pipeline = OperationsRAGPipeline(
+        resources["retriever"],
+        answer_generator=generate_answer,
+    )
+
+    def predict_fn(
+        question: str,
+        tenant_id: str,
+        region: str,
+        allowed_groups: list[str],
+    ) -> str:
+        result = connected_pipeline.invoke(
+            question,
+            tenant_id=tenant_id,
+            region=region,
+            allowed_groups=allowed_groups,
+            mode="hybrid",
+            candidate_k=3,
+            final_k=3,
+        )
+        return result.answer
+
     judge_model = session.judge_model_uri()
-    evaluation_data = [
-        {
+    def evaluation_row(case):
+        reference = pipeline.invoke(
+            case.question,
+            tenant_id=case.tenant_id,
+            region=case.region,
+            allowed_groups=case.allowed_groups,
+            mode="hybrid",
+        )
+        return {
             "inputs": {
                 "question": case.question,
                 "tenant_id": case.tenant_id,
@@ -791,21 +816,38 @@ if RUN_CONNECTED:
                 "allowed_groups": list(case.allowed_groups),
             },
             "expectations": {
+                "expected_response": reference.answer,
                 "expected_document_ids": list(case.expected_document_ids),
             },
         }
+
+    policy_data = [
+        evaluation_row(case)
         for case in cases
+        if not case.answerable or case.expects_action_proposal
     ]
-    connected_evaluation = mlflow.genai.evaluate(
-        data=evaluation_data,
-        predict_fn=predict_fn,
-        scorers=[
-            RetrievalRelevance(model=judge_model),
-            RetrievalGroundedness(model=judge_model),
-            RetrievalSufficiency(model=judge_model),
-            Safety(model=judge_model),
-        ],
-    )
+    rag_data = [
+        evaluation_row(case)
+        for case in cases
+        if case.answerable and not case.expects_action_proposal
+    ]
+    connected_evaluation = {
+        "policy": mlflow.genai.evaluate(
+            data=policy_data,
+            predict_fn=predict_fn,
+            scorers=[Safety(model=judge_model)],
+        ),
+        "rag": mlflow.genai.evaluate(
+            data=rag_data,
+            predict_fn=predict_fn,
+            scorers=[
+                RetrievalRelevance(model=judge_model),
+                RetrievalGroundedness(model=judge_model),
+                RetrievalSufficiency(model=judge_model),
+                Safety(model=judge_model),
+            ],
+        ),
+    }
 connected_evaluation
 """),
         m(

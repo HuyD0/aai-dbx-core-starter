@@ -22,6 +22,11 @@ class QueryKind(StrEnum):
     SENSITIVE_REQUEST = "sensitive_request"
 
 
+class MeasurementSource(StrEnum):
+    SIMULATED_OFFLINE_FIXTURE = "simulated_offline_fixture"
+    CONNECTED_WALL_CLOCK = "connected_wall_clock"
+
+
 class OperationDocument(ContractModel):
     """One already-chunked, access-scoped runbook document."""
 
@@ -69,11 +74,4 @@ class PipelineResult(ContractModel):
     proposed_action: str | None = None
     requires_approval: bool = False
     latency_ms: float = Field(ge=0.0)
-    measurement_source: str = "simulated_offline_fixture"
-
-    @field_validator("measurement_source")
-    @classmethod
-    def require_explicit_fixture_label(cls, value: str) -> str:
-        if value != "simulated_offline_fixture":
-            raise ValueError("offline measurements must remain explicitly labelled")
-        return value
+    measurement_source: MeasurementSource = MeasurementSource.SIMULATED_OFFLINE_FIXTURE
