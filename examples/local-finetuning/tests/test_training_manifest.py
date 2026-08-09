@@ -321,7 +321,7 @@ def test_training_child_ignores_mutable_python_import_overrides(
         environment = kwargs.get("env")
         assert isinstance(environment, dict)
         assert not any(name.upper().startswith("PYTHON") for name in environment)
-        assert command[:4] == [sys.executable, "-I", "-m", "mlx_lm"]
+        assert command[:5] == [sys.executable, "-I", "-B", "-m", "mlx_lm"]
         original = os.environ["PYTHONPATH"]
         os.environ["PYTHONPATH"] = (malicious_root / "replacement").as_posix()
         os.environ["PYTHONPATH"] = original
@@ -333,7 +333,44 @@ def test_training_child_ignores_mutable_python_import_overrides(
     monkeypatch.setattr(training.subprocess, "run", isolated_run)
     evidence = _run(inputs)
 
-    assert evidence.command[:4] == ["<python>", "-I", "-m", "mlx_lm"]
+    assert evidence.command[:5] == ["<python>", "-I", "-B", "-m", "mlx_lm"]
+
+
+def test_training_rejects_executable_substitution_before_command_construction(
+    training_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _write_training_inputs(training_root)
+    plan = training._build_training_plan(
+        inputs.config_path,
+        iterations=None,
+        adapter_path=None,
+        expected_inputs=inputs.contract,
+    )
+    substituted = training_root / "substituted-python"
+    substituted.write_bytes(b"not the captured interpreter")
+    monkeypatch.setattr(training.sys, "executable", substituted.as_posix())
+
+    def unexpected_invalidation(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("evidence was invalidated before executable validation")
+
+    def unexpected_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("substituted Python executable was launched")
+
+    monkeypatch.setattr(
+        training,
+        "_invalidate_success_evidence",
+        unexpected_invalidation,
+    )
+    monkeypatch.setattr(training.subprocess, "run", unexpected_run)
+
+    with pytest.raises(RuntimeError, match="Python executable changed"):
+        training._run_lora_locked(
+            plan,
+            iterations_overridden=False,
+            adapter_path_overridden=False,
+            log_name="latest",
+        )
 
 
 def test_custom_configuration_requires_explicit_trusted_inputs(

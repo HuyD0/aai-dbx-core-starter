@@ -33,6 +33,11 @@ def remove_pytest_only_import_root(monkeypatch: pytest.MonkeyPatch) -> None:
     def without_test_modules() -> tuple[tuple[str, object], ...]:
         selected: list[tuple[str, object]] = []
         for name, module in loaded_modules():
+            if (
+                training._runtime_audit.was_preexisting(name, module)
+                and name != "_virtualenv"
+            ):
+                continue
             spec = getattr(module, "__spec__", None)
             loader = getattr(spec, "loader", None)
             if type(loader).__module__.startswith("_pytest."):

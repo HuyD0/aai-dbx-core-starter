@@ -8,6 +8,7 @@ import json
 import os
 import py_compile
 import shutil
+import subprocess
 import sys
 from argparse import Namespace
 from dataclasses import dataclass
@@ -1635,10 +1636,74 @@ def test_capture_rejects_source_changed_before_provenance_audit(
             ),
         )
 
-        with pytest.raises(RuntimeError, match="does not match captured source bytes"):
+        with pytest.raises(RuntimeError, match="predates execution evidence"):
             training.capture_execution_snapshot()
     finally:
         training.sys.modules.pop("session_runtime", None)
+
+
+def test_pre_audit_source_and_spec_less_forgery_fail_closed(tmp_path: Path) -> None:
+    source = tmp_path / "preaudit_runtime.py"
+    source.write_text('VALUE = "resident-a"\n', encoding="utf-8")
+    script = r"""
+import importlib
+import py_compile
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+root = Path(sys.argv[1])
+sys.path.insert(0, root.as_posix())
+module = importlib.import_module("preaudit_runtime")
+assert module.VALUE == "resident-a"
+source = root / "preaudit_runtime.py"
+source.write_text('VALUE = "captured-b"\n', encoding="utf-8")
+py_compile.compile(source.as_posix(), doraise=True)
+forged = ModuleType("cython_runtime")
+forged.__spec__ = None
+sys.modules["cython_runtime"] = forged
+
+from aai_local_finetuning import training
+
+path = source.resolve(strict=True)
+current = training._capture_physical_file_identity(
+    path,
+    label="pre-audit source",
+)
+try:
+    training._require_loaded_code_provenance(
+        "preaudit_runtime",
+        module,
+        path,
+        current,
+    )
+except RuntimeError as error:
+    assert "predates execution evidence" in str(error)
+else:
+    raise AssertionError("replaceable bytecode authenticated resident code")
+
+try:
+    training._validate_spec_less_module(
+        "cython_runtime",
+        forged,
+        state=SimpleNamespace(),
+        roots=[],
+        captured_by_path={},
+        initial=None,
+    )
+except RuntimeError as error:
+    assert "lacks origin metadata" in str(error)
+else:
+    raise AssertionError("pre-audit cython_runtime forgery was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, tmp_path.as_posix()],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1690,6 +1755,36 @@ def test_recheck_binds_import_hook_activation_and_order(
 
     with pytest.raises(RuntimeError, match="runtime package files changed"):
         recheck_evaluation_session(session)
+
+
+def test_real_snapshot_allows_first_mlx_native_import() -> None:
+    script = r"""
+import sys
+from aai_local_finetuning import training
+
+assert "mlx.core" not in sys.modules
+snapshot = training.capture_execution_snapshot()
+assert sys.dont_write_bytecode is True
+import mlx.core
+path = training._loaded_module_origin_path(sys.modules["mlx.core"].__spec__)
+assert path is not None
+before = dict(snapshot._import_environment.execution_counts).get(path, 0)
+after = dict(training._runtime_execution_counts()).get(path, 0)
+assert after - before == 1
+training.recheck_execution_snapshot(snapshot)
+for name in training._RUNTIME_MLX_SPECLESS_CHILDREN:
+    assert name in sys.modules
+training.recheck_execution_snapshot(snapshot)
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("drift", ("mutate", "delete"))

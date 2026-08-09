@@ -186,23 +186,28 @@ unsupported, so invoke the physical path instead. The setuptools `strict`
 editable mode is also deliberately unsupported because its generated
 symlink/hardlink tree cannot be represented as portable strict evidence; use
 the standard finder or path editable mode when producing governed runs.
-Python modules loaded after the evidence guard initializes are also checked
-against the top-level code object observed when they execute; modules already
-present at initialization require a normal, active, source-equivalent bytecode
-cache as proof of the code Python loaded. A preloaded source module with no
-cache, an instrumenting loader, or a stale cache fails closed. If runtime source
-changes in a long-lived notebook or REPL, restart the Python process before
-creating new evidence: a snapshot will not bind replacement bytes to stale code
-that is still resident in memory. Arbitrary spec-less and originless modules are
-rejected, and both importer/hook activation order and governed module
-import/reload/removal activity are checked across the operation. Native or
-other non-source modules loaded later fail closed unless their pre-load file
+The package installs its execution audit boundary before importing runtime
+dependencies. Python modules loaded after that boundary are checked against the
+top-level code object observed when they execute; unrecognized application or
+dependency modules already resident before the boundary fail closed because a
+replaceable cache cannot attest to in-memory code. Import this package before
+MLX or other application dependencies in a long-lived notebook, and restart the
+kernel after source changes. Exact interpreter-startup bootstrap modules are the
+only pre-boundary exceptions.
+
+Snapshots disable future bytecode writes so a first lazy import cannot mutate a
+captured `__pycache__` directory. Arbitrary spec-less and originless modules are
+rejected; MLX's exact dynamic child modules are accepted only through their
+captured native `mlx.core` parent. Importer/hook activation order and governed
+module import/reload/removal activity are checked across the operation. Native
+or other non-source modules loaded later fail closed unless their pre-load file
 identity was established.
 
-MLX-LM training launches the captured Python executable in isolated mode and
-passes a fixed child environment with every `PYTHON*` override removed. This
-means a caller's mutable `PYTHONPATH`, current project directory, or user site
-cannot substitute a different `mlx_lm` implementation during training.
+MLX-LM training launches the captured Python executable in isolated no-bytecode
+mode and passes a fixed child environment with every `PYTHON*` override
+removed. This means a caller's mutable `PYTHONPATH`, current project directory,
+or user site cannot substitute a different `mlx_lm` implementation during
+training.
 
 The governed source boundary is the reusable `src/aai_local_finetuning` package
 plus `scripts/render_notebooks.py` and `scripts/notebook_pedagogy.py`. Generated

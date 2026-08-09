@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+from aai_local_finetuning import training
 from aai_local_finetuning.capstone import (
     deterministic_capstone_predictions,
     evaluate_capstone_predictions,
@@ -22,6 +26,55 @@ from aai_local_finetuning.settings import load_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "examples" / "local-finetuning"
+
+
+@pytest.fixture
+def normalize_runtime_evidence_test_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exclude pytest-only import state from strict application evidence."""
+
+    pytest_only_roots = {
+        ROOT / "tests",
+        ROOT / "src" / "platform_app",
+    }
+
+    def resolved(entry: str) -> Path:
+        candidate = Path(entry or os.getcwd())
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        return candidate.resolve(strict=False)
+
+    monkeypatch.setattr(
+        sys,
+        "path",
+        [entry for entry in sys.path if resolved(entry) not in pytest_only_roots],
+    )
+    loaded_modules = training._runtime_loaded_modules
+
+    def without_test_modules() -> tuple[tuple[str, object], ...]:
+        selected: list[tuple[str, object]] = []
+        for name, module in loaded_modules():
+            if (
+                training._runtime_audit.was_preexisting(name, module)
+                and name != "_virtualenv"
+            ):
+                continue
+            spec = getattr(module, "__spec__", None)
+            loader = getattr(spec, "loader", None)
+            if type(loader).__module__.startswith("_pytest."):
+                continue
+            origin = getattr(spec, "origin", None)
+            if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+                selected.append((name, module))
+                continue
+            if not any(
+                resolved(origin).is_relative_to(root) for root in pytest_only_roots
+            ):
+                selected.append((name, module))
+        return tuple(selected)
+
+    monkeypatch.setattr(training, "_runtime_loaded_modules", without_test_modules)
 
 
 def test_local_finetuning_project_has_isolated_locked_contract():
@@ -108,7 +161,10 @@ def test_root_build_excludes_standalone_project_from_sdk_sdist():
     assert "/tests/test_local_finetuning_project.py" in excluded
 
 
-def test_capstone_generation_is_portable_and_has_frozen_hashes(tmp_path):
+def test_capstone_generation_is_portable_and_has_frozen_hashes(
+    tmp_path,
+    normalize_runtime_evidence_test_harness,
+):
     source = tmp_path / "source"
     manifest = generate_capstone_dataset(source)
 

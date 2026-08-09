@@ -32,6 +32,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from . import _runtime_audit
 from .settings import PROJECT_ROOT, ProjectSettings, load_settings
 
 TRAINING_MANIFEST_NAME = "training-manifest.json"
@@ -620,6 +621,13 @@ class _LoadedModuleState:
 
 
 @dataclass(frozen=True, slots=True)
+class _LoadedSpecLessModuleState:
+    name: str
+    parent_name: str | None
+    module: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
 class _CapturedImportHooks:
     portable: tuple[str, ...]
     objects: tuple[object, ...] = field(repr=False, compare=False)
@@ -763,12 +771,14 @@ class _CapturedImportEnvironment:
     namespace_placeholders: tuple[str, ...]
     captured_files: tuple[_CapturedPhysicalFile, ...]
     loaded_modules: tuple[_LoadedModuleState, ...]
+    spec_less_modules: tuple[_LoadedSpecLessModuleState, ...]
     meta_path: _CapturedImportHooks
     path_hooks: _CapturedImportHooks
     execution_counts: tuple[tuple[Path, int], ...]
+    bytecode_writes_disabled: bool
 
 
-_RUNTIME_PROVENANCE_LOCK = threading.Lock()
+_RUNTIME_PROVENANCE_LOCK = threading.RLock()
 _RUNTIME_EXECUTED_MODULE_CODE: dict[Path, list[types.CodeType]] = {}
 _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW: set[Path] = set()
 _RUNTIME_EXECUTION_COUNTS: dict[Path, int] = {}
@@ -784,15 +794,25 @@ _RUNTIME_INITIAL_MODULE_FILES: dict[
 _RUNTIME_INITIAL_SPECLESS_MODULES: dict[str, object] = {}
 _RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES = 8_192
 _RUNTIME_PROVENANCE_CACHE: OrderedDict[tuple[object, ...], None] = OrderedDict()
-_RUNTIME_SOURCE_CACHE_VALIDATION: OrderedDict[tuple[object, ...], None] = OrderedDict()
 _RUNTIME_PROVENANCE_AUDIT_INSTALLED = False
-_RUNTIME_SPECLESS_MODULE_NAMES = frozenset(
-    {"__main__", "cython_runtime", "typing.io", "typing.re"}
-)
+_RUNTIME_SPECLESS_MODULE_NAMES = frozenset({"__main__"})
 _RUNTIME_SPECLESS_PARENT_ALIASES = {
     "pyexpat.errors": ("pyexpat", "errors"),
     "pyexpat.model": ("pyexpat", "model"),
+    "typing.io": ("typing", "io"),
+    "typing.re": ("typing", "re"),
 }
+_RUNTIME_MLX_SPECLESS_CHILDREN = frozenset(
+    {
+        "mlx.core.cuda",
+        "mlx.core.distributed",
+        "mlx.core.fast",
+        "mlx.core.fft",
+        "mlx.core.linalg",
+        "mlx.core.metal",
+        "mlx.core.random",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1196,6 +1216,12 @@ def _child_environment() -> tuple[tuple[str, str], ...]:
     )
 
 
+def _disable_runtime_bytecode_writes() -> None:
+    """Prevent lazy imports from mutating governed cache directories."""
+
+    sys.dont_write_bytecode = True
+
+
 def run_lora(
     *,
     iterations: int | None = None,
@@ -1244,9 +1270,12 @@ def _run_lora_locked(
         )
     )
     try:
+        if not _captured_executable_matches(plan.child_python):
+            raise RuntimeError("Python executable changed before MLX-LM launch")
         command = [
-            sys.executable,
+            str(plan.child_python.path),
             "-I",
+            "-B",
             "-m",
             "mlx_lm",
             "lora",
@@ -1256,6 +1285,7 @@ def _run_lora_locked(
         recorded_command = [
             "<python>",
             "-I",
+            "-B",
             "-m",
             "mlx_lm",
             "lora",
@@ -1275,8 +1305,6 @@ def _run_lora_locked(
             plan.target_adapter_path,
             evidence_path,
         )
-        if not _captured_executable_matches(plan.child_python):
-            raise RuntimeError("Python executable changed before MLX-LM launch")
         result = subprocess.run(
             command,
             cwd=PROJECT_ROOT,
@@ -1953,6 +1981,7 @@ def _require_unchanged_training_inputs(plan: _TrainingPlan) -> None:
 def _capture_execution_contract() -> _CapturedExecutionContract:
     """Capture portable source bytes and installed distribution payloads."""
 
+    _disable_runtime_bytecode_writes()
     context = _RuntimeCaptureContext()
     source_files, _source_transient, _source_directories = (
         _capture_governed_source_state(context=context)
@@ -1998,6 +2027,7 @@ def capture_execution_contract() -> ExecutionContract:
 def capture_execution_snapshot() -> ExecutionSnapshot:
     """Capture portable evidence plus transient identities for later rechecking."""
 
+    _disable_runtime_bytecode_writes()
     context = _RuntimeCaptureContext()
     source_files, source_transient_files, source_directories = (
         _capture_governed_source_state(context=context)
@@ -2052,6 +2082,10 @@ def recheck_execution_snapshot(snapshot: ExecutionSnapshot) -> ExecutionSnapshot
     ):
         raise RuntimeError("captured execution snapshot is internally inconsistent")
     try:
+        if not snapshot._import_environment.bytecode_writes_disabled:
+            raise RuntimeError("captured bytecode-write policy is invalid")
+        if not sys.dont_write_bytecode:
+            raise RuntimeError("Python bytecode writes were re-enabled")
         files = (
             *snapshot._source_files,
             *snapshot._source_transient_files,
@@ -2875,6 +2909,7 @@ def _capture_import_environment(
         "active_sys_path": list(active_tokens),
         "meta_path": list(meta_path.portable),
         "path_hooks": list(path_hooks.portable),
+        "bytecode_writes_disabled": True,
         "origins": sorted(canonical_bindings),
     }
     canonical = json.dumps(
@@ -2938,17 +2973,21 @@ def _capture_import_environment(
         namespace_placeholders=tuple(sorted(allowed_namespace_placeholders)),
         captured_files=captured_files,
         loaded_modules=(),
+        spec_less_modules=(),
         meta_path=meta_path,
         path_hooks=path_hooks,
         execution_counts=_runtime_execution_counts(),
+        bytecode_writes_disabled=True,
+    )
+    loaded_modules, spec_less_modules = _validate_loaded_module_origins(
+        state,
+        tuple(origin_paths),
+        capture_initial=True,
     )
     state = replace(
         state,
-        loaded_modules=_validate_loaded_module_origins(
-            state,
-            tuple(origin_paths),
-            capture_initial=True,
-        ),
+        loaded_modules=loaded_modules,
+        spec_less_modules=spec_less_modules,
     )
     return _RuntimeDistribution(
         evidence=evidence,
@@ -3410,30 +3449,41 @@ def _validate_loaded_module_origins(
     origin_paths: tuple[tuple[Path, str], ...] | None = None,
     *,
     capture_initial: bool = False,
-) -> tuple[_LoadedModuleState, ...]:
+) -> tuple[tuple[_LoadedModuleState, ...], tuple[_LoadedSpecLessModuleState, ...]]:
     # Initial capture passes exact finder/source roots. Recheck reconstructs the
     # direct/path roots from the stable root-token mapping below.
     roots = list(origin_paths if origin_paths is not None else state.origin_paths)
     expected = dict(state.protected_origins)
     captured_by_path = {item.path: item for item in state.captured_files}
     initial_modules = {item.name: item for item in state.loaded_modules}
+    initial_spec_less = {item.name: item for item in state.spec_less_modules}
     if len(initial_modules) != len(state.loaded_modules):
         raise RuntimeError("captured loaded-module state contains duplicate names")
+    if len(initial_spec_less) != len(state.spec_less_modules):
+        raise RuntimeError("captured spec-less module state contains duplicate names")
     loaded_modules = _runtime_loaded_modules()
-    _prevalidate_loaded_source_caches(
-        loaded_modules,
-        expected=expected,
-        captured_by_path=captured_by_path,
-    )
     observed_initial: set[str] = set()
+    observed_spec_less: set[str] = set()
     captured_modules: list[_LoadedModuleState] = []
+    captured_spec_less: list[_LoadedSpecLessModuleState] = []
     for module_name, module in loaded_modules:
         top_level = module_name.partition(".")[0]
         expected_token = expected.get(top_level)
         spec = getattr(module, "__spec__", None)
         if expected_token is None:
             if spec is None:
-                _require_supported_spec_less_module(module_name, module)
+                captured_dynamic = _validate_spec_less_module(
+                    module_name,
+                    module,
+                    state=state,
+                    roots=roots,
+                    captured_by_path=captured_by_path,
+                    initial=initial_spec_less.get(module_name),
+                )
+                if module_name in initial_spec_less:
+                    observed_spec_less.add(module_name)
+                if capture_initial:
+                    captured_spec_less.append(captured_dynamic)
             else:
                 _reject_unbound_loaded_origin(
                     module_name,
@@ -3442,7 +3492,19 @@ def _validate_loaded_module_origins(
                 )
             continue
         if spec is None:
-            raise RuntimeError(f"loaded module lacks origin metadata: {module_name}")
+            captured_dynamic = _validate_spec_less_module(
+                module_name,
+                module,
+                state=state,
+                roots=roots,
+                captured_by_path=captured_by_path,
+                initial=initial_spec_less.get(module_name),
+            )
+            if module_name in initial_spec_less:
+                observed_spec_less.add(module_name)
+            if capture_initial:
+                captured_spec_less.append(captured_dynamic)
+            continue
         origin = getattr(spec, "origin", None)
         if origin in {"built-in", "frozen"}:
             raise RuntimeError(
@@ -3492,6 +3554,17 @@ def _validate_loaded_module_origins(
         if capture_initial:
             captured_modules.append(captured)
 
+    mlx_core = sys.modules.get("mlx.core")
+    if mlx_core is not None:
+        for child_module_name in _RUNTIME_MLX_SPECLESS_CHILDREN:
+            child_name = child_module_name.rpartition(".")[2]
+            child = getattr(mlx_core, child_name, None)
+            if child is not None and sys.modules.get(child_module_name) is not child:
+                raise RuntimeError(
+                    "loaded native child was removed or replaced: "
+                    f"{child_module_name}"
+                )
+
     if not capture_initial:
         missing = set(initial_modules).difference(observed_initial)
         if missing:
@@ -3499,12 +3572,22 @@ def _validate_loaded_module_origins(
                 "loaded modules present at evidence capture were removed: "
                 + ", ".join(sorted(missing))
             )
-    return tuple(sorted(captured_modules, key=lambda item: item.name))
+        missing_spec_less = set(initial_spec_less).difference(observed_spec_less)
+        if missing_spec_less:
+            raise RuntimeError(
+                "spec-less modules present at evidence capture were removed: "
+                + ", ".join(sorted(missing_spec_less))
+            )
+    return (
+        tuple(sorted(captured_modules, key=lambda item: item.name)),
+        tuple(sorted(captured_spec_less, key=lambda item: item.name)),
+    )
 
 
 def _supported_spec_less_module_name(name: str) -> bool:
     return (
         name in _RUNTIME_SPECLESS_MODULE_NAMES
+        or name == "cython_runtime"
         or re.fullmatch(
             r"_cython_\d+(?:_\d+)+",
             name,
@@ -3513,19 +3596,90 @@ def _supported_spec_less_module_name(name: str) -> bool:
     )
 
 
-def _require_supported_spec_less_module(name: str, module: object) -> None:
-    initial = _RUNTIME_INITIAL_SPECLESS_MODULES.get(name)
+def _validate_spec_less_module(
+    name: str,
+    module: object,
+    *,
+    state: _CapturedImportEnvironment,
+    roots: list[tuple[Path, str]],
+    captured_by_path: dict[Path, _CapturedPhysicalFile],
+    initial: _LoadedSpecLessModuleState | None,
+) -> _LoadedSpecLessModuleState:
+    if initial is not None and module is not initial.module:
+        raise RuntimeError(f"loaded spec-less module identity changed: {name}")
+
     parent_alias = _RUNTIME_SPECLESS_PARENT_ALIASES.get(name)
     if parent_alias is not None:
         parent = sys.modules.get(parent_alias[0])
         if parent is not None and getattr(parent, parent_alias[1], None) is module:
-            return
+            return _LoadedSpecLessModuleState(
+                name=name,
+                parent_name=parent_alias[0],
+                module=module,
+            )
+
+    if name in _RUNTIME_MLX_SPECLESS_CHILDREN:
+        parent_name, _, child_name = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is None or getattr(parent, child_name, None) is not module:
+            raise RuntimeError(f"loaded native child lacks its parent binding: {name}")
+        spec = getattr(parent, "__spec__", None)
+        path = _loaded_module_origin_path(spec) if spec is not None else None
+        if path is None or not any(
+            path.name.endswith(suffix)
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+        ):
+            raise RuntimeError(f"loaded native child has an invalid parent: {name}")
+        expected_token = dict(state.protected_origins).get(name.partition(".")[0])
+        if (
+            expected_token is None
+            or _loaded_origin_token(path, roots) != expected_token
+        ):
+            raise RuntimeError(
+                f"loaded native child parent violates captured precedence: {name}"
+            )
+        initial_parent = next(
+            (item for item in state.loaded_modules if item.name == parent_name),
+            None,
+        )
+        _validate_loaded_module_file(
+            parent_name,
+            parent,
+            path,
+            captured_by_path=captured_by_path,
+            initial=initial_parent,
+        )
+        _require_inert_spec_less_shape(name, module)
+        return _LoadedSpecLessModuleState(
+            name=name,
+            parent_name=parent_name,
+            module=module,
+        )
+
+    baseline = _RUNTIME_INITIAL_SPECLESS_MODULES.get(name)
+    if name in _RUNTIME_SPECLESS_MODULE_NAMES and baseline is module:
+        return _LoadedSpecLessModuleState(name=name, parent_name=None, module=module)
     if (
-        not _supported_spec_less_module_name(name)
-        or initial is None
-        or module is not initial
+        (
+            name == "cython_runtime"
+            or re.fullmatch(r"_cython_\d+(?:_\d+)+", name) is not None
+        )
+        and baseline is module
+        and not _runtime_audit.was_preexisting(name, module)
     ):
-        raise RuntimeError(f"loaded module lacks origin metadata: {name}")
+        _require_inert_spec_less_shape(name, module)
+        return _LoadedSpecLessModuleState(name=name, parent_name=None, module=module)
+    raise RuntimeError(f"loaded module lacks origin metadata: {name}")
+
+
+def _require_inert_spec_less_shape(name: str, module: object) -> None:
+    if (
+        type(module) is not types.ModuleType
+        or getattr(module, "__file__", None) is not None
+        or getattr(module, "__loader__", None) is not None
+        or getattr(module, "__package__", None) is not None
+    ):
+        raise RuntimeError(f"loaded spec-less module has executable metadata: {name}")
 
 
 def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> None:
@@ -3600,7 +3754,6 @@ def _validate_loaded_module_file(
         module,
         path,
         current,
-        captured_by_path=captured_by_path,
     )
     return _LoadedModuleState(name=module_name, origin=current, module=module)
 
@@ -3750,10 +3903,12 @@ def _runtime_exec_audit_hook(event: str, args: tuple[object, ...]) -> None:
         raw_path = args[1]
         if isinstance(raw_path, str):
             path = Path(raw_path)
+            completed_import = True
         elif raw_path is None and len(args) >= 3:
             path = _find_native_import_candidate(name, args[2])
             if path is None:
                 return
+            completed_import = False
         else:
             return
         if not path.is_absolute():
@@ -3768,7 +3923,8 @@ def _runtime_exec_audit_hook(event: str, args: tuple[object, ...]) -> None:
             )
         except (OSError, RuntimeError, ValueError):
             return
-        _record_runtime_execution(path)
+        if completed_import:
+            _record_runtime_execution(path)
         _record_native_import_identity(name, captured)
         return
     if event != "exec" or len(args) != 1 or not isinstance(args[0], types.CodeType):
@@ -3914,78 +4070,8 @@ def _install_runtime_provenance_audit() -> None:
                 # fail closed if it participates in governed execution later.
                 continue
         _RUNTIME_INITIAL_MODULE_FILES.update(initial)
-        sys.addaudithook(_runtime_exec_audit_hook)
+        _runtime_audit.activate(_runtime_exec_audit_hook)
         _RUNTIME_PROVENANCE_AUDIT_INSTALLED = True
-
-
-def _prevalidate_loaded_source_caches(
-    loaded_modules: tuple[tuple[str, object], ...],
-    *,
-    expected: dict[str, str],
-    captured_by_path: dict[Path, _CapturedPhysicalFile],
-) -> None:
-    pending: list[tuple[tuple[object, ...], Path, str]] = []
-    for module_name, module in loaded_modules:
-        if module_name.partition(".")[0] not in expected:
-            continue
-        spec = getattr(module, "__spec__", None)
-        if spec is None:
-            continue
-        try:
-            path = _loaded_module_origin_path(spec)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if path is None or path.suffix != ".py":
-            continue
-        current = captured_by_path.get(path)
-        if current is None:
-            continue
-        with _RUNTIME_PROVENANCE_LOCK:
-            executed = bool(_RUNTIME_EXECUTED_MODULE_CODE.get(path))
-            native_files = bool(_RUNTIME_IMPORTED_NATIVE_FILES.get((module_name, path)))
-            initial = _RUNTIME_INITIAL_MODULE_FILES.get((module_name, path))
-        if executed or native_files or initial != current:
-            continue
-        cache = _capture_loaded_source_cache(
-            module_name,
-            module,
-            captured_by_path=captured_by_path,
-        )
-        key = (module_name, path, current, cache)
-        with _RUNTIME_PROVENANCE_LOCK:
-            if key in _RUNTIME_SOURCE_CACHE_VALIDATION:
-                _RUNTIME_SOURCE_CACHE_VALIDATION.move_to_end(key)
-                continue
-        pending.append((key, cache.path, module_name))
-
-    if not pending:
-        return
-    unique_paths = tuple(dict.fromkeys(path for _key, path, _name in pending))
-    try:
-        details = _validate_runtime_bytecode_details(unique_paths)
-    except (RuntimeError, ValueError) as error:
-        raise RuntimeError(
-            "loaded Python code does not match captured source bytes"
-        ) from error
-    for key, path, module_name in pending:
-        status, _digest = details[path]
-        if status != "source-equivalent":
-            raise RuntimeError(
-                "loaded Python code does not match captured source bytes: "
-                f"{module_name}"
-            )
-        _cache_source_validation(key)
-
-
-def _cache_source_validation(key: tuple[object, ...]) -> None:
-    with _RUNTIME_PROVENANCE_LOCK:
-        _RUNTIME_SOURCE_CACHE_VALIDATION[key] = None
-        _RUNTIME_SOURCE_CACHE_VALIDATION.move_to_end(key)
-        while (
-            len(_RUNTIME_SOURCE_CACHE_VALIDATION)
-            > _RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES
-        ):
-            _RUNTIME_SOURCE_CACHE_VALIDATION.popitem(last=False)
 
 
 def _require_loaded_code_provenance(
@@ -3993,8 +4079,6 @@ def _require_loaded_code_provenance(
     module: object,
     path: Path,
     current: _CapturedPhysicalFile,
-    *,
-    captured_by_path: dict[Path, _CapturedPhysicalFile],
 ) -> None:
     with _RUNTIME_PROVENANCE_LOCK:
         overflow = path in _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW
@@ -4003,18 +4087,6 @@ def _require_loaded_code_provenance(
         native_overflow = native_key in _RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW
         native_files = tuple(_RUNTIME_IMPORTED_NATIVE_FILES.get(native_key, ()))
         initial = _RUNTIME_INITIAL_MODULE_FILES.get((module_name, path))
-        pre_audit_cache = None
-        if (
-            not executed
-            and not native_files
-            and initial == current
-            and path.suffix == ".py"
-        ):
-            pre_audit_cache = _capture_loaded_source_cache(
-                module_name,
-                module,
-                captured_by_path=captured_by_path,
-            )
         cache_key = (
             module_name,
             path,
@@ -4022,7 +4094,6 @@ def _require_loaded_code_provenance(
             tuple(id(code) for code in executed),
             native_files,
             initial,
-            pre_audit_cache,
         )
         if cache_key in _RUNTIME_PROVENANCE_CACHE:
             _RUNTIME_PROVENANCE_CACHE.move_to_end(cache_key)
@@ -4053,25 +4124,7 @@ def _require_loaded_code_provenance(
             )
         _cache_runtime_provenance(cache_key)
         return
-    if initial == current and path.suffix != ".py":
-        _cache_runtime_provenance(cache_key)
-        return
-    if initial == current and pre_audit_cache is not None:
-        source_cache_key = (module_name, path, current, pre_audit_cache)
-        with _RUNTIME_PROVENANCE_LOCK:
-            source_cache_validated = (
-                source_cache_key in _RUNTIME_SOURCE_CACHE_VALIDATION
-            )
-        if not source_cache_validated:
-            status, _digest = _validate_runtime_bytecode_details(
-                (pre_audit_cache.path,)
-            )[pre_audit_cache.path]
-            if status != "source-equivalent":
-                raise RuntimeError(
-                    "loaded Python code does not match captured source bytes: "
-                    f"{module_name}"
-                )
-            _cache_source_validation(source_cache_key)
+    if initial == current and _trusted_pre_audit_module(module_name, module):
         _cache_runtime_provenance(cache_key)
         return
     raise RuntimeError(
@@ -4080,47 +4133,24 @@ def _require_loaded_code_provenance(
     )
 
 
-def _capture_loaded_source_cache(
-    module_name: str,
-    module: object,
-    *,
-    captured_by_path: dict[Path, _CapturedPhysicalFile],
-) -> _CapturedPhysicalFile:
-    spec = getattr(module, "__spec__", None)
-    loader = getattr(spec, "loader", None)
-    if not isinstance(loader, importlib.machinery.SourceFileLoader):
-        raise RuntimeError(
-            f"pre-evidence Python module has an unsupported loader: {module_name}"
+def _trusted_pre_audit_module(module_name: str, module: object) -> bool:
+    if not _runtime_audit.was_preexisting(module_name, module):
+        return False
+    if module_name in {
+        "_virtualenv",
+        "aai_local_finetuning",
+        "aai_local_finetuning._runtime_audit",
+    }:
+        return True
+    if module_name == "_distutils_hack" or module_name.startswith("_distutils_hack."):
+        return True
+    return (
+        re.fullmatch(
+            r"__editable___[A-Za-z0-9_]+_finder",
+            module_name,
         )
-    raw_cache = getattr(module, "__cached__", None)
-    if not isinstance(raw_cache, str) or not raw_cache:
-        raise RuntimeError(
-            f"pre-evidence Python module lacks an active bytecode cache: {module_name}"
-        )
-    cache_path = Path(raw_cache)
-    if not cache_path.is_absolute():
-        cache_path = Path(os.path.abspath(cache_path))
-    _require_no_lexical_symlink_components(
-        cache_path,
-        label="loaded module bytecode cache",
+        is not None
     )
-    if cache_path.is_symlink() or cache_path.suffix != ".pyc":
-        raise ValueError(f"loaded module bytecode cache is unsupported: {module_name}")
-    cache_path = cache_path.resolve(strict=True)
-    expected = captured_by_path.get(cache_path)
-    if expected is None:
-        raise RuntimeError(
-            f"loaded module bytecode cache is not bound to evidence: {module_name}"
-        )
-    current = _capture_physical_file_identity(
-        cache_path,
-        label="loaded module bytecode cache",
-    )
-    if current != expected:
-        raise RuntimeError(
-            f"loaded module bytecode cache changed while captured: {module_name}"
-        )
-    return current
 
 
 def _cache_runtime_provenance(cache_key: tuple[object, ...]) -> None:
