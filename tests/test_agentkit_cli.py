@@ -193,7 +193,10 @@ def test_broken_agent_fails_the_gate_with_exit_two(project_dir, capsys):
     main(["smoke", "--establish-baseline", *_config_flag(project_dir)])
     (project_dir / "evals" / "data" / "answer_sheet.json").write_text(
         json.dumps(
-            [{"question": f"question {index}", "answer": ""} for index in range(12)]
+            [
+                {"question": f"question {index}", "answer": "unrelated"}
+                for index in range(12)
+            ]
         )
     )
     capsys.readouterr()
