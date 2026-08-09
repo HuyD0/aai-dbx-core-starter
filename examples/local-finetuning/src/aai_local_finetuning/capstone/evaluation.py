@@ -9,7 +9,7 @@ import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -29,9 +29,10 @@ from .schemas import (
 
 CAPSTONE_OUTPUT_CONTRACT_VERSION = "1.0.0"
 CAPSTONE_SYSTEM_PROMPT = (
-    "Review the application manifest. Return one JSON object only with status "
-    "and checks. Include only non-pass checks. Every check must contain exactly "
-    "name, result, severity, and remediation_id. Do not invent external facts."
+    "Review the application manifest. Return one JSON object only with "
+    'schema_version exactly "1.0.0", status, and checks. Include only non-pass '
+    "checks. Every check must contain exactly name, result, severity, and "
+    "remediation_id. Do not invent external facts."
 )
 
 
@@ -53,7 +54,7 @@ class CompactReadinessCheck(StrictFrozenModel):
 class CompactReadinessReview(StrictFrozenModel):
     """Bounded model-facing projection of the full deterministic review."""
 
-    schema_version: str = CAPSTONE_OUTPUT_CONTRACT_VERSION
+    schema_version: Literal["1.0.0"]
     status: ReadinessStatus
     checks: tuple[CompactReadinessCheck, ...]
 
@@ -201,6 +202,7 @@ def compact_review(review: ReadinessReview) -> CompactReadinessReview:
         if check.result is not CheckOutcome.PASS
     )
     return CompactReadinessReview(
+        schema_version=CAPSTONE_OUTPUT_CONTRACT_VERSION,
         status=review.status,
         checks=checks,
     )

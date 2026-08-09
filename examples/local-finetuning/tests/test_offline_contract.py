@@ -91,6 +91,9 @@ def test_flight_manifest_rejects_governed_source_or_package_drift(
             training.RuntimePackageEvidence(
                 name="aai-local-finetuning",
                 version=version,
+                payload_file_count=1,
+                payload_size_bytes=10,
+                payload_files_sha256="d" * 64,
             )
             for version in package_versions
         )
@@ -131,11 +134,23 @@ def test_flight_manifest_rejects_governed_source_or_package_drift(
 
     path = write_flight_manifest(settings)  # type: ignore[arg-type]
     written = json.loads(path.read_text(encoding="utf-8"))
-    assert written["schema_version"] == "3.0.0"
+    assert written["schema_version"] == "4.0.0"
     assert written["source_files"] == {"src/aai_local_finetuning/training.py": "a" * 64}
     assert written["packages"] == [
-        {"name": "aai-local-finetuning", "version": "0.1.0"},
-        {"name": "aai-local-finetuning", "version": "0.1.0-vendored"},
+        {
+            "name": "aai-local-finetuning",
+            "version": "0.1.0",
+            "payload_file_count": 1,
+            "payload_size_bytes": 10,
+            "payload_files_sha256": "d" * 64,
+        },
+        {
+            "name": "aai-local-finetuning",
+            "version": "0.1.0-vendored",
+            "payload_file_count": 1,
+            "payload_size_bytes": 10,
+            "payload_files_sha256": "d" * 64,
+        },
     ]
 
     state["contract"] = (

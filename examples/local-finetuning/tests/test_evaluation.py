@@ -181,6 +181,9 @@ def _mutated_execution_contract(
                     training.RuntimePackageEvidence(
                         name="zz-runtime-mutation-test",
                         version="1.0.0",
+                        payload_file_count=1,
+                        payload_size_bytes=10,
+                        payload_files_sha256="f" * 64,
                     ),
                 ),
                 key=lambda package: package.name,

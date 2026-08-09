@@ -49,6 +49,11 @@ _NOTEBOOK_SOURCE_PATHS = (
 )
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _REVISION_PATTERN = r"^[0-9a-f]{40}$"
+_RUNTIME_PAYLOAD_DIGEST_CACHE: dict[
+    tuple[str, int, int, int, int, int],
+    tuple[str, int],
+] = {}
+_RUNTIME_PAYLOAD_DIGEST_CACHE_LOCK = threading.Lock()
 
 
 class TrainingManifestError(RuntimeError):
@@ -109,12 +114,15 @@ class TrainingFileEvidence(BaseModel):
 
 
 class RuntimePackageEvidence(BaseModel):
-    """One installed distribution, recorded without machine-specific paths."""
+    """One installed distribution and its content-addressed runtime payload."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     version: str = Field(min_length=1)
+    payload_file_count: int = Field(ge=0)
+    payload_size_bytes: int = Field(ge=0)
+    payload_files_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def _require_canonical_value(self) -> RuntimePackageEvidence:
@@ -122,6 +130,8 @@ class RuntimePackageEvidence(BaseModel):
             raise ValueError(
                 "runtime package version must not contain outer whitespace"
             )
+        if self.payload_file_count == 0 and self.payload_size_bytes != 0:
+            raise ValueError("an empty runtime package payload must have zero bytes")
         return self
 
 
@@ -130,7 +140,7 @@ class ExecutionContract(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["1.0.0"] = "1.0.0"
+    schema_version: Literal["2.0.0"] = "2.0.0"
     python_version: str = Field(min_length=1)
     python_implementation: str = Field(min_length=1)
     operating_system: str = Field(min_length=1)
@@ -157,7 +167,7 @@ class ExecutionContract(BaseModel):
         ):
             raise ValueError("source_files must have unique paths in sorted order")
         package_keys = tuple(
-            (item.name, item.version) for item in self.runtime_packages
+            _runtime_package_sort_key(item) for item in self.runtime_packages
         )
         if package_keys != tuple(sorted(package_keys)):
             raise ValueError("runtime_packages must be in canonical sorted order")
@@ -204,7 +214,7 @@ class TrainingManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["3.0.0"] = "3.0.0"
+    schema_version: Literal["4.0.0"] = "4.0.0"
     adapter_path: str = Field(min_length=1)
     adapter_sha256: str = Field(pattern=_SHA256_PATTERN)
     adapter_size_bytes: int = Field(gt=0)
@@ -305,7 +315,9 @@ class _CapturedDirectory:
 class _RuntimeDistribution:
     evidence: RuntimePackageEvidence
     metadata_path: Path
+    metadata_file: _CapturedFile
     install_root: Path
+    payload_files: tuple[_CapturedFile, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +334,7 @@ class ExecutionSnapshot:
     execution_contract_sha256: str
     _source_files: tuple[_CapturedFile, ...] = field(repr=False)
     _runtime_package_metadata: tuple[_CapturedFile, ...] = field(repr=False)
+    _runtime_package_payloads: tuple[_CapturedFile, ...] = field(repr=False)
     _runtime_package_roots: tuple[_CapturedDirectory, ...] = field(repr=False)
 
 
@@ -1380,12 +1393,22 @@ def _require_unchanged_training_inputs(plan: _TrainingPlan) -> None:
 
 
 def _capture_execution_contract() -> _CapturedExecutionContract:
-    """Capture portable source bytes and canonical installed distribution versions."""
+    """Capture portable source bytes and installed distribution payloads."""
 
     source_files = _capture_governed_source_files()
     packages = _capture_runtime_packages()
+    contract = _build_execution_contract(source_files, packages)
+    return source_files, contract
+
+
+def _build_execution_contract(
+    source_files: tuple[_CapturedFile, ...],
+    packages: tuple[RuntimePackageEvidence, ...],
+) -> ExecutionContract:
+    if not packages:
+        raise RuntimeError("installed runtime package set is empty")
     source_evidence = tuple(item.evidence for item in source_files)
-    return source_files, ExecutionContract(
+    return ExecutionContract(
         python_version=platform.python_version(),
         python_implementation=platform.python_implementation(),
         operating_system=platform.system(),
@@ -1407,15 +1430,19 @@ def capture_execution_contract() -> ExecutionContract:
 def capture_execution_snapshot() -> ExecutionSnapshot:
     """Capture portable evidence plus transient identities for later rechecking."""
 
-    source_files, contract = _capture_execution_contract()
-    package_metadata, package_roots = _capture_runtime_package_state(
-        expected_packages=contract.runtime_packages
+    source_files = _capture_governed_source_files()
+    distributions = _runtime_distribution_inventory()
+    packages = tuple(item.evidence for item in distributions)
+    contract = _build_execution_contract(source_files, packages)
+    package_metadata, package_payloads, package_roots = _runtime_package_state(
+        distributions
     )
     return ExecutionSnapshot(
         execution_contract=contract,
         execution_contract_sha256=execution_contract_sha256(contract),
         _source_files=source_files,
         _runtime_package_metadata=package_metadata,
+        _runtime_package_payloads=package_payloads,
         _runtime_package_roots=package_roots,
     )
 
@@ -1427,7 +1454,7 @@ def recheck_execution_snapshot(snapshot: ExecutionSnapshot) -> ExecutionSnapshot
         current = capture_execution_snapshot()
     except (OSError, RuntimeError, ValueError) as error:
         raise RuntimeError(
-            "source code or runtime package metadata changed during the operation"
+            "source code or runtime package files changed during the operation"
         ) from error
     captured_digest = execution_contract_sha256(snapshot.execution_contract)
     if captured_digest != snapshot.execution_contract_sha256:
@@ -1436,10 +1463,11 @@ def recheck_execution_snapshot(snapshot: ExecutionSnapshot) -> ExecutionSnapshot
         current.execution_contract != snapshot.execution_contract
         or current._source_files != snapshot._source_files
         or current._runtime_package_metadata != snapshot._runtime_package_metadata
+        or current._runtime_package_payloads != snapshot._runtime_package_payloads
         or current._runtime_package_roots != snapshot._runtime_package_roots
     ):
         raise RuntimeError(
-            "source code or runtime package metadata changed during the operation"
+            "source code or runtime package files changed during the operation"
         )
     return snapshot
 
@@ -1582,29 +1610,23 @@ def _capture_runtime_packages() -> tuple[RuntimePackageEvidence, ...]:
     return tuple(item.evidence for item in distributions)
 
 
-def _capture_runtime_package_state(
-    *,
-    expected_packages: tuple[RuntimePackageEvidence, ...],
-) -> tuple[tuple[_CapturedFile, ...], tuple[_CapturedDirectory, ...]]:
-    """Capture package metadata files and their installation-root identities."""
+def _runtime_package_state(
+    distributions: tuple[_RuntimeDistribution, ...],
+) -> tuple[
+    tuple[_CapturedFile, ...],
+    tuple[_CapturedFile, ...],
+    tuple[_CapturedDirectory, ...],
+]:
+    """Return package metadata, payload files, and installation-root identities."""
 
-    distributions = _runtime_distribution_inventory()
-    packages = tuple(item.evidence for item in distributions)
     metadata_files: list[_CapturedFile] = []
+    payload_files: list[_CapturedFile] = []
     roots: set[Path] = set()
-    for index, distribution in enumerate(distributions):
-        metadata_files.append(
-            _capture_file(
-                distribution.metadata_path,
-                f"runtime-packages/{index:06d}-{distribution.evidence.name}/metadata",
-            )
-        )
+    for distribution in distributions:
+        metadata_files.append(distribution.metadata_file)
+        payload_files.extend(distribution.payload_files)
         roots.add(distribution.install_root)
 
-    if packages != expected_packages:
-        raise RuntimeError(
-            "installed runtime package set changed while its identity was captured"
-        )
     captured_roots = tuple(
         _capture_directory_identity(path)
         for path in sorted(roots, key=lambda item: item.as_posix())
@@ -1613,6 +1635,7 @@ def _capture_runtime_package_state(
         raise RuntimeError("installed runtime package roots are missing")
     return (
         tuple(metadata_files),
+        tuple(payload_files),
         captured_roots,
     )
 
@@ -1629,32 +1652,34 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
 
     by_metadata_path: dict[Path, _RuntimeDistribution] = {}
     for distribution in importlib.metadata.distributions():
-        evidence = _runtime_package_evidence(distribution)
         metadata_path = _distribution_metadata_path(distribution)
         if metadata_path.is_symlink():
             raise ValueError(
                 f"runtime package metadata is a symbolic link: {metadata_path}"
             )
         resolved_metadata = metadata_path.resolve(strict=True)
+        if resolved_metadata in by_metadata_path:
+            continue
         install_root = Path(distribution.locate_file("")).resolve(strict=True)
+        payload_files = _capture_runtime_package_payloads(distribution)
+        evidence = _runtime_package_evidence(distribution, payload_files)
+        metadata_display_path = (
+            "runtime-package-metadata/"
+            + hashlib.sha256(resolved_metadata.as_posix().encode()).hexdigest()
+        )
         captured = _RuntimeDistribution(
             evidence=evidence,
             metadata_path=resolved_metadata,
+            metadata_file=_capture_file(resolved_metadata, metadata_display_path),
             install_root=install_root,
+            payload_files=payload_files,
         )
-        existing = by_metadata_path.get(resolved_metadata)
-        if existing is not None and existing != captured:
-            raise RuntimeError(
-                "one runtime metadata path resolved to inconsistent distributions: "
-                f"{resolved_metadata}"
-            )
         by_metadata_path[resolved_metadata] = captured
     return tuple(
         sorted(
             by_metadata_path.values(),
             key=lambda item: (
-                item.evidence.name,
-                item.evidence.version,
+                *_runtime_package_sort_key(item.evidence),
                 item.metadata_path.as_posix(),
             ),
         )
@@ -1663,13 +1688,80 @@ def _runtime_distribution_inventory() -> tuple[_RuntimeDistribution, ...]:
 
 def _runtime_package_evidence(
     distribution: importlib.metadata.Distribution,
+    payload_files: tuple[_CapturedFile, ...],
 ) -> RuntimePackageEvidence:
     raw_name = distribution.metadata.get("Name")
     raw_version = distribution.version
     if not raw_name or not raw_version:
         raise RuntimeError("installed distribution metadata is incomplete")
     name = re.sub(r"[-_.]+", "-", raw_name).lower()
-    return RuntimePackageEvidence(name=name, version=raw_version)
+    payload_evidence = tuple(item.evidence for item in payload_files)
+    return RuntimePackageEvidence(
+        name=name,
+        version=raw_version,
+        payload_file_count=len(payload_evidence),
+        payload_size_bytes=sum(item.size_bytes for item in payload_evidence),
+        payload_files_sha256=_evidence_sequence_sha256(payload_evidence),
+    )
+
+
+def _runtime_package_sort_key(
+    package: RuntimePackageEvidence,
+) -> tuple[str, str, str, int, int]:
+    return (
+        package.name,
+        package.version,
+        package.payload_files_sha256,
+        package.payload_file_count,
+        package.payload_size_bytes,
+    )
+
+
+def _capture_runtime_package_payloads(
+    distribution: importlib.metadata.Distribution,
+) -> tuple[_CapturedFile, ...]:
+    """Hash every installed non-metadata file without persisting local paths."""
+
+    by_record_path: dict[str, importlib.metadata.PackagePath] = {}
+    for item in distribution.files or ():
+        record_path = _distribution_record_path(item)
+        if _is_distribution_metadata_path(record_path):
+            continue
+        if record_path in by_record_path:
+            name = distribution.metadata.get("Name") or "<unknown>"
+            raise RuntimeError(
+                f"installed distribution contains a duplicate payload path: {name}"
+            )
+        by_record_path[record_path] = item
+
+    captured: list[_CapturedFile] = []
+    for record_path, item in sorted(by_record_path.items()):
+        display_path = (
+            "runtime-package-payload/"
+            + hashlib.sha256(record_path.encode()).hexdigest()
+        )
+        captured.append(
+            _capture_runtime_payload_file(
+                Path(distribution.locate_file(item)),
+                display_path,
+            )
+        )
+    return tuple(captured)
+
+
+def _distribution_record_path(item: importlib.metadata.PackagePath) -> str:
+    raw = str(item).replace("\\", "/")
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute() or not candidate.parts or candidate.as_posix() != raw:
+        raise ValueError(f"installed distribution path is not canonical: {raw}")
+    return raw
+
+
+def _is_distribution_metadata_path(record_path: str) -> bool:
+    return any(
+        part.endswith((".dist-info", ".egg-info"))
+        for part in PurePosixPath(record_path).parts
+    )
 
 
 def _distribution_metadata_path(
@@ -1741,6 +1833,16 @@ def _capture_file(path: Path, display_path: str) -> _CapturedFile:
     return captured
 
 
+def _capture_runtime_payload_file(path: Path, display_path: str) -> _CapturedFile:
+    captured, _ = _capture_open_file(
+        path,
+        display_path,
+        include_bytes=False,
+        use_runtime_digest_cache=True,
+    )
+    return captured
+
+
 def _capture_file_bytes(path: Path, display_path: str) -> tuple[_CapturedFile, bytes]:
     captured, raw = _capture_open_file(path, display_path, include_bytes=True)
     assert raw is not None
@@ -1752,8 +1854,11 @@ def _capture_open_file(
     display_path: str,
     *,
     include_bytes: bool,
+    use_runtime_digest_cache: bool = False,
 ) -> tuple[_CapturedFile, bytes | None]:
     _require_safe_relative_path(display_path, "captured file")
+    if include_bytes and use_runtime_digest_cache:
+        raise ValueError("captured bytes cannot use the runtime digest cache")
     if path.is_symlink():
         raise ValueError(f"symbolic links are not valid training inputs: {path}")
     flags = os.O_RDONLY
@@ -1761,18 +1866,36 @@ def _capture_open_file(
         flags |= os.O_NOFOLLOW
     descriptor = os.open(path, flags)
     chunks: list[bytes] | None = [] if include_bytes else None
-    digest = hashlib.sha256()
-    size_bytes = 0
+    digest_hex: str | None = None
+    size_bytes: int | None = None
+    cache_key: tuple[str, int, int, int, int, int] | None = None
     try:
         with os.fdopen(descriptor, "rb") as stream:
             before = os.fstat(stream.fileno())
             if not stat.S_ISREG(before.st_mode):
                 raise ValueError(f"training input is not a regular file: {path}")
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-                size_bytes += len(chunk)
-                if chunks is not None:
-                    chunks.append(chunk)
+            if use_runtime_digest_cache:
+                cache_key = (
+                    os.path.abspath(path),
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                with _RUNTIME_PAYLOAD_DIGEST_CACHE_LOCK:
+                    cached = _RUNTIME_PAYLOAD_DIGEST_CACHE.get(cache_key)
+                if cached is not None:
+                    digest_hex, size_bytes = cached
+            if digest_hex is None:
+                digest = hashlib.sha256()
+                size_bytes = 0
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size_bytes += len(chunk)
+                    if chunks is not None:
+                        chunks.append(chunk)
+                digest_hex = digest.hexdigest()
             after = os.fstat(stream.fileno())
     except Exception:
         if descriptor >= 0:
@@ -1795,12 +1918,17 @@ def _capture_open_file(
         after.st_mtime_ns,
         after.st_ctime_ns,
     )
+    assert digest_hex is not None
+    assert size_bytes is not None
     if identity_before != identity_after or size_bytes != after.st_size:
         raise RuntimeError(f"training input changed while it was captured: {path}")
+    if cache_key is not None:
+        with _RUNTIME_PAYLOAD_DIGEST_CACHE_LOCK:
+            _RUNTIME_PAYLOAD_DIGEST_CACHE[cache_key] = (digest_hex, size_bytes)
     captured = _CapturedFile(
         evidence=TrainingFileEvidence(
             path=display_path,
-            sha256=digest.hexdigest(),
+            sha256=digest_hex,
             size_bytes=size_bytes,
         ),
         device=after.st_dev,

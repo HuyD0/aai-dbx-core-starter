@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+from pydantic import ValidationError
+
 from aai_local_finetuning import cli, training
 from aai_local_finetuning.capstone import (
     CapstonePrediction,
@@ -56,6 +59,53 @@ def test_compact_contract_contains_only_actionable_checks() -> None:
         assert len(compact.model_dump_json()) < len(
             record.expected_output.model_dump_json()
         )
+
+
+@pytest.mark.parametrize(
+    "schema_version",
+    (None, "0.9.0", "1.0.1"),
+)
+def test_compact_contract_requires_the_explicit_supported_schema_version(
+    schema_version: str | None,
+) -> None:
+    payload = compact_expected(build_records(DatasetSplit.TEST, 1)[0]).model_dump(
+        mode="json"
+    )
+    if schema_version is None:
+        payload.pop("schema_version")
+    else:
+        payload["schema_version"] = schema_version
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        CompactReadinessReview.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "schema_version",
+    (None, "0.9.0"),
+)
+def test_evaluator_rejects_missing_or_unsupported_output_schema_versions(
+    schema_version: str | None,
+) -> None:
+    record = build_records(DatasetSplit.TEST, 1)[0]
+    payload = compact_expected(record).model_dump(mode="json")
+    if schema_version is None:
+        payload.pop("schema_version")
+    else:
+        payload["schema_version"] = schema_version
+
+    report = evaluate_capstone_predictions(
+        (record,),
+        (_prediction(record.example_id, json.dumps(payload)),),
+        evaluation_session=start_evaluation_session(),
+        inference_config=DeterministicInferenceConfig(method="schema-fixture"),
+    )
+
+    assert report.aggregate.json_parse_rate == 1.0
+    assert report.aggregate.schema_validity_rate == 0.0
+    assert report.aggregate.exact_review_rate == 0.0
+    assert report.error_analysis.total_errors == 1
+    assert report.error_analysis.examples[0].issues == ("schema",)
 
 
 def test_policy_ceiling_scores_perfectly_and_exposes_slices() -> None:

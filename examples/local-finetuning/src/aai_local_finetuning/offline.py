@@ -53,7 +53,7 @@ class FlightManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["3.0.0"] = "3.0.0"
+    schema_version: Literal["4.0.0"] = "4.0.0"
     python: str
     platform: str
     project_lock_sha256: str
@@ -248,7 +248,7 @@ def _current_flight_manifest(settings: ProjectSettings) -> FlightManifest:
         if path.is_file()
     }
     return FlightManifest(
-        schema_version="3.0.0",
+        schema_version="4.0.0",
         python=platform.python_version(),
         platform=f"{platform.system()}-{platform.machine()}",
         project_lock_sha256=sha256_file(PROJECT_ROOT / "uv.lock"),

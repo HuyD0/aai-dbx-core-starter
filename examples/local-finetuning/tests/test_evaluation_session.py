@@ -40,6 +40,7 @@ class GovernedRuntime:
     project_root: Path
     source_path: Path
     metadata_path: Path
+    package_payload_path: Path
     settings: object
     model_dir: Path
     model_runtime_path: Path
@@ -105,7 +106,7 @@ def governed_runtime(
         encoding="utf-8",
     )
 
-    distribution, metadata_path = _write_distribution(
+    distribution, metadata_path, package_payload_path = _write_distribution(
         tmp_path / "site-packages",
         name="session-runtime",
         version="1.0.0",
@@ -143,6 +144,7 @@ def governed_runtime(
         project_root=project_root,
         source_path=source_path,
         metadata_path=metadata_path,
+        package_payload_path=package_payload_path,
         settings=settings,
         model_dir=model_dir,
         model_runtime_path=model_runtime_path,
@@ -155,21 +157,32 @@ def _write_distribution(
     *,
     name: str,
     version: str,
-) -> tuple[PathDistribution, Path]:
+) -> tuple[PathDistribution, Path, Path]:
     normalized_name = name.replace("-", "_")
     directory_name = f"{normalized_name}-{version}.dist-info"
     distribution_dir = root / directory_name
     distribution_dir.mkdir(parents=True)
+    package_dir = root / normalized_name
+    package_dir.mkdir()
+    package_payload_path = package_dir / "__init__.py"
+    package_payload_path.write_text(
+        f'"""Runtime payload for {name} {version}."""\n',
+        encoding="utf-8",
+    )
     metadata_path = distribution_dir / "METADATA"
     metadata_path.write_text(
         f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
         encoding="utf-8",
     )
     (distribution_dir / "RECORD").write_text(
-        f"{directory_name}/METADATA,,\n{directory_name}/RECORD,,\n",
+        (
+            f"{normalized_name}/__init__.py,,\n"
+            f"{directory_name}/METADATA,,\n"
+            f"{directory_name}/RECORD,,\n"
+        ),
         encoding="utf-8",
     )
-    return PathDistribution(distribution_dir), metadata_path
+    return PathDistribution(distribution_dir), metadata_path, package_payload_path
 
 
 def _replace_with_original_bytes(path: Path) -> None:
@@ -381,6 +394,21 @@ def test_prestarted_session_rejects_package_metadata_drift_restored_before_scori
         )
 
 
+def test_prestarted_session_rejects_installed_package_payload_mutation(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    package = session.execution_contract.runtime_packages[0]
+    original = governed_runtime.package_payload_path.read_bytes()
+
+    assert package.payload_file_count == 1
+    assert package.payload_size_bytes == len(original)
+    governed_runtime.package_payload_path.write_bytes(b"x" * len(original))
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
 def test_support_and_capstone_reports_bind_the_prestarted_session_hash(
     governed_runtime: GovernedRuntime,
 ) -> None:
@@ -416,7 +444,7 @@ def test_session_preserves_distinct_vendored_versions_with_the_same_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     primary = PathDistribution(governed_runtime.metadata_path.parent)
-    vendored, _vendored_metadata = _write_distribution(
+    vendored, _vendored_metadata, _vendored_payload = _write_distribution(
         governed_runtime.metadata_path.parents[2] / "provider" / "_vendor",
         name="session-runtime",
         version="0.9.0",

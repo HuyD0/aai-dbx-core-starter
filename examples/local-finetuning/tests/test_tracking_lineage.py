@@ -23,7 +23,7 @@ def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
     for name, content in (
         ("adapters.safetensors", b"weights"),
         ("adapter_config.json", b'{"rank":8}\n'),
-        ("training-manifest.json", b'{"schema_version":"3.0.0"}\n'),
+        ("training-manifest.json", b'{"schema_version":"4.0.0"}\n'),
     ):
         (adapter_dir / name).write_bytes(content)
     training_config = tmp_path / "configs" / "training" / "lora.yaml"

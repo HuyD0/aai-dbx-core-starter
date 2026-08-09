@@ -193,7 +193,7 @@ def test_success_manifest_binds_all_model_data_and_adapter_bytes(
     assert manifest.data_path == "data/processed/study-v1"
     assert manifest.adapter_size_bytes == len(b"adapter-v1")
     assert manifest.effective_config["iters"] == 12
-    assert manifest.schema_version == "3.0.0"
+    assert manifest.schema_version == "4.0.0"
     assert tuple(item.path for item in manifest.execution_contract.source_files) == (
         "scripts/notebook_pedagogy.py",
         "scripts/render_notebooks.py",
@@ -538,6 +538,9 @@ def test_verifier_rejects_runtime_package_set_changed_after_training(
         training.RuntimePackageEvidence(
             name="aai-runtime-mutation-test",
             version="1.0.0",
+            payload_file_count=1,
+            payload_size_bytes=10,
+            payload_files_sha256="f" * 64,
         ),
     )
     changed = tuple(sorted(changed, key=lambda package: package.name))
