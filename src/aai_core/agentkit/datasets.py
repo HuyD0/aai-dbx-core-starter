@@ -8,12 +8,15 @@ names exactly which rows it scored.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
+import math
 import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -527,35 +530,64 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     )
 
 
+_TRACE_STATES = frozenset({"STATE_UNSPECIFIED", "OK", "ERROR", "IN_PROGRESS"})
+_TRACE_V2_STATUSES = frozenset(
+    {"TRACE_STATUS_UNSPECIFIED", "OK", "ERROR", "IN_PROGRESS"}
+)
+_SPAN_STATUSES = frozenset({"UNSET", "OK", "ERROR"})
+_SPAN_V3_STATUSES = _SPAN_STATUSES | frozenset(
+    {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"}
+)
+_ASSESSMENT_SOURCE_TYPES = frozenset(
+    {"SOURCE_TYPE_UNSPECIFIED", "LLM_JUDGE", "AI_JUDGE", "HUMAN", "CODE"}
+)
+_TRACE_INFO_V2_KEYS = frozenset(
+    {
+        "request_id",
+        "experiment_id",
+        "timestamp_ms",
+        "execution_time_ms",
+        "status",
+        "request_metadata",
+        "tags",
+        "assessments",
+    }
+)
+_TRACE_INFO_V3_KEYS = frozenset(
+    {
+        "trace_id",
+        "trace_location",
+        "request_time",
+        "state",
+        "request_preview",
+        "response_preview",
+        "client_request_id",
+        "execution_duration",
+        "execution_duration_ms",
+        "trace_metadata",
+        "tags",
+        "assessments",
+    }
+)
+
+
 def _trace_envelope_is_deserializable(document: Mapping[str, Any]) -> bool:
     """Whether MLflow can deserialize this complete v2/v3 trace envelope.
 
-    MLflow is an optional dependency of the SDK, so the base package cannot
-    import it at module load. A conservative structural check keeps that base
-    path dependency-free. When the evaluation extra is installed, the pinned
-    ``Trace.from_dict`` implementation is the final authority; this catches
-    malformed ids, timestamps, locations, assessments, and span variants
-    before planning or confirmation rather than inside a paid evaluation.
+    The pure structural contract is intentionally conservative and complete
+    for the canonical dictionaries emitted by MLflow 2/3. The SDK's base
+    install therefore rejects malformed traces without importing an optional
+    dependency. When MLflow is present, pinned ``Trace.from_dict`` remains the
+    final parity check.
     """
 
-    info = document.get("info")
-    data = document.get("data")
-    if not isinstance(info, Mapping) or not isinstance(data, Mapping):
+    if not _complete_trace_envelope(document):
         return False
-    spans = data.get("spans", [])
-    if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
-        return False
-    if not _complete_trace_info(info) or not all(
-        isinstance(span, Mapping) and _complete_span(span) for span in spans
-    ):
-        return False
-
     try:
         from mlflow.entities import Trace
     except ModuleNotFoundError as error:
         # The SDK's base install intentionally has no MLflow dependency. A
-        # broken installed MLflow is different from an absent optional extra
-        # and fails closed.
+        # broken installed MLflow is different from an absent optional extra.
         return error.name == "mlflow"
     except ImportError:
         return False
@@ -567,45 +599,92 @@ def _trace_envelope_is_deserializable(document: Mapping[str, Any]) -> bool:
     return True
 
 
-def _complete_trace_info(info: Mapping[str, Any]) -> bool:
-    assessments = info.get("assessments", [])
-    if not isinstance(assessments, Sequence) or isinstance(assessments, (str, bytes)):
-        return False
-    if not all(_complete_assessment(item) for item in assessments):
-        return False
+def _complete_trace_envelope(document: Mapping[str, Any]) -> bool:
+    """Dependency-free contract for canonical MLflow v2/v3 trace dictionaries."""
 
-    if "request_id" in info:  # MLflow trace-info v2
-        return (
-            all(
-                _is_populated(info.get(key))
-                for key in ("request_id", "experiment_id", "status")
+    try:
+        info = document.get("info")
+        data = document.get("data")
+        if not isinstance(info, Mapping) or not isinstance(data, Mapping):
+            return False
+        schema = "v2" if "request_id" in info else "v3"
+        if not _complete_trace_info(info, schema=schema):
+            return False
+        spans = data.get("spans", [])
+        if not isinstance(spans, list):
+            return False
+        request_id = info["request_id" if schema == "v2" else "trace_id"]
+        return all(
+            isinstance(span, Mapping)
+            and _complete_span(
+                span,
+                schema=schema,
+                expected_request_id=request_id,
             )
-            and info.get("status")
-            in {"TRACE_STATUS_UNSPECIFIED", "OK", "ERROR", "IN_PROGRESS"}
-            and "timestamp_ms" in info
-            and "execution_time_ms" in info
+            for span in spans
         )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # This is a boundary over untrusted JSON. Shape errors are governed
+        # validation failures, never raw Python exceptions.
+        return False
 
-    if not all(
-        _is_populated(info.get(key)) for key in ("trace_id", "trace_location", "state")
-    ) or info.get("state") not in {
-        "STATE_UNSPECIFIED",
-        "OK",
-        "ERROR",
-        "IN_PROGRESS",
-    }:
+
+def _complete_trace_info(info: Mapping[str, Any], *, schema: str) -> bool:
+    if schema == "v2":
+        if not set(info) <= _TRACE_INFO_V2_KEYS:
+            return False
+        request_id = info.get("request_id")
+        experiment_id = info.get("experiment_id")
+        status = info.get("status")
+        if not (
+            _non_empty_string(request_id)
+            and _non_empty_string(experiment_id)
+            and isinstance(status, str)
+            and status in _TRACE_V2_STATUSES
+            and _non_negative_integer(info.get("timestamp_ms"))
+            and "execution_time_ms" in info
+            and _optional_non_negative_integer(info.get("execution_time_ms"))
+            and _optional_string_map(info, "request_metadata")
+            and _optional_string_map(info, "tags")
+        ):
+            return False
+    else:
+        if not set(info) <= _TRACE_INFO_V3_KEYS:
+            return False
+        request_id = info.get("trace_id")
+        state = info.get("state")
+        if not (
+            _non_empty_string(request_id)
+            and isinstance(state, str)
+            and state in _TRACE_STATES
+            and _rfc3339_timestamp(info.get("request_time"))
+            and _complete_trace_location(info.get("trace_location"))
+            and _optional_string(info, "request_preview")
+            and _optional_string(info, "response_preview")
+            and _optional_string(info, "client_request_id")
+            and _optional_non_negative_integer_field(info, "execution_duration")
+            and _optional_non_negative_integer_field(info, "execution_duration_ms")
+            and _optional_string_map(info, "trace_metadata")
+            and _optional_string_map(info, "tags")
+        ):
+            return False
+
+    assessments = info.get("assessments", [])
+    return isinstance(assessments, list) and all(
+        _complete_assessment(item, expected_request_id=request_id)
+        for item in assessments
+    )
+
+
+def _complete_trace_location(value: Any) -> bool:
+    if not isinstance(value, Mapping):
         return False
-    request_time = info.get("request_time")
-    if not (
-        request_time == 0
-        or (isinstance(request_time, str) and bool(request_time.strip()))
-    ):
+    location_type = value.get("type")
+    if not isinstance(location_type, str):
         return False
-    location = info.get("trace_location")
-    if not isinstance(location, Mapping):
-        return False
-    location_type = location.get("type")
-    location_fields = {
+    if location_type == "TRACE_LOCATION_TYPE_UNSPECIFIED":
+        return True
+    shapes = {
         "MLFLOW_EXPERIMENT": ("mlflow_experiment", ("experiment_id",)),
         "INFERENCE_TABLE": ("inference_table", ("full_table_name",)),
         "UC_SCHEMA": ("uc_schema", ("catalog_name", "schema_name")),
@@ -614,75 +693,326 @@ def _complete_trace_info(info: Mapping[str, Any]) -> bool:
             ("catalog_name", "schema_name"),
         ),
     }
-    if location_type == "TRACE_LOCATION_TYPE_UNSPECIFIED":
-        return True
-    field_spec = location_fields.get(location_type)
-    if field_spec is None:
+    shape = shapes.get(location_type)
+    if shape is None:
         return False
-    field, required_location_keys = field_spec
-    details = location.get(field)
+    field, required = shape
+    details = value.get(field)
     return isinstance(details, Mapping) and all(
-        _is_populated(details.get(key)) for key in required_location_keys
+        _non_empty_string(details.get(key)) for key in required
     )
 
 
-def _complete_assessment(assessment: Any) -> bool:
+def _complete_assessment(assessment: Any, *, expected_request_id: str) -> bool:
     if not isinstance(assessment, Mapping):
         return False
-    required = ("assessment_name", "source", "create_time", "last_update_time")
-    if not all(_is_populated(assessment.get(key)) for key in required):
-        return False
     source = assessment.get("source")
-    if not isinstance(source, Mapping) or not _is_populated(source.get("source_type")):
-        return False
-    return any(
-        isinstance(assessment.get(kind), Mapping)
-        for kind in ("expectation", "feedback", "issue")
-    )
-
-
-def _complete_span(span: Mapping[str, Any]) -> bool:
-    attributes = span.get("attributes")
-    if not isinstance(attributes, Mapping) or not _is_populated(
-        attributes.get("mlflow.traceRequestId")
+    if not (
+        _non_empty_string(assessment.get("assessment_name"))
+        and _rfc3339_timestamp(assessment.get("create_time"))
+        and _rfc3339_timestamp(assessment.get("last_update_time"))
+        and isinstance(source, Mapping)
+        and set(source) <= {"source_type", "source_id"}
+        and isinstance(source.get("source_type"), str)
+        and source["source_type"].upper() in _ASSESSMENT_SOURCE_TYPES
+        and _optional_string(source, "source_id")
+        and _optional_string(assessment, "assessment_id")
+        and _optional_string(assessment, "run_id")
+        and _optional_string(assessment, "rationale")
+        and _optional_string(assessment, "span_id")
+        and _optional_string(assessment, "overrides")
+        and _optional_string_map(assessment, "metadata")
+        and ("valid" not in assessment or isinstance(assessment.get("valid"), bool))
     ):
         return False
-    if "context" in span:  # MLflow span v2
-        context = span.get("context")
-        required = (
-            "parent_id",
-            "name",
-            "start_time",
-            "end_time",
-            "status_code",
-            "status_message",
-            "events",
-        )
-        return (
-            isinstance(context, Mapping)
-            and _is_populated(context.get("trace_id"))
-            and _is_populated(context.get("span_id"))
-            and all(key in span for key in required)
-            and isinstance(span.get("events"), Sequence)
-        )
+    assessment_trace_id = assessment.get("trace_id")
+    if assessment_trace_id is not None and assessment_trace_id != expected_request_id:
+        return False
 
-    required = (
-        "trace_id",
-        "span_id",
-        "parent_span_id",
-        "name",
-        "start_time_unix_nano",
-        "status",
+    kinds = [
+        key
+        for key in ("expectation", "feedback", "issue")
+        if isinstance(assessment.get(key), Mapping) and assessment.get(key)
+    ]
+    if len(kinds) != 1:
+        return False
+    kind = kinds[0]
+    value = assessment[kind]
+    if kind == "expectation":
+        return _complete_expectation(value)
+    if kind == "feedback":
+        return _complete_feedback(value)
+    return _non_empty_string(value.get("issue_name"))
+
+
+def _complete_expectation(value: Mapping[str, Any]) -> bool:
+    if "value" in value:
+        return _json_value(value["value"])
+    serialized = value.get("serialized_value")
+    if not isinstance(serialized, Mapping):
+        return False
+    encoded = serialized.get("value")
+    if not isinstance(encoded, str):
+        return False
+    try:
+        json.loads(encoded)
+    except (TypeError, ValueError):
+        return False
+    return _optional_string(serialized, "serialization_format")
+
+
+def _complete_feedback(value: Mapping[str, Any]) -> bool:
+    if "value" not in value or not _json_value(value.get("value")):
+        return False
+    error = value.get("error")
+    if error is None:
+        return True
+    return (
+        isinstance(error, Mapping)
+        and _non_empty_string(error.get("error_code"))
+        and _optional_string(error, "error_message")
+        and _optional_string(error, "stack_trace")
+    )
+
+
+def _complete_span(
+    span: Mapping[str, Any], *, schema: str, expected_request_id: str
+) -> bool:
+    attributes = span.get("attributes")
+    if not (
+        _otel_attributes(attributes)
+        and _request_id_attribute_matches(attributes, expected_request_id)
+        and _non_empty_string(span.get("name"))
+    ):
+        return False
+    if schema == "v2":
+        return _complete_v2_span(span)
+    return _complete_v3_span(span)
+
+
+def _complete_v2_span(span: Mapping[str, Any]) -> bool:
+    context = span.get("context")
+    status = span.get("status_code")
+    return (
+        isinstance(context, Mapping)
+        and _hex_id(context.get("trace_id"), width=32)
+        and _hex_id(context.get("span_id"), width=16)
+        and "parent_id" in span
+        and _optional_hex_parent(span.get("parent_id"))
+        and _non_negative_integer(span.get("start_time"))
+        and _non_negative_integer(span.get("end_time"))
+        and isinstance(status, str)
+        and status in _SPAN_STATUSES
+        and isinstance(span.get("status_message"), str)
+        and _complete_events(span.get("events"), schema="v2")
+        and _complete_links(span.get("links", []))
+    )
+
+
+def _complete_v3_span(span: Mapping[str, Any]) -> bool:
+    trace_id = span.get("trace_id")
+    byte_ids = _base64_id(trace_id, width=16)
+    ids_are_valid = (
+        _base64_id(span.get("span_id"), width=8)
+        and _optional_base64_parent(span.get("parent_span_id"))
+        if byte_ids
+        else _property_trace_id(trace_id)
+        and _hex_id(span.get("span_id"), width=16)
+        and _optional_hex_parent(span.get("parent_span_id"))
     )
     status = span.get("status")
+    end_time = span.get("end_time_unix_nano")
     return (
-        all(key in span for key in required)
-        and _is_populated(span.get("trace_id"))
-        and _is_populated(span.get("span_id"))
+        ids_are_valid
+        and "parent_span_id" in span
+        and _non_negative_integer(span.get("start_time_unix_nano"))
+        and (end_time is None or _non_negative_integer(end_time))
         and isinstance(status, Mapping)
-        and _is_populated(status.get("code"))
-        and isinstance(span.get("events", []), Sequence)
+        and isinstance(status.get("code"), str)
+        and status["code"] in _SPAN_V3_STATUSES
+        and ("message" not in status or isinstance(status.get("message"), str))
+        and _complete_events(span.get("events", []), schema="v3")
+        and _complete_links(span.get("links", []))
     )
+
+
+def _complete_events(value: Any, *, schema: str) -> bool:
+    if not isinstance(value, list):
+        return False
+    time_key = "timestamp" if schema == "v2" else "time_unix_nano"
+    return all(
+        isinstance(event, Mapping)
+        and _non_empty_string(event.get("name"))
+        and _non_negative_integer(event.get(time_key))
+        and _otel_attributes(event.get("attributes", {}))
+        for event in value
+    )
+
+
+def _complete_links(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(link, Mapping)
+        and _linked_trace_id(link.get("trace_id"))
+        and _hex_id(link.get("span_id"), width=16)
+        and (
+            link.get("attributes") is None
+            or _json_scalar_mapping(link.get("attributes"))
+        )
+        for link in value
+    )
+
+
+def _request_id_attribute_matches(
+    attributes: Mapping[str, Any], expected_request_id: str
+) -> bool:
+    encoded = attributes.get("mlflow.traceRequestId")
+    if not isinstance(encoded, str):
+        return False
+    try:
+        decoded = json.loads(encoded)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(decoded, str) and decoded == expected_request_id
+
+
+def _rfc3339_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    body = value[:-1]
+    timestamp, separator, fraction = body.partition(".")
+    if separator and (not 1 <= len(fraction) <= 9 or not fraction.isdigit()):
+        return False
+    try:
+        datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
+
+
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _non_negative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _optional_non_negative_integer(value: Any) -> bool:
+    return value is None or _non_negative_integer(value)
+
+
+def _optional_non_negative_integer_field(mapping: Mapping[str, Any], key: str) -> bool:
+    return key not in mapping or _optional_non_negative_integer(mapping.get(key))
+
+
+def _optional_string(mapping: Mapping[str, Any], key: str) -> bool:
+    return (
+        key not in mapping
+        or mapping.get(key) is None
+        or isinstance(mapping.get(key), str)
+    )
+
+
+def _optional_string_map(mapping: Mapping[str, Any], key: str) -> bool:
+    return key not in mapping or _string_map(mapping.get(key))
+
+
+def _string_map(value: Any) -> bool:
+    return isinstance(value, Mapping) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    )
+
+
+def _otel_attributes(value: Any) -> bool:
+    return isinstance(value, Mapping) and all(
+        isinstance(key, str) and _otel_attribute_value(item)
+        for key, item in value.items()
+    )
+
+
+def _otel_attribute_value(value: Any) -> bool:
+    if isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if not isinstance(value, list):
+        return False
+    if not value:
+        return True
+    value_type = type(value[0])
+    return value_type in {str, bool, int, float} and all(
+        type(item) is value_type
+        and (not isinstance(item, float) or math.isfinite(item))
+        for item in value
+    )
+
+
+def _json_value(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_json_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and _json_value(item) for key, item in value.items()
+        )
+    return False
+
+
+def _json_scalar_mapping(value: Any) -> bool:
+    return isinstance(value, Mapping) and all(
+        isinstance(key, str)
+        and (item is None or isinstance(item, (str, bool, int, float)))
+        and (not isinstance(item, float) or math.isfinite(item))
+        for key, item in value.items()
+    )
+
+
+def _base64_id(value: Any, *, width: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        return False
+    return len(decoded) == width and any(decoded)
+
+
+def _hex_id(value: Any, *, width: int) -> bool:
+    if not isinstance(value, str) or len(value) != width:
+        return False
+    try:
+        return int(value, 16) > 0
+    except ValueError:
+        return False
+
+
+def _optional_base64_parent(value: Any) -> bool:
+    return value is None or value == "" or _base64_id(value, width=8)
+
+
+def _optional_hex_parent(value: Any) -> bool:
+    return value is None or value == "" or _hex_id(value, width=16)
+
+
+def _property_trace_id(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    identifier = value
+    if value.startswith("trace:/"):
+        parts = value.removeprefix("trace:/").split("/")
+        if len(parts) != 2 or not all(parts):
+            return False
+        identifier = parts[1]
+    if identifier.startswith("tr-"):
+        identifier = identifier.removeprefix("tr-")
+    return _hex_id(identifier, width=32)
+
+
+def _linked_trace_id(value: Any) -> bool:
+    return _property_trace_id(value) or _hex_id(value, width=32)
 
 
 def _span_identifier(span: Mapping[str, Any]) -> Any:

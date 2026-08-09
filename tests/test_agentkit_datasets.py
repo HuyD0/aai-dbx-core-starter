@@ -165,6 +165,73 @@ def _mlflow_v2_trace():
     }
 
 
+def _trace_with_event_and_link(trace):
+    document = json.loads(json.dumps(trace))
+    span = document["data"]["spans"][0]
+    if "context" in span:
+        span["events"] = [
+            {"name": "retrieved", "timestamp": 2, "attributes": {"count": 1}}
+        ]
+    else:
+        span["events"] = [
+            {
+                "name": "retrieved",
+                "time_unix_nano": 1_786_000_000_000_000_001,
+                "attributes": {"count": 1},
+            }
+        ]
+    span["links"] = [
+        {
+            "trace_id": "tr-11111111111111111111111111111111",
+            "span_id": "0123456789abcdef",
+            "attributes": {"relationship": "handoff"},
+        }
+    ]
+    return document
+
+
+def _malformed_complete_trace(case):
+    document = _mlflow_v2_trace() if case.startswith("v2-") else _mlflow_trace()
+    span = document["data"]["spans"][0]
+    if case == "bad-request-time":
+        document["info"]["request_time"] = "not-a-timestamp"
+    elif case == "list-state":
+        document["info"]["state"] = ["OK"]
+    elif case == "mapping-location-type":
+        document["info"]["trace_location"]["type"] = {"name": "experiment"}
+    elif case == "bad-trace-id":
+        span["trace_id"] = "not-base64!"
+    elif case == "bad-span-id":
+        span["span_id"] = "not-base64!"
+    elif case == "bad-span-status":
+        span["status"]["code"] = "STATUS_CODE_UNKNOWN"
+    elif case == "bad-event":
+        span["events"] = [{"time_unix_nano": 1, "attributes": {}}]
+    elif case == "bad-link":
+        span["links"] = [{"trace_id": "tr-" + "1" * 32}]
+    elif case == "bad-request-id-json":
+        span["attributes"]["mlflow.traceRequestId"] = json.dumps(["not", "an-id"])
+    elif case == "bad-request-id-encoding":
+        span["attributes"]["mlflow.traceRequestId"] = "not-json"
+    elif case == "mismatched-request-id":
+        span["attributes"]["mlflow.traceRequestId"] = json.dumps("tr-other")
+    elif case == "v2-bad-timestamp":
+        document["info"]["timestamp_ms"] = "not-an-integer"
+    elif case == "v2-bad-trace-id":
+        span["context"]["trace_id"] = "not-hex"
+    elif case == "v2-bad-span-status":
+        span["status_code"] = "UNKNOWN"
+    elif case == "v2-bad-event":
+        span["events"] = [{"timestamp": 1, "attributes": {}}]
+    elif case == "v2-bad-link":
+        span["links"] = [{"trace_id": "tr-" + "1" * 32}]
+    elif case == "v2-bad-request-id-json":
+        span["attributes"]["mlflow.traceRequestId"] = json.dumps({"id": "bad"})
+    else:  # pragma: no cover - test table and builder must stay in lockstep
+        raise AssertionError(case)
+    return document
+
+
 def test_load_json_and_jsonl(tmp_path):
     rows = _rows(3)
     _write_dataset(tmp_path, rows)
@@ -1281,6 +1348,86 @@ def test_trace_validation_matches_locked_mlflow_from_dict(tmp_path):
     assert validate_dataset(
         load_dataset("invalid.json", root=tmp_path), minimum_rows=1
     ) == ["row 0 trace must be decodable and contain a usable request or root span"]
+
+
+_MALFORMED_TRACE_CASES = (
+    "bad-request-time",
+    "list-state",
+    "mapping-location-type",
+    "bad-trace-id",
+    "bad-span-id",
+    "bad-span-status",
+    "bad-event",
+    "bad-link",
+    "bad-request-id-json",
+    "bad-request-id-encoding",
+    "mismatched-request-id",
+    "v2-bad-timestamp",
+    "v2-bad-trace-id",
+    "v2-bad-span-status",
+    "v2-bad-event",
+    "v2-bad-link",
+    "v2-bad-request-id-json",
+)
+
+
+@pytest.mark.parametrize("case", _MALFORMED_TRACE_CASES)
+def test_dependency_free_trace_contract_fails_closed_and_is_total(tmp_path, case):
+    """Every JSON-valid malformed value becomes a governed row failure."""
+
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    trace = _malformed_complete_trace(case)
+    assert _complete_trace_envelope(trace) is False
+    _write_dataset(tmp_path, [{"inputs": {"question": "q"}, "trace": trace}])
+
+    assert validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    ) == ["row 0 trace must be decodable and contain a usable request or root span"]
+
+
+@pytest.mark.parametrize("trace", [_mlflow_trace(), _mlflow_v2_trace()])
+def test_dependency_free_trace_contract_accepts_canonical_v2_and_v3(trace):
+    from aai_core.agentkit.datasets import _complete_trace_envelope
+
+    assert _complete_trace_envelope(_trace_with_event_and_link(trace)) is True
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "bad-request-time",
+        "list-state",
+        "mapping-location-type",
+        "bad-trace-id",
+        "bad-span-id",
+        "bad-span-status",
+        "bad-event",
+        "bad-link",
+        "bad-request-id-json",
+        "v2-bad-trace-id",
+        "v2-bad-span-status",
+        "v2-bad-event",
+        "v2-bad-link",
+        "v2-bad-request-id-json",
+    ],
+)
+def test_structural_rejections_match_locked_mlflow(case):
+    pytest.importorskip("mlflow")
+    from mlflow.entities import Trace
+    from mlflow.exceptions import MlflowException
+
+    with pytest.raises((ValueError, TypeError, MlflowException)):
+        Trace.from_dict(_malformed_complete_trace(case))
+
+
+@pytest.mark.parametrize("trace", [_mlflow_trace(), _mlflow_v2_trace()])
+def test_canonical_event_and_link_shapes_match_locked_mlflow(trace):
+    pytest.importorskip("mlflow")
+    from mlflow.entities import Trace
+
+    document = _trace_with_event_and_link(trace)
+    assert Trace.from_dict(document).data.spans
 
 
 @pytest.mark.parametrize("inputs", ["scalar request", ["list request"]])
