@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from aai_core.agentkit import catalog as catalog_module
+from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.baseline import (
     BaselineDataset,
     BaselineRecord,
@@ -64,7 +65,13 @@ from aai_core.agentkit.gate import (
     EXIT_THRESHOLD_FAILED,
     build_policy,
 )
-from aai_core.agentkit.results import ResultsRecord, publish_results, write_results
+from aai_core.agentkit.results import (
+    ResultsRecord,
+    begin_results_attempt,
+    complete_results_attempt,
+    publish_results,
+    write_results,
+)
 from aai_core.agentkit.targets import (
     TargetKind,
     build_predict_fn,
@@ -158,6 +165,14 @@ def run_scoring(
     """Score the current version and compare it against the baseline."""
 
     config = project.config
+    # Resolve and structurally preflight the configured target before a UC
+    # dataset or explicit remote baseline can cause a cloud read. HTTP auth
+    # is required here only when the caller explicitly selected live mode;
+    # the default mode is known after the dataset shape is loaded.
+    target = resolve_target(
+        agent or config.agent, root=project.root, settings=project.settings
+    )
+    preflight_target(target, project=project, require_invocation=mode == "live")
     dataset = load_dataset(
         config.dataset, root=project.root, mlflow_module=mlflow_module
     )
@@ -169,13 +184,9 @@ def run_scoring(
             remediation="Fix the dataset rows, then run the command again.",
         )
 
-    # An explicit target overrides the configured one. The deployment-job
-    # gate needs this: it must score the model version that triggered it,
-    # not whatever `agent:` happened to be committed.
-    target = resolve_target(
-        agent or config.agent, root=project.root, settings=project.settings
-    )
     resolved_mode = mode or _default_mode(target, dataset)
+    if resolved_mode == "live" and mode != "live":
+        preflight_target(target, project=project, require_invocation=True)
     # Before the estimate and before any judge call: a traces run supplies
     # no predict_fn, so a row without a trace has no answer to score at
     # all. Choosing the mode by default already avoids this; asking for it
@@ -296,10 +307,6 @@ def run_scoring(
             )
 
     enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
-    if resolved_mode == "live":
-        # Everything inspectable without a provider call belongs before
-        # endpoint identity, prompt registry reads, and confirmation.
-        preflight_target(target, project=project)
     if judges_enabled:
         # Best effort: an endpoint name is stable while the model behind it
         # is not, so pin what it currently serves when the workspace will
@@ -386,6 +393,8 @@ def run_scoring(
                 "the confirmation prompt."
             )
             return outcome, EXIT_ERROR
+
+    attempt = begin_results_attempt(project.results_dir, command=command)
 
     # Confirmation follows every refusal that can be determined without
     # scoring, including governed prompt drift. Only an accepted run tunes
@@ -588,6 +597,7 @@ def run_scoring(
                 change_id=change_id,
             ),
         )
+    complete_results_attempt(project.results_dir, attempt, results_path)
 
     outcome.results = results
     outcome.gate = gate
@@ -797,17 +807,11 @@ def _is_populated_score(value: Any) -> bool:
     that works without importing pandas.
     """
 
-    if value is None:
-        return False
-    if isinstance(value, float) and value != value:
-        return False
-    return True
+    return not is_missing_scalar(value)
 
 
 def _is_reported_error(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, float) and value != value:  # NaN
+    if is_missing_scalar(value):
         return False
     return bool(str(value).strip())
 

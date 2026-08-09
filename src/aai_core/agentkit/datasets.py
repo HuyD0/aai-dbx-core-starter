@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.errors import ConfigError, missing_extra
 
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
@@ -722,11 +723,7 @@ def _is_missing(value: Any) -> bool:
     ``bool(pd.NA)`` raises, so its type name is the safe thing to check.
     """
 
-    if value is None:
-        return True
-    if isinstance(value, float):
-        return value != value  # NaN is the only float unequal to itself
-    return type(value).__name__ in {"NAType", "NaTType"}
+    return is_missing_scalar(value)
 
 
 def _is_populated(value: Any) -> bool:
@@ -1076,12 +1073,34 @@ def _span_outputs(span: Mapping[str, Any]) -> Any | None:
             isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes))
         ) or _is_populated(candidate):
             found.append(candidate)
-    # A list of documents is the shape both callers want; prefer it over a
-    # scalar or mapping that some other key happened to hold.
-    for candidate in found:
-        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
-            return candidate
-    return found[0] if found else None
+    # A retriever can expose the same output in several MLflow shapes. An
+    # empty lower-priority representation must not erase a populated one and
+    # turn a real judge call into zero. Prefer the representation with the
+    # most known documents, using serialized size to break equal-count ties.
+    sequences = [
+        candidate
+        for candidate in found
+        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes))
+    ]
+    populated_sequences = [candidate for candidate in sequences if candidate]
+    if populated_sequences:
+        return max(
+            populated_sequences,
+            key=lambda candidate: (
+                len(candidate),
+                _judge_payload_characters(candidate),
+            ),
+        )
+    non_sequences = [
+        candidate
+        for candidate in found
+        if not isinstance(candidate, Sequence) or isinstance(candidate, (str, bytes))
+    ]
+    if non_sequences:
+        # A scalar/mapping conflicting with an empty list is not a known-zero
+        # retrieval shape, so retain the conservative one-call path.
+        return non_sequences[0]
+    return sequences[0] if sequences else None
 
 
 def _chunk_count(span: Mapping[str, Any]) -> int:

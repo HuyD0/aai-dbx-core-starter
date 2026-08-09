@@ -1,9 +1,9 @@
 """The results record — one scoring run's evidence, written to disk.
 
-Every scoring command writes one of these under ``.aai/agentkit/results/``.
-``gate`` and ``evidence`` read the newest record rather than re-running an
-evaluation, so a CI job can score once and gate/report from the same
-evidence.
+Every completed scoring command writes one under ``.aai/agentkit/results/``
+and atomically points the local gate at it. ``gate`` and ``evidence`` read
+that completed attempt rather than re-running an evaluation; a failed newer
+attempt cannot silently fall back to an older passing record.
 
 A recorded run also attaches the record to its MLflow run as an artifact.
 The local directory is whatever filesystem the run happened on — for the
@@ -14,14 +14,22 @@ the answer to "show me what this version scored", from any machine.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, ValidationError, field_serializer, field_validator
+from pydantic import (
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from aai_core.agentkit.baseline import BaselineDataset, BaselineScope, BaselineVersions
 from aai_core.agentkit.errors import ConfigError
@@ -32,6 +40,36 @@ RESULTS_GLOB = "*.json"
 RESULTS_ARTIFACT_DIR = "agentkit"
 RESULTS_ARTIFACT_FILE = "results.json"
 RESULTS_ARTIFACT_PATH = f"{RESULTS_ARTIFACT_DIR}/{RESULTS_ARTIFACT_FILE}"
+RESULTS_ATTEMPT_FILE = ".latest-attempt"
+RESULTS_ATTEMPT_STATE_PREFIX = ".attempt-"
+
+
+class ResultsAttemptPointer(ContractModel):
+    schema_version: Literal[1] = 1
+    attempt_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    command: str = Field(min_length=1)
+
+
+class ResultsAttempt(ContractModel):
+    """Atomic pointer to the only local result a bare gate may consume."""
+
+    schema_version: Literal[1] = 1
+    attempt_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    command: str = Field(min_length=1)
+    status: Literal["pending", "complete"]
+    results_file: str | None = None
+    results_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def completed_attempt_has_bound_results(self) -> ResultsAttempt:
+        if self.status == "complete":
+            if not self.results_file or not self.results_sha256:
+                raise ValueError("a complete attempt needs its results file and digest")
+            if Path(self.results_file).name != self.results_file:
+                raise ValueError("results_file must be a basename")
+        elif self.results_file is not None or self.results_sha256 is not None:
+            raise ValueError("a pending attempt cannot name completed results")
+        return self
 
 
 class ResultsRecord(ContractModel):
@@ -146,6 +184,118 @@ def write_results(directory: Path, record: ResultsRecord) -> Path:
     finally:
         scratch.unlink(missing_ok=True)
     return path
+
+
+def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
+    """Invalidate stale gate evidence before an evaluation can start."""
+
+    attempt = ResultsAttempt(
+        attempt_id=uuid.uuid4().hex,
+        command=command,
+        status="pending",
+    )
+    _write_attempt_state(directory, attempt)
+    _write_contract_file(
+        directory / RESULTS_ATTEMPT_FILE,
+        ResultsAttemptPointer(
+            attempt_id=attempt.attempt_id,
+            command=attempt.command,
+        ).model_dump(),
+    )
+    return attempt
+
+
+def complete_results_attempt(
+    directory: Path, attempt: ResultsAttempt, results_path: Path
+) -> None:
+    """Atomically bind the newest attempt to its completed result bytes."""
+
+    if results_path.parent.resolve() != directory.resolve():
+        raise ConfigError(
+            "completed results must live in the project results directory"
+        )
+    completed = ResultsAttempt(
+        attempt_id=attempt.attempt_id,
+        command=attempt.command,
+        status="complete",
+        results_file=results_path.name,
+        results_sha256=hashlib.sha256(results_path.read_bytes()).hexdigest(),
+    )
+    _write_attempt_state(directory, completed)
+
+
+def load_gate_results(directory: Path) -> tuple[ResultsRecord, Path] | None:
+    """The result bound to the latest attempt, with legacy fallback."""
+
+    pointer_path = directory / RESULTS_ATTEMPT_FILE
+    if not pointer_path.is_file():
+        return load_latest_results(directory)
+    try:
+        pointer = ResultsAttemptPointer(
+            **json.loads(pointer_path.read_text(encoding="utf-8"))
+        )
+    except (OSError, json.JSONDecodeError, ValidationError) as error:
+        raise ConfigError(
+            f"{pointer_path} is not a valid evaluation-attempt pointer: {error}"
+        ) from error
+    state_path = _attempt_state_path(directory, pointer.attempt_id)
+    try:
+        attempt = ResultsAttempt(**json.loads(state_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, ValidationError) as error:
+        raise ConfigError(
+            f"{state_path} is not a valid evaluation-attempt record: {error}"
+        ) from error
+    if attempt.attempt_id != pointer.attempt_id or attempt.command != pointer.command:
+        raise ConfigError("the latest evaluation-attempt pointer is inconsistent")
+    if attempt.status != "complete":
+        raise ConfigError(
+            "the latest evaluation attempt did not publish a results record",
+            remediation=(
+                "Fix the scoring or MLflow artifact error and rerun the "
+                "evaluation before invoking `agentkit gate`."
+            ),
+        )
+    path = directory / str(attempt.results_file)
+    if not path.is_file():
+        raise ConfigError(
+            f"the latest evaluation result {path} is missing",
+            remediation="Run the evaluation again before invoking `agentkit gate`.",
+        )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != attempt.results_sha256:
+        raise ConfigError(
+            f"the latest evaluation result {path} changed after it was recorded",
+            remediation="Run the evaluation again before invoking `agentkit gate`.",
+        )
+    return read_results(path), path
+
+
+def _attempt_state_path(directory: Path, attempt_id: str) -> Path:
+    return directory / f"{RESULTS_ATTEMPT_STATE_PREFIX}{attempt_id}"
+
+
+def _write_attempt_state(directory: Path, attempt: ResultsAttempt) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    _write_contract_file(
+        _attempt_state_path(directory, attempt.attempt_id), attempt.model_dump()
+    )
+
+
+def _write_contract_file(path: Path, document: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, scratch_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    os.close(descriptor)
+    scratch = Path(scratch_name)
+    try:
+        scratch.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(scratch, path)
+    finally:
+        scratch.unlink(missing_ok=True)
 
 
 def read_results(path: Path) -> ResultsRecord:

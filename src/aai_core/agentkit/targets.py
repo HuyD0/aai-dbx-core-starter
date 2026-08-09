@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.machinery
 import importlib.util
 import inspect
 import json
@@ -90,7 +91,8 @@ def resolve_target(
     if reference.startswith("models:/"):
         return Target(TargetKind.UC_MODEL, reference, reference)
     if reference.startswith(("http://", "https://")):
-        return Target(TargetKind.HTTP, reference, reference)
+        normalized = _validated_http_url(reference)
+        return Target(TargetKind.HTTP, normalized, normalized)
     if ":" in reference and not reference.startswith(("/", "\\")):
         location, _, attribute = reference.rpartition(":")
         if location.endswith(".py"):
@@ -131,7 +133,9 @@ def resolve_target(
     )
 
 
-def preflight_target(target: Target, *, project: ProjectContext) -> None:
+def preflight_target(
+    target: Target, *, project: ProjectContext, require_invocation: bool = True
+) -> None:
     """Refuse locally knowable target failures without constructing a client.
 
     This deliberately performs no network or provider-client operation. It
@@ -139,10 +143,15 @@ def preflight_target(target: Target, *, project: ProjectContext) -> None:
     so users are not asked to approve a run whose local target cannot work.
     """
 
-    if target.kind is TargetKind.LOCAL_CALLABLE and target.path is not None:
-        _preflight_local_file(target)
+    if target.kind is TargetKind.LOCAL_CALLABLE:
+        if target.path is not None:
+            _preflight_local_file(target)
+        else:
+            _preflight_local_module(target)
     elif target.kind is TargetKind.HTTP:
-        _preflight_http(target, project.config.request_mapping)
+        _validated_http_url(target.normalized)
+        if require_invocation:
+            _preflight_http(target, project.config.request_mapping)
 
 
 def _preflight_local_file(target: Target) -> None:
@@ -155,19 +164,42 @@ def _preflight_local_file(target: Target) -> None:
         ) from error
 
     attribute = target.attribute or ""
-    declaration: ast.AST | None = None
+    literal_non_callable = False
+    async_declared = False
+    dynamic_binding = False
     for node in module.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == attribute:
+            async_declared = True
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
             if node.name == attribute:
                 return
+            if node.name == "__getattr__":
+                dynamic_binding = True
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(
-                isinstance(item, ast.Name) and item.id == attribute for item in targets
+            if any(_binds_name(item, attribute) for item in targets):
+                value = node.value
+                if value is None or isinstance(
+                    value,
+                    (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
+                ):
+                    literal_non_callable = True
+                else:
+                    # A lambda, call, name, attribute, or subscript may
+                    # resolve to a callable. Runtime construction remains
+                    # the authoritative check.
+                    return
+            if node.value is not None and any(
+                isinstance(item, (ast.Call, ast.NamedExpr))
+                for item in ast.walk(node.value)
             ):
-                declaration = node.value
-                break
+                dynamic_binding = True
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.ImportFrom) and any(
+                alias.name == "*" for alias in node.names
+            ):
+                dynamic_binding = True
             if any(
                 (alias.asname or alias.name.rpartition(".")[2]) == attribute
                 for alias in node.names
@@ -175,24 +207,117 @@ def _preflight_local_file(target: Target) -> None:
                 # Imported objects cannot be classified without executing
                 # their module, so the runtime constructor remains the check.
                 return
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            # Module docstring or another inert literal.
+            continue
+        elif isinstance(node, ast.Pass):
+            continue
+        else:
+            # Conditional definitions, try/except imports, exec-like calls,
+            # module __getattr__, and other dynamic module code make absence
+            # unknowable without executing application code.
+            dynamic_binding = True
 
-    if declaration is None:
-        detail = "is not declared"
-    elif isinstance(
-        declaration,
-        (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
-    ):
-        detail = "is declared but is not callable"
-    else:
-        # A lambda is callable; a call, name, or attribute may resolve to
-        # one. Accept unknowns rather than execute application code here.
+    if dynamic_binding:
         return
+    if async_declared:
+        raise TargetContractError(
+            f"{target.ref!r}: {attribute!r} is async, but AgentKit's "
+            "local target adapter is synchronous",
+            remediation="Expose a synchronous wrapper that returns the final answer.",
+        )
+    detail = (
+        "is declared but is not callable" if literal_non_callable else "is not declared"
+    )
     raise TargetResolutionError(
         f"{target.ref!r}: {attribute!r} {detail} in {target.path}"
     )
 
 
+def _preflight_local_module(target: Target) -> None:
+    module_name = target.ref.rpartition(":")[0]
+    search_path = None
+    specification = None
+    qualified = ""
+    parts = module_name.split(".")
+    for index, part in enumerate(parts):
+        qualified = f"{qualified}.{part}" if qualified else part
+        specification = importlib.machinery.PathFinder.find_spec(qualified, search_path)
+        if specification is None and index == 0:
+            specification = importlib.util.find_spec(qualified)
+        if specification is None:
+            raise TargetResolutionError(
+                f"could not find local agent module {module_name!r}"
+            )
+        locations = specification.submodule_search_locations
+        if index < len(parts) - 1 and locations is None:
+            raise TargetResolutionError(
+                f"local agent module {qualified!r} is not a package"
+            )
+        search_path = list(locations) if locations is not None else None
+    origin = getattr(specification, "origin", None)
+    if isinstance(origin, str) and origin.endswith(".py"):
+        _preflight_local_file(
+            Target(
+                kind=target.kind,
+                ref=target.ref,
+                normalized=target.normalized,
+                path=Path(origin),
+                attribute=target.attribute,
+            )
+        )
+
+
+def _binds_name(target: ast.AST, name: str) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds_name(item, name) for item in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds_name(target.value, name)
+    return False
+
+
+def _validated_http_url(reference: str) -> str:
+    """Return a tag-safe invocation URL or reject it before any cloud read."""
+
+    try:
+        parts = urllib.parse.urlsplit(reference)
+        hostname = parts.hostname
+        # Accessing port validates malformed/non-numeric/out-of-range values.
+        _ = parts.port
+    except ValueError as error:
+        raise TargetResolutionError("agent HTTP URL is malformed") from error
+    if parts.scheme not in {"http", "https"} or not hostname:
+        raise TargetResolutionError(
+            "agent HTTP URL needs an http(s) scheme and a hostname"
+        )
+    if any(character.isspace() or ord(character) < 32 for character in reference):
+        raise TargetResolutionError("agent HTTP URL contains invalid whitespace")
+    if parts.username is not None or parts.password is not None:
+        raise TargetResolutionError(
+            "agent HTTP URL must not contain user information",
+            remediation=(
+                "Put the credential in request_mapping.auth_env instead; "
+                "URLs are written to MLflow tags and results evidence."
+            ),
+        )
+    if parts.query or parts.fragment:
+        raise TargetResolutionError(
+            "agent HTTP URL must not contain a query string or fragment",
+            remediation=(
+                "Put credentials in request_mapping.auth_env and request "
+                "values in request_mapping.extra_body; URLs are written to "
+                "MLflow tags and results evidence."
+            ),
+        )
+    return urllib.parse.urlunsplit(
+        (parts.scheme.lower(), parts.netloc, parts.path, "", "")
+    )
+
+
 def _preflight_http(target: Target, mapping: RequestMapping) -> None:
+    _validated_http_url(target.normalized)
     if not mapping.auth_env:
         return
     _require_encrypted_transport(target, mapping.auth_env)
@@ -268,6 +393,12 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
         raise TargetResolutionError(
             f"{target.ref!r}: {target.attribute!r} is not a callable in the " "module"
         )
+    if inspect.iscoroutinefunction(function):
+        raise TargetContractError(
+            f"{target.ref!r} is async, but AgentKit's local target adapter "
+            "is synchronous",
+            remediation="Expose a synchronous wrapper that returns the final answer.",
+        )
     signature = inspect.signature(function)
     parameters = [
         parameter
@@ -286,14 +417,29 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
             if single_argument:
                 name = parameters[0].name
                 if name in inputs:
-                    return function(inputs[name])
-                if len(inputs) == 1:
-                    return function(next(iter(inputs.values())))
+                    result = function(inputs[name])
+                elif len(inputs) == 1:
+                    result = function(next(iter(inputs.values())))
+                else:
+                    raise TargetContractError(
+                        f"{target.ref!r} takes one argument {name!r} but the "
+                        f"dataset inputs have keys {sorted(inputs)}"
+                    )
+            else:
+                result = function(**inputs)
+            if inspect.isawaitable(result):
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
                 raise TargetContractError(
-                    f"{target.ref!r} takes one argument {name!r} but the "
-                    f"dataset inputs have keys {sorted(inputs)}"
+                    f"{target.ref!r} returned an awaitable, but AgentKit's "
+                    "local target adapter is synchronous",
+                    remediation=(
+                        "Await the operation inside a synchronous wrapper and "
+                        "return the final answer."
+                    ),
                 )
-            return function(**inputs)
+            return result
         except TargetContractError:
             raise
         except Exception as error:

@@ -1,5 +1,6 @@
 """Unit tests for the shared scorer registry: integrity, selection, building."""
 
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -246,6 +247,21 @@ def test_global_judge_disable_still_wins_over_scorers_add():
     assert _excluded(plan, "correctness") == "smoke runs code scorers only"
 
 
+def test_same_scorer_cannot_be_both_added_and_removed():
+    with pytest.raises(ConfigError, match="both scorers.add and scorers.remove"):
+        select_scorers(
+            _shape(),
+            _config(
+                scorers={
+                    "add": ["keyword_coverage"],
+                    "remove": ["keyword_coverage"],
+                }
+            ),
+            mode="answer-sheet",
+            judges_enabled=False,
+        )
+
+
 def test_remove_wins_over_auto_selection():
     plan = select_scorers(
         _shape(),
@@ -344,8 +360,16 @@ def test_score_all_covers_every_row_level_code_scorer():
 
 
 def test_code_scorers_never_turn_a_missing_output_into_text():
-    with pytest.raises(ConfigError, match="no output to score"):
-        score_all(None, {"expected_response": "None"})
+    missing = [None, Decimal("NaN")]
+    try:
+        import numpy as np
+
+        missing.append(np.float32("nan"))
+    except ImportError:
+        pass
+    for value in missing:
+        with pytest.raises(ConfigError, match="no output to score"):
+            score_all(value, {"expected_response": "None"})
 
 
 def _fake_mlflow(make_judge=None):

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
+from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError, missing_extra
 from aai_core.contracts import ContractModel
 
@@ -388,6 +389,13 @@ def select_scorers(
 
     added = set(config.scorers.add)
     removed = set(config.scorers.remove)
+    contradictory = sorted(added & removed)
+    if contradictory:
+        raise ConfigError(
+            "the same scorer cannot appear in both scorers.add and "
+            "scorers.remove: " + ", ".join(contradictory),
+            remediation="Keep each scorer in only one selection list.",
+        )
     expectation_keys = set(shape.expectation_keys)
 
     entries: list[PlanEntry] = []
@@ -763,11 +771,7 @@ CODE_SCORER_FUNCTIONS: Mapping[str, Callable[[str, Mapping[str, Any]], float]] =
 def _require_output_text(outputs: Any) -> str:
     """Normalise a real output without turning absence into the word ``None``."""
 
-    missing = outputs is None
-    if isinstance(outputs, float):
-        missing = missing or outputs != outputs  # NaN
-    missing = missing or type(outputs).__name__ in {"NAType", "NaTType"}
-    if missing:
+    if is_missing_scalar(outputs):
         raise ConfigError(
             "code scorers received no output to score",
             remediation=(

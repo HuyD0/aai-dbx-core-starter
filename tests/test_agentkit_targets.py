@@ -87,6 +87,28 @@ def test_unresolvable_reference_lists_supported_shapes(tmp_path):
     assert "answer sheet" in message
 
 
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "https://",
+        "http://",
+        "https:///score",
+        "https://user:password@host/score",
+        "https://host/score?sig=secret-token",
+        "https://host/score#credential",
+        "https://host name/score",
+    ),
+)
+def test_http_target_rejects_malformed_or_durable_sensitive_urls(tmp_path, reference):
+    with pytest.raises(TargetResolutionError) as excinfo:
+        resolve_target(reference, root=tmp_path)
+
+    message = str(excinfo.value)
+    assert "password" not in message
+    assert "secret-token" not in message
+    assert "#credential" not in message
+
+
 def test_answer_sheet_target_builds_no_predict_fn(tmp_path):
     (tmp_path / "answers.json").write_text("[]")
     target = resolve_target("answers.json", root=tmp_path)
@@ -158,18 +180,63 @@ def test_local_callable_missing_attribute(tmp_path):
     assert "not a callable" in str(excinfo.value)
 
 
-def test_local_callable_preflight_does_not_execute_the_module(tmp_path):
+def test_local_callable_preflight_does_not_execute_dynamic_module_code(tmp_path):
+    marker = tmp_path / "executed"
     (tmp_path / "agent.py").write_text(
-        "raise RuntimeError('module executed')\nVALUE = 1\n"
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n"
     )
     target = resolve_target("agent.py:respond", root=tmp_path)
 
-    with pytest.raises(TargetResolutionError) as excinfo:
+    # Dynamic module code means absence is unknowable without execution, so
+    # preflight stays conservative and the runtime loader remains the check.
+    preflight_target(target, project=_project(tmp_path))
+    assert not marker.exists()
+
+
+def test_local_callable_preflight_accepts_a_conditional_definition(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "if True:\n    def respond(question):\n        return question\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    preflight_target(target, project=_project(tmp_path))
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+    assert predict(question="hello") == "hello"
+
+
+def test_missing_module_target_fails_preflight(tmp_path):
+    target = resolve_target(
+        "definitely_missing_aai_agent_module:respond", root=tmp_path
+    )
+
+    with pytest.raises(TargetResolutionError, match="could not find"):
         preflight_target(target, project=_project(tmp_path))
 
-    message = str(excinfo.value)
-    assert "respond" in message
-    assert "module executed" not in message
+
+def test_async_local_callable_fails_before_invocation(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "async def respond(question):\n    return question\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    with pytest.raises(TargetContractError, match="synchronous"):
+        preflight_target(target, project=_project(tmp_path))
+
+
+def test_sync_local_callable_cannot_return_an_awaitable(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "async def answer(question):\n    return question\n"
+        "def respond(question):\n    return answer(question)\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+    predict = build_predict_fn(
+        target, project=_project(tmp_path), mlflow_module=FAKE_MLFLOW
+    )
+
+    with pytest.raises(TargetContractError, match="returned an awaitable"):
+        predict(question="hello")
 
 
 def test_http_adapter_maps_request_and_response(tmp_path, monkeypatch):

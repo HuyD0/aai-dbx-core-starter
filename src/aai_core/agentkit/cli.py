@@ -312,7 +312,7 @@ def _cmd_evidence(arguments: argparse.Namespace) -> int:
         write_evidence,
     )
     from aai_core.agentkit.gate import evaluate_gate
-    from aai_core.agentkit.results import fetch_results, load_latest_results
+    from aai_core.agentkit.results import fetch_results, load_gate_results
 
     project = _project(arguments)
     if arguments.run_id:
@@ -321,7 +321,7 @@ def _cmd_evidence(arguments: argparse.Namespace) -> int:
         # record names, and this checkout's `evals/baseline.json` is not it.
         baseline = None
     else:
-        found = load_latest_results(project.results_dir)
+        found = load_gate_results(project.results_dir)
         if found is None:
             from aai_core.agentkit.errors import EvidenceMissingError
 

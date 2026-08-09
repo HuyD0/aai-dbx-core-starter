@@ -26,8 +26,8 @@ from aai_core.agentkit.catalog import (
     registry_direction,
 )
 from aai_core.agentkit.config import ProjectContext, parse_threshold
-from aai_core.agentkit.errors import UnknownScorerError
-from aai_core.agentkit.results import ResultsRecord, load_latest_results
+from aai_core.agentkit.errors import ConfigError, UnknownScorerError
+from aai_core.agentkit.results import ResultsRecord, load_gate_results
 from aai_core.evaluation import (
     GateFailure,
     GatePolicy,
@@ -258,7 +258,10 @@ def run_gate(
             return None, EXIT_ERROR, f"{results_path} does not exist"
         results = read_results(results_path)
     else:
-        found = load_latest_results(project.results_dir)
+        try:
+            found = load_gate_results(project.results_dir)
+        except ConfigError as error:
+            return None, EXIT_ERROR, str(error)
         if found is None:
             return None, EXIT_ERROR, NO_RESULTS_MESSAGE
         results, _ = found

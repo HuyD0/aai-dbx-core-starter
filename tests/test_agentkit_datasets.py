@@ -1,6 +1,7 @@
 """Unit tests for dataset loading, digesting, sampling, and validation."""
 
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -695,7 +696,17 @@ def test_dataframe_nulls_read_as_missing(tmp_path):
 def test_missing_recognises_every_null_sentinel():
     from aai_core.agentkit.datasets import _is_missing, _is_populated
 
-    absent = [None, float("nan"), NAType()]
+    absent = [None, float("nan"), Decimal("NaN"), NAType()]
+    try:
+        import numpy as np
+
+        absent += [
+            np.float32("nan"),
+            np.float64("nan"),
+            np.datetime64("NaT", "ns"),
+        ]
+    except ImportError:
+        pass
     try:
         import pandas as pd
 

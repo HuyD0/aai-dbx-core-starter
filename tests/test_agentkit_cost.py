@@ -1,5 +1,7 @@
 """Unit tests for the pre-run judge cost estimate and budget enforcement."""
 
+import json
+
 import pytest
 
 from aai_core.agentkit.catalog import PlanEntry, ScorerPlan, get_spec, select_scorers
@@ -340,6 +342,32 @@ def test_known_empty_retriever_outputs_cost_zero_relevance_calls(outputs):
     assert dict(cost.calls_by_scorer) == {"retrieval_relevance": 0}
     assert cost.estimated_tokens == 0
     assert cost.fanout_counted is True
+
+
+def test_empty_duplicate_cannot_mask_a_populated_retriever_output():
+    row = {
+        "inputs": {"question": "policy?"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {
+                        "type": "RETRIEVER",
+                        "outputs": [],
+                        "attributes": {
+                            "mlflow.spanOutputs": json.dumps(
+                                [{"page_content": "governed context"}]
+                            )
+                        },
+                    }
+                ]
+            }
+        },
+    }
+
+    cost = estimate([row], _judge_plan("retrieval_relevance"))
+
+    assert dict(cost.calls_by_scorer) == {"retrieval_relevance": 1}
+    assert cost.estimated_tokens > 0
 
 
 @pytest.mark.parametrize(

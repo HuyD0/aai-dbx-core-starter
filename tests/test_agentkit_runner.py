@@ -1008,7 +1008,11 @@ def test_local_scoring_refuses_a_missing_recorded_output(tmp_path):
             mlflow_module=FakeMlflow(),
         )
 
-    assert not project.results_dir.exists()
+    assert load_latest_results(project.results_dir) is None
+    report, code, message = run_gate(project)
+    assert report is None
+    assert code == EXIT_ERROR
+    assert "latest evaluation attempt" in message
 
 
 def test_agent_override_scores_the_named_target(tmp_path):
@@ -1168,7 +1172,45 @@ def test_unpublishable_evidence_fails_the_run(tmp_path):
     report, code, gate_message = run_gate(project)
     assert report is None
     assert code == EXIT_ERROR
-    assert "agentkit compare" in gate_message
+    assert "latest evaluation attempt" in gate_message
+
+
+def test_failed_new_publication_invalidates_an_older_passing_gate(tmp_path):
+    project = _project(tmp_path)
+    first_mlflow = FakeMlflow(run_id="run-1")
+    first, code = run_scoring(
+        project,
+        command="compare",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=first_mlflow,
+        environ={},
+    )
+    assert code == EXIT_PASS
+    assert first.results.run_id == "run-1"
+
+    second_mlflow = FakeMlflow(run_id="run-2")
+
+    def broken_client(*args, **kwargs):
+        raise RuntimeError("tracking store unavailable")
+
+    second_mlflow.MlflowClient = broken_client
+    with pytest.raises(EvidenceMissingError):
+        run_scoring(
+            project,
+            command="compare",
+            establish_baseline=True,
+            assume_yes=True,
+            mlflow_module=second_mlflow,
+            environ={},
+        )
+
+    historical, _ = load_latest_results(project.results_dir)
+    assert historical.run_id == "run-1"
+    report, gate_code, message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in message
 
 
 def test_local_scoring_needs_no_publication(tmp_path):

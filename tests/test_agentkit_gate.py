@@ -21,7 +21,12 @@ from aai_core.agentkit.gate import (
     render_report,
     run_gate,
 )
-from aai_core.agentkit.results import ResultsRecord, write_results
+from aai_core.agentkit.results import (
+    ResultsRecord,
+    begin_results_attempt,
+    complete_results_attempt,
+    write_results,
+)
 from aai_core.testing import dev_settings
 
 
@@ -246,6 +251,54 @@ def test_run_gate_reads_the_newest_results_record(tmp_path):
     assert code == EXIT_THRESHOLD_FAILED
     assert message is None
     assert not report.passed
+
+
+def test_pending_latest_attempt_blocks_an_older_passing_result(tmp_path):
+    project = _project(tmp_path)
+    write_baseline(project.baseline_path, _baseline())
+    write_results(project.results_dir, _results())
+    begin_results_attempt(project.results_dir, command="compare")
+
+    report, code, message = run_gate(project)
+
+    assert report is None
+    assert code == EXIT_ERROR
+    assert "latest evaluation attempt" in message
+
+
+def test_completed_attempt_binds_gate_to_exact_result_bytes(tmp_path):
+    project = _project(tmp_path)
+    write_baseline(project.baseline_path, _baseline())
+    attempt = begin_results_attempt(project.results_dir, command="compare")
+    path = write_results(project.results_dir, _results())
+    complete_results_attempt(project.results_dir, attempt, path)
+
+    report, code, message = run_gate(project)
+    assert code == EXIT_PASS
+    assert message is None
+    assert report.results.run_id == "run-1"
+
+    path.write_text(path.read_text() + " ")
+    report, code, message = run_gate(project)
+    assert report is None
+    assert code == EXIT_ERROR
+    assert "changed after it was recorded" in message
+
+
+def test_older_concurrent_completion_cannot_replace_the_latest_attempt(tmp_path):
+    project = _project(tmp_path)
+    write_baseline(project.baseline_path, _baseline())
+    older = begin_results_attempt(project.results_dir, command="compare")
+    latest = begin_results_attempt(project.results_dir, command="compare")
+    path = write_results(project.results_dir, _results())
+
+    complete_results_attempt(project.results_dir, older, path)
+
+    report, code, message = run_gate(project)
+    assert report is None
+    assert code == EXIT_ERROR
+    assert "latest evaluation attempt" in message
+    assert older.attempt_id != latest.attempt_id
 
 
 def test_run_gate_with_explicit_missing_path_exits_one(tmp_path):
