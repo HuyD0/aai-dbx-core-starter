@@ -63,6 +63,8 @@ class FakeClient:
     def get_prompt_version(self, name, version):
         # Deliberately the only fetch the fake client offers: promote()
         # must never use a linking load, client-level or fluent.
+        if self.owner.version_error is not None:
+            raise self.owner.version_error
         uri = f"prompts:/{name}/{version}"
         return SimpleNamespace(
             uri=uri, template=self.owner.genai.templates_by_uri.get(uri)
@@ -120,7 +122,9 @@ class FakeMlflow:
         decision_run_error=None,
         decision_artifact=None,
         decision_artifact_error=None,
+        version_error=None,
     ):
+        self.version_error = version_error
         self.prompt = prompt
         self.versions = list(versions)
         self.get_error = get_error
@@ -554,6 +558,77 @@ def test_promote_reports_a_missing_decision_artifact_as_blocked_evidence(tmp_pat
     assert excinfo.value.remediation is not None
     assert isinstance(excinfo.value.__cause__, DecisionEvidenceError)
     assert excinfo.value.__cause__.__cause__ is missing
+    assert mlflow.genai.alias is None
+
+
+def test_promote_reports_a_missing_prompt_version_as_refusal(tmp_path):
+    # The third fetch on the promotion path: a version that was never
+    # registered is invalid promotion input, so it must reach the caller as
+    # the guarded refusal with remediation, not as a raw registry error.
+    class MissingVersionError(Exception):
+        error_code = "RESOURCE_DOES_NOT_EXIST"
+
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+    missing = MissingVersionError("prompt version does not exist")
+    mlflow.version_error = missing
+
+    with pytest.raises(PromptPromotionError, match="does not exist") as excinfo:
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+        )
+
+    assert excinfo.value.remediation is not None
+    assert excinfo.value.__cause__ is missing
+    assert mlflow.genai.alias is None
+
+
+@pytest.mark.parametrize(
+    "version_error",
+    [
+        type("DeniedVersionError", (Exception,), {"error_code": "PERMISSION_DENIED"})(
+            "prompt version does not exist"
+        ),
+        type("TransportVersionError", (Exception,), {})("connection reset"),
+    ],
+)
+def test_promote_propagates_prompt_version_auth_and_transport_failures(
+    tmp_path, version_error
+):
+    # An access or connectivity fault must never be reported as a missing
+    # version — the alias stays untouched either way, but the operator
+    # needs the real cause.
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+    mlflow.version_error = version_error
+
+    with pytest.raises(type(version_error)):
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+        )
+
     assert mlflow.genai.alias is None
 
 

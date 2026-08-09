@@ -143,7 +143,11 @@ All notable changes to `aai-core` are documented here.
   the only fetch with no lineage side effects — every `load_prompt`
   flavor, the client-level one included, links the loaded version to
   active lineage — so a rejected change is never attached to an active
-  experiment, run, model, or trace.
+  experiment, run, model, or trace. Every fetch on that path — the
+  decision run, its artifact, and the prompt version — converts absence
+  into the guarded refusal with remediation, so invalid promotion input
+  never escapes as a raw registry error, while permission and transport
+  failures still propagate as themselves.
   The prompt, agent, and RAG templates now persist the exact release-gate
   decision, print its run id, and require that id when their promotion scripts
   call the guarded `promote()` path; their template versions are 1.2.0.

@@ -233,9 +233,23 @@ class PromptManager:
         # even the client-level one attaches it to the active experiment.
         # get_prompt_version is the only fetch with no lineage side
         # effects, so a rejected change never becomes associated evidence.
-        registered = (
-            self._client().MlflowClient().get_prompt_version(qualified, version)
-        )
+        try:
+            registered = (
+                self._client().MlflowClient().get_prompt_version(qualified, version)
+            )
+        except Exception as error:
+            # A version that does not exist is invalid promotion input, not
+            # a provider outage, so it joins the same guarded refusal as the
+            # evidence checks above rather than escaping as a raw registry
+            # error. Permission and transport failures still propagate.
+            if not is_missing_prompt_error(error):
+                raise
+            raise PromptPromotionError(
+                f"Refusing to move alias {alias!r} for prompt {name!r}: "
+                f"registry version {version} does not exist",
+                remediation="Promote a registered version of this prompt; "
+                "register the evaluated template with ensure_version() first.",
+            ) from error
         template = getattr(registered, "template", None)
         if template is None:
             raise PromptPromotionError(
