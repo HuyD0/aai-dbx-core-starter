@@ -12,7 +12,7 @@ import hashlib
 import json
 import random
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -318,36 +318,60 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
     )
 
 
-def evaluation_rows(dataset: LoadedDataset, *, mode: str) -> list[dict[str, Any]]:
-    """The rows handed to ``mlflow.genai.evaluate`` — the payload boundary.
+def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
+    """The dataset as MLflow will actually see it, for this mode.
 
-    Two rules, both about not sending MLflow something it will misread.
+    The authored rows and the scored rows are not the same thing, and
+    everything downstream — which scorers apply, what the judge calls will
+    cost, what the payload contains — has to be decided from the second.
+    Deciding from the first is how a plan promises a scorer whose field
+    MLflow will have replaced, and how a budget is approved against a
+    fan-out that will not happen.
+
+    Three transformations, each mirroring something MLflow does:
 
     **A stored trace travels only in ``traces`` mode.** It is the recorded
-    answer to the question, so in ``live`` the answer comes from
-    ``predict_fn`` and in ``answer-sheet`` from the sheet; passing a trace
-    there hands MLflow a *different run's* answer. It is not inert either:
+    answer, so in ``live`` the answer comes from ``predict_fn`` and in
+    ``answer-sheet`` from the sheet. It is not inert baggage either:
     ``_convert_to_eval_set`` pipes any present trace column through
     ``_extract_request_response_from_trace``, which calls
-    ``trace.data._get_root_span()`` on every value — so one ``NaN`` raises
-    ``AttributeError`` before the agent is ever called — and through
-    ``_extract_expectations_from_trace``, which *overwrites* the
-    expectations column from the traces' assessments. MLflow's own
-    validation agrees the column is unwanted here: it adds ``trace`` to the
-    satisfied columns whenever a ``predict_fn`` is supplied.
+    ``trace.data._get_root_span()`` on every value — one ``NaN`` raises
+    before the agent is called — and through
+    ``_extract_expectations_from_trace``, which overwrites expectations.
+    MLflow's own validation agrees the column is unwanted here: it adds
+    ``trace`` to the satisfied columns whenever a ``predict_fn`` is given.
+
+    **Dropping the trace must not drop the question with it.** A
+    trace-only row keeps its request, recovered the same way the dataset
+    digest recovers it, because otherwise removing the trace would leave a
+    row MLflow cannot evaluate at all.
+
+    **In ``traces`` mode, expectations come from the traces** whenever any
+    one of them carries an expectation assessment — MLflow replaces the
+    whole column, so a row whose trace has no assessment ends up with
+    *none*, whatever the dataset wrote. Mirroring that here is what stops
+    a scorer being selected against a curated field the run will not have:
+    `keyword_coverage` reads an absent expected response as a vacuous
+    1.0, and a gate passing on that is the exact failure this toolkit
+    exists to prevent.
 
     **A missing value is an absent key.** A Unity Catalog dataset arrives
     through ``to_dict("records")``, where an absent field is ``NaN``; only
-    dropping the key says "absent" to MLflow rather than passing a float
-    where a mapping belongs.
+    dropping the key says "absent" rather than handing MLflow a float
+    where a mapping belongs. That alone would not fix a partly traced
+    dataset — pandas refills the column for the rows that dropped the key
+    — which is why the mode rule exists as well.
 
-    Rule two alone would not fix a partly traced dataset — pandas refills
-    the column with ``NaN`` for the rows that dropped the key — which is
-    why the mode rule exists as well.
+    The digest, ref and sampling provenance are the authored dataset's:
+    this is the same data seen through the run's mode, not different data.
     """
 
     keep_trace = mode in STORED_TRACE_MODES
-    payload: list[dict[str, Any]] = []
+    # MLflow replaces the column wholesale, or not at all.
+    replace_expectations = keep_trace and any(
+        _trace_expectation_names(row.get("trace")) for row in dataset.rows
+    )
+    rows: list[Mapping[str, Any]] = []
     for row in dataset.rows:
         kept: dict[str, Any] = {}
         for key, value in row.items():
@@ -356,8 +380,101 @@ def evaluation_rows(dataset: LoadedDataset, *, mode: str) -> list[dict[str, Any]
             if _is_missing(value):
                 continue
             kept[key] = value
-        payload.append(kept)
-    return payload
+        if not keep_trace and not _is_populated(kept.get("inputs")):
+            request = _trace_inputs(row.get("trace"))
+            if request is not None:
+                kept["inputs"] = request
+        if replace_expectations:
+            kept["expectations"] = _trace_expectations(row.get("trace"))
+        rows.append(kept)
+    frozen = tuple(rows)
+    shape = _infer_shape(frozen)
+    if not keep_trace:
+        # The span *kinds* stay the authored dataset's. A live run's traces
+        # do not exist yet, but a suite recorded against a retrieving agent
+        # is still a retrieval suite, and inferring otherwise from rows we
+        # just emptied would silently drop the retrieval judges from every
+        # live run — a control removed by a fix, which is not a fix. What
+        # must not carry over is the *count*: the estimate reads the rows,
+        # finds no traces, and applies the configured assumption instead of
+        # the previous agent's fan-out.
+        shape = replace(
+            shape,
+            has_retrieval_spans=dataset.shape.has_retrieval_spans,
+            has_tool_spans=dataset.shape.has_tool_spans,
+        )
+    return LoadedDataset(
+        ref=dataset.ref,
+        source=dataset.source,
+        rows=frozen,
+        digest=dataset.digest,
+        shape=shape,
+        sampled_from=dataset.sampled_from,
+    )
+
+
+def evaluation_rows(dataset: LoadedDataset, *, mode: str) -> list[dict[str, Any]]:
+    """The rows handed to ``mlflow.genai.evaluate``."""
+
+    return [dict(row) for row in effective_dataset(dataset, mode=mode).rows]
+
+
+def rows_missing_inputs(dataset: LoadedDataset) -> tuple[int, ...]:
+    """Rows MLflow cannot evaluate without a trace to fall back on.
+
+    ``inputs`` must be a mapping once the trace is gone — MLflow says so
+    itself, and only skips the check when a trace column is present.
+    """
+
+    return tuple(
+        index
+        for index, row in enumerate(dataset.rows)
+        if not isinstance(row.get("inputs"), Mapping) or not row["inputs"]
+    )
+
+
+def _trace_inputs(trace: Any) -> Mapping[str, Any] | None:
+    """The trace's request, but only when it can serve as ``inputs``.
+
+    MLflow requires a mapping there. ``_trace_request`` may recover a
+    JSON string from ``info.request`` instead, which is worth decoding,
+    but anything that is not a mapping in the end is not usable and the
+    row is reported rather than passed on to fail obscurely.
+    """
+
+    request = _trace_request(trace)
+    if isinstance(request, str):
+        try:
+            request = json.loads(request)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(request, Mapping) and request:
+        return _plain(request)
+    return None
+
+
+def _trace_expectations(trace: Any) -> dict[str, Any]:
+    document = _trace_document(trace)
+    info = document.get("info") if document is not None else None
+    if not isinstance(info, Mapping):
+        return {}
+    expectations: dict[str, Any] = {}
+    for assessment in info.get("assessments") or ():
+        if not isinstance(assessment, Mapping):
+            continue
+        expectation = assessment.get("expectation")
+        if not _is_populated(expectation):
+            continue
+        name = assessment.get("assessment_name") or assessment.get("name")
+        if not name:
+            continue
+        value = (
+            expectation.get("value")
+            if isinstance(expectation, Mapping)
+            else expectation
+        )
+        expectations[str(name)] = value
+    return expectations
 
 
 def trace_expectation_overrides(dataset: LoadedDataset) -> tuple[str, ...]:

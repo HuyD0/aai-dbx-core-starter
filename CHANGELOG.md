@@ -217,6 +217,25 @@ All notable changes to `aai-core` are documented here.
   MLflow intends; the run now says which expectations that applies to
   instead of letting the substitution pass unseen.
 
+  The plan, the cost estimate and the payload are all built from the rows
+  MLflow will actually score rather than the rows on disk — the same data
+  seen through the run's mode, keeping the authored dataset's digest. The
+  authored rows had been deciding all three, which is how a plan could
+  promise a scorer whose field the run would not have: one expectation
+  assessment replaces MLflow's whole expectations column, so a row whose
+  trace carries none loses the curated `expected_response` entirely, and
+  `keyword_coverage` reads an absent expected response as a vacuous 1.0 —
+  a gate passing on evidence that never evaluated its contract. It is how
+  a live run was priced from the recorded agent's retrieval fan-out, so
+  `budget.max_judge_calls` authorised it against a number the new agent
+  could exceed; the configured `retrieved_chunks_per_row` assumption now
+  applies instead, while the scorers the suite was recorded for stay
+  selected. And it is how dropping the stored trace could take the
+  question with it: a trace-only row now keeps the request recovered from
+  its trace, so re-running production traces with `--mode live` still has
+  something to send the agent, and a row whose request cannot be recovered
+  is named and refused before the run rather than failing inside MLflow.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

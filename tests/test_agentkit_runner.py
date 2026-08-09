@@ -17,6 +17,7 @@ from aai_core.agentkit.errors import (
     BaselineIncomparableError,
     BaselineMissingError,
     BudgetExceededError,
+    ConfigError,
     EvidenceMissingError,
 )
 from aai_core.agentkit.gate import EXIT_ERROR, EXIT_PASS, EXIT_THRESHOLD_FAILED
@@ -1698,3 +1699,174 @@ def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
     assert any(
         "trace's assessments" in warning for warning in outcome.warnings
     ), outcome.warnings
+
+
+def test_a_live_run_prices_the_fanout_it_will_actually_have(tmp_path):
+    """Stored traces are discarded in a live run, so they cannot price it.
+
+    Counting them read the *old* agent's retrieval as this run's exact
+    fan-out. If the recorded agent retrieved one chunk and the current one
+    retrieves fifty, `budget.max_judge_calls` authorises the run against a
+    number the run will exceed.
+    """
+
+    project = _traced_project(
+        tmp_path,
+        trace=lambda i: {
+            "data": {
+                "spans": [
+                    {
+                        "parent_span_id": None,
+                        "span_type": "RETRIEVER",
+                        "inputs": {"question": f"question {i}"},
+                        "outputs": [{"page_content": "one chunk"}],
+                    }
+                ]
+            }
+        },
+    )
+    fake = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    # The stored traces are gone, so the configured assumption applies
+    # rather than the previous agent's exact count.
+    assert outcome.cost.fanout_counted is False
+
+
+def test_a_traces_run_still_counts_the_fanout_it_will_judge(tmp_path):
+    project = _traced_project(
+        tmp_path,
+        trace=lambda i: {
+            "data": {
+                "spans": [
+                    {
+                        "parent_span_id": None,
+                        "span_type": "RETRIEVER",
+                        "inputs": {"question": f"question {i}"},
+                        "outputs": [{"page_content": "one chunk"}],
+                    }
+                ]
+            }
+        },
+    )
+    fake = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="traces",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert outcome.cost.fanout_counted is True
+
+
+def test_a_trace_only_dataset_can_still_be_re_run_live(tmp_path):
+    """Explicit --mode live over production traces must keep working.
+
+    Stripping the trace without recovering its request left rows MLflow
+    cannot evaluate; the request now travels as `inputs`.
+    """
+
+    project = _project(tmp_path)
+    cases = [
+        {
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "parent_span_id": None,
+                            "inputs": {"question": f"question {index}"},
+                        }
+                    ]
+                }
+            }
+        }
+        for index in range(12)
+    ]
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
+    fake = FakeMlflow()
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=False,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert code == EXIT_PASS
+    payload = fake.evaluate_calls[0]["data"]
+    assert all(row["inputs"]["question"].startswith("question") for row in payload)
+    assert all("trace" not in row for row in payload)
+
+
+def test_a_row_whose_request_cannot_be_recovered_is_refused(tmp_path):
+    project = _project(tmp_path)
+    cases = [{"trace": {"info": {"request_preview": "unparseable"}}} for _ in range(12)]
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
+    fake = FakeMlflow()
+
+    with pytest.raises(ConfigError) as excinfo:
+        run_scoring(
+            project,
+            establish_baseline=True,
+            judges_enabled=False,
+            mode="live",
+            assume_yes=True,
+            mlflow_module=fake,
+        )
+
+    assert "no inputs to send the agent" in str(excinfo.value)
+    assert "--mode traces" in str(excinfo.value)
+    assert fake.evaluate_calls == []
+
+
+def test_a_trace_replaced_expectation_removes_the_scorer_it_fed(tmp_path):
+    """The plan must not promise what MLflow will have taken away.
+
+    One trace assessment replaces the whole expectations column, so the
+    rows without one lose `expected_response` entirely — and
+    keyword_coverage reads an absent expected response as a vacuous 1.0.
+    """
+
+    def trace(index):
+        assessments = (
+            [
+                {
+                    "assessment_name": "expected_response",
+                    "expectation": {"value": "from the trace"},
+                }
+            ]
+            if index == 0
+            else []
+        )
+        return {"info": {"trace_id": f"t{index}", "assessments": assessments}}
+
+    project = _traced_project(tmp_path, trace=trace)
+    fake = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=False,
+        mode="traces",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    selected = {entry.spec.name for entry in outcome.plan.entries}
+    assert "keyword_coverage" not in selected
+    excluded = {item.spec.name: item.reason for item in outcome.plan.excluded}
+    assert "expected_response" in excluded.get("keyword_coverage", "")

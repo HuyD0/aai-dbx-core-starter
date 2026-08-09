@@ -197,8 +197,25 @@ raises before your agent is ever called. Two consequences worth knowing:
   about either; the plan excludes them and points at `--mode traces`.
 - In `traces` mode, an expectation recorded on the trace **wins over the
   one in the dataset** — that is MLflow's behaviour, and may be exactly
-  what you want when reviewers curate expectations on traces. The run says
-  which expectations it applies to rather than letting the swap go unseen.
+  what you want when reviewers curate expectations on traces. One
+  assessment anywhere replaces the *whole* column, so a row whose trace
+  carries none ends up with no expectations at all. The plan is built from
+  what will actually be there, so a scorer whose field the traces do not
+  supply is excluded and says so, rather than scoring an absent expected
+  response as a vacuous 1.0.
+- Dropping the trace does not drop the question with it. A trace-only row
+  keeps the request recovered from its trace, so re-running a production
+  trace dataset with `--mode live` still has something to send the agent.
+  A row whose request cannot be recovered is named and refused before the
+  run rather than failing inside MLflow.
+
+The **cost estimate follows the same rule**: a live run's judge fan-out is
+counted from the traces that run will produce, which do not exist yet, so
+the `budget.retrieved_chunks_per_row` assumption applies rather than the
+recorded agent's count. The scorers still selected are the ones the suite
+was recorded for — a suite built against a retrieving agent stays a
+retrieval suite — but the *number* is never borrowed from the old traces,
+because a budget approved against last month's fan-out is not a budget.
 
 ## Two speeds, deliberately
 

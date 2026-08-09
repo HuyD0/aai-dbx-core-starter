@@ -8,8 +8,10 @@ import pytest
 from aai_core.agentkit.datasets import (
     attach_answer_sheet,
     dataset_digest,
+    effective_dataset,
     evaluation_rows,
     load_dataset,
+    rows_missing_inputs,
     smoke_sample,
     trace_expectation_overrides,
     validate_dataset,
@@ -1071,3 +1073,136 @@ def test_mlflow_really_does_overwrite_curated_expectations(tmp_path):
 
     assert frame["expectations"][0] == {"expected_response": "from the trace"}
     assert trace_expectation_overrides(dataset) == ("expected_response",)
+
+
+def test_dropping_the_trace_keeps_the_question(tmp_path):
+    """Removing the answer must not remove the question with it.
+
+    A trace-only row has no `inputs` of its own; stripping the trace for a
+    live run left MLflow a row it cannot evaluate at all.
+    """
+
+    rows = [
+        {
+            "trace": {
+                "data": {
+                    "spans": [
+                        {
+                            "parent_span_id": None,
+                            "inputs": {"question": f"q{index}"},
+                        }
+                    ]
+                }
+            }
+        }
+        for index in range(3)
+    ]
+    _write_dataset(tmp_path, rows)
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    scored = effective_dataset(dataset, mode="live")
+
+    assert rows_missing_inputs(scored) == ()
+    assert [row["inputs"] for row in scored.rows] == [
+        {"question": "q0"},
+        {"question": "q1"},
+        {"question": "q2"},
+    ]
+    assert all("trace" not in row for row in scored.rows)
+
+
+def test_an_unrecoverable_request_is_reported_not_passed(tmp_path):
+    """MLflow needs a mapping; a preview string is not one."""
+
+    rows = [{"trace": {"info": {"request_preview": "just some text"}}}]
+    _write_dataset(tmp_path, rows)
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    scored = effective_dataset(dataset, mode="live")
+
+    assert rows_missing_inputs(scored) == (0,)
+
+
+def test_traces_mode_plans_against_the_expectations_mlflow_will_use(tmp_path):
+    """One assessment replaces the whole column, including the empty ones.
+
+    A row whose trace carries no assessment ends up with no expectations
+    at all, whatever the dataset wrote — so a scorer chosen from the
+    curated field would score nothing and report a vacuous pass.
+    """
+
+    def trace(index):
+        assessments = (
+            [
+                {
+                    "assessment_name": "expected_response",
+                    "expectation": {"value": "from the trace"},
+                }
+            ]
+            if index == 0
+            else []
+        )
+        return {"info": {"trace_id": f"t{index}", "assessments": assessments}}
+
+    dataset = _traced_rows(tmp_path, trace=trace)
+    assert dataset.shape.expectation_keys == ("expected_response",)
+
+    scored = effective_dataset(dataset, mode="traces")
+
+    assert scored.rows[0]["expectations"] == {"expected_response": "from the trace"}
+    assert scored.rows[1]["expectations"] == {}
+    # No longer on every row, so the contract check will exclude the
+    # scorers that need it instead of letting them score vacuously.
+    assert scored.shape.expectation_keys == ()
+    assert scored.shape.partial_expectation_keys == ("expected_response",)
+
+
+def test_curated_expectations_survive_traces_without_assessments(tmp_path):
+    dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+
+    scored = effective_dataset(dataset, mode="traces")
+
+    assert scored.shape.expectation_keys == ("expected_response",)
+    assert scored.rows[0]["expectations"] == {"expected_response": "a0"}
+
+
+def test_the_effective_dataset_keeps_the_authored_identity(tmp_path):
+    dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+
+    scored = effective_dataset(dataset, mode="live")
+
+    assert scored.digest == dataset.digest
+    assert scored.ref == dataset.ref
+    assert scored.sampled_from == dataset.sampled_from
+
+
+def test_a_live_run_keeps_the_span_kinds_but_not_the_counts(tmp_path):
+    """A suite recorded against a retrieving agent is still a retrieval suite.
+
+    Inferring the span kinds from rows the strip just emptied would drop
+    the retrieval judges from every live run — a control removed by a fix.
+    What must not carry over is the count, which the estimate reads from
+    the rows themselves.
+    """
+
+    dataset = _traced_rows(
+        tmp_path,
+        trace=lambda i: {
+            "data": {
+                "spans": [
+                    {
+                        "parent_span_id": None,
+                        "span_type": "RETRIEVER",
+                        "outputs": [{"page_content": "chunk"}],
+                    }
+                ]
+            }
+        },
+    )
+    assert dataset.shape.has_retrieval_spans
+
+    scored = effective_dataset(dataset, mode="live")
+
+    assert scored.shape.has_retrieval_spans
+    assert not scored.shape.has_traces
+    assert all("trace" not in row for row in scored.rows)

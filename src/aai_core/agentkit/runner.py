@@ -44,8 +44,9 @@ from aai_core.agentkit.datasets import (
     STORED_TRACE_MODES,
     LoadedDataset,
     attach_answer_sheet,
-    evaluation_rows,
+    effective_dataset,
     load_dataset,
+    rows_missing_inputs,
     smoke_sample,
     trace_expectation_overrides,
     validate_dataset,
@@ -207,15 +208,34 @@ def run_scoring(
         # without CAN_VIEW, and widening that grant to make a check work
         # is exactly what section 4 of AGENTS.md forbids.
         judge_model_identity = project.judge_model_identity()
+    # Plan and price the rows MLflow will actually score, not the ones on
+    # disk. In a live run the stored traces are gone, so their retrieval
+    # fan-out is not this run's; in a traces run the traces' own
+    # expectation assessments replace the dataset's, so a scorer chosen
+    # from the curated fields could be reading nothing at all.
+    scored = effective_dataset(dataset, mode=resolved_mode)
+    if resolved_mode != "traces":
+        missing_inputs = rows_missing_inputs(scored)
+        if missing_inputs:
+            listed = ", ".join(str(index) for index in missing_inputs[:5])
+            raise ConfigError(
+                f"{len(missing_inputs)} row(s) have no inputs to send the "
+                f"agent (rows {listed}); a trace-only row needs a request "
+                "that can be recovered from its trace",
+                remediation=(
+                    "Run `--mode traces` to score the recorded traces, or "
+                    "give every row an `inputs` object."
+                ),
+            )
     plan = select_scorers(
-        dataset.shape,
+        scored.shape,
         config,
         mode=resolved_mode,
         judges_enabled=judges_enabled,
         judge_note=judge_note,
     )
     cost = estimate(
-        dataset.rows,
+        scored.rows,
         plan,
         price_per_1m_tokens=config.budget.judge_price_per_1m_tokens,
         chunks_per_row=config.budget.retrieved_chunks_per_row,
@@ -375,7 +395,8 @@ def run_scoring(
 
     if mlflow is None:
         gate = apply_gate(
-            _score_locally(dataset, plan),
+            # Same rows the MLflow path would score, so the two agree.
+            _score_locally(scored, plan),
             policy=policy,
             baseline_metrics=baseline_metrics,
         )
@@ -413,7 +434,7 @@ def run_scoring(
         ) as active_run:
             run_id, experiment_id = _run_identity(active_run)
             native_result = mlflow.genai.evaluate(
-                data=evaluation_rows(dataset, mode=resolved_mode),
+                data=[dict(row) for row in scored.rows],
                 scorers=scorers,
                 predict_fn=predict_fn,
             )
