@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -1757,9 +1758,24 @@ def test_recheck_binds_import_hook_activation_and_order(
         recheck_evaluation_session(session)
 
 
+def test_capture_requires_active_extension_tracker_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = training._RUNTIME_EXTENSION_FINDER
+    assert tracker is not None
+    reordered = [item for item in training.sys.meta_path if item is not tracker]
+    path_finder_index = reordered.index(importlib.machinery.PathFinder)
+    reordered.insert(path_finder_index + 1, tracker)
+    monkeypatch.setattr(training.sys, "meta_path", reordered)
+
+    with pytest.raises(RuntimeError, match="extension import tracker order"):
+        training._install_runtime_extension_finder()
+
+
 def test_real_snapshot_allows_first_mlx_native_import() -> None:
     script = r"""
 import sys
+from types import ModuleType
 from aai_local_finetuning import training
 
 assert "mlx.core" not in sys.modules
@@ -1775,6 +1791,71 @@ training.recheck_execution_snapshot(snapshot)
 for name in training._RUNTIME_MLX_SPECLESS_CHILDREN:
     assert name in sys.modules
 training.recheck_execution_snapshot(snapshot)
+replacement = ModuleType("mlx.core.random")
+replacement.__spec__ = None
+replacement.unbound_callable = lambda: "not native"
+mlx.core.random = replacement
+sys.modules["mlx.core.random"] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "completed parent provenance" in str(error.__cause__)
+else:
+    raise AssertionError("replacement MLX child was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_native_sibling_requires_a_completed_extension_load() -> None:
+    script = r"""
+import importlib
+import importlib.util
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+snapshot = training.capture_execution_snapshot()
+import PIL
+assert "PIL._imaging" not in sys.modules
+spec = importlib.util.find_spec("PIL._imaging")
+assert spec is not None
+replacement = ModuleType("PIL._imaging")
+replacement.__spec__ = spec
+replacement.__loader__ = spec.loader
+replacement.__package__ = "PIL"
+PIL._imaging = replacement
+sys.modules["PIL._imaging"] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "matching import provenance" in str(error.__cause__)
+else:
+    raise AssertionError("unloaded extension sibling was accepted")
+
+del sys.modules["PIL._imaging"]
+del PIL._imaging
+native = importlib.import_module("PIL._imaging")
+training.recheck_execution_snapshot(snapshot)
+replacement = ModuleType("PIL._imaging")
+replacement.__spec__ = native.__spec__
+replacement.__loader__ = native.__loader__
+replacement.__package__ = "PIL"
+PIL._imaging = replacement
+sys.modules["PIL._imaging"] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "completed import provenance" in str(error.__cause__)
+else:
+    raise AssertionError("replacement extension module was accepted")
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],

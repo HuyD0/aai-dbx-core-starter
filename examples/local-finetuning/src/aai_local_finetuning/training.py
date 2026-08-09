@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import csv
 import hashlib
+import importlib.abc
 import importlib.machinery
 import importlib.metadata
 import importlib.util
@@ -628,9 +629,57 @@ class _LoadedSpecLessModuleState:
 
 
 @dataclass(frozen=True, slots=True)
+class _RuntimeNativeLoadState:
+    name: str
+    origin: _CapturedPhysicalFile
+    module: object = field(repr=False, compare=False)
+    loader: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
 class _CapturedImportHooks:
     portable: tuple[str, ...]
     objects: tuple[object, ...] = field(repr=False, compare=False)
+
+
+class _RuntimeExtensionLoader(importlib.abc.Loader):
+    """Delegate one extension load and retain its resulting module identity."""
+
+    def __init__(
+        self,
+        name: str,
+        delegate: importlib.machinery.ExtensionFileLoader,
+    ) -> None:
+        self._name = name
+        self._delegate = delegate
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> object:
+        return self._delegate.create_module(spec)
+
+    def exec_module(self, module: types.ModuleType) -> None:
+        self._delegate.exec_module(module)
+        _record_loaded_native_module(self._name, module, self)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
+
+
+class _RuntimeExtensionFinder(importlib.abc.MetaPathFinder):
+    """Wrap extensions found by the ordinary path finder after initialization."""
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: object = None,
+        target: object = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is not None and isinstance(
+            spec.loader,
+            importlib.machinery.ExtensionFileLoader,
+        ):
+            spec.loader = _RuntimeExtensionLoader(fullname, spec.loader)
+        return spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,14 +836,23 @@ _RUNTIME_IMPORTED_NATIVE_FILES: dict[
     list[_CapturedPhysicalFile],
 ] = {}
 _RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW: set[tuple[str, Path]] = set()
+_RUNTIME_IMPORTED_NATIVE_MODULES: dict[
+    tuple[str, Path],
+    list[_RuntimeNativeLoadState],
+] = {}
+_RUNTIME_IMPORTED_NATIVE_MODULES_OVERFLOW: set[tuple[str, Path]] = set()
+_RUNTIME_MLX_CHILD_BINDINGS: dict[str, list[tuple[object, object]]] = {}
+_RUNTIME_MLX_CHILD_BINDINGS_OVERFLOW: set[str] = set()
 _RUNTIME_INITIAL_MODULE_FILES: dict[
     tuple[str, Path],
     _CapturedPhysicalFile,
 ] = {}
+_RUNTIME_INITIAL_MODULE_OBJECTS: dict[tuple[str, Path], object] = {}
 _RUNTIME_INITIAL_SPECLESS_MODULES: dict[str, object] = {}
 _RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES = 8_192
 _RUNTIME_PROVENANCE_CACHE: OrderedDict[tuple[object, ...], None] = OrderedDict()
 _RUNTIME_PROVENANCE_AUDIT_INSTALLED = False
+_RUNTIME_EXTENSION_FINDER: _RuntimeExtensionFinder | None = None
 _RUNTIME_SPECLESS_MODULE_NAMES = frozenset({"__main__"})
 _RUNTIME_SPECLESS_PARENT_ALIASES = {
     "pyexpat.errors": ("pyexpat", "errors"),
@@ -2685,6 +2743,7 @@ def _capture_import_environment(
 ) -> _RuntimeDistribution:
     """Bind effective import precedence and the covered origin for each name."""
 
+    _install_runtime_extension_finder()
     if not distributions:
         raise RuntimeError("installed runtime package set is empty")
     by_install_root: dict[Path, list[_RuntimeDistribution]] = {}
@@ -3623,6 +3682,18 @@ def _validate_spec_less_module(
         parent = sys.modules.get(parent_name)
         if parent is None or getattr(parent, child_name, None) is not module:
             raise RuntimeError(f"loaded native child lacks its parent binding: {name}")
+        with _RUNTIME_PROVENANCE_LOCK:
+            bindings_overflowed = name in _RUNTIME_MLX_CHILD_BINDINGS_OVERFLOW
+            bindings = tuple(_RUNTIME_MLX_CHILD_BINDINGS.get(name, ()))
+        if (
+            bindings_overflowed
+            or len(bindings) != 1
+            or bindings[0][0] is not parent
+            or bindings[0][1] is not module
+        ):
+            raise RuntimeError(
+                f"loaded native child lacks completed parent provenance: {name}"
+            )
         spec = getattr(parent, "__spec__", None)
         path = _loaded_module_origin_path(spec) if spec is not None else None
         if path is None or not any(
@@ -3946,7 +4017,6 @@ def _runtime_exec_audit_hook(event: str, args: tuple[object, ...]) -> None:
             _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW.add(path)
             return
         observed.append(code)
-    _record_neighbor_native_candidates(path)
 
 
 def _record_runtime_execution(path: Path) -> None:
@@ -3981,53 +4051,6 @@ def _find_native_import_candidate(name: str, raw_roots: object) -> Path | None:
     return next(iter(candidates))
 
 
-def _record_neighbor_native_candidates(source_path: Path) -> None:
-    """Bind extension siblings before Python package code can import them."""
-
-    directory = source_path.parent
-    package_parts: list[str] = []
-    cursor = directory
-    while (cursor / "__init__.py").is_file() and cursor.name.isidentifier():
-        package_parts.insert(0, cursor.name)
-        cursor = cursor.parent
-    if not package_parts:
-        return
-    try:
-        entries = tuple(directory.iterdir())
-    except OSError:
-        return
-    for candidate in entries:
-        suffix = next(
-            (
-                value
-                for value in sorted(
-                    importlib.machinery.EXTENSION_SUFFIXES,
-                    key=len,
-                    reverse=True,
-                )
-                if candidate.name.endswith(value)
-            ),
-            None,
-        )
-        if suffix is None or candidate.is_symlink() or not candidate.is_file():
-            continue
-        stem = candidate.name[: -len(suffix)]
-        if stem == "__init__":
-            name = ".".join(package_parts)
-        elif stem.isidentifier():
-            name = ".".join((*package_parts, stem))
-        else:
-            continue
-        try:
-            captured = _capture_physical_file_identity(
-                candidate.resolve(strict=True),
-                label="package native module candidate",
-            )
-        except (OSError, RuntimeError, ValueError):
-            continue
-        _record_native_import_identity(name, captured)
-
-
 def _record_native_import_identity(
     name: str,
     captured: _CapturedPhysicalFile,
@@ -4043,6 +4066,90 @@ def _record_native_import_identity(
         observed_files.append(captured)
 
 
+def _record_loaded_native_module(
+    name: str,
+    module: types.ModuleType,
+    loader: _RuntimeExtensionLoader,
+) -> None:
+    spec = getattr(module, "__spec__", None)
+    path = _loaded_module_origin_path(spec) if spec is not None else None
+    if path is None or not any(
+        path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES
+    ):
+        raise RuntimeError(f"loaded extension has an invalid origin: {name}")
+    captured = _capture_physical_file_identity(
+        path,
+        label="loaded native module origin",
+    )
+    state = _RuntimeNativeLoadState(
+        name=name,
+        origin=captured,
+        module=module,
+        loader=loader,
+    )
+    key = (name, path)
+    with _RUNTIME_PROVENANCE_LOCK:
+        observed = _RUNTIME_IMPORTED_NATIVE_MODULES.setdefault(key, [])
+        if len(observed) >= 64:
+            _RUNTIME_IMPORTED_NATIVE_MODULES_OVERFLOW.add(key)
+        else:
+            observed.append(state)
+    if name == "mlx.core":
+        _record_mlx_child_bindings(module)
+
+
+def _record_mlx_child_bindings(parent: types.ModuleType) -> None:
+    for child_module_name in _RUNTIME_MLX_SPECLESS_CHILDREN:
+        child_name = child_module_name.rpartition(".")[2]
+        child = getattr(parent, child_name, None)
+        if child is None or sys.modules.get(child_module_name) is not child:
+            raise RuntimeError(
+                f"loaded MLX native child lacks its parent binding: {child_module_name}"
+            )
+        _require_inert_spec_less_shape(child_module_name, child)
+        with _RUNTIME_PROVENANCE_LOCK:
+            observed = _RUNTIME_MLX_CHILD_BINDINGS.setdefault(
+                child_module_name,
+                [],
+            )
+            if len(observed) >= 64:
+                _RUNTIME_MLX_CHILD_BINDINGS_OVERFLOW.add(child_module_name)
+            else:
+                observed.append((parent, child))
+
+
+def _install_runtime_extension_finder() -> None:
+    global _RUNTIME_EXTENSION_FINDER
+    if _RUNTIME_EXTENSION_FINDER is not None:
+        tracker_indices = [
+            index
+            for index, item in enumerate(sys.meta_path)
+            if item is _RUNTIME_EXTENSION_FINDER
+        ]
+        path_finder_indices = [
+            index
+            for index, item in enumerate(sys.meta_path)
+            if item is importlib.machinery.PathFinder
+        ]
+        if (
+            len(tracker_indices) != 1
+            or len(path_finder_indices) != 1
+            or tracker_indices[0] + 1 != path_finder_indices[0]
+        ):
+            raise RuntimeError("runtime extension import tracker order changed")
+        return
+    path_finder_indices = [
+        index
+        for index, item in enumerate(sys.meta_path)
+        if item is importlib.machinery.PathFinder
+    ]
+    if len(path_finder_indices) != 1:
+        raise RuntimeError("Python path finder order is unsupported")
+    finder = _RuntimeExtensionFinder()
+    sys.meta_path.insert(path_finder_indices[0], finder)
+    _RUNTIME_EXTENSION_FINDER = finder
+
+
 def _install_runtime_provenance_audit() -> None:
     """Establish the one-time loaded-module boundary for this interpreter."""
 
@@ -4050,7 +4157,9 @@ def _install_runtime_provenance_audit() -> None:
     with _RUNTIME_PROVENANCE_LOCK:
         if _RUNTIME_PROVENANCE_AUDIT_INSTALLED:
             return
+        _install_runtime_extension_finder()
         initial: dict[tuple[str, Path], _CapturedPhysicalFile] = {}
+        initial_modules: dict[tuple[str, Path], object] = {}
         for name, module in sys.modules.items():
             spec = getattr(module, "__spec__", None)
             if spec is None:
@@ -4065,11 +4174,17 @@ def _install_runtime_provenance_audit() -> None:
                     path,
                     label="initial loaded module origin",
                 )
+                initial_modules[(name, path)] = module
             except (OSError, RuntimeError, ValueError):
                 # An unsafe or already-missing origin remains unproven and will
                 # fail closed if it participates in governed execution later.
                 continue
         _RUNTIME_INITIAL_MODULE_FILES.update(initial)
+        _RUNTIME_INITIAL_MODULE_OBJECTS.update(initial_modules)
+        mlx_core = sys.modules.get("mlx.core")
+        if isinstance(mlx_core, types.ModuleType):
+            if not _runtime_audit.was_preexisting("mlx.core", mlx_core):
+                _record_mlx_child_bindings(mlx_core)
         _runtime_audit.activate(_runtime_exec_audit_hook)
         _RUNTIME_PROVENANCE_AUDIT_INSTALLED = True
 
@@ -4086,19 +4201,35 @@ def _require_loaded_code_provenance(
         native_key = (module_name, path)
         native_overflow = native_key in _RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW
         native_files = tuple(_RUNTIME_IMPORTED_NATIVE_FILES.get(native_key, ()))
+        native_module_overflow = native_key in _RUNTIME_IMPORTED_NATIVE_MODULES_OVERFLOW
+        native_modules = tuple(_RUNTIME_IMPORTED_NATIVE_MODULES.get(native_key, ()))
         initial = _RUNTIME_INITIAL_MODULE_FILES.get((module_name, path))
+        initial_module = _RUNTIME_INITIAL_MODULE_OBJECTS.get((module_name, path))
+        module_spec = getattr(module, "__spec__", None)
         cache_key = (
             module_name,
             path,
             current,
+            id(module),
+            id(module_spec),
+            id(getattr(module_spec, "loader", None)),
+            id(getattr(module, "__loader__", None)),
+            overflow,
+            native_overflow,
+            native_module_overflow,
             tuple(id(code) for code in executed),
             native_files,
+            tuple(
+                (item.origin, id(item.module), id(item.loader))
+                for item in native_modules
+            ),
             initial,
+            id(initial_module),
         )
         if cache_key in _RUNTIME_PROVENANCE_CACHE:
             _RUNTIME_PROVENANCE_CACHE.move_to_end(cache_key)
             return
-    if overflow or native_overflow:
+    if overflow or native_overflow or native_module_overflow:
         raise RuntimeError(
             f"loaded module execution provenance overflowed: {module_name}"
         )
@@ -4120,6 +4251,27 @@ def _require_loaded_code_provenance(
         if set(native_files) != {current}:
             raise RuntimeError(
                 "loaded native code does not match captured module bytes: "
+                f"{module_name}"
+            )
+        spec = getattr(module, "__spec__", None)
+        active_loader = getattr(spec, "loader", None)
+        module_loader = getattr(module, "__loader__", None)
+        tracked_load = (
+            len(native_modules) == 1
+            and native_modules[0].origin == current
+            and native_modules[0].module is module
+            and native_modules[0].loader is active_loader
+            and module_loader is active_loader
+        )
+        captured_during_bootstrap = (
+            not native_modules
+            and initial == current
+            and initial_module is module
+            and not _runtime_audit.was_preexisting(module_name, module)
+        )
+        if not tracked_load and not captured_during_bootstrap:
+            raise RuntimeError(
+                "loaded native module identity lacks completed import provenance: "
                 f"{module_name}"
             )
         _cache_runtime_provenance(cache_key)

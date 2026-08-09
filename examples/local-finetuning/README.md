@@ -200,8 +200,8 @@ captured `__pycache__` directory. Arbitrary spec-less and originless modules are
 rejected; MLX's exact dynamic child modules are accepted only through their
 captured native `mlx.core` parent. Importer/hook activation order and governed
 module import/reload/removal activity are checked across the operation. Native
-or other non-source modules loaded later fail closed unless their pre-load file
-identity was established.
+modules loaded later require both a pre-load file identity and a completed
+extension-loader module identity; other non-source modules fail closed.
 
 MLX-LM training launches the captured Python executable in isolated no-bytecode
 mode and passes a fixed child environment with every `PYTHON*` override
