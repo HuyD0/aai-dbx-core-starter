@@ -541,6 +541,61 @@ _SPAN_V3_STATUSES = _SPAN_STATUSES | frozenset(
 _ASSESSMENT_SOURCE_TYPES = frozenset(
     {"SOURCE_TYPE_UNSPECIFIED", "LLM_JUDGE", "AI_JUDGE", "HUMAN", "CODE"}
 )
+_ASSESSMENT_KIND_KEYS = frozenset({"expectation", "feedback", "issue"})
+_ASSESSMENT_KEYS = frozenset(
+    {
+        "assessment_id",
+        "assessment_name",
+        "trace_id",
+        "run_id",
+        "source",
+        "create_time",
+        "last_update_time",
+        "expectation",
+        "feedback",
+        "issue",
+        "rationale",
+        "metadata",
+        "span_id",
+        "overrides",
+        "valid",
+    }
+)
+_EXPECTATION_KEYS = frozenset({"value", "serialized_value"})
+_SERIALIZED_EXPECTATION_KEYS = frozenset({"serialization_format", "value"})
+_FEEDBACK_KEYS = frozenset({"value", "error"})
+_FEEDBACK_ERROR_KEYS = frozenset({"error_code", "error_message", "stack_trace"})
+_ISSUE_KEYS = frozenset({"issue_name"})
+_TRACE_LOCATION_SHAPES = {
+    "TRACE_LOCATION_TYPE_UNSPECIFIED": (None, frozenset(), frozenset()),
+    "MLFLOW_EXPERIMENT": (
+        "mlflow_experiment",
+        frozenset({"experiment_id"}),
+        frozenset(),
+    ),
+    "INFERENCE_TABLE": (
+        "inference_table",
+        frozenset({"full_table_name"}),
+        frozenset(),
+    ),
+    "UC_SCHEMA": (
+        "uc_schema",
+        frozenset({"catalog_name", "schema_name"}),
+        frozenset({"otel_spans_table_name", "otel_logs_table_name"}),
+    ),
+    "UC_TABLE_PREFIX": (
+        "uc_table_prefix",
+        frozenset({"catalog_name", "schema_name"}),
+        frozenset(
+            {
+                "table_prefix",
+                "otel_spans_table_name",
+                "otel_logs_table_name",
+                "annotations_table_name",
+            }
+        ),
+    ),
+}
 _TRACE_INFO_V2_KEYS = frozenset(
     {
         "request_id",
@@ -680,26 +735,24 @@ def _complete_trace_location(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
     location_type = value.get("type")
-    if not isinstance(location_type, str):
+    if (
+        not isinstance(location_type, str)
+        or location_type not in _TRACE_LOCATION_SHAPES
+    ):
         return False
-    if location_type == "TRACE_LOCATION_TYPE_UNSPECIFIED":
+
+    field, required, optional = _TRACE_LOCATION_SHAPES[location_type]
+    expected_keys = {"type"} if field is None else {"type", field}
+    if set(value) != expected_keys:
+        return False
+    if field is None:
         return True
-    shapes = {
-        "MLFLOW_EXPERIMENT": ("mlflow_experiment", ("experiment_id",)),
-        "INFERENCE_TABLE": ("inference_table", ("full_table_name",)),
-        "UC_SCHEMA": ("uc_schema", ("catalog_name", "schema_name")),
-        "UC_TABLE_PREFIX": (
-            "uc_table_prefix",
-            ("catalog_name", "schema_name"),
-        ),
-    }
-    shape = shapes.get(location_type)
-    if shape is None:
-        return False
-    field, required = shape
+
     details = value.get(field)
-    return isinstance(details, Mapping) and all(
-        _non_empty_string(details.get(key)) for key in required
+    return (
+        isinstance(details, Mapping)
+        and required <= set(details) <= required | optional
+        and all(_non_empty_string(details.get(key)) for key in details)
     )
 
 
@@ -708,7 +761,8 @@ def _complete_assessment(assessment: Any, *, expected_request_id: str) -> bool:
         return False
     source = assessment.get("source")
     if not (
-        _non_empty_string(assessment.get("assessment_name"))
+        set(assessment) <= _ASSESSMENT_KEYS
+        and _non_empty_string(assessment.get("assessment_name"))
         and _rfc3339_timestamp(assessment.get("create_time"))
         and _rfc3339_timestamp(assessment.get("last_update_time"))
         and isinstance(source, Mapping)
@@ -717,6 +771,7 @@ def _complete_assessment(assessment: Any, *, expected_request_id: str) -> bool:
         and source["source_type"].upper() in _ASSESSMENT_SOURCE_TYPES
         and _optional_string(source, "source_id")
         and _optional_string(assessment, "assessment_id")
+        and _optional_string(assessment, "trace_id")
         and _optional_string(assessment, "run_id")
         and _optional_string(assessment, "rationale")
         and _optional_string(assessment, "span_id")
@@ -729,46 +784,58 @@ def _complete_assessment(assessment: Any, *, expected_request_id: str) -> bool:
     if assessment_trace_id is not None and assessment_trace_id != expected_request_id:
         return False
 
-    kinds = [
-        key
-        for key in ("expectation", "feedback", "issue")
-        if isinstance(assessment.get(key), Mapping) and assessment.get(key)
-    ]
+    kinds = set(assessment) & _ASSESSMENT_KIND_KEYS
     if len(kinds) != 1:
         return False
-    kind = kinds[0]
+    kind = next(iter(kinds))
     value = assessment[kind]
+    if not isinstance(value, Mapping):
+        return False
     if kind == "expectation":
         return _complete_expectation(value)
     if kind == "feedback":
         return _complete_feedback(value)
-    return _non_empty_string(value.get("issue_name"))
+    return set(value) == _ISSUE_KEYS and _non_empty_string(value.get("issue_name"))
 
 
 def _complete_expectation(value: Mapping[str, Any]) -> bool:
-    if "value" in value:
-        return _json_value(value["value"])
-    serialized = value.get("serialized_value")
-    if not isinstance(serialized, Mapping):
+    arms = set(value) & _EXPECTATION_KEYS
+    if not set(value) <= _EXPECTATION_KEYS or len(arms) != 1:
+        return False
+    if arms == {"value"}:
+        direct = value["value"]
+        return direct is not None and _json_value(direct)
+
+    serialized = value["serialized_value"]
+    if (
+        not isinstance(serialized, Mapping)
+        or set(serialized) != _SERIALIZED_EXPECTATION_KEYS
+        or serialized.get("serialization_format") != "JSON_FORMAT"
+    ):
         return False
     encoded = serialized.get("value")
     if not isinstance(encoded, str):
         return False
     try:
-        json.loads(encoded)
+        decoded = json.loads(encoded)
     except (TypeError, ValueError):
         return False
-    return _optional_string(serialized, "serialization_format")
+    return decoded is not None and _json_value(decoded)
 
 
 def _complete_feedback(value: Mapping[str, Any]) -> bool:
-    if "value" not in value or not _json_value(value.get("value")):
+    if (
+        not set(value) <= _FEEDBACK_KEYS
+        or "value" not in value
+        or not _json_value(value.get("value"))
+    ):
         return False
-    error = value.get("error")
-    if error is None:
+    if "error" not in value:
         return True
+    error = value["error"]
     return (
         isinstance(error, Mapping)
+        and set(error) <= _FEEDBACK_ERROR_KEYS
         and _non_empty_string(error.get("error_code"))
         and _optional_string(error, "error_message")
         and _optional_string(error, "stack_trace")
@@ -935,7 +1002,7 @@ def _otel_attribute_value(value: Any) -> bool:
         return True
     if isinstance(value, float):
         return math.isfinite(value)
-    if not isinstance(value, list):
+    if not isinstance(value, (list, tuple)):
         return False
     if not value:
         return True
