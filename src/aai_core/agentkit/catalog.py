@@ -597,6 +597,22 @@ def _contract_blocker(
     if spec.needs_trace is TraceNeed.ANY and mode not in TRACE_MODES:
         return "needs a trace (answer-sheet rows have none)"
     if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS} and mode != "live":
+        if mode not in TRACE_MODES and (shape.has_traces or shape.partial_traces):
+            # The rule one branch up, applied to the same rows: an
+            # answer-sheet run replays recorded outputs and does not hand
+            # MLflow the stored trace, so there is nothing for these to
+            # read. Selecting them on the strength of the dataset's stored
+            # spans would also pair one run's answers with another run's
+            # retrieval, which is not evidence about either.
+            #
+            # Only when the rows *do* carry traces: pointing a trace-free
+            # dataset at --mode traces would be advice it cannot take, so
+            # those fall through to the span messages below.
+            return (
+                "needs a trace; an answer-sheet run replays recorded "
+                "outputs and does not pass the rows' traces. Use "
+                "--mode traces to score the traces the rows hold."
+            )
         wanted = (
             shape.has_retrieval_spans
             if spec.needs_trace is TraceNeed.RETRIEVAL

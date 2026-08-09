@@ -1589,3 +1589,112 @@ def test_full_coverage_says_nothing():
     result = SimpleNamespace(metrics={}, result_df=_CoverageFrame([1.0, 0.5]))
 
     assert _coverage_warnings(result) == []
+
+
+def _traced_project(tmp_path, *, trace, rows=12):
+    """A project whose dataset carries a `trace` value on every row."""
+
+    project = _project(tmp_path, rows=rows)
+    cases = json.loads((tmp_path / "evals" / "data" / "golden_cases.json").read_text())
+    for index, case in enumerate(cases):
+        case["trace"] = trace(index)
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(cases))
+    return project
+
+
+def test_a_live_run_does_not_hand_mlflow_a_stored_trace(tmp_path):
+    """The recorded trace is a different run's answer.
+
+    MLflow does not ignore it: a present trace column rewrites inputs,
+    outputs and expectations from the traces before predict_fn is touched.
+    """
+
+    project = _traced_project(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+    fake = FakeMlflow()
+
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=False,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    call = fake.evaluate_calls[0]
+    assert call["predict_fn"] is not None
+    assert all("trace" not in row for row in call["data"])
+
+
+def test_a_nullable_trace_column_still_scores(tmp_path):
+    """The P1, end to end.
+
+    A UC dataset with a nullable trace column infers `live` correctly, but
+    used to carry `trace: NaN` into MLflow, where
+    `_extract_request_response_from_trace` calls `trace.data` on every
+    value and raises before the agent runs.
+    """
+
+    project = _traced_project(tmp_path, trace=lambda i: None)
+    fake = FakeMlflow()
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=False,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert code == EXIT_PASS
+    assert all("trace" not in row for row in fake.evaluate_calls[0]["data"])
+
+
+def test_a_traces_run_still_carries_its_traces(tmp_path):
+    project = _traced_project(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+    fake = FakeMlflow()
+
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=False,
+        mode="traces",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    call = fake.evaluate_calls[0]
+    assert call["predict_fn"] is None
+    assert all("trace" in row for row in call["data"])
+
+
+def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
+    project = _traced_project(
+        tmp_path,
+        trace=lambda i: {
+            "info": {
+                "trace_id": f"t{i}",
+                "assessments": [
+                    {
+                        "assessment_name": "expected_response",
+                        "expectation": {"value": "other"},
+                    }
+                ],
+            }
+        },
+    )
+    fake = FakeMlflow()
+
+    outcome, _ = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=False,
+        mode="traces",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert any(
+        "trace's assessments" in warning for warning in outcome.warnings
+    ), outcome.warnings

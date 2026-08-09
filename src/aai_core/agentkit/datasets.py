@@ -20,6 +20,10 @@ from aai_core.agentkit.errors import ConfigError, missing_extra
 
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 DEFAULT_MINIMUM_ROWS = 10
+# The modes in which a row's *stored* trace is the thing being scored, and
+# so the only ones whose payload carries it. `live` produces fresh traces
+# from the agent; `answer-sheet` replays recorded outputs.
+STORED_TRACE_MODES = frozenset({"traces"})
 SMOKE_SEED = 20260802
 _STRATA_CARDINALITY_LIMIT = 8
 _LISTED_FAILURES = 5
@@ -312,6 +316,85 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
         rows,
         sampled_from=dataset.sampled_from,
     )
+
+
+def evaluation_rows(dataset: LoadedDataset, *, mode: str) -> list[dict[str, Any]]:
+    """The rows handed to ``mlflow.genai.evaluate`` — the payload boundary.
+
+    Two rules, both about not sending MLflow something it will misread.
+
+    **A stored trace travels only in ``traces`` mode.** It is the recorded
+    answer to the question, so in ``live`` the answer comes from
+    ``predict_fn`` and in ``answer-sheet`` from the sheet; passing a trace
+    there hands MLflow a *different run's* answer. It is not inert either:
+    ``_convert_to_eval_set`` pipes any present trace column through
+    ``_extract_request_response_from_trace``, which calls
+    ``trace.data._get_root_span()`` on every value — so one ``NaN`` raises
+    ``AttributeError`` before the agent is ever called — and through
+    ``_extract_expectations_from_trace``, which *overwrites* the
+    expectations column from the traces' assessments. MLflow's own
+    validation agrees the column is unwanted here: it adds ``trace`` to the
+    satisfied columns whenever a ``predict_fn`` is supplied.
+
+    **A missing value is an absent key.** A Unity Catalog dataset arrives
+    through ``to_dict("records")``, where an absent field is ``NaN``; only
+    dropping the key says "absent" to MLflow rather than passing a float
+    where a mapping belongs.
+
+    Rule two alone would not fix a partly traced dataset — pandas refills
+    the column with ``NaN`` for the rows that dropped the key — which is
+    why the mode rule exists as well.
+    """
+
+    keep_trace = mode in STORED_TRACE_MODES
+    payload: list[dict[str, Any]] = []
+    for row in dataset.rows:
+        kept: dict[str, Any] = {}
+        for key, value in row.items():
+            if key == "trace" and not keep_trace:
+                continue
+            if _is_missing(value):
+                continue
+            kept[key] = value
+        payload.append(kept)
+    return payload
+
+
+def trace_expectation_overrides(dataset: LoadedDataset) -> tuple[str, ...]:
+    """Rows whose curated expectations MLflow will replace with the trace's.
+
+    ``_extract_expectations_from_trace`` documents itself as filling the
+    column "if it is not already present", but it has no such check: any
+    trace carrying an expectation assessment rewrites the whole column. In
+    ``traces`` mode that is MLflow's behaviour and may be what the project
+    wants — so this reports rather than refuses, naming the expectations
+    whose value comes from the trace instead of the dataset.
+    """
+
+    overridden: set[str] = set()
+    for row in dataset.rows:
+        if not _is_populated(row.get("expectations")):
+            continue
+        overridden.update(_trace_expectation_names(row.get("trace")))
+    return tuple(sorted(overridden))
+
+
+def _trace_expectation_names(trace: Any) -> tuple[str, ...]:
+    document = _trace_document(trace)
+    info = document.get("info") if document is not None else None
+    if not isinstance(info, Mapping):
+        return ()
+    names: list[str] = []
+    for assessment in info.get("assessments") or ():
+        if not isinstance(assessment, Mapping):
+            continue
+        if not _is_populated(assessment.get("expectation")):
+            continue
+        # `Trace.to_dict()` writes `assessment_name`; the in-memory entity
+        # attribute is `name`, and a row can arrive as either.
+        name = assessment.get("assessment_name") or assessment.get("name")
+        names.append(str(name or "an expectation"))
+    return tuple(names)
 
 
 def validate_dataset(

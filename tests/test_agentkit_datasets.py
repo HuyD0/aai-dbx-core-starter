@@ -8,8 +8,10 @@ import pytest
 from aai_core.agentkit.datasets import (
     attach_answer_sheet,
     dataset_digest,
+    evaluation_rows,
     load_dataset,
     smoke_sample,
+    trace_expectation_overrides,
     validate_dataset,
 )
 from aai_core.agentkit.errors import ConfigError
@@ -877,3 +879,195 @@ def test_a_null_expectations_column_is_not_malformed(tmp_path):
     failures = validate_dataset(dataset, minimum_rows=1)
 
     assert not any("must be an object" in failure for failure in failures)
+
+
+def _traced_rows(tmp_path, *, trace=None, **extra):
+    rows = []
+    for index in range(3):
+        row = {
+            "inputs": {"question": f"q{index}"},
+            "expectations": {"expected_response": f"a{index}"},
+            **extra,
+        }
+        if trace is not None:
+            row["trace"] = trace(index)
+        rows.append(row)
+    _write_dataset(tmp_path, rows)
+    return load_dataset("golden.json", root=tmp_path)
+
+
+def test_a_stored_trace_travels_only_in_traces_mode(tmp_path):
+    """The trace is the recorded answer, so it belongs to one mode.
+
+    In live the answer comes from predict_fn and in answer-sheet from the
+    sheet; passing a stored trace there hands MLflow a different run's
+    answer — and MLflow does not ignore it, it rewrites inputs, outputs
+    and expectations from it.
+    """
+
+    dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+
+    for mode in ("live", "answer-sheet"):
+        payload = evaluation_rows(dataset, mode=mode)
+        assert all("trace" not in row for row in payload), mode
+        assert all(row["inputs"] for row in payload), mode
+    traced = evaluation_rows(dataset, mode="traces")
+    assert all("trace" in row for row in traced)
+
+
+def test_a_null_trace_never_reaches_the_payload(tmp_path):
+    """The P1: MLflow calls trace.data on every value of a trace column.
+
+    `_extract_request_response_from_trace` does it unconditionally, so one
+    NaN raises AttributeError before the agent is ever called.
+    """
+
+    dataset = _traced_rows(tmp_path, trace=lambda i: float("nan"))
+
+    for mode in ("live", "answer-sheet", "traces"):
+        payload = evaluation_rows(dataset, mode=mode)
+        assert all("trace" not in row for row in payload), mode
+
+
+def test_a_partly_traced_dataset_carries_no_trace_outside_traces_mode(tmp_path):
+    """Dropping null keys alone is not enough here.
+
+    Pandas refills the column with NaN for the rows that dropped the key,
+    so the mode rule is what closes the partial case.
+    """
+
+    rows = [
+        {"inputs": {"question": "q0"}, "trace": {"info": {"trace_id": "t0"}}},
+        {"inputs": {"question": "q1"}},
+    ]
+    _write_dataset(tmp_path, rows)
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    assert dataset.shape.partial_traces
+    assert all("trace" not in row for row in evaluation_rows(dataset, mode="live"))
+
+
+def test_a_missing_value_is_an_absent_key(tmp_path):
+    rows = [
+        {
+            "inputs": {"question": f"q{index}"},
+            "expectations": float("nan"),
+            "outputs": float("nan"),
+        }
+        for index in range(3)
+    ]
+    _write_dataset(tmp_path, rows)
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    payload = evaluation_rows(dataset, mode="live")
+
+    assert all(set(row) == {"inputs"} for row in payload)
+
+
+def test_building_the_payload_does_not_alter_the_dataset(tmp_path):
+    dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+    digest = dataset.digest
+
+    evaluation_rows(dataset, mode="live")
+
+    assert dataset.digest == digest
+    assert all("trace" in row for row in dataset.rows)
+
+
+def test_trace_expectation_overrides_names_the_expectation(tmp_path):
+    """MLflow rewrites the whole expectations column from trace assessments.
+
+    Its docstring says it fills the column only when absent; the code has
+    no such check.
+    """
+
+    def trace(index):
+        assessments = (
+            [
+                {
+                    "assessment_name": "expected_response",
+                    "expectation": {"value": "from trace"},
+                }
+            ]
+            if index == 1
+            else []
+        )
+        return {"info": {"trace_id": f"t{index}", "assessments": assessments}}
+
+    dataset = _traced_rows(tmp_path, trace=trace)
+
+    assert trace_expectation_overrides(dataset) == ("expected_response",)
+
+
+def test_no_override_reported_without_assessments(tmp_path):
+    dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
+
+    assert trace_expectation_overrides(dataset) == ()
+
+
+def test_mlflow_really_does_raise_on_a_null_trace(tmp_path):
+    """The reason `evaluation_rows` drops the column, checked not assumed.
+
+    Reaches into MLflow's private `_convert_to_eval_set` on purpose: that
+    is the function `evaluate` calls on its data (`evaluation/base.py`),
+    before `predict_fn` is touched, and pinning it here is what tells us
+    if the behaviour this fix exists for ever changes.
+    """
+
+    pytest.importorskip("mlflow")
+    from mlflow.genai.evaluation.utils import _convert_to_eval_set
+
+    dataset = _traced_rows(tmp_path, trace=lambda i: float("nan"))
+    raw = [dict(row) for row in dataset.rows]
+
+    with pytest.raises(AttributeError):
+        _convert_to_eval_set(raw)
+
+    frame = _convert_to_eval_set(evaluation_rows(dataset, mode="live"))
+    assert "trace" not in frame.columns
+
+
+def test_mlflow_really_does_overwrite_curated_expectations(tmp_path):
+    """`_extract_expectations_from_trace` documents a guard it does not have.
+
+    Built through MLflow rather than hand-rolled JSON: the serialized
+    assessment carries `assessment_name`, `create_time` and
+    `last_update_time`, and a hand-written shape both fails to load and
+    proves nothing about the real one.
+    """
+
+    pytest.importorskip("mlflow")
+    import mlflow
+    from mlflow.genai.evaluation.utils import _convert_to_eval_set
+
+    mlflow.set_tracking_uri(f"sqlite:///{tmp_path}/mlflow.db")
+    mlflow.set_experiment("expectation-override")
+
+    @mlflow.trace
+    def agent(question):
+        return "an answer"
+
+    agent("q0")
+    mlflow.flush_trace_async_logging()
+    recorded = mlflow.search_traces(return_type="list")[0]
+    mlflow.log_expectation(
+        trace_id=recorded.info.trace_id,
+        name="expected_response",
+        value="from the trace",
+    )
+    trace = mlflow.get_trace(recorded.info.trace_id).to_dict()
+
+    rows = [
+        {
+            "inputs": {"question": "q0"},
+            "expectations": {"expected_response": "from the dataset"},
+            "trace": trace,
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+    dataset = load_dataset("golden.json", root=tmp_path)
+
+    frame = _convert_to_eval_set([dict(row) for row in dataset.rows])
+
+    assert frame["expectations"][0] == {"expected_response": "from the trace"}
+    assert trace_expectation_overrides(dataset) == ("expected_response",)

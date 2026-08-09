@@ -149,7 +149,7 @@ def test_trace_rows_select_trace_dependent_scorers():
     plan = select_scorers(
         _shape(has_traces=True),
         _config(),
-        mode="answer-sheet",
+        mode="traces",
         judges_enabled=True,
     )
 
@@ -162,7 +162,7 @@ def test_trace_scorers_excluded_on_plain_rows_with_reason():
     plan = select_scorers(
         _shape(),
         _config(scorers={"add": ["retrieval_groundedness"]}),
-        mode="answer-sheet",
+        mode="traces",
         judges_enabled=True,
     )
 
@@ -439,7 +439,7 @@ def test_retrieval_traces_do_not_select_tool_scorers():
     plan = select_scorers(
         _shape(has_traces=True, has_retrieval_spans=True, has_tool_spans=False),
         _config(),
-        mode="answer-sheet",
+        mode="traces",
         judges_enabled=True,
     )
 
@@ -453,7 +453,7 @@ def test_tool_traces_do_not_select_retrieval_scorers():
     plan = select_scorers(
         _shape(has_traces=True, has_retrieval_spans=False, has_tool_spans=True),
         _config(),
-        mode="answer-sheet",
+        mode="traces",
         judges_enabled=True,
     )
 
@@ -686,3 +686,73 @@ def test_a_dataset_with_no_expectations_still_selects_relevance():
     )
 
     assert "relevance" in _selected_names(plan)
+
+
+def test_answer_sheet_mode_refuses_trace_scorers_and_names_the_mode():
+    """The rows carry traces, but an answer-sheet run does not pass them.
+
+    Selecting these on the strength of the dataset's stored spans would
+    pair one run's recorded answers with another run's retrieval — and
+    since the payload no longer carries the trace, they would have nothing
+    to read either way.
+    """
+
+    plan = select_scorers(
+        _shape(has_traces=True, has_retrieval_spans=True, has_tool_spans=True),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "retrieval_groundedness" not in names
+    assert "tool_call_correctness" not in names
+    for scorer in ("retrieval_groundedness", "tool_call_correctness"):
+        reason = _excluded(plan, scorer)
+        assert reason is not None
+        assert "--mode traces" in reason
+
+
+def test_a_requested_trace_scorer_still_refuses_in_answer_sheet_mode():
+    plan = select_scorers(
+        _shape(has_traces=True, has_retrieval_spans=True),
+        _config(scorers={"add": ["retrieval_groundedness"]}),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    assert "retrieval_groundedness" not in _selected_names(plan)
+    assert "--mode traces" in (_excluded(plan, "retrieval_groundedness") or "")
+
+
+def test_live_mode_still_selects_trace_scorers():
+    """Fresh traces come from the agent, so live is untouched."""
+
+    plan = select_scorers(
+        _shape(),
+        _config(scorers={"add": ["retrieval_groundedness"]}),
+        mode="live",
+        judges_enabled=True,
+    )
+
+    assert "retrieval_groundedness" in _selected_names(plan)
+
+
+def test_a_trace_free_dataset_is_not_told_to_use_mode_traces():
+    """Advice a dataset cannot take is worse than no advice.
+
+    The answer-sheet reason names `--mode traces`, which only helps rows
+    that actually carry traces; trace-free rows keep the message about the
+    spans they lack.
+    """
+
+    plan = select_scorers(
+        _shape(),
+        _config(scorers={"add": ["retrieval_groundedness"]}),
+        mode="answer-sheet",
+        judges_enabled=True,
+    )
+
+    reason = _excluded(plan, "retrieval_groundedness") or ""
+    assert "--mode traces" not in reason
+    assert "RETRIEVER spans" in reason

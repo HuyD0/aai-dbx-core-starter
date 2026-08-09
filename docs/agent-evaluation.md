@@ -184,6 +184,22 @@ again would discard the recorded behaviour and score something else that
 merely shares the questions, so a trace-backed dataset defaults to `traces`
 and `--mode live` says out loud what it is about to overwrite.
 
+A stored trace is therefore **passed to MLflow only in `traces` mode**. A
+live run's answers come from the agent and an answer-sheet run's from the
+file, so in both cases the recorded trace is a different run's answer — and
+MLflow does not treat it as inert baggage. A present trace column makes it
+rewrite `inputs`, `outputs` and `expectations` from the traces, and a row
+whose trace is null (which is how a nullable Unity Catalog column arrives)
+raises before your agent is ever called. Two consequences worth knowing:
+
+- Retrieval and tool-call scorers are not available in `answer-sheet` mode.
+  Judging one run's retrieval beside another run's answers is not evidence
+  about either; the plan excludes them and points at `--mode traces`.
+- In `traces` mode, an expectation recorded on the trace **wins over the
+  one in the dataset** — that is MLflow's behaviour, and may be exactly
+  what you want when reviewers curate expectations on traces. The run says
+  which expectations it applies to rather than letting the swap go unseen.
+
 ## Two speeds, deliberately
 
 | | Where it runs | When | Why |

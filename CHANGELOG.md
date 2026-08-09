@@ -200,6 +200,23 @@ All notable changes to `aai-core` are documented here.
   meant scoring the default scope — every configured judge call — on a
   `--yes` run that asked for the smallest possible one.
 
+  A stored trace now reaches MLflow only in the mode that scores it. A live
+  run's answers come from the agent and an answer-sheet run's from the
+  file, so the recorded trace is a different run's answer — and MLflow does
+  not ignore a trace column it was not asked about: it rewrites inputs,
+  outputs and expectations from it, and calls `trace.data` on every value,
+  so a single null raised before the agent was ever called. That null is
+  how a nullable Unity Catalog column arrives, which the null-sentinel fix
+  had made reachable by correctly routing those rows to a live run. A
+  missing value is likewise dropped rather than passed, so an absent field
+  reads as absent instead of as a float. Because an answer-sheet run no
+  longer carries the trace, retrieval and tool-call scorers are excluded
+  there and name `--mode traces` — pairing one run's recorded answers with
+  another run's retrieval was not evidence about either. In `traces` mode
+  the trace's own expectation assessments still win over the dataset's, as
+  MLflow intends; the run now says which expectations that applies to
+  instead of letting the substitution pass unseen.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

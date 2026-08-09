@@ -41,10 +41,13 @@ from aai_core.agentkit.config import ProjectContext
 from aai_core.agentkit.cost import CostEstimate, enforce_budget, estimate
 from aai_core.agentkit.cost import render as render_cost
 from aai_core.agentkit.datasets import (
+    STORED_TRACE_MODES,
     LoadedDataset,
     attach_answer_sheet,
+    evaluation_rows,
     load_dataset,
     smoke_sample,
+    trace_expectation_overrides,
     validate_dataset,
 )
 from aai_core.agentkit.errors import (
@@ -410,7 +413,7 @@ def run_scoring(
         ) as active_run:
             run_id, experiment_id = _run_identity(active_run)
             native_result = mlflow.genai.evaluate(
-                data=[dict(row) for row in dataset.rows],
+                data=evaluation_rows(dataset, mode=resolved_mode),
                 scorers=scorers,
                 predict_fn=predict_fn,
             )
@@ -781,6 +784,20 @@ def _default_mode(target: Any, dataset: LoadedDataset) -> str:
 
 def _mode_warnings(mode: str, dataset: LoadedDataset, *, explicit: bool) -> list[str]:
     warnings = []
+    if mode in STORED_TRACE_MODES:
+        overridden = trace_expectation_overrides(dataset)
+        if overridden:
+            # MLflow rewrites the whole expectations column from the traces'
+            # assessments, despite documenting itself as filling it only when
+            # absent. In this mode that is its behaviour and may be wanted —
+            # but a silent change to what "correct" means is not something a
+            # run should leave unsaid.
+            named = ", ".join(overridden)
+            warnings.append(
+                f"the rows' traces carry expectation assessments ({named}) "
+                "and the dataset also supplies expectations; MLflow scores "
+                "the trace's assessments, not the dataset's."
+            )
     if mode == "live" and dataset.shape.has_traces and explicit:
         warnings.append(
             "--mode live on a dataset that carries traces: the agent is "
