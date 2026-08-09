@@ -313,6 +313,61 @@ def test_a_traced_row_that_retrieved_nothing_costs_nothing():
     assert cost.fanout_counted is True
 
 
+@pytest.mark.parametrize(
+    "outputs",
+    (
+        pytest.param([], id="plain-empty-list"),
+        pytest.param("[]", id="serialized-empty-list"),
+    ),
+)
+def test_known_empty_retriever_outputs_cost_zero_relevance_calls(outputs):
+    row = {
+        "inputs": {"question": "policy?"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {
+                        "type": "RETRIEVER",
+                        "attributes": {"mlflow.spanOutputs": outputs},
+                    }
+                ]
+            }
+        },
+    }
+
+    cost = estimate([row], _judge_plan("retrieval_relevance"))
+
+    assert dict(cost.calls_by_scorer) == {"retrieval_relevance": 0}
+    assert cost.estimated_tokens == 0
+    assert cost.fanout_counted is True
+
+
+@pytest.mark.parametrize(
+    "span",
+    (
+        pytest.param({"type": "RETRIEVER"}, id="missing-output"),
+        pytest.param(
+            {
+                "type": "RETRIEVER",
+                "attributes": {"mlflow.spanOutputs": "not-json"},
+            },
+            id="unparseable-output",
+        ),
+    ),
+)
+def test_unknown_retriever_outputs_keep_one_conservative_relevance_call(span):
+    row = {
+        "inputs": {"question": "policy?"},
+        "trace": {"data": {"spans": [span]}},
+    }
+
+    cost = estimate([row], _judge_plan("retrieval_relevance"))
+
+    assert dict(cost.calls_by_scorer) == {"retrieval_relevance": 1}
+    assert cost.estimated_tokens > 0
+    assert cost.fanout_counted is True
+
+
 def test_retrieval_cost_uses_only_the_spans_and_chunks_it_judges():
     """Small conversational rows must not dilute one large retrieval."""
 

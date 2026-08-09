@@ -455,6 +455,19 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
             assert "databricks bundle run agent_app -t dev" not in readme
             assert "Serving resources were intentionally omitted" in readme
 
+    if template.name == "evaluation-project":
+        release_gate = yaml.safe_load(
+            (output / "resources" / "evaluation_job.yml").read_text()
+        )["resources"]["jobs"]["release_gate"]
+        assert release_gate["tasks"][0]["spark_python_task"]["parameters"] == ["--yes"]
+        deployment_gate = yaml.safe_load(
+            (output / "resources" / "optional" / "deployment_job.yml").read_text()
+        )["resources"]["jobs"]["agent_deployment_gate"]
+        assert deployment_gate["tasks"][0]["spark_python_task"]["parameters"][:2] == [
+            "--yes",
+            "--model-name",
+        ]
+
 
 @requires_cli
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
@@ -576,3 +589,26 @@ def test_the_evaluation_shim_publishes_the_run_it_recorded(tmp_path):
     # returned id is what the test pins.
     assert script.publish_evidence_run_id(tmp_path) == "run-from-this-job"
     assert script.publish_evidence_run_id(tmp_path / "empty") is None
+
+
+def test_the_evaluation_shim_requires_explicit_spend_confirmation():
+    script = _template_script("evals/evaluate.py")
+
+    assert script.build_arguments([]) == ["eval"]
+    assert script.build_arguments(["--yes"]) == ["eval", "--yes"]
+    assert script.build_arguments(
+        [
+            "--yes",
+            "--model-name",
+            "main.eval.agent",
+            "--model-version",
+            "7",
+        ]
+    ) == [
+        "eval",
+        "--yes",
+        "--agent",
+        "models:/main.eval.agent/7",
+        "--mode",
+        "live",
+    ]

@@ -304,6 +304,80 @@ def test_scorers_ls_json(capsys):
     assert all("version" in entry for entry in document)
 
 
+class _PromptRegistryError(RuntimeError):
+    def __init__(self, message, *, error_code):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class _FailingPromptManager:
+    def __init__(self, error):
+        self.error = error
+
+    def load(self, name, *, alias):
+        raise self.error
+
+
+def _live_prompt_project(error):
+    return SimpleNamespace(
+        judge_model_uri=lambda: "endpoints:/judge",
+        prompt_manager=lambda: _FailingPromptManager(error),
+    )
+
+
+def test_scorers_ls_live_labels_only_confirmed_prompt_absence(capsys, monkeypatch):
+    from aai_core.agentkit import cli as cli_module
+
+    missing = _PromptRegistryError("hidden", error_code="NOT_FOUND")
+    monkeypatch.setattr(
+        cli_module, "_project", lambda arguments: _live_prompt_project(missing)
+    )
+
+    assert cli_module.main(["scorers", "ls", "--live"]) == 0
+    output = capsys.readouterr().out
+    assert "not registered (bundled instructions apply)" in output
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        pytest.param(
+            _PromptRegistryError(
+                "prompt does not exist", error_code="PERMISSION_DENIED"
+            ),
+            id="permission",
+        ),
+        pytest.param(
+            _PromptRegistryError("token expired", error_code="UNAUTHENTICATED"),
+            id="authentication",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "service unavailable", error_code="TEMPORARILY_UNAVAILABLE"
+            ),
+            id="transient",
+        ),
+        pytest.param(ConnectionError("connection reset"), id="transport"),
+    ),
+)
+def test_scorers_ls_live_propagates_non_absence_registry_failures(
+    capsys, monkeypatch, error
+):
+    from aai_core.agentkit import cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module, "_project", lambda arguments: _live_prompt_project(error)
+    )
+
+    with pytest.raises(type(error)) as excinfo:
+        cli_module.main(["scorers", "ls", "--live"])
+
+    assert excinfo.value is error
+    captured = capsys.readouterr()
+    assert "not registered" not in captured.out
+    assert "not registered" not in captured.err
+
+
 def test_init_print_only_uses_the_platform_template(capsys, monkeypatch):
     monkeypatch.setenv("AAI_TEMPLATE_REPO", "https://example.invalid/org/repo")
 

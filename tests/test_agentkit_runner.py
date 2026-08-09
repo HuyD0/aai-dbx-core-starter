@@ -19,6 +19,8 @@ from aai_core.agentkit.errors import (
     BudgetExceededError,
     ConfigError,
     EvidenceMissingError,
+    TargetInvocationError,
+    TargetResolutionError,
 )
 from aai_core.agentkit.gate import EXIT_ERROR, EXIT_PASS, EXIT_THRESHOLD_FAILED
 from aai_core.agentkit.results import load_latest_results
@@ -535,6 +537,79 @@ def test_a_judged_plan_never_resolves_the_endpoint_identity(tmp_path, monkeypatc
     assert outcome.cost.judge_calls > 0
 
 
+def test_local_target_preflight_precedes_cloud_reads_confirmation_and_spend(
+    tmp_path, monkeypatch
+):
+    project = _with_prompt_judge(tmp_path)
+    (tmp_path / "src" / "app" / "example_agent.py").write_text("VALUE = 1\n")
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: pytest.fail("endpoint identity was resolved"),
+    )
+    monkeypatch.setattr(
+        project,
+        "prompt_manager",
+        lambda mlflow_module=None: pytest.fail("prompt registry was read"),
+    )
+    asked = []
+    mlflow = FakeMlflow()
+
+    with pytest.raises(TargetResolutionError, match="respond"):
+        run_scoring(
+            project,
+            establish_baseline=True,
+            mode="live",
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
+            mlflow_module=mlflow,
+            environ={},
+        )
+
+    assert asked == []
+    assert mlflow.experiment is None
+    assert mlflow.evaluate_calls == []
+    assert not project.results_dir.exists()
+
+
+def test_http_auth_preflight_precedes_identity_confirmation_and_transport(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("AGENT_TOKEN", raising=False)
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: https://agent.example/score\n"
+            "dataset: evals/data/golden_cases.json\n"
+            "request_mapping:\n  auth_env: AGENT_TOKEN\n"
+        ),
+    )
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: pytest.fail("endpoint identity was resolved"),
+    )
+    asked = []
+    mlflow = FakeMlflow()
+
+    with pytest.raises(TargetInvocationError, match="AGENT_TOKEN"):
+        run_scoring(
+            project,
+            establish_baseline=True,
+            mode="live",
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
+            transport=lambda request: pytest.fail("HTTP transport was called"),
+            mlflow_module=mlflow,
+            environ={},
+        )
+
+    assert asked == []
+    assert mlflow.experiment is None
+    assert mlflow.evaluate_calls == []
+
+
 def test_row_limit_samples_deterministically_and_records_scope(tmp_path):
     project = _project(tmp_path, rows=30)
     fake = FakeMlflow()
@@ -910,6 +985,27 @@ def test_local_scoring_still_gates_and_can_fail(tmp_path):
     assert not outcome.results.gate_passed
 
 
+def test_local_scoring_refuses_a_missing_recorded_output(tmp_path):
+    project = _project(tmp_path)
+    sheet = tmp_path / "evals" / "data" / "answer_sheet.json"
+    answers = json.loads(sheet.read_text())
+    answers[0]["answer"] = None
+    sheet.write_text(json.dumps(answers))
+
+    with pytest.raises(ConfigError, match="no output to score"):
+        run_scoring(
+            project,
+            command="smoke",
+            judges_enabled=False,
+            require_baseline=False,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=FakeMlflow(),
+        )
+
+    assert not project.results_dir.exists()
+
+
 def test_agent_override_scores_the_named_target(tmp_path):
     """The deployment gate must score the version that triggered it."""
 
@@ -1215,6 +1311,46 @@ def test_partial_scorer_failures_fail_the_gate(tmp_path):
     assert outcome.results.metrics["keyword_coverage/error_count"] == 0.0
     assert any(
         failure["metric"] == "correctness/error_count"
+        for failure in outcome.results.gate_failures
+    )
+
+
+def test_missing_trace_duration_fails_the_gate_instead_of_scoring_zero(tmp_path):
+    project = _trace_project(tmp_path)
+    mlflow = FakeMlflow(metrics={**JUDGED_METRICS, "retrieval_groundedness/mean": 0.9})
+    frame = _Frame(
+        {
+            "latency_seconds/value": [None] * len(TRACE_ROWS),
+            "latency_seconds/error_message": [
+                "trace.info.execution_duration is missing"
+            ]
+            * len(TRACE_ROWS),
+        }
+    )
+    mlflow._evaluate = lambda data=None, scorers=None, predict_fn=None: (
+        mlflow.evaluate_calls.append({"data": data, "predict_fn": predict_fn})
+        or SimpleNamespace(metrics=dict(mlflow.metrics_to_return), result_df=frame)
+    )
+    mlflow.genai = SimpleNamespace(
+        evaluate=mlflow._evaluate,
+        scorers=mlflow.genai.scorers,
+        make_judge=mlflow.genai.make_judge,
+    )
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        mode="traces",
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert outcome.results.metrics["latency_seconds/error_count"] == len(TRACE_ROWS)
+    assert "latency_seconds/mean" not in outcome.results.metrics
+    assert any(
+        failure["metric"] == "latency_seconds/error_count"
         for failure in outcome.results.gate_failures
     )
 

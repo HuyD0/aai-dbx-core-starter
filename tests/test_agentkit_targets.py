@@ -19,6 +19,7 @@ from aai_core.agentkit.errors import (
 from aai_core.agentkit.targets import (
     TargetKind,
     build_predict_fn,
+    preflight_target,
     resolve_target,
 )
 from aai_core.testing import dev_settings
@@ -157,6 +158,20 @@ def test_local_callable_missing_attribute(tmp_path):
     assert "not a callable" in str(excinfo.value)
 
 
+def test_local_callable_preflight_does_not_execute_the_module(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "raise RuntimeError('module executed')\nVALUE = 1\n"
+    )
+    target = resolve_target("agent.py:respond", root=tmp_path)
+
+    with pytest.raises(TargetResolutionError) as excinfo:
+        preflight_target(target, project=_project(tmp_path))
+
+    message = str(excinfo.value)
+    assert "respond" in message
+    assert "module executed" not in message
+
+
 def test_http_adapter_maps_request_and_response(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_TOKEN", "token-value")
     captured = {}
@@ -194,15 +209,13 @@ def test_http_adapter_missing_auth_env(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_TOKEN", raising=False)
     project = _project(tmp_path, request_mapping={"auth_env": "AGENT_TOKEN"})
     target = resolve_target("https://host/score", root=tmp_path)
-    predict = build_predict_fn(
-        target,
-        project=project,
-        transport=lambda request: b"{}",
-        mlflow_module=FAKE_MLFLOW,
-    )
-
     with pytest.raises(TargetInvocationError) as excinfo:
-        predict(question="q")
+        build_predict_fn(
+            target,
+            project=project,
+            transport=lambda request: b"{}",
+            mlflow_module=FAKE_MLFLOW,
+        )
     assert "AGENT_TOKEN" in str(excinfo.value)
 
 

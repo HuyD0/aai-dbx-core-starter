@@ -416,20 +416,18 @@ def select_scorers(
             expectation_keys=expectation_keys,
         )
         if blocker is not None:
-            if (
-                spec.name in added
-                and spec.needs_expectations
-                and (not expectation_keys.intersection(spec.needs_expectations))
-            ):
+            # Smoke deliberately disables every judge globally; a scorer in
+            # scorers.add does not opt that free path back into spend. Every
+            # other explicit selection is a contract: silently excluding it
+            # would record evidence without a scorer the project requested.
+            globally_disabled_judge = spec.judge is not None and not judges_enabled
+            if spec.name in added and not globally_disabled_judge:
                 raise ConfigError(
-                    f"scorers.add requests {spec.name!r} but the dataset has "
-                    "no "
-                    + " or ".join(
-                        f"expectations.{key}" for key in spec.needs_expectations
-                    ),
+                    f"scorers.add requests {spec.name!r}, but its contract "
+                    f"is unsatisfied: {blocker}",
                     remediation=(
-                        "Add the expectation field to the dataset rows or "
-                        "drop the scorer."
+                        "Satisfy the scorer requirements on every applicable "
+                        "row or drop it from scorers.add."
                     ),
                 )
             excluded.append(ExcludedScorer(spec, blocker))
@@ -580,20 +578,9 @@ def _contract_blocker(
     if spec.judge is not None and not judges_enabled:
         note = judge_note or "judge scorers run in live/full evaluation"
         return note
-    if spec.needs_expectations and not _every_row_satisfies(
-        shape, set(spec.needs_expectations), expectation_keys
-    ):
-        fields = " or ".join(f"expectations.{key}" for key in spec.needs_expectations)
-        available = set(shape.expectation_keys) | set(shape.partial_expectation_keys)
-        if available.intersection(spec.needs_expectations):
-            # Scoring only the rows that carry the field would average a
-            # subset while reporting it as the whole dataset; the rows
-            # without it would score as vacuously perfect.
-            return (
-                f"only some rows have {fields}; every row must provide one "
-                "of them for the score to mean what it says"
-            )
-        return f"dataset rows have no {fields}"
+    expectation_blocker = _expectation_contract_blocker(spec, shape, expectation_keys)
+    if expectation_blocker is not None:
+        return expectation_blocker
     if spec.needs_trace is TraceNeed.ANY and mode not in TRACE_MODES:
         return "needs a trace (answer-sheet rows have none)"
     if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS} and mode != "live":
@@ -628,6 +615,28 @@ def _contract_blocker(
                 return f"the rows' traces carry no {kind}"
             return f"needs {kind} in a trace; these rows have none"
     return None
+
+
+def _expectation_contract_blocker(
+    spec: ScorerSpec,
+    shape: DatasetShape,
+    expectation_keys: set[str],
+) -> str | None:
+    if not spec.needs_expectations or _every_row_satisfies(
+        shape, set(spec.needs_expectations), expectation_keys
+    ):
+        return None
+    fields = " or ".join(f"expectations.{key}" for key in spec.needs_expectations)
+    available = set(shape.expectation_keys) | set(shape.partial_expectation_keys)
+    if available.intersection(spec.needs_expectations):
+        # Scoring only the rows that carry the field would average a subset
+        # while reporting it as the whole dataset; rows without it can score
+        # as vacuously perfect.
+        return (
+            f"only some rows have {fields}; every row must provide one "
+            "of them for the score to mean what it says"
+        )
+    return f"dataset rows have no {fields}"
 
 
 def _conditional_note(spec: ScorerSpec, shape: DatasetShape, mode: str) -> str | None:
@@ -751,11 +760,30 @@ CODE_SCORER_FUNCTIONS: Mapping[str, Callable[[str, Mapping[str, Any]], float]] =
 }
 
 
-def score_all(outputs: str, expectations: Mapping[str, Any]) -> dict[str, float]:
+def _require_output_text(outputs: Any) -> str:
+    """Normalise a real output without turning absence into the word ``None``."""
+
+    missing = outputs is None
+    if isinstance(outputs, float):
+        missing = missing or outputs != outputs  # NaN
+    missing = missing or type(outputs).__name__ in {"NAType", "NaTType"}
+    if missing:
+        raise ConfigError(
+            "code scorers received no output to score",
+            remediation=(
+                "Make the agent return an output for every row, or repair the "
+                "answer sheet before running the gate."
+            ),
+        )
+    return str(outputs)
+
+
+def score_all(outputs: Any, expectations: Mapping[str, Any]) -> dict[str, float]:
     """Run every row-level code scorer — the tier-1 offline scoring engine."""
 
+    text = _require_output_text(outputs)
     return {
-        name: function(outputs, expectations)
+        name: function(text, expectations)
         for name, function in CODE_SCORER_FUNCTIONS.items()
     }
 
@@ -811,7 +839,13 @@ def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
                 getattr(trace, "info", None), "execution_duration", None
             )
             if duration_ms is None:
-                return 0.0
+                raise ConfigError(
+                    "latency_seconds needs trace.info.execution_duration",
+                    remediation=(
+                        "Record a complete MLflow trace for every row before "
+                        "using the latency scorer."
+                    ),
+                )
             return float(duration_ms) / 1000.0
 
         return latency_scorer
@@ -820,7 +854,10 @@ def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
 
     @scorer_decorator(name=spec.name)
     def code_scorer(outputs=None, expectations=None):
-        return function(str(outputs), dict(expectations or {}))
+        return function(
+            _require_output_text(outputs),
+            dict(expectations or {}),
+        )
 
     return code_scorer
 

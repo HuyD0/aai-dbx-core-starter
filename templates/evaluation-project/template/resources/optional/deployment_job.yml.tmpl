@@ -48,6 +48,8 @@ resources:
           spark_python_task:
             python_file: ../evals/evaluate.py
             parameters:
+              # This task is non-interactive; local evaluator calls omit it.
+              - "--yes"
               - "--model-name"
               - "{{"{{"}}job.parameters.model_name{{"}}"}}"
               - "--model-version"

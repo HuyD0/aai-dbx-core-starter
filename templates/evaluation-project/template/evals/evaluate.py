@@ -38,6 +38,11 @@ def build_arguments(argv: list[str] | None = None) -> list[str]:
         help="record this run as the baseline future runs compare against.",
     )
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the spend confirmation (for non-interactive jobs).",
+    )
+    parser.add_argument(
         "--decision",
         choices=["adopt", "reject", "inconclusive"],
         default=None,
@@ -58,7 +63,9 @@ def build_arguments(argv: list[str] | None = None) -> list[str]:
     if bool(parsed.model_name) != bool(parsed.model_version):
         parser.error("--model-name and --model-version must be given together")
 
-    arguments = ["eval", "--yes"]
+    arguments = ["eval"]
+    if parsed.yes:
+        arguments.append("--yes")
     mode = parsed.mode
     if parsed.model_name:
         # Score the version that triggered promotion, whatever agentkit.yaml

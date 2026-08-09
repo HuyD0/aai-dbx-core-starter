@@ -555,6 +555,7 @@ def _confirm(prompt: str) -> bool:
 
 def _live_prompt_versions(project: Any) -> dict[str, str]:
     from aai_core.agentkit.catalog import CATALOG
+    from aai_core.prompts import is_missing_prompt_error
 
     versions: dict[str, str] = {}
     manager = project.prompt_manager()
@@ -564,7 +565,9 @@ def _live_prompt_versions(project: Any) -> dict[str, str]:
             continue
         try:
             prompt = manager.load(binding.prompt_name, alias=binding.prompt_alias)
-        except Exception:
+        except Exception as error:
+            if not is_missing_prompt_error(error):
+                raise
             versions[spec.name] = "not registered (bundled instructions apply)"
             continue
         versions[spec.name] = str(

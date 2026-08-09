@@ -904,7 +904,10 @@ def _retrieval_judge_input_characters(
             request, ground_truth, outputs
         )
         if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)):
-            documents = list(outputs) or [None]
+            # An explicitly empty list is known zero retrieval relevance
+            # calls. Only a missing/unreadable output remains unknown and
+            # receives the conservative one-call assumption below.
+            documents = list(outputs)
         else:
             documents = [outputs]
         for document in documents:
@@ -1069,7 +1072,9 @@ def _span_outputs(span: Mapping[str, Any]) -> Any | None:
                 # string. Dropping it here lost the whole response from
                 # the token estimate.
                 pass
-        if _is_populated(candidate):
+        if (
+            isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes))
+        ) or _is_populated(candidate):
             found.append(candidate)
     # A list of documents is the shape both callers want; prefer it over a
     # scalar or mapping that some other key happened to hold.
@@ -1080,16 +1085,11 @@ def _span_outputs(span: Mapping[str, Any]) -> Any | None:
 
 
 def _chunk_count(span: Mapping[str, Any]) -> int:
-    """Documents a retriever span returned; 1 when the shape is unknown.
-
-    Never zero: a span that returned nothing countable is still one judge
-    call's worth of uncertainty, and rounding a cost estimate down is the
-    direction that breaks a budget.
-    """
+    """Documents returned; exact zero when empty, one when unknown."""
 
     outputs = _span_outputs(span)
     if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)):
-        return max(1, len(outputs))
+        return len(outputs)
     return 1
 
 

@@ -9,6 +9,7 @@ logic; adapter construction imports heavy clients lazily.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import inspect
@@ -128,6 +129,79 @@ def resolve_target(
         f"could not resolve agent {reference!r}. Supported shapes:\n{shapes}",
         remediation="Set `agent:` in agentkit.yaml to one of the shapes above.",
     )
+
+
+def preflight_target(target: Target, *, project: ProjectContext) -> None:
+    """Refuse locally knowable target failures without constructing a client.
+
+    This deliberately performs no network or provider-client operation. It
+    runs before endpoint identity, prompt registry reads, and confirmation,
+    so users are not asked to approve a run whose local target cannot work.
+    """
+
+    if target.kind is TargetKind.LOCAL_CALLABLE and target.path is not None:
+        _preflight_local_file(target)
+    elif target.kind is TargetKind.HTTP:
+        _preflight_http(target, project.config.request_mapping)
+
+
+def _preflight_local_file(target: Target) -> None:
+    try:
+        source = target.path.read_text(encoding="utf-8")  # type: ignore[union-attr]
+        module = ast.parse(source, filename=str(target.path))
+    except (OSError, SyntaxError) as error:
+        raise TargetResolutionError(
+            f"could not inspect local agent {target.ref!r}: {error}"
+        ) from error
+
+    attribute = target.attribute or ""
+    declaration: ast.AST | None = None
+    for node in module.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == attribute:
+                return
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(item, ast.Name) and item.id == attribute for item in targets
+            ):
+                declaration = node.value
+                break
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any(
+                (alias.asname or alias.name.rpartition(".")[2]) == attribute
+                for alias in node.names
+            ):
+                # Imported objects cannot be classified without executing
+                # their module, so the runtime constructor remains the check.
+                return
+
+    if declaration is None:
+        detail = "is not declared"
+    elif isinstance(
+        declaration,
+        (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
+    ):
+        detail = "is declared but is not callable"
+    else:
+        # A lambda is callable; a call, name, or attribute may resolve to
+        # one. Accept unknowns rather than execute application code here.
+        return
+    raise TargetResolutionError(
+        f"{target.ref!r}: {attribute!r} {detail} in {target.path}"
+    )
+
+
+def _preflight_http(target: Target, mapping: RequestMapping) -> None:
+    if not mapping.auth_env:
+        return
+    _require_encrypted_transport(target, mapping.auth_env)
+    if not os.environ.get(mapping.auth_env):
+        raise TargetInvocationError(
+            f"request_mapping.auth_env names {mapping.auth_env!r} but the "
+            "variable is not set",
+            remediation=f"export {mapping.auth_env}=<token> before running.",
+        )
 
 
 def build_predict_fn(
@@ -269,8 +343,7 @@ def _http_call(
     transport: Callable[[urllib.request.Request], bytes] | None,
 ) -> Callable[[Mapping[str, Any]], Any]:
     send = transport or _urllib_transport
-    if mapping.auth_env:
-        _require_encrypted_transport(target, mapping.auth_env)
+    _preflight_http(target, mapping)
 
     def call(inputs: Mapping[str, Any]) -> Any:
         body: dict[str, Any] = thaw_value(mapping.extra_body)

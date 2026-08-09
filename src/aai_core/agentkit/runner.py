@@ -65,7 +65,12 @@ from aai_core.agentkit.gate import (
     build_policy,
 )
 from aai_core.agentkit.results import ResultsRecord, publish_results, write_results
-from aai_core.agentkit.targets import TargetKind, build_predict_fn, resolve_target
+from aai_core.agentkit.targets import (
+    TargetKind,
+    build_predict_fn,
+    preflight_target,
+    resolve_target,
+)
 from aai_core.evaluation import GateResult, apply_gate
 from aai_core.experiments import ExperimentRunMetadata, RunPurpose
 from aai_core.prompts import is_missing_prompt_error
@@ -291,6 +296,10 @@ def run_scoring(
             )
 
     enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
+    if resolved_mode == "live":
+        # Everything inspectable without a provider call belongs before
+        # endpoint identity, prompt registry reads, and confirmation.
+        preflight_target(target, project=project)
     if judges_enabled:
         # Best effort: an endpoint name is stable while the model behind it
         # is not, so pin what it currently serves when the workspace will
@@ -1110,7 +1119,7 @@ def _score_locally(dataset: LoadedDataset, plan: ScorerPlan) -> dict[str, float]
 
     totals: dict[str, float] = {}
     for row in dataset.rows:
-        outputs = str(row.get("outputs", ""))
+        outputs = catalog_module._require_output_text(row.get("outputs"))
         expectations = dict(row.get("expectations") or {})
         for entry in plan.entries:
             function = catalog_module.CODE_SCORER_FUNCTIONS[entry.spec.name]

@@ -158,17 +158,17 @@ def test_trace_rows_select_trace_dependent_scorers():
     assert "tool_call_correctness" in names
 
 
-def test_trace_scorers_excluded_on_plain_rows_with_reason():
-    plan = select_scorers(
-        _shape(),
-        _config(scorers={"add": ["retrieval_groundedness"]}),
-        mode="traces",
-        judges_enabled=True,
-    )
+def test_requested_trace_scorer_on_plain_rows_fails_before_any_spend():
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(),
+            _config(scorers={"add": ["retrieval_groundedness"]}),
+            mode="traces",
+            judges_enabled=True,
+        )
 
-    reason = _excluded(plan, "retrieval_groundedness")
-    assert reason is not None
-    assert "RETRIEVER spans" in reason
+    assert "scorers.add requests 'retrieval_groundedness'" in str(excinfo.value)
+    assert "RETRIEVER spans" in str(excinfo.value)
 
 
 def test_trace_scorer_added_in_live_mode_is_conditional():
@@ -192,6 +192,58 @@ def test_add_violating_expectation_contract_fails_before_any_spend():
             judges_enabled=True,
         )
     assert "expectations.expected_response" in str(excinfo.value)
+
+
+def test_add_with_partial_single_field_coverage_fails_before_any_spend():
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(
+                expectation_keys=(),
+                partial_expectation_keys=("expected_response",),
+                expectation_rows=(("expected_response",), (), ("expected_response",)),
+            ),
+            _config(scorers={"add": ["equivalence"]}),
+            mode="answer-sheet",
+            judges_enabled=True,
+        )
+
+    message = str(excinfo.value)
+    assert "scorers.add requests 'equivalence'" in message
+    assert "only some rows have expectations.expected_response" in message
+    assert "every applicable row" in message
+
+
+def test_add_with_partial_or_contract_coverage_fails_before_any_spend():
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(
+                expectation_keys=(),
+                partial_expectation_keys=("expected_facts", "expected_response"),
+                expectation_rows=(("expected_response",), (), ("expected_facts",)),
+            ),
+            _config(scorers={"add": ["correctness"]}),
+            mode="answer-sheet",
+            judges_enabled=True,
+        )
+
+    message = str(excinfo.value)
+    assert "scorers.add requests 'correctness'" in message
+    assert "expected_facts" in message
+    assert "expected_response" in message
+    assert "only some rows" in message
+
+
+def test_global_judge_disable_still_wins_over_scorers_add():
+    plan = select_scorers(
+        _shape(expectation_keys=()),
+        _config(scorers={"add": ["correctness"]}),
+        mode="answer-sheet",
+        judges_enabled=False,
+        judge_note="smoke runs code scorers only",
+    )
+
+    assert "correctness" not in _selected_names(plan)
+    assert _excluded(plan, "correctness") == "smoke runs code scorers only"
 
 
 def test_remove_wins_over_auto_selection():
@@ -291,6 +343,11 @@ def test_score_all_covers_every_row_level_code_scorer():
     assert set(scores) == set(CODE_SCORER_FUNCTIONS)
 
 
+def test_code_scorers_never_turn_a_missing_output_into_text():
+    with pytest.raises(ConfigError, match="no output to score"):
+        score_all(None, {"expected_response": "None"})
+
+
 def _fake_mlflow(make_judge=None):
     def scorer_decorator(name=None):
         def wrap(function):
@@ -341,6 +398,26 @@ def test_build_code_scorer_wraps_the_pure_function():
     assert built.name == "keyword_coverage"
     value = built.function(outputs="Paris", expectations={"expected_response": "Paris"})
     assert value == 1.0
+
+
+def test_native_code_scorer_fails_closed_on_a_missing_output():
+    built = build_scorer(get_spec("response_length_ok"), mlflow_module=_fake_mlflow())
+
+    with pytest.raises(ConfigError, match="no output to score"):
+        built.function(outputs=None, expectations={})
+
+
+def test_latency_scorer_fails_when_trace_duration_is_missing():
+    built = build_scorer(get_spec("latency_seconds"), mlflow_module=_fake_mlflow())
+
+    with pytest.raises(ConfigError, match="execution_duration"):
+        built.function(trace=SimpleNamespace(info=SimpleNamespace()))
+    assert (
+        built.function(
+            trace=SimpleNamespace(info=SimpleNamespace(execution_duration=1250))
+        )
+        == 1.25
+    )
 
 
 def test_every_judge_routes_through_the_governed_endpoint():
@@ -714,15 +791,15 @@ def test_answer_sheet_mode_refuses_trace_scorers_and_names_the_mode():
 
 
 def test_a_requested_trace_scorer_still_refuses_in_answer_sheet_mode():
-    plan = select_scorers(
-        _shape(has_traces=True, has_retrieval_spans=True),
-        _config(scorers={"add": ["retrieval_groundedness"]}),
-        mode="answer-sheet",
-        judges_enabled=True,
-    )
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(has_traces=True, has_retrieval_spans=True),
+            _config(scorers={"add": ["retrieval_groundedness"]}),
+            mode="answer-sheet",
+            judges_enabled=True,
+        )
 
-    assert "retrieval_groundedness" not in _selected_names(plan)
-    assert "--mode traces" in (_excluded(plan, "retrieval_groundedness") or "")
+    assert "--mode traces" in str(excinfo.value)
 
 
 def test_live_mode_still_selects_trace_scorers():
@@ -746,13 +823,14 @@ def test_a_trace_free_dataset_is_not_told_to_use_mode_traces():
     spans they lack.
     """
 
-    plan = select_scorers(
-        _shape(),
-        _config(scorers={"add": ["retrieval_groundedness"]}),
-        mode="answer-sheet",
-        judges_enabled=True,
-    )
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(),
+            _config(scorers={"add": ["retrieval_groundedness"]}),
+            mode="answer-sheet",
+            judges_enabled=True,
+        )
 
-    reason = _excluded(plan, "retrieval_groundedness") or ""
+    reason = str(excinfo.value)
     assert "--mode traces" not in reason
     assert "RETRIEVER spans" in reason
