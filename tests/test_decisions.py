@@ -79,6 +79,8 @@ class FakeDecisionClient:
 
     def get_run(self, run_id):
         self.owner.requested_run_ids.append(run_id)
+        if self.owner.get_error is not None:
+            raise self.owner.get_error
         return self.owner.run
 
     def download_artifacts(self, run_id, artifact_path):
@@ -89,9 +91,10 @@ class FakeDecisionClient:
 
 
 class FakeDecisionMlflow:
-    def __init__(self, *, run, artifact, download_error=None):
+    def __init__(self, *, run, artifact, get_error=None, download_error=None):
         self.run = run
         self.artifact = artifact
+        self.get_error = get_error
         self.download_error = download_error
         self.requested_run_ids: list[str] = []
         self.downloads: list[tuple[str, str]] = []
@@ -458,6 +461,34 @@ def test_load_decision_converts_a_missing_artifact_to_stable_evidence_error(
 
 
 @pytest.mark.parametrize(
+    "missing",
+    [
+        FileNotFoundError("missing decision run"),
+        type(
+            "MissingRunError",
+            (Exception,),
+            {"error_code": "NOT_FOUND"},
+        )("decision run does not exist"),
+    ],
+)
+def test_load_decision_converts_a_missing_run_to_stable_evidence_error(
+    tmp_path, missing
+):
+    mlflow = _persisted_mlflow(tmp_path, _record())
+    mlflow.get_error = missing
+
+    with pytest.raises(
+        DecisionEvidenceError, match="decision run does not exist"
+    ) as excinfo:
+        load_decision("run-decision-1", mlflow_module=mlflow)
+
+    assert excinfo.value.code == "aai_core.decisions.evidence_invalid"
+    assert excinfo.value.__cause__ is missing
+    assert mlflow.requested_run_ids == ["run-decision-1"]
+    assert mlflow.downloads == []
+
+
+@pytest.mark.parametrize(
     "provider_error",
     [
         type(
@@ -478,6 +509,30 @@ def test_load_decision_propagates_artifact_auth_and_transport_failures(
         load_decision("run-decision-1", mlflow_module=mlflow)
 
     assert excinfo.value is provider_error
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        type(
+            "DeniedRunError",
+            (Exception,),
+            {"error_code": "PERMISSION_DENIED"},
+        )("decision run does not exist"),
+        ConnectionError("connection reset"),
+    ],
+)
+def test_load_decision_propagates_run_auth_and_transport_failures(
+    tmp_path, provider_error
+):
+    mlflow = _persisted_mlflow(tmp_path, _record())
+    mlflow.get_error = provider_error
+
+    with pytest.raises(type(provider_error)) as excinfo:
+        load_decision("run-decision-1", mlflow_module=mlflow)
+
+    assert excinfo.value is provider_error
+    assert mlflow.downloads == []
 
 
 def test_load_decision_validates_run_ids_before_mlflow_access():

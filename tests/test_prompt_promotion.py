@@ -70,6 +70,8 @@ class FakeClient:
 
     def get_run(self, run_id):
         self.owner.decision_run_requests.append(run_id)
+        if self.owner.decision_run_error is not None:
+            raise self.owner.decision_run_error
         if self.owner.decision_run is None:
             raise AssertionError("promotion requested an unexpected decision run")
         return self.owner.decision_run
@@ -115,6 +117,7 @@ class FakeMlflow:
         templates_by_uri=None,
         pages=None,
         decision_run=None,
+        decision_run_error=None,
         decision_artifact=None,
         decision_artifact_error=None,
     ):
@@ -125,6 +128,7 @@ class FakeMlflow:
         self.searched_name = None
         self.page_tokens_requested: list = []
         self.decision_run = decision_run
+        self.decision_run_error = decision_run_error
         self.decision_artifact = decision_artifact
         self.decision_artifact_error = decision_artifact_error
         self.decision_run_requests: list[str] = []
@@ -550,6 +554,79 @@ def test_promote_reports_a_missing_decision_artifact_as_blocked_evidence(tmp_pat
     assert excinfo.value.remediation is not None
     assert isinstance(excinfo.value.__cause__, DecisionEvidenceError)
     assert excinfo.value.__cause__.__cause__ is missing
+    assert mlflow.genai.alias is None
+
+
+def test_promote_reports_a_missing_decision_run_as_blocked_evidence(tmp_path):
+    class MissingRunError(Exception):
+        error_code = "RESOURCE_DOES_NOT_EXIST"
+
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+    missing = MissingRunError("decision run does not exist")
+    mlflow.decision_run_error = missing
+
+    with pytest.raises(
+        PromptPromotionError, match="decision run does not exist"
+    ) as excinfo:
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+        )
+
+    assert excinfo.value.remediation is not None
+    assert isinstance(excinfo.value.__cause__, DecisionEvidenceError)
+    assert excinfo.value.__cause__.__cause__ is missing
+    assert mlflow.decision_artifact_requests == []
+    assert mlflow.genai.alias is None
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        type(
+            "DeniedRunError",
+            (Exception,),
+            {"error_code": "PERMISSION_DENIED"},
+        )("decision run does not exist"),
+        ConnectionError("connection reset"),
+    ],
+)
+def test_promote_propagates_decision_run_auth_and_transport_failures(
+    tmp_path, provider_error
+):
+    record = DecisionRecord(
+        decision=Decision.ADOPT,
+        change_id="prompt-v2",
+        change_summary="Require one exact source citation.",
+        rationale="Citation rate reached 1.0 with no quality regression.",
+        gate=_passing_gate(),
+        prompt_name="main.app.earnings_summary",
+        prompt_version=2,
+        prompt_digest=prompt_digest(TEMPLATE),
+    )
+    mlflow = _persisted_mlflow(tmp_path, record)
+    mlflow.decision_run_error = provider_error
+
+    with pytest.raises(type(provider_error)) as excinfo:
+        _manager(mlflow).promote(
+            "earnings_summary",
+            version=2,
+            decision_run_id="run-decision-1",
+        )
+
+    assert excinfo.value is provider_error
+    assert mlflow.decision_artifact_requests == []
     assert mlflow.genai.alias is None
 
 

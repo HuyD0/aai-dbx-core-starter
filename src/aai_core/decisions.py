@@ -234,7 +234,12 @@ def load_decision(
     run_id = _validated_run_id(decision_run_id)
     mlflow = _decision_client(mlflow_module)
     client = mlflow.MlflowClient()
-    run = client.get_run(run_id)
+    try:
+        run = client.get_run(run_id)
+    except Exception as error:
+        if not _is_missing_decision_resource(error):
+            raise
+        raise DecisionEvidenceError("The cited decision run does not exist.") from error
     info = getattr(run, "info", None)
     if str(getattr(info, "run_id", "")) != run_id:
         raise DecisionEvidenceError(
@@ -252,9 +257,7 @@ def load_decision(
         # A finished run without the decision artifact is invalid evidence,
         # not a provider outage. Structured auth and transient codes override
         # not-found wording inside the shared classifier and still propagate.
-        if not isinstance(error, FileNotFoundError) and not _is_missing_registry_error(
-            error
-        ):
+        if not _is_missing_decision_resource(error):
             raise
         raise DecisionEvidenceError(
             "The decision run does not contain a valid decision/decision.json "
@@ -306,6 +309,12 @@ def _persisted_tags(record: DecisionRecord) -> dict[str, str]:
     if record.baseline_run_id:
         tags["aai.baseline_run_id"] = record.baseline_run_id
     return tags
+
+
+def _is_missing_decision_resource(error: Exception) -> bool:
+    """Recognize only authoritative run/artifact absence."""
+
+    return isinstance(error, FileNotFoundError) or _is_missing_registry_error(error)
 
 
 def _validated_run_id(value: str) -> str:
