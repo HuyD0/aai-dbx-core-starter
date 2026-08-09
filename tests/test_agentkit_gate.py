@@ -26,6 +26,7 @@ from aai_core.agentkit.gate import (
 )
 from aai_core.agentkit.results import (
     RESULTS_ATTEMPT_FILE,
+    RESULTS_ATTEMPT_TRANSITION_FILE,
     ResultsRecord,
     begin_results_attempt,
     complete_results_attempt,
@@ -258,6 +259,20 @@ def test_run_gate_reads_the_newest_results_record(tmp_path):
     assert not report.passed
 
 
+def test_legacy_results_fallback_requires_no_attempt_metadata(tmp_path):
+    project = _project(tmp_path)
+    path = write_results(project.results_dir, _results())
+
+    loaded = load_gate_results(project.results_dir)
+
+    assert loaded is not None
+    assert loaded[0].run_id == "run-1"
+    assert loaded[1] == path
+    assert not any(
+        entry.name.startswith(".attempt-") for entry in project.results_dir.iterdir()
+    )
+
+
 def test_pending_latest_attempt_blocks_an_older_passing_result(tmp_path):
     project = _project(tmp_path)
     write_baseline(project.baseline_path, _baseline())
@@ -377,12 +392,22 @@ def test_attempt_state_write_failure_leaves_the_gate_invalidated(tmp_path, monke
     from aai_core.agentkit import results as results_module
 
     project = _project(tmp_path)
+    old = begin_results_attempt(project.results_dir, command="compare")
+    old_path = write_results(
+        project.results_dir,
+        _results(attempt_id=old.attempt_id),
+        attempt=old,
+    )
+    complete_results_attempt(project.results_dir, old, old_path)
     calls = []
     write_contract = results_module._write_contract_file
 
     def fail_state(path, document):
         calls.append(path)
-        if path.name.startswith(".attempt-"):
+        if (
+            path.name.startswith(".attempt-")
+            and path.name != RESULTS_ATTEMPT_TRANSITION_FILE
+        ):
             raise OSError("disk full")
         write_contract(path, document)
 
@@ -391,9 +416,42 @@ def test_attempt_state_write_failure_leaves_the_gate_invalidated(tmp_path, monke
     with pytest.raises(OSError, match="disk full"):
         begin_results_attempt(project.results_dir, command="compare")
 
-    assert calls[0] == project.results_dir / RESULTS_ATTEMPT_FILE
-    assert calls[1].name.startswith(".attempt-")
-    with pytest.raises(ConfigError, match="evaluation-attempt record"):
+    assert calls[0] == project.results_dir / RESULTS_ATTEMPT_TRANSITION_FILE
+    assert calls[1] == project.results_dir / RESULTS_ATTEMPT_FILE
+    assert calls[2].name.startswith(".attempt-")
+    with pytest.raises(ConfigError, match="did not finish initializing"):
+        load_gate_results(project.results_dir)
+
+
+def test_pointer_write_failure_cannot_leave_an_old_pass_gate_eligible(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import results as results_module
+
+    project = _project(tmp_path)
+    old = begin_results_attempt(project.results_dir, command="compare")
+    old_path = write_results(
+        project.results_dir,
+        _results(attempt_id=old.attempt_id),
+        attempt=old,
+    )
+    complete_results_attempt(project.results_dir, old, old_path)
+    assert load_gate_results(project.results_dir)[0].gate_passed
+    write_contract = results_module._write_contract_file
+
+    def fail_pointer(path, document):
+        if path.name == RESULTS_ATTEMPT_FILE:
+            raise OSError("pointer replace failed")
+        write_contract(path, document)
+
+    monkeypatch.setattr(results_module, "_write_contract_file", fail_pointer)
+
+    with pytest.raises(OSError, match="pointer replace failed"):
+        begin_results_attempt(project.results_dir, command="compare")
+
+    assert not (project.results_dir / RESULTS_ATTEMPT_FILE).exists()
+    assert (project.results_dir / RESULTS_ATTEMPT_TRANSITION_FILE).exists()
+    with pytest.raises(ConfigError, match="did not finish initializing"):
         load_gate_results(project.results_dir)
 
 

@@ -164,6 +164,15 @@ def run_scoring(
 ) -> tuple[RunOutcome, int]:
     """Score the current version and compare it against the baseline."""
 
+    # Every real invocation supersedes earlier gate evidence immediately,
+    # even when target, dataset, baseline, budget, or prompt validation later
+    # refuses the run. A plan is inspection rather than an evaluation attempt
+    # and therefore leaves the current gate evidence untouched.
+    attempt = (
+        None
+        if plan_only
+        else begin_results_attempt(project.results_dir, command=command)
+    )
     config = project.config
     # Resolve and structurally preflight the configured target before a UC
     # dataset or explicit remote baseline can cause a cloud read. HTTP auth
@@ -262,6 +271,7 @@ def run_scoring(
     outcome.messages.append(render_cost(cost))
     if plan_only:
         return outcome, EXIT_PASS
+    assert attempt is not None
 
     # Select the baseline before the budget check, but defer the endpoint-
     # backed comparability check until local validation and budget enforcement
@@ -380,12 +390,6 @@ def run_scoring(
             warnings.extend(prompt_drift)
             if not comparable:
                 baseline = None
-
-    # A confirmation decline is still the newest evaluation attempt: it
-    # must invalidate an older passing gate rather than leave that stale
-    # result eligible for promotion.  Plan-only returned above and remains
-    # the one path that intentionally creates no attempt.
-    attempt = begin_results_attempt(project.results_dir, command=command)
 
     if cost.judge_calls and not assume_yes:
         if confirm is None or not confirm("Proceed?"):

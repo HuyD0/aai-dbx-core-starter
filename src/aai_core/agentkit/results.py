@@ -20,9 +20,15 @@ import math
 import os
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
+
+try:  # POSIX is the deployment/runtime platform; keep Windows import-safe.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on Windows
+    fcntl = None  # type: ignore[assignment]
 
 from pydantic import (
     Field,
@@ -43,6 +49,8 @@ RESULTS_ARTIFACT_FILE = "results.json"
 RESULTS_ARTIFACT_PATH = f"{RESULTS_ARTIFACT_DIR}/{RESULTS_ARTIFACT_FILE}"
 RESULTS_ATTEMPT_FILE = ".latest-attempt"
 RESULTS_ATTEMPT_STATE_PREFIX = ".attempt-"
+RESULTS_ATTEMPT_LOCK_FILE = ".attempt-lock"
+RESULTS_ATTEMPT_TRANSITION_FILE = ".attempt-transition"
 
 
 class ResultsAttemptPointer(ContractModel):
@@ -227,17 +235,22 @@ def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
         command=command,
         status="pending",
     )
-    # Point at the new attempt first.  If its state write then fails, the
-    # pointer names a missing state and the gate refuses.  Writing the state
-    # first could fail while leaving the previous passing pointer visible.
-    _write_contract_file(
-        directory / RESULTS_ATTEMPT_FILE,
-        ResultsAttemptPointer(
-            attempt_id=attempt.attempt_id,
-            command=attempt.command,
-        ).model_dump(),
+    pointer = ResultsAttemptPointer(
+        attempt_id=attempt.attempt_id,
+        command=attempt.command,
     )
-    _write_attempt_state(directory, attempt)
+    pointer_path = directory / RESULTS_ATTEMPT_FILE
+    transition_path = directory / RESULTS_ATTEMPT_TRANSITION_FILE
+    with _serialize_attempt_starts(directory):
+        # The transition marker is installed before touching the previous
+        # pointer.  Readers refuse while it exists.  It deliberately remains
+        # after any pointer/state/unlink failure, so no earlier pass becomes
+        # eligible just because beginning this attempt failed midway.
+        _write_contract_file(transition_path, pointer.model_dump())
+        pointer_path.unlink(missing_ok=True)
+        _write_contract_file(pointer_path, pointer.model_dump())
+        _write_attempt_state(directory, attempt)
+        transition_path.unlink()
     return attempt
 
 
@@ -266,10 +279,29 @@ def complete_results_attempt(
 def load_gate_results(directory: Path) -> tuple[ResultsRecord, Path] | None:
     """The result bound to the latest attempt, with legacy fallback."""
 
+    transition_path = directory / RESULTS_ATTEMPT_TRANSITION_FILE
+    if _path_exists(transition_path, purpose="evaluation-attempt transition"):
+        raise ConfigError(
+            "the latest evaluation attempt did not finish initializing",
+            remediation=(
+                "Fix the local results-directory error and rerun the evaluation "
+                "before invoking `agentkit gate`."
+            ),
+        )
     pointer_path = directory / RESULTS_ATTEMPT_FILE
     try:
         pointer_path.stat()
     except FileNotFoundError:
+        if _has_attempt_metadata(directory):
+            raise ConfigError(
+                "evaluation-attempt metadata exists but its latest pointer is "
+                "missing",
+                remediation=(
+                    "Rerun the evaluation before invoking `agentkit gate`; "
+                    "legacy result fallback is only available to directories "
+                    "that have never used the attempt protocol."
+                ),
+            ) from None
         return load_latest_results(directory)
     except OSError as error:
         raise ConfigError(
@@ -333,6 +365,48 @@ def _attempt_state_path(directory: Path, attempt_id: str) -> Path:
     return directory / f"{RESULTS_ATTEMPT_STATE_PREFIX}{attempt_id}"
 
 
+@contextmanager
+def _serialize_attempt_starts(directory: Path) -> Iterator[None]:
+    """Serialize the small fail-closed pointer transition across processes."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / RESULTS_ATTEMPT_LOCK_FILE
+    with lock_path.open("a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _path_exists(path: Path, *, purpose: str) -> bool:
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ConfigError(f"could not inspect {purpose} {path}: {error}") from error
+    return True
+
+
+def _has_attempt_metadata(directory: Path) -> bool:
+    """Whether legacy newest-file fallback would cross a protocol boundary."""
+
+    try:
+        return any(
+            entry.name.startswith(RESULTS_ATTEMPT_STATE_PREFIX)
+            for entry in directory.iterdir()
+        )
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ConfigError(
+            f"could not inspect evaluation-attempt metadata in {directory}: {error}"
+        ) from error
+
+
 def _write_attempt_state(directory: Path, attempt: ResultsAttempt) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     _write_contract_file(
@@ -364,7 +438,7 @@ def read_results(path: Path) -> ResultsRecord:
 def _read_results_bytes(path: Path) -> bytes:
     try:
         return path.read_bytes()
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise ConfigError(f"could not read results record {path}: {error}") from error
 
 

@@ -609,7 +609,11 @@ def test_local_target_preflight_precedes_cloud_reads_confirmation_and_spend(
     assert asked == []
     assert mlflow.experiment is None
     assert mlflow.evaluate_calls == []
-    assert not project.results_dir.exists()
+    assert load_latest_results(project.results_dir) is None
+    report, gate_code, gate_message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in gate_message
 
 
 def test_http_auth_preflight_precedes_identity_confirmation_and_transport(
@@ -1473,7 +1477,16 @@ def test_a_clean_result_table_adds_no_failures(tmp_path):
 def test_explicit_traces_mode_on_partial_coverage_is_refused(tmp_path):
     from aai_core.agentkit.errors import ConfigError
 
-    _project(tmp_path)
+    project = _project(tmp_path)
+    first, code = run_scoring(
+        project,
+        mode="answer-sheet",
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=FakeMlflow(run_id="run-1"),
+    )
+    assert code == EXIT_PASS
+    assert first.results.gate_passed
     mixed = list(TRACE_ROWS[:6]) + [
         {
             "inputs": {"question": f"question {index}"},
@@ -1484,18 +1497,25 @@ def test_explicit_traces_mode_on_partial_coverage_is_refused(tmp_path):
     (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(mixed))
     project = ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
     mlflow = FakeMlflow()
+    asked = []
 
     with pytest.raises(ConfigError) as excinfo:
         run_scoring(
             project,
             mode="traces",
             establish_baseline=True,
-            assume_yes=True,
+            assume_yes=False,
+            confirm=lambda prompt: asked.append(prompt) or True,
             mlflow_module=mlflow,
         )
 
     assert "only some rows carry one" in str(excinfo.value)
+    assert asked == []
     assert mlflow.evaluate_calls == []
+    report, gate_code, gate_message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in gate_message
 
 
 def test_a_sampled_run_records_its_scope_for_a_run_baseline(tmp_path):
@@ -1795,7 +1815,11 @@ def test_prompt_lookup_failures_refuse_baseline_before_scoring_or_evidence(
     assert mlflow.experiment is None
     assert mlflow.tags == {}
     assert mlflow.run_artifacts == []
-    assert not project.results_dir.exists()
+    assert load_latest_results(project.results_dir) is None
+    report, gate_code, gate_message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in gate_message
     assert not project.baseline_path.exists()
 
 
@@ -1827,7 +1851,7 @@ def test_prompt_lookup_failures_refuse_comparison_without_new_evidence(
     )
     baseline_before = project.baseline_path.read_bytes()
     results_before = {
-        path.name: path.read_bytes() for path in project.results_dir.iterdir()
+        path.name: path.read_bytes() for path in project.results_dir.glob("*.json")
     }
 
     failing = _RecordingPromptManager(error=error)
@@ -1860,8 +1884,12 @@ def test_prompt_lookup_failures_refuse_comparison_without_new_evidence(
     assert mlflow.run_artifacts == []
     assert project.baseline_path.read_bytes() == baseline_before
     assert {
-        path.name: path.read_bytes() for path in project.results_dir.iterdir()
+        path.name: path.read_bytes() for path in project.results_dir.glob("*.json")
     } == results_before
+    report, gate_code, gate_message = run_gate(project)
+    assert report is None
+    assert gate_code == EXIT_ERROR
+    assert "latest evaluation attempt" in gate_message
 
 
 def test_prompt_resolution_is_shared_by_provenance_and_scorer(tmp_path, monkeypatch):
