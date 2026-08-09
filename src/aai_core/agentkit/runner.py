@@ -211,12 +211,6 @@ def run_scoring(
     judge_note = None if judges_enabled else _SMOKE_JUDGE_NOTE
     if judges_enabled:
         judge_model_uri = project.judge_model_uri()
-        # Best effort: an endpoint name is stable while the model behind
-        # it is not, so pin what it currently serves when the workspace
-        # will say. A least-privilege CI principal may hold CAN_QUERY
-        # without CAN_VIEW, and widening that grant to make a check work
-        # is exactly what section 4 of AGENTS.md forbids.
-        judge_model_identity = project.judge_model_identity()
     if resolved_mode != "traces":
         missing_inputs = rows_missing_inputs(scored)
         if missing_inputs:
@@ -253,9 +247,10 @@ def run_scoring(
     if plan_only:
         return outcome, EXIT_PASS
 
-    # The baseline is settled BEFORE the budget check and the confirmation
-    # prompt. Discovering that the comparison was never valid after paying
-    # for the judge calls would make the refusal worthless.
+    # Select the baseline before the budget check, but defer the endpoint-
+    # backed comparability check until every local refusal and confirmation
+    # has completed. An unreachable workspace must not delay a dry plan, a
+    # malformed dataset, or a run the caller will decline.
     baseline: BaselineRecord | None = None
     warnings: list[str] = list(mode_warnings)
     if establish_baseline:
@@ -294,29 +289,6 @@ def run_scoring(
                     rows=dataset.shape.row_count,
                 )
             )
-            comparability, comparable = _enforce_comparability(
-                baseline,
-                dataset=dataset,
-                mode="sample" if sampled else "full",
-                rows=dataset.shape.row_count,
-                plan=plan,
-                judge_model=judge_model_uri,
-                judge_model_identity=judge_model_identity,
-                judges_enabled=judges_enabled,
-                allow_drift=allow_baseline_drift,
-                blocking=require_baseline,
-            )
-            warnings.extend(comparability)
-            if baseline.versions.judge_model_identity and not judge_model_identity:
-                # Silence here would read as "the judge is unchanged".
-                warnings.append(
-                    "the baseline was judged by "
-                    f"{baseline.versions.judge_model_identity}, but what the "
-                    "endpoint serves now could not be read, so a change "
-                    "behind the same endpoint name is unverified"
-                )
-            if not comparable:
-                baseline = None
 
     enforce_budget(cost, max_judge_calls=config.budget.max_judge_calls)
     if cost.judge_calls and not assume_yes:
@@ -331,6 +303,39 @@ def run_scoring(
                 "the confirmation prompt."
             )
             return outcome, EXIT_ERROR
+
+    if judges_enabled:
+        # Best effort: an endpoint name is stable while the model behind it
+        # is not, so pin what it currently serves when the workspace will
+        # say. This is intentionally after all local checks, plan-only, budget
+        # enforcement, and confirmation, but before comparability or a paid
+        # judge call. A least-privilege CI principal may hold CAN_QUERY without
+        # CAN_VIEW; widening that grant to make this work is forbidden.
+        judge_model_identity = project.judge_model_identity()
+    if baseline is not None:
+        comparability, comparable = _enforce_comparability(
+            baseline,
+            dataset=dataset,
+            mode="sample" if sampled else "full",
+            rows=dataset.shape.row_count,
+            plan=plan,
+            judge_model=judge_model_uri,
+            judge_model_identity=judge_model_identity,
+            judges_enabled=judges_enabled,
+            allow_drift=allow_baseline_drift,
+            blocking=require_baseline,
+        )
+        warnings.extend(comparability)
+        if baseline.versions.judge_model_identity and not judge_model_identity:
+            # Silence here would read as "the judge is unchanged".
+            warnings.append(
+                "the baseline was judged by "
+                f"{baseline.versions.judge_model_identity}, but what the "
+                "endpoint serves now could not be read, so a change "
+                "behind the same endpoint name is unverified"
+            )
+        if not comparable:
+            baseline = None
 
     set_concurrency_env(config.concurrency, environ)
     # A code-scorer-only run over recorded answers needs nothing from

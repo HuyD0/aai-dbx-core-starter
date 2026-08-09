@@ -427,7 +427,7 @@ def test_judged_run_records_the_governed_judge_endpoint(tmp_path):
     assert outcome.cost.judge_calls > 0
 
 
-def test_declined_confirmation_scores_nothing(tmp_path):
+def test_declined_confirmation_scores_nothing(tmp_path, monkeypatch):
     """A cancelled run is not a passed run.
 
     The usual cause is a CI job on a non-interactive stream with no
@@ -436,6 +436,11 @@ def test_declined_confirmation_scores_nothing(tmp_path):
     """
 
     project = _project(tmp_path)
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: pytest.fail("endpoint identity was resolved"),
+    )
     fake = FakeMlflow()
 
     outcome, code = run_scoring(
@@ -455,7 +460,7 @@ def test_declined_confirmation_scores_nothing(tmp_path):
     assert any("--yes" in message for message in outcome.messages)
 
 
-def test_budget_stops_the_run_before_any_call(tmp_path):
+def test_budget_stops_the_run_before_any_call(tmp_path, monkeypatch):
     project = _project(
         tmp_path,
         config_text=(
@@ -464,6 +469,11 @@ def test_budget_stops_the_run_before_any_call(tmp_path):
             "dataset: evals/data/golden_cases.json\n"
             "budget:\n  max_judge_calls: 3\n"
         ),
+    )
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: pytest.fail("endpoint identity was resolved"),
     )
     fake = FakeMlflow()
 
@@ -497,6 +507,27 @@ def test_plan_only_prints_without_scoring(tmp_path):
     text = "\n".join(outcome.messages)
     assert "Inferred evaluation plan" in text
     assert "0 judge calls" in text
+
+
+def test_a_judged_plan_never_resolves_the_endpoint_identity(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: pytest.fail("endpoint identity was resolved"),
+    )
+
+    outcome, code = run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        plan_only=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.plan_only
+    assert outcome.cost.judge_calls > 0
 
 
 def test_row_limit_samples_deterministically_and_records_scope(tmp_path):
@@ -601,8 +632,8 @@ def test_a_changed_dataset_refuses_the_comparison(tmp_path):
     assert mlflow.evaluate_calls == []
 
 
-def test_the_refusal_precedes_the_budget_and_the_prompt(tmp_path):
-    """Refusing after paying for judge calls would be worthless."""
+def test_baseline_refusal_follows_confirmation_but_precedes_spend(tmp_path):
+    """The endpoint check stays late, but an invalid delta is never scored."""
 
     project = _project(tmp_path)
     run_scoring(
@@ -615,6 +646,7 @@ def test_the_refusal_precedes_the_budget_and_the_prompt(tmp_path):
     )
     _edit_an_expectation(project)
     asked = []
+    mlflow = FakeMlflow()
 
     with pytest.raises(BaselineIncomparableError):
         run_scoring(
@@ -623,10 +655,71 @@ def test_the_refusal_precedes_the_budget_and_the_prompt(tmp_path):
             mode="answer-sheet",
             assume_yes=False,
             confirm=lambda prompt: asked.append(prompt) or True,
-            mlflow_module=FakeMlflow(),
+            mlflow_module=mlflow,
         )
 
-    assert asked == []
+    assert asked == ["Proceed?"]
+    assert mlflow.evaluate_calls == []
+
+
+def test_endpoint_identity_follows_confirmation_and_precedes_comparison_and_spend(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _project(tmp_path)
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: "main.models.judge/3",
+    )
+    run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    events = []
+    monkeypatch.setattr(
+        project,
+        "judge_model_identity",
+        lambda: events.append("identity") or "main.models.judge/3",
+    )
+    enforce_comparability = runner_module._enforce_comparability
+
+    def record_comparability(*args, **kwargs):
+        events.append("comparability")
+        return enforce_comparability(*args, **kwargs)
+
+    monkeypatch.setattr(
+        runner_module,
+        "_enforce_comparability",
+        record_comparability,
+    )
+    mlflow = FakeMlflow(run_id="run-2")
+    evaluate = mlflow.genai.evaluate
+
+    def record_evaluate(*args, **kwargs):
+        events.append("evaluate")
+        return evaluate(*args, **kwargs)
+
+    mlflow.genai.evaluate = record_evaluate
+
+    run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=False,
+        confirm=lambda prompt: events.append("confirm") or True,
+        mlflow_module=mlflow,
+    )
+
+    assert events[0:2] == ["confirm", "identity"]
+    assert events.index("identity") < events.index("comparability")
+    assert events.index("comparability") < events.index("evaluate")
 
 
 def test_allow_baseline_drift_proceeds_and_records_the_reason(tmp_path):
