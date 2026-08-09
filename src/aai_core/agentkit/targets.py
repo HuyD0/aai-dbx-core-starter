@@ -530,7 +530,16 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
             "is synchronous",
             remediation="Expose a synchronous wrapper that returns the final answer.",
         )
-    signature = inspect.signature(function)
+    try:
+        signature = inspect.signature(function)
+    except Exception as error:
+        raise TargetContractError(
+            f"could not inspect the callable signature for {target.ref!r}",
+            remediation=(
+                "Expose a Python callable with an inspectable signature so "
+                "AgentKit can map dataset inputs before evaluation."
+            ),
+        ) from error
     parameters = [
         parameter
         for parameter in signature.parameters.values()
@@ -546,18 +555,38 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
     def call(inputs: Mapping[str, Any]) -> Any:
         try:
             if single_argument:
-                name = parameters[0].name
+                parameter = parameters[0]
+                name = parameter.name
                 if name in inputs:
-                    result = function(inputs[name])
+                    value = inputs[name]
                 elif len(inputs) == 1:
-                    result = function(next(iter(inputs.values())))
+                    value = next(iter(inputs.values()))
                 else:
                     raise TargetContractError(
                         f"{target.ref!r} takes one argument {name!r} but the "
                         f"dataset inputs have keys {sorted(inputs)}"
                     )
+                if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+                    arguments: tuple[Any, ...] = ()
+                    keywords = {name: value}
+                else:
+                    arguments = (value,)
+                    keywords = {}
             else:
-                result = function(**inputs)
+                arguments = ()
+                keywords = dict(inputs)
+            try:
+                signature.bind(*arguments, **keywords)
+            except TypeError as error:
+                raise TargetContractError(
+                    f"{target.ref!r} cannot accept dataset input keys "
+                    f"{sorted(inputs)}: {error}",
+                    remediation=(
+                        "Align the callable parameters with the dataset's "
+                        "inputs fields."
+                    ),
+                ) from error
+            result = function(*arguments, **keywords)
             if inspect.isawaitable(result):
                 close = getattr(result, "close", None)
                 if callable(close):
