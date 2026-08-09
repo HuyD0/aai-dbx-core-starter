@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
+import shutil
 from argparse import Namespace
 from dataclasses import dataclass
 from importlib.metadata import PackagePath, PathDistribution
@@ -468,9 +470,59 @@ def test_prestarted_session_rejects_unrecorded_importable_module(
         recheck_evaluation_session(session)
 
 
+@pytest.mark.parametrize("entry_name", ("unowned_module.py", "unowned_package"))
+def test_execution_capture_rejects_wholly_unrecorded_top_level_import(
+    governed_runtime: GovernedRuntime,
+    entry_name: str,
+) -> None:
+    install_root = governed_runtime.metadata_path.parent.parent
+    entry = install_root / entry_name
+    if entry.suffix:
+        entry.write_text('VALUE = "unowned"\n', encoding="utf-8")
+    else:
+        entry.mkdir()
+        (entry / "__init__.py").write_text(
+            'VALUE = "unowned"\n',
+            encoding="utf-8",
+        )
+
+    with pytest.raises(RuntimeError, match="without distribution inventory ownership"):
+        start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+
+
+def test_virtualenv_distributionless_bootstrap_is_content_bound(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    install_root = governed_runtime.metadata_path.parent.parent
+    (install_root / "_virtualenv.pth").write_text(
+        "import _virtualenv\n",
+        encoding="utf-8",
+    )
+    bootstrap = install_root / "_virtualenv.py"
+    bootstrap.write_text('VALUE = "generated bootstrap"\n', encoding="utf-8")
+
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+
+    assert any(
+        package.name == "python-environment-bootstrap"
+        for package in session.execution_contract.runtime_packages
+    )
+    bootstrap.write_text('VALUE = "mutated bootstrap"\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
 def test_prestarted_session_rejects_entry_point_metadata_mutation(
     governed_runtime: GovernedRuntime,
 ) -> None:
+    record_path = governed_runtime.metadata_path.with_name("RECORD")
+    record_path.write_text(
+        record_path.read_text(encoding="utf-8").replace(
+            "session_runtime-1.0.0.dist-info/entry_points.txt,,\n",
+            "",
+        ),
+        encoding="utf-8",
+    )
     session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
 
     governed_runtime.entry_points_path.write_text(
@@ -486,21 +538,80 @@ def test_prestarted_session_rejects_entry_point_metadata_mutation(
         recheck_evaluation_session(session)
 
 
-def test_external_console_launcher_record_is_portable_bookkeeping(
+def test_prestarted_session_rejects_new_unrecorded_runtime_metadata(
     governed_runtime: GovernedRuntime,
 ) -> None:
-    distribution = PathDistribution(governed_runtime.metadata_path.parent)
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+
+    governed_runtime.metadata_path.with_name("new-runtime-hook.txt").write_text(
+        "runtime-significant metadata\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_nested_runtime_directory_identity_detects_create_import_delete(
+    governed_runtime: GovernedRuntime,
+) -> None:
+    nested = governed_runtime.package_payload_path.parent / "nested"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("", encoding="utf-8")
+    session = start_evaluation_session(governed_runtime.settings)  # type: ignore[arg-type]
+    transient = nested / "transient.py"
+    transient.write_text('VALUE = "briefly imported"\n', encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "_transient_runtime_module",
+        transient,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.VALUE == "briefly imported"
+    transient.unlink()
+    shutil.rmtree(nested / "__pycache__", ignore_errors=True)
+
+    with pytest.raises(RuntimeError, match="runtime package files changed"):
+        recheck_evaluation_session(session)
+
+
+def test_external_console_launcher_record_is_portable_bookkeeping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = tmp_path / "python-environment"
+    install_root = prefix / "lib" / "python3.12" / "site-packages"
+    distribution, _metadata, _entry_points, _payload = _write_distribution(
+        install_root,
+        name="session-runtime",
+        version="1.0.0",
+    )
+    launcher = prefix / "bin" / "session-runtime"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("portable launcher bytes are excluded\n", encoding="utf-8")
+    application = prefix / "share" / "applications" / "session.desktop"
+    application.parent.mkdir(parents=True)
+    application.write_text("desktop bookkeeping\n", encoding="utf-8")
+    icon = prefix / "share" / "icons" / "session.png"
+    icon.parent.mkdir(parents=True)
+    icon.write_bytes(b"icon bookkeeping")
+    monkeypatch.setattr(training.sys, "prefix", prefix.as_posix())
     inventory = training._require_distribution_file_inventory(distribution)
-    install_root = Path(distribution.locate_file("")).resolve(strict=True)
     before, _before_roots = training._capture_runtime_package_payloads(
         distribution,
-        install_root=install_root,
+        install_root=install_root.resolve(strict=True),
         inventory=inventory,
     )
     with_launcher, _launcher_roots = training._capture_runtime_package_payloads(
         distribution,
-        install_root=install_root,
-        inventory=inventory + (PackagePath("../../../bin/session-runtime"),),
+        install_root=install_root.resolve(strict=True),
+        inventory=inventory
+        + (
+            PackagePath("../../../bin/session-runtime"),
+            PackagePath("../../../share/applications/session.desktop"),
+            PackagePath("../../../share/icons/session.png"),
+        ),
     )
 
     assert with_launcher == before
@@ -509,12 +620,47 @@ def test_external_console_launcher_record_is_portable_bookkeeping(
     ) == ("bin/session-runtime", True)
     with pytest.raises(ValueError, match="unsafe traversal"):
         training._distribution_record_path(PackagePath("package/../../bin/tool"))
-    with pytest.raises(ValueError, match="without a portable runtime mapping"):
+    escaped = prefix.parent / "escaped-runtime"
+    escaped.write_text("must not be trusted\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="escapes the Python environment"):
         training._capture_runtime_package_payloads(
             distribution,
-            install_root=install_root,
-            inventory=inventory + (PackagePath("../../../../etc/passwd"),),
+            install_root=install_root.resolve(strict=True),
+            inventory=inventory + (PackagePath("../../../../escaped-runtime"),),
         )
+
+
+def test_external_runtime_archive_is_content_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = tmp_path / "python-environment"
+    install_root = prefix / "lib" / "python3.12" / "site-packages"
+    distribution, _metadata, _entry_points, _payload = _write_distribution(
+        install_root,
+        name="archive-runtime",
+        version="1.0.0",
+    )
+    archive = prefix / "share" / "py4j" / "runtime.jar"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"first archive")
+    monkeypatch.setattr(training.sys, "prefix", prefix.as_posix())
+    inventory = training._require_distribution_file_inventory(distribution)
+    inventory += (PackagePath("../../../share/py4j/runtime.jar"),)
+
+    before, _roots = training._capture_runtime_package_payloads(
+        distribution,
+        install_root=install_root.resolve(strict=True),
+        inventory=inventory,
+    )
+    archive.write_bytes(b"changed archive")
+    after, _roots = training._capture_runtime_package_payloads(
+        distribution,
+        install_root=install_root.resolve(strict=True),
+        inventory=inventory,
+    )
+
+    assert before != after
 
 
 def test_editable_import_root_uses_portable_content_evidence(
@@ -563,6 +709,226 @@ def test_editable_import_root_uses_portable_content_evidence(
     )
 
     assert training._capture_runtime_packages() == first_evidence
+
+
+def test_setuptools_finder_editable_is_portable_and_binds_mapped_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def finder_distribution(
+        prefix: str,
+    ) -> tuple[PathDistribution, Path, Path, Path]:
+        checkout = tmp_path / f"{prefix}-checkout"
+        package_root = checkout / "src" / "session_runtime"
+        package_root.mkdir(parents=True)
+        package_payload = package_root / "__init__.py"
+        package_payload.write_text('VALUE = "portable"\n', encoding="utf-8")
+        module_stem = checkout / "src" / "renamed"
+        module_stem.mkdir()
+        (module_stem / "not_imported.txt").write_text(
+            "the finder selects the sibling module instead\n",
+            encoding="utf-8",
+        )
+        module_path = module_stem.with_suffix(".py")
+        module_path.write_text('RENAMED = "portable"\n', encoding="utf-8")
+        namespace_root = checkout / "namespace" / "portion"
+        namespace_root.mkdir(parents=True)
+        (namespace_root / "feature.py").write_text(
+            'FEATURE = "portable"\n',
+            encoding="utf-8",
+        )
+
+        install_root = tmp_path / prefix / "site-packages"
+        distribution_root = install_root / "session_runtime-1.0.0.dist-info"
+        distribution_root.mkdir(parents=True)
+        (distribution_root / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: session-runtime\nVersion: 1.0.0\n",
+            encoding="utf-8",
+        )
+        pth_name = "__editable__.session_runtime-1.0.0.pth"
+        finder_name = "__editable___session_runtime_1_0_0_finder"
+        pth_path = install_root / pth_name
+        pth_path.write_text(
+            f"import {finder_name}; {finder_name}.install()\n",
+            encoding="utf-8",
+        )
+        finder_path = install_root / f"{finder_name}.py"
+        finder_path.write_text(
+            (
+                "from pathlib import Path\n"
+                "MAPPING: dict[str, str] = "
+                f"{{'session_runtime': {str(package_root)!r}, "
+                f"'renamed': {str(module_stem)!r}}}\n"
+                "NAMESPACES: dict[str, list[str]] = "
+                f"{{'session_namespace': [{str(namespace_root)!r}]}}\n"
+                f"PATH_PLACEHOLDER = {('__editable__.session_runtime-1.0.0.finder')!r} "
+                '+ ".__path_hook__"\n'
+                "class _EditableFinder:\n    pass\n"
+                "class _EditableNamespaceFinder:\n    pass\n"
+                "def install():\n    return None\n"
+            ),
+            encoding="utf-8",
+        )
+        (distribution_root / "RECORD").write_text(
+            (
+                f"{pth_name},,\n"
+                f"{finder_name}.py,,\n"
+                "session_runtime-1.0.0.dist-info/METADATA,,\n"
+                "session_runtime-1.0.0.dist-info/RECORD,,\n"
+            ),
+            encoding="utf-8",
+        )
+        return (
+            PathDistribution(distribution_root),
+            package_payload,
+            module_path,
+            namespace_root / "feature.py",
+        )
+
+    first, first_package, first_module, first_namespace = finder_distribution(
+        "first-environment"
+    )
+    second, _second_package, _second_module, _second_namespace = finder_distribution(
+        "second-environment"
+    )
+    monkeypatch.setattr(training.importlib.metadata, "distributions", lambda: (first,))
+    first_evidence = training._capture_runtime_packages()
+    monkeypatch.setattr(training.importlib.metadata, "distributions", lambda: (second,))
+
+    assert training._capture_runtime_packages() == first_evidence
+
+    monkeypatch.setattr(training.importlib.metadata, "distributions", lambda: (first,))
+    first_package.write_text('VALUE = "mutated"\n', encoding="utf-8")
+    assert training._capture_runtime_packages() != first_evidence
+    first_package.write_text('VALUE = "portable"\n', encoding="utf-8")
+    first_module.write_text('RENAMED = "mutated"\n', encoding="utf-8")
+    assert training._capture_runtime_packages() != first_evidence
+    first_module.write_text('RENAMED = "portable"\n', encoding="utf-8")
+    first_namespace.write_text('FEATURE = "mutated"\n', encoding="utf-8")
+    assert training._capture_runtime_packages() != first_evidence
+
+    finder_path = Path(
+        first.locate_file("__editable___session_runtime_1_0_0_finder.py")
+    )
+    finder_path.write_text(
+        "MAPPING = dict(session_runtime='/tmp/untrusted')\nNAMESPACES = {}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="MAPPING is not literal"):
+        training._capture_runtime_packages()
+
+
+def test_unknown_executable_pth_fails_closed(tmp_path: Path) -> None:
+    install_root = tmp_path / "site-packages"
+    distribution, _metadata, _entry_points, _payload = _write_distribution(
+        install_root,
+        name="session-runtime",
+        version="1.0.0",
+    )
+    executable = install_root / "unexpected.pth"
+    executable.write_text("import os; os.getcwd()\n", encoding="utf-8")
+    inventory = training._require_distribution_file_inventory(distribution) + (
+        PackagePath("unexpected.pth"),
+    )
+
+    with pytest.raises(ValueError, match="unknown executable"):
+        training._capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root.resolve(strict=True),
+            inventory=inventory,
+        )
+
+
+def test_setuptools_strict_editable_tree_is_explicitly_unsupported(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "site-packages"
+    distribution, _metadata, _entry_points, _payload = _write_distribution(
+        install_root,
+        name="session-runtime",
+        version="1.0.0",
+    )
+    strict_tree = tmp_path / "build" / "__editable__.session_runtime-1.0.0-py3-none-any"
+    strict_tree.mkdir(parents=True)
+    strict_pth = install_root / "__editable__.session_runtime-1.0.0.pth"
+    strict_pth.write_text(strict_tree.as_posix() + "\n", encoding="utf-8")
+    inventory = training._require_distribution_file_inventory(distribution) + (
+        PackagePath(strict_pth.name),
+    )
+
+    with pytest.raises(ValueError, match="strict editable symlink-tree mode"):
+        training._capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root.resolve(strict=True),
+            inventory=inventory,
+        )
+
+
+def test_runtime_capture_deduplicates_shared_namespace_tree_and_file_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_root = tmp_path / "site-packages"
+    first, _metadata, _entry_points, _payload = _write_distribution(
+        install_root,
+        name="first-runtime",
+        version="1.0.0",
+    )
+    second, _metadata, _entry_points, _payload = _write_distribution(
+        install_root,
+        name="second-runtime",
+        version="1.0.0",
+    )
+    shared_root = install_root / "shared_namespace"
+    shared_root.mkdir()
+    shared_file = shared_root / "shared.py"
+    shared_file.write_text('VALUE = "shared"\n', encoding="utf-8")
+    for distribution in (first, second):
+        record = Path(distribution._path) / "RECORD"
+        record.write_text(
+            "shared_namespace/shared.py,,\n" + record.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    tree_calls: list[Path] = []
+    file_calls: list[Path] = []
+    original_tree_capture = training._capture_runtime_tree
+    original_file_capture = training._capture_runtime_payload_file
+
+    def capture_tree(path: Path) -> object:
+        tree_calls.append(path)
+        return original_tree_capture(path)
+
+    def capture_file(path: Path, display_path: str) -> object:
+        file_calls.append(path)
+        return original_file_capture(path, display_path)
+
+    monkeypatch.setattr(training, "_capture_runtime_tree", capture_tree)
+    monkeypatch.setattr(training, "_capture_runtime_payload_file", capture_file)
+    monkeypatch.setattr(
+        training.importlib.metadata,
+        "distributions",
+        lambda: (first, second),
+    )
+
+    training._capture_runtime_packages()
+
+    assert tree_calls.count(shared_root.resolve(strict=True)) == 1
+    assert file_calls.count(shared_file.resolve(strict=True)) == 1
+
+
+def test_runtime_payload_digest_cache_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(training, "_RUNTIME_PAYLOAD_DIGEST_CACHE_MAX_ENTRIES", 2)
+    training._RUNTIME_PAYLOAD_DIGEST_CACHE.clear()
+    for index in range(3):
+        path = tmp_path / f"payload-{index}.py"
+        path.write_text(f"VALUE = {index}\n", encoding="utf-8")
+        training._capture_runtime_payload_file(path, f"payload/{index}.py")
+
+    assert len(training._RUNTIME_PAYLOAD_DIGEST_CACHE) == 2
 
 
 def test_support_and_capstone_reports_bind_the_prestarted_session_hash(
@@ -693,9 +1059,11 @@ def test_cli_removes_prediction_and_report_after_post_persistence_session_failur
 def test_cli_revalidates_training_lineage_before_persistence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    governed_runtime: GovernedRuntime,
     kind: str,
 ) -> None:
     monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    assert training.PROJECT_ROOT == governed_runtime.project_root
     session = start_evaluation_session()
     invalid_snapshot = SimpleNamespace(
         manifest_sha256="a" * 64,

@@ -163,6 +163,16 @@ per-adapter shared/exclusive lock keeps training publication and evaluation
 from overlapping, and tracked change runs retain both the adapter weights and
 `adapter_config.json` needed to reload them.
 
+Runtime capture supports ordinary path-based editables and the standard
+setuptools PEP 660 finder form. Other executable `.pth` files fail closed except
+for exact, syntax-validated bootstrap forms emitted by the locked setuptools,
+coverage, and virtualenv toolchain; virtualenv's distribution-less bootstrap is
+content-bound as environment evidence. The setuptools `strict` editable mode
+is deliberately unsupported because its generated symlink/hardlink tree cannot
+be represented as portable strict evidence without also binding link
+identities; use the standard finder or path editable mode when producing
+governed runs.
+
 The governed source boundary is the reusable `src/aai_local_finetuning` package
 plus `scripts/render_notebooks.py` and `scripts/notebook_pedagogy.py`. Generated
 notebooks are outputs of those canonical sources; saving cell outputs does not
