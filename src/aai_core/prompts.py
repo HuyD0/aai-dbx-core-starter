@@ -4,21 +4,10 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from re import sub
+from re import fullmatch, sub
 from typing import Any
 
 from aai_core.tags import ResourceContext
-
-# Structured codes that are authoritatively NOT absence. Registry services
-# often word permission denials as "does not exist" to avoid disclosing an
-# inaccessible prompt, so these must override any message marker below.
-_NON_MISSING_ERROR_CODES = {
-    "PERMISSION_DENIED",
-    "UNAUTHENTICATED",
-    "UNAUTHORIZED",
-    "TEMPORARILY_UNAVAILABLE",
-    "REQUEST_LIMIT_EXCEEDED",
-}
 
 
 @dataclass(frozen=True)
@@ -138,25 +127,28 @@ def _prompt_tag_key(key: str) -> str:
 def is_missing_prompt_error(error: Exception) -> bool:
     """True only when a registry error authoritatively means absence.
 
-    Authentication, permission, rate-limit, and transient registry failures
-    return ``False`` even when their message uses non-disclosure wording such
-    as "does not exist". Callers may therefore fall back to bundled content
-    only for a genuinely missing prompt or alias.
+    Any structured code outside the two provider absence codes returns
+    ``False`` even when its message uses non-disclosure wording such as "does
+    not exist". The one provider-specific exception is MLflow's exact missing
+    alias shape under ``INVALID_PARAMETER_VALUE``. Callers may therefore fall
+    back to bundled content only for a genuinely missing prompt or alias.
     """
 
-    error_code = str(getattr(error, "error_code", "")).strip().upper()
+    raw_error_code = getattr(error, "error_code", None)
+    error_code = "" if raw_error_code is None else str(raw_error_code).strip().upper()
     if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
         return True
-    if error_code in _NON_MISSING_ERROR_CODES:
+    message = str(error).strip().upper()
+    missing_alias = (
+        fullmatch(r"REGISTERED MODEL ALIAS .+ NOT FOUND\.?", message) is not None
+    )
+    if missing_alias and error_code in {"", "INVALID_PARAMETER_VALUE"}:
+        return True
+    if error_code:
         return False
-    message = str(error).upper()
     if any(
         marker in message
         for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
     ):
         return True
-    # The file and SQL registries report a missing alias as
-    # INVALID_PARAMETER_VALUE with "Registered model alias ... not found."
-    # Recognize that narrow shape without treating arbitrary invalid input as
-    # absence.
-    return "ALIAS" in message and "NOT FOUND" in message
+    return False

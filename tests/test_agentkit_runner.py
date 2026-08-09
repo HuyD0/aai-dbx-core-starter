@@ -1250,7 +1250,56 @@ def _prompt_lookup_failures():
             ),
             id="transient",
         ),
+        pytest.param(
+            _PromptRegistryError(
+                "prompt does not exist", error_code="CUSTOMER_UNAUTHORIZED"
+            ),
+            id="customer-unauthorized",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "prompt does not exist", error_code="RESOURCE_EXHAUSTED"
+            ),
+            id="resource-exhausted",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "prompt does not exist", error_code="DEADLINE_EXCEEDED"
+            ),
+            id="deadline-exceeded",
+        ),
+        pytest.param(
+            _PromptRegistryError("prompt does not exist", error_code="INTERNAL_ERROR"),
+            id="internal-error",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "prompt does not exist", error_code="INVALID_PARAMETER_VALUE"
+            ),
+            id="invalid-parameter-not-alias",
+        ),
         pytest.param(ConnectionError("connection reset"), id="transport"),
+    )
+
+
+def _prompt_absence_errors():
+    return (
+        pytest.param(
+            _PromptRegistryError("hidden", error_code="NOT_FOUND"),
+            id="structured-not-found",
+        ),
+        pytest.param(RuntimeError("prompt does not exist"), id="code-less-marker"),
+        pytest.param(
+            _PromptRegistryError("prompt does not exist", error_code=None),
+            id="null-code-marker",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "Registered model alias production not found.",
+                error_code="INVALID_PARAMETER_VALUE",
+            ),
+            id="mlflow-missing-alias",
+        ),
     )
 
 
@@ -1269,9 +1318,11 @@ def _use_registered_prompt(project, monkeypatch):
     return manager
 
 
-def test_a_missing_judge_prompt_uses_one_cached_bundled_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing", _prompt_absence_errors())
+def test_a_missing_judge_prompt_uses_one_cached_bundled_fallback(
+    tmp_path, monkeypatch, missing
+):
     project = _with_prompt_judge(tmp_path)
-    missing = _PromptRegistryError("hidden", error_code="NOT_FOUND")
     manager = _RecordingPromptManager(error=missing)
     monkeypatch.setattr(
         project,
