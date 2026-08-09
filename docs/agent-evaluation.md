@@ -359,6 +359,15 @@ never appears, and a set discovered from the tags that happen to exist cannot
 see the one that is missing. Without `approvals:`, evidence reports the tags
 it found and states plainly that it could not verify completeness.
 
+**"the version the run actually scored" is literal.** Approval is reported
+only when the run's agent named one — `models:/<name>/<version>`, which is
+what the deployment job passes. An endpoint, a local callable, a different
+model, or an alias identifies no version, and evidence then reports approval
+`unknown` with the reason rather than borrowing the newest version's tags. An
+alias is not resolved even though it could be: it may have moved between the
+run and the evidence, so resolving it now would attribute an approval the run
+never had.
+
 The approver needs `APPLY TAG` on the model and `CAN MANAGE RUN` on the job.
 Use governed tag policies when several groups must sign off, so nobody can
 approve their own change.

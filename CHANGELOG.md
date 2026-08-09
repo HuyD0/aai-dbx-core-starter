@@ -141,6 +141,19 @@ All notable changes to `aai-core` are documented here.
   expectations", which had been adding a thresholded relevance judge nobody
   asked for.
 
+  Approval is reported only for a run that named a version of the configured
+  registered model. An endpoint, a local callable, an alias, or a different
+  model identifies no version, and reading the newest version's tags instead
+  let `"status": "approved"` describe a run that evaluated something else —
+  a caveat in the identity string does not stop a machine reading the
+  status. An alias stays unresolved on purpose: it may have moved since the
+  run. Span outputs now have one reader, so the token estimate sees the
+  documents `Span.to_dict()` stores in `attributes["mlflow.spanOutputs"]`
+  rather than only a plain `outputs` key — the chunk count already read
+  both. And a Unity Catalog dataset's `NaN`/`NaT`/`pd.NA` are recognised as
+  absent: a nullable `trace` column had made every row look traced, which
+  selects a mode that supplies no predict_fn.
+
 - Updated the `evaluation-project` template to 2.0.0: it now generates a real,
   runnable agent (`src/app/example_agent.py`) whose gate passes immediately,
   an `agentkit.yaml` carrying a regression budget, and opt-in Unity Catalog

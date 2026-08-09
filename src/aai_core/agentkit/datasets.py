@@ -357,7 +357,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
             retrieval, tools = _trace_span_kinds(row["trace"])
             has_retrieval_spans = has_retrieval_spans or retrieval
             has_tool_spans = has_tool_spans or tools
-        if row.get("outputs") is None:
+        if _is_missing(row.get("outputs")):
             has_outputs = False
     strata_values = {
         key: tuple(sorted(values))
@@ -382,10 +382,30 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
     )
 
 
+def _is_missing(value: Any) -> bool:
+    """The several ways a value can be absent once a dataframe is involved.
+
+    A Unity Catalog dataset arrives through ``DataFrame.to_dict("records")``,
+    which represents a nullable column as ``NaN``/``NaT``/``pd.NA`` rather
+    than ``None``. Treating those as present is how a nullable ``trace``
+    column makes every row look traced — selecting the traces mode, which
+    supplies no predict_fn, for rows that have no answer at all.
+
+    Duck-typed on purpose: pandas is MLflow's dependency, not the SDK's, and
+    ``bool(pd.NA)`` raises, so its type name is the safe thing to check.
+    """
+
+    if value is None:
+        return True
+    if isinstance(value, float):
+        return value != value  # NaN is the only float unequal to itself
+    return type(value).__name__ in {"NAType", "NaTType"}
+
+
 def _is_populated(value: Any) -> bool:
     """An empty expectation cannot satisfy a scorer's input contract."""
 
-    if value is None:
+    if _is_missing(value):
         return False
     if isinstance(value, (str, list, tuple, dict, set)):
         return len(value) > 0
@@ -469,7 +489,7 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
     rows_counted = spans = chunks = 0
     for row in rows:
         trace = row.get("trace") if isinstance(row, Mapping) else None
-        if trace is None:
+        if _is_missing(trace):
             continue
         row_spans = _retriever_spans(trace)
         if not row_spans:
@@ -540,11 +560,9 @@ def trace_judge_text(trace: Any) -> str:
                 break
     for span in _spans(trace):
         if _is_retriever(span):
-            for key in ("outputs", "output"):
-                value = span.get(key)
-                if _is_populated(value):
-                    parts.append(_plain(value))
-                    break
+            documents = _span_outputs(span)
+            if documents is not None:
+                parts.append(_plain(documents))
     if not parts:
         return ""
     return json.dumps(parts, default=str)
@@ -609,6 +627,37 @@ def _is_retriever(span: Mapping[str, Any]) -> bool:
     return _RETRIEVER_SPAN_TYPE in _span_types([span])
 
 
+def _span_outputs(span: Mapping[str, Any]) -> Any | None:
+    """What a span returned, wherever this serialization put it.
+
+    ``Span.to_dict()`` stores it in ``attributes["mlflow.spanOutputs"]`` as
+    a JSON string; a hand-written or partly-normalised span carries a plain
+    ``outputs``. Both readers of this field — the chunk count and the token
+    estimate — go through here, because the bug worth preventing is the two
+    of them disagreeing about where to look.
+    """
+
+    attributes = span.get("attributes")
+    candidates: list[Any] = [span.get("outputs"), span.get("output")]
+    if isinstance(attributes, Mapping):
+        candidates.append(attributes.get("mlflow.spanOutputs"))
+    found: list[Any] = []
+    for candidate in candidates:
+        if isinstance(candidate, (str, bytes)):
+            try:
+                candidate = json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
+        if _is_populated(candidate):
+            found.append(candidate)
+    # A list of documents is the shape both callers want; prefer it over a
+    # scalar or mapping that some other key happened to hold.
+    for candidate in found:
+        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+            return candidate
+    return found[0] if found else None
+
+
 def _chunk_count(span: Mapping[str, Any]) -> int:
     """Documents a retriever span returned; 1 when the shape is unknown.
 
@@ -617,20 +666,9 @@ def _chunk_count(span: Mapping[str, Any]) -> int:
     direction that breaks a budget.
     """
 
-    candidates: list[Any] = [span.get("outputs")]
-    attributes = span.get("attributes")
-    if isinstance(attributes, Mapping):
-        candidates.append(attributes.get("mlflow.spanOutputs"))
-    for candidate in candidates:
-        # A serialised span carries its outputs as a JSON string; MLflow's
-        # own extractor json.loads them before counting chunks.
-        if isinstance(candidate, (str, bytes)):
-            try:
-                candidate = json.loads(candidate)
-            except (ValueError, TypeError):
-                continue
-        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
-            return max(1, len(candidate))
+    outputs = _span_outputs(span)
+    if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)):
+        return max(1, len(outputs))
     return 1
 
 

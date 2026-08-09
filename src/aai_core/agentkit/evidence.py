@@ -280,15 +280,25 @@ def databricks_approver_lookup(
     # the newest version instead would let evidence for version N report
     # version N+1's approval the moment someone registers another one.
     evaluated = evaluated_model_version(results.agent, model_name)
+    if evaluated is None:
+        # No version, no verdict. Reading the newest version's tags instead
+        # would let `"status": "approved"` describe a run that scored an
+        # endpoint, a callable, or another model entirely — and a caveat in
+        # the identity string does not stop a machine reading the status.
+        # An alias is deliberately not resolved either: it may have moved
+        # since the run, so resolving it now attributes an approval the run
+        # never had.
+        return {
+            "status": "unknown",
+            "reason": (
+                f"this run evaluated {results.agent}, which does not name a "
+                f"version of {model_name}, so no approval can be attributed "
+                "to it"
+            ),
+        }
     try:
         client = MlflowClient(registry_uri="databricks-uc")
-        if evaluated is not None:
-            version = client.get_model_version(model_name, evaluated)
-        else:
-            versions = client.search_model_versions(f"name='{model_name}'")
-            if not versions:
-                return {"status": "unknown", "reason": "no model versions found"}
-            version = max(versions, key=lambda item: int(item.version))
+        version = client.get_model_version(model_name, evaluated)
         tags = dict(getattr(version, "tags", {}) or {})
         approvals = {
             key: value
@@ -296,8 +306,6 @@ def databricks_approver_lookup(
             if key.lower().startswith("approval")
         }
         identity = f"{model_name} v{version.version}"
-        if evaluated is None:
-            identity += " (latest; the run did not name a model version)"
         recorded = {key: str(value) for key, value in sorted(approvals.items())}
         return _verdict(recorded, tuple(project.config.approvals), identity)
     except Exception as error:  # pragma: no cover - network/credential paths

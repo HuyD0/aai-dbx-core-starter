@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from aai_core.agentkit.baseline import (
     BaselineDataset,
     BaselineRecord,
@@ -418,3 +420,83 @@ def test_evidence_reads_baseline_lineage_from_the_record(tmp_path):
 
     assert document["comparison"]["baseline_recorded_at"] == "2026-07-01T09:00:00Z"
     assert document["comparison"]["baseline_dataset_digest"] == "digest-of-the-run"
+
+
+def _refusing_lookup(tmp_path, monkeypatch, agent):
+    """The approver lookup against a registry that must not be consulted."""
+
+    import sys
+    from types import SimpleNamespace
+
+    calls = []
+
+    class _Client:
+        def __init__(self, registry_uri=None):
+            calls.append(registry_uri)
+
+        def get_model_version(self, name, number):  # pragma: no cover - guard
+            raise AssertionError("no version was evaluated; nothing to read")
+
+        def search_model_versions(self, filter_string):  # pragma: no cover
+            raise AssertionError("the newest version is not this run's version")
+
+    monkeypatch.setitem(
+        sys.modules, "mlflow", SimpleNamespace(MlflowClient=_Client, __spec__=None)
+    )
+    from aai_core.agentkit.evidence import databricks_approver_lookup
+
+    project = ProjectContext(
+        config=AgentkitConfig(
+            version=1,
+            agent=agent,
+            dataset="evals/data/golden_cases.json",
+            registered_model="main.eval.agent",
+        ),
+        settings=dev_settings(),
+        root=tmp_path,
+    )
+    approver = databricks_approver_lookup(project, _results(agent=agent))
+    return approver, calls
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [
+        "endpoints:/agent-serving",
+        "src/app/example_agent.py:respond",
+        "models:/main.eval.agent@champion",
+        "models:/other.catalog.model/3",
+    ],
+)
+def test_approval_needs_the_exact_evaluated_version(tmp_path, monkeypatch, agent):
+    """No version, no verdict — and no registry call either.
+
+    An endpoint, a callable, an alias, and a different registered model all
+    identify no version of the configured model. Reading the newest
+    version's tags would let `status: approved` describe a run that scored
+    something else entirely, and a caveat in the identity string does not
+    stop a machine reading the status.
+    """
+
+    approver, calls = _refusing_lookup(tmp_path, monkeypatch, agent)
+
+    assert approver["status"] == "unknown"
+    assert agent in approver["reason"]
+    assert "main.eval.agent" in approver["reason"]
+    # The registry is never consulted: there is nothing to ask it for.
+    assert calls == []
+
+
+def test_an_evaluated_version_is_still_read(tmp_path, monkeypatch):
+    """The exact-version path is untouched."""
+
+    approver = _lookup_with_tags(
+        tmp_path,
+        monkeypatch,
+        {"approval_gate": "Approved"},
+        approvals=("approval_gate",),
+    )
+
+    assert approver["status"] == "approved"
+    assert approver["model_version"] == "main.eval.agent v7"
+    assert "latest" not in approver["model_version"]

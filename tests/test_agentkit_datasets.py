@@ -606,3 +606,112 @@ def test_expectation_rows_record_each_row_alternative(tmp_path):
     # The dataset-wide views are unchanged: nothing is on every row.
     assert shape.expectation_keys == ()
     assert shape.partial_expectation_keys == ("expected_facts", "expected_response")
+
+
+class NAType:
+    """Stands in for pandas' NA, whose truthiness deliberately raises.
+
+    Named to match `type(pd.NA).__name__`: the check is by type name,
+    because pandas is MLflow's dependency and not the SDK's, and
+    `bool(pd.NA)` raises rather than answering.
+    """
+
+    def __bool__(self):
+        raise TypeError("boolean value of NA is ambiguous")
+
+
+def test_dataframe_nulls_read_as_missing(tmp_path):
+    """A UC dataset arrives via to_dict("records"), so nulls are NaN.
+
+    Treating NaN as present makes every row of a nullable `trace` column
+    look traced, which selects the traces mode — and that mode supplies no
+    predict_fn, so those rows would have no answer at all.
+    """
+
+    rows = [
+        {
+            "inputs": {"question": f"q{index}"},
+            "expectations": {"expected_response": "a"},
+            "trace": float("nan"),
+            "outputs": float("nan"),
+        }
+        for index in range(10)
+    ]
+    _write_dataset(tmp_path, rows)
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert not shape.has_traces
+    assert not shape.partial_traces
+    assert not shape.has_outputs
+
+
+def test_missing_recognises_every_null_sentinel():
+    from aai_core.agentkit.datasets import _is_missing, _is_populated
+
+    absent = [None, float("nan"), NAType()]
+    try:
+        import pandas as pd
+
+        # The real sentinels, when pandas is installed: the stub above only
+        # proves the name check, not that the name is the right one.
+        absent += [pd.NA, pd.NaT, float("nan")]
+    except ImportError:
+        pass
+    for value in absent:
+        assert _is_missing(value), value
+        assert not _is_populated(value)
+    for present in (0, 0.0, False, "x", ["x"], {"a": 1}):
+        assert not _is_missing(present), present
+
+
+def test_a_null_expectation_does_not_satisfy_a_contract(tmp_path):
+    rows = [
+        {"inputs": {"question": f"q{index}"}, "expectations": {"expected_response": v}}
+        for index, v in enumerate(["a"] * 9 + [float("nan")])
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.expectation_keys == ()
+    assert shape.expectation_rows[-1] == ()
+
+
+def test_serialized_span_outputs_reach_the_token_estimate(tmp_path):
+    """`Span.to_dict()` puts them in attributes as a JSON string.
+
+    The chunk count already read that form; the token estimate did not, so
+    the retrieved documents contributed nothing to the number a developer
+    approves — in exactly the serialized case the estimate exists for.
+    """
+
+    from aai_core.agentkit.datasets import _chunk_count, trace_judge_text
+
+    body = "Contributions vest after two years of continuous service. " * 20
+    documents = [{"page_content": body}, {"page_content": body}]
+    serialized = {
+        "info": {"request_preview": "when do contributions vest?"},
+        "data": {
+            "spans": [
+                {
+                    "span_id": "1",
+                    "attributes": {
+                        "mlflow.spanType": '"RETRIEVER"',
+                        "mlflow.spanOutputs": json.dumps(documents),
+                    },
+                }
+            ]
+        },
+    }
+    plain = {
+        "info": {"request_preview": "when do contributions vest?"},
+        "data": {
+            "spans": [{"span_id": "1", "type": "RETRIEVER", "outputs": documents}]
+        },
+    }
+
+    assert body in trace_judge_text(serialized)
+    # The two shapes describe the same retrieval, so they agree on both.
+    assert trace_judge_text(serialized) == trace_judge_text(plain)
+    assert _chunk_count(serialized["data"]["spans"][0]) == 2
+    assert _chunk_count(plain["data"]["spans"][0]) == 2
