@@ -130,8 +130,9 @@ def is_missing_prompt_error(error: Exception) -> bool:
     Any structured code outside the two provider absence codes returns
     ``False`` even when its message uses non-disclosure wording such as "does
     not exist". The one provider-specific exception is MLflow's exact missing
-    alias shape under ``INVALID_PARAMETER_VALUE``. Callers may therefore fall
-    back to bundled content only for a genuinely missing prompt or alias.
+    alias shape under ``INVALID_PARAMETER_VALUE``, before or after its prompt
+    exception translator runs. Callers may therefore fall back to bundled
+    content only for a genuinely missing prompt or alias.
     """
 
     raw_error_code = getattr(error, "error_code", None)
@@ -140,7 +141,12 @@ def is_missing_prompt_error(error: Exception) -> bool:
         return True
     message = str(error).strip().upper()
     missing_alias = (
-        fullmatch(r"REGISTERED MODEL ALIAS .+ NOT FOUND\.?", message) is not None
+        fullmatch(
+            r"(?:INVALID_PARAMETER_VALUE: )?"
+            r"(?:REGISTERED MODEL|PROMPT) ALIAS [\w-]+ NOT FOUND\.?",
+            message,
+        )
+        is not None
     )
     if missing_alias and error_code in {"", "INVALID_PARAMETER_VALUE"}:
         return True

@@ -1258,6 +1258,13 @@ def _prompt_lookup_failures():
         ),
         pytest.param(
             _PromptRegistryError(
+                "Prompt alias production not found.",
+                error_code="CUSTOMER_UNAUTHORIZED",
+            ),
+            id="translated-alias-auth",
+        ),
+        pytest.param(
+            _PromptRegistryError(
                 "prompt does not exist", error_code="RESOURCE_EXHAUSTED"
             ),
             id="resource-exhausted",
@@ -1277,6 +1284,13 @@ def _prompt_lookup_failures():
                 "prompt does not exist", error_code="INVALID_PARAMETER_VALUE"
             ),
             id="invalid-parameter-not-alias",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "Prompt alias production was not found.",
+                error_code="INVALID_PARAMETER_VALUE",
+            ),
+            id="invalid-parameter-alias-near-miss",
         ),
         pytest.param(ConnectionError("connection reset"), id="transport"),
     )
@@ -1298,7 +1312,21 @@ def _prompt_absence_errors():
                 "Registered model alias production not found.",
                 error_code="INVALID_PARAMETER_VALUE",
             ),
-            id="mlflow-missing-alias",
+            id="mlflow-pre-translation-alias",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "Prompt alias production not found.",
+                error_code="INVALID_PARAMETER_VALUE",
+            ),
+            id="mlflow-translated-alias",
+        ),
+        pytest.param(
+            _PromptRegistryError(
+                "INVALID_PARAMETER_VALUE: Prompt alias production not found.",
+                error_code="INVALID_PARAMETER_VALUE",
+            ),
+            id="mlflow-rest-translated-alias",
         ),
     )
 
@@ -1316,6 +1344,44 @@ def _use_registered_prompt(project, monkeypatch):
         lambda mlflow_module=None: manager,
     )
     return manager
+
+
+def test_pinned_mlflow_translator_shapes_are_missing_aliases():
+    pytest.importorskip("mlflow")
+    from mlflow.exceptions import MlflowException, RestException
+    from mlflow.prompt.registry_utils import translate_prompt_exception
+
+    from aai_core.prompts import is_missing_prompt_error
+
+    errors = (
+        (
+            MlflowException.invalid_parameter_value(
+                "Registered model alias production not found."
+            ),
+            "Prompt alias production not found.",
+        ),
+        (
+            RestException(
+                {
+                    "error_code": "INVALID_PARAMETER_VALUE",
+                    "message": "Registered model alias production not found.",
+                }
+            ),
+            "INVALID_PARAMETER_VALUE: Prompt alias production not found.",
+        ),
+    )
+    for error, translated_message in errors:
+
+        @translate_prompt_exception
+        def load_prompt(error=error):
+            raise error
+
+        with pytest.raises(MlflowException) as excinfo:
+            load_prompt()
+
+        assert str(excinfo.value) == translated_message
+        assert excinfo.value.error_code == "INVALID_PARAMETER_VALUE"
+        assert is_missing_prompt_error(excinfo.value)
 
 
 @pytest.mark.parametrize("missing", _prompt_absence_errors())
