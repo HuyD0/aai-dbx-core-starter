@@ -43,7 +43,7 @@ import re
 from collections.abc import Mapping, Sequence
 from enum import IntEnum, StrEnum
 from statistics import NormalDist
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 import yaml
 from pydantic import (
@@ -62,6 +62,8 @@ from pydantic import (
 #: satisfied tier 1. Surrounding whitespace is stripped as well, so two
 #: spellings of one identifier cannot both exist.
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+_ArtifactT = TypeVar("_ArtifactT", bound=BaseModel)
 
 # ---------------------------------------------------------------------------
 # Constants and small helpers
@@ -2117,6 +2119,30 @@ def evaluate_gate(
     )
 
 
+def revalidated(artifact: _ArtifactT, error: type[Exception]) -> _ArtifactT:
+    """Re-run an artifact's validators, because `model_copy` does not.
+
+    `model_copy(update=...)` produces an object of the right type that
+    never satisfied the invariants its own model declares —
+    `rejecting.model_copy(update={"decision": ADOPT})` is a valid
+    `GateReport` whose aggregate its field results do not support. Every
+    "the artifact validates itself" guard in this module is only true at
+    the boundaries that do this round trip.
+
+    It is a function rather than a line repeated at each boundary because
+    repeating it is how the persistence path came to be missing it while
+    the authorisation path had it: a forged adoption was refused at
+    execution and written to the durable evaluation record anyway.
+    """
+    try:
+        return type(artifact).model_validate(artifact.model_dump(mode="python"))
+    except ValidationError as invalid:
+        raise error(
+            f"the {type(artifact).__name__} does not satisfy its own "
+            f"invariants: {invalid}"
+        ) from invalid
+
+
 def approve_gate(report: GateReport, approver: str) -> GateReport:
     """Record the named human sign-off a tier 1 run requires.
 
@@ -2128,6 +2154,7 @@ def approve_gate(report: GateReport, approver: str) -> GateReport:
     value is retained in the gate artifact and the run metadata table
     (both access controlled) and deliberately never reaches a tag.
     """
+    revalidated(report, GateNotPassed)
     if report.decision != GateDecision.PENDING_APPROVAL:
         raise GateNotPassed(
             f"only a pending_approval report can be approved, got "
@@ -2157,20 +2184,7 @@ def require_executable(
         return
     if report is None:
         raise GateNotPassed(f"tier {spec.use_tier} runs require a gate report")
-    # `model_copy(update=...)` does not re-run validators, so a report can
-    # reach this function having never satisfied the invariants its own
-    # model declares — `rejecting.model_copy(update={"decision": ADOPT})`
-    # is a valid `GateReport` object with an aggregate its field results
-    # do not support. Every "the artifact validates itself" guard added
-    # since the interval checks rests on this round trip, and this module
-    # builds reports that way itself in `approve_gate`. Revalidating here
-    # is what makes those guards true at the point they are relied upon.
-    try:
-        GateReport.model_validate(report.model_dump(mode="python"))
-    except ValidationError as invalid:
-        raise GateNotPassed(
-            f"the gate report does not satisfy its own invariants: {invalid}"
-        ) from invalid
+    revalidated(report, GateNotPassed)
     if report.spec_digest != spec.spec_digest:
         raise GateNotPassed(
             "gate report was produced for a different spec revision; "
@@ -2655,13 +2669,7 @@ def _require_authorised_write(
     # artifact and not its siblings is the same mistake three rounds
     # running, so this revalidates the whole bundle.
     for artifact in (estimate, preflight):
-        try:
-            type(artifact).model_validate(artifact.model_dump(mode="python"))
-        except ValidationError as invalid:
-            raise EvidenceMismatch(
-                f"the {type(artifact).__name__} does not satisfy its own "
-                f"invariants: {invalid}"
-            ) from invalid
+        revalidated(artifact, EvidenceMismatch)
     if spec.gate_required and report is None:
         raise GateNotPassed(
             f"tier {spec.use_tier} runs execute against the snapshot their "
@@ -3186,7 +3194,7 @@ def run_metadata_conflict_sql(
     spec: BatchInferenceSpec,
     *,
     run_id: str,
-    target_table_version: int,
+    target_table_version: int | None = None,
 ) -> str:
     """Find an existing run record this run would have contradicted.
 
@@ -3197,16 +3205,28 @@ def run_metadata_conflict_sql(
 
     A still-NULL ``target_table_version`` is not a conflict: that is this
     run's own reserved record, waiting to be finalised.
+
+    Omit ``target_table_version`` before execution, when this run has not
+    produced one yet. Passing a placeholder there compared every real
+    version against it and flagged a conflict on any same-id retry that
+    reached stage 7 the first time round — turning the documented
+    idempotent retry into a refusal. Identity is the only thing knowable
+    that early, and identity is what makes a reuse a conflict.
     """
+    version_clash = (
+        ""
+        if target_table_version is None
+        else f"""
+    OR (
+      target_table_version IS NOT NULL
+      AND target_table_version <> {int(target_table_version)}
+    )"""
+    )
     return f"""SELECT run_id, spec_digest, target_table_version
 FROM {spec.run_metadata_table}
 WHERE run_id = {sql_string_literal(run_id)}
   AND (
-    NOT (spec_digest <=> {sql_string_literal(spec.spec_digest)})
-    OR (
-      target_table_version IS NOT NULL
-      AND target_table_version <> {int(target_table_version)}
-    )
+    NOT (spec_digest <=> {sql_string_literal(spec.spec_digest)}){version_clash}
   )"""
 
 
@@ -3285,6 +3305,12 @@ def log_gate_evidence(
     """
     import mlflow
 
+    # The durable evaluation record is as much a boundary as execution
+    # is: a forged adoption refused by `require_executable` was still
+    # being written here, leaving MLflow claiming an adoption the gate
+    # would reject. Revalidate, then bind the scores to this spec.
+    revalidated(report, EvidenceMismatch)
+    require_matching_evidence(spec, report.scores)
     # The report is what the decision came from, so it has to belong to
     # the release being recorded. Checking only the snapshot let
     # `log_gate_evidence(spec_v2, estimate_v2, allocation, report_v1)`

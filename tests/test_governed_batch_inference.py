@@ -1794,6 +1794,11 @@ def test_a_reused_run_id_is_found_rather_than_silently_overwritten():
     """The record is immutable, so the conflict has to be detectable."""
     spec = make_spec()
     check = gbi.run_metadata_conflict_sql(spec, run_id="run-1", target_table_version=7)
+    # Before execution there is no version yet, so identity is all that
+    # can be compared — and a placeholder would flag an idempotent retry.
+    identity_only = gbi.run_metadata_conflict_sql(spec, run_id="run-1")
+    assert "target_table_version <>" not in identity_only
+    assert f"spec_digest <=> '{spec.spec_digest}'" in identity_only
     assert "WHERE run_id = 'run-1'" in check
     assert f"spec_digest <=> '{spec.spec_digest}'" in check
     assert "target_table_version <> 7" in check
@@ -2069,6 +2074,31 @@ def test_a_tuple_standing_in_for_a_mapping_enforces_unique_keys():
         )
 
 
+def test_a_forged_adoption_never_reaches_the_durable_record(monkeypatch):
+    """Execution refused it; the evaluation record was writing it anyway,
+    leaving MLflow claiming an adoption the gate would reject."""
+    spec = one_field_spec()
+    rejecting = gate(spec, score(records_for("s", correct=80, wrong=20), spec))
+    forged = rejecting.model_copy(update={"decision": gbi.GateDecision.ADOPT})
+
+    recorder = _RecordingMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", recorder)
+    with pytest.raises(gbi.EvidenceMismatch, match="does not satisfy its own"):
+        gbi.log_gate_evidence(
+            spec, estimate_matching(rejecting, spec), {"s": 200}, forged
+        )
+    assert not recorder.tags  # nothing was written before the refusal
+
+    # Approval is a boundary too: a forged pending_approval cannot be
+    # promoted into an adoption.
+    tier1 = one_field_spec(use_tier=1, rollback_plan="Restore prior version.")
+    bad_pending = gate(
+        tier1, score(records_for("s", correct=80, wrong=20), tier1)
+    ).model_copy(update={"decision": gbi.GateDecision.PENDING_APPROVAL})
+    with pytest.raises(gbi.GateNotPassed, match="does not satisfy its own"):
+        gbi.approve_gate(bad_pending, "board")
+
+
 def test_a_right_name_with_the_wrong_type_blocks_the_release():
     """`UPDATE SET *` would cast silently, leaving the advertised schema
     wrong, or fail inside the paid statement instead of before it."""
@@ -2103,7 +2133,9 @@ def test_logged_evidence_is_bound_to_the_spec_it_records(monkeypatch):
     recorder = _RecordingMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", recorder)
 
-    with pytest.raises(gbi.EvidenceMismatch, match="one release and the decision"):
+    # Refused because the carried scores are v1's; had they somehow been
+    # v2's, the digest comparison below catches it on the next line.
+    with pytest.raises(gbi.EvidenceMismatch, match="Re-score|one release"):
         gbi.log_gate_evidence(
             v2, estimate_matching(report_v1, v2), {"s": 200}, report_v1
         )

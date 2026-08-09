@@ -1312,7 +1312,10 @@ spark.sql(
 gbi.require_unique_run_id(
     spec_v2,
     spark.sql(
-        gbi.run_metadata_conflict_sql(spec_v2, run_id=RUN_ID, target_table_version=-1)
+        # Identity only: this run has not produced a version yet, and a
+        # placeholder here would flag every same-id retry that already
+        # reached stage 7 as a conflict.
+        gbi.run_metadata_conflict_sql(spec_v2, run_id=RUN_ID)
     ).count(),
 )
 
