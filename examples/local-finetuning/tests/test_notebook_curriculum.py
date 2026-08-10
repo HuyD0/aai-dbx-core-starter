@@ -9,6 +9,7 @@ from pathlib import Path
 
 from nbconvert import HTMLExporter
 
+from aai_local_finetuning import training
 from aai_local_finetuning.settings import PROJECT_ROOT
 
 EXPECTED_NOTEBOOKS = (
@@ -25,6 +26,15 @@ EXPECTED_NOTEBOOKS = (
     "10_capstone_model_vs_hybrid.ipynb",
     "11_design_the_next_project.ipynb",
 )
+
+
+def test_notebook_collection_dependencies_are_test_harness_only():
+    """Notebook-rendering imports must not become application runtime evidence."""
+
+    loaded = dict(training._runtime_loaded_modules())
+
+    assert "six" not in loaded
+    assert "six.moves" not in loaded
 
 
 def _notebooks() -> list[tuple[Path, dict]]:

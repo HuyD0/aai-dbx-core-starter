@@ -10,6 +10,15 @@ import pytest
 
 from aai_local_finetuning import training
 
+_COLLECTION_MODULES: dict[str, object] = {}
+
+
+def pytest_collection_finish() -> None:
+    """Remember imports performed solely while pytest collected test modules."""
+
+    _COLLECTION_MODULES.clear()
+    _COLLECTION_MODULES.update(training._runtime_loaded_modules())
+
 
 @pytest.fixture(autouse=True)
 def remove_pytest_only_import_root(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,8 +44,8 @@ def remove_pytest_only_import_root(monkeypatch: pytest.MonkeyPatch) -> None:
         for name, module in loaded_modules():
             if (
                 training._runtime_audit.was_preexisting(name, module)
-                and name != "_virtualenv"
-            ):
+                or _COLLECTION_MODULES.get(name) is module
+            ) and name != "_virtualenv":
                 continue
             spec = getattr(module, "__spec__", None)
             loader = getattr(spec, "loader", None)
