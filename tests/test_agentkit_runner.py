@@ -868,6 +868,45 @@ def test_jsonl_answer_sheet_target_runs_in_automatic_mode(tmp_path):
     assert mlflow.evaluate_calls == []
 
 
+def test_answer_sheet_output_limits_refuse_before_plan_cost_or_evaluation(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import runner as runner_module
+
+    project = _project(tmp_path)
+    sheet = tmp_path / "evals" / "data" / "answer_sheet.json"
+    answers = json.loads(sheet.read_text())
+    output = "private-output"
+    for _ in range(70):
+        output = {"nested": output}
+    answers[0]["answer"] = output
+    sheet.write_text(json.dumps(answers), encoding="utf-8")
+    monkeypatch.setattr(
+        runner_module,
+        "select_scorers",
+        lambda *args, **kwargs: pytest.fail("evaluation plan was selected"),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "estimate",
+        lambda *args, **kwargs: pytest.fail("cost was estimated"),
+    )
+    mlflow = FakeMlflow()
+
+    with pytest.raises(ConfigError, match="answer.*too deeply nested or complex"):
+        run_scoring(
+            project,
+            command="smoke",
+            judges_enabled=False,
+            require_baseline=False,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=mlflow,
+        )
+
+    assert mlflow.evaluate_calls == []
+
+
 def test_http_auth_preflight_precedes_identity_confirmation_and_transport(
     tmp_path, monkeypatch
 ):

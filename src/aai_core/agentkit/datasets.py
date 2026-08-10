@@ -376,6 +376,10 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
                 f"answer sheet {sheet_path} {location} needs populated "
                 f"{output_name}"
             )
+        output = _bounded_plain(
+            output,
+            subject=f"answer sheet {sheet_path} {location} {output_name}",
+        )
         key = _inputs_key(
             inputs,
             subject=f"answer sheet {sheet_path} {location} inputs",
