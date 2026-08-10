@@ -274,16 +274,23 @@ because a budget approved against last month's fan-out is not a budget.
 
 `agentkit eval --submit` runs the bundle's `release_gate` job.
 
-The submitted job scores the project's **committed** configuration — that is
-what makes the result reproducible from the repository rather than from
-whatever was on one laptop. So anything that would change what gets scored
-locally has nowhere to travel, and `--submit` refuses it up front rather
-than running something other than what you asked for: `--agent`, `--mode`,
-`--decision`, `--plan`, the baseline selection and establishment flags, the
-drift override, and a `--config` (or `AGENTKIT_CONFIG`) pointing anywhere
-but the project's own `agentkit.yaml`. Run those locally without `--submit`,
-or commit the change and submit the committed version. Only `--target`,
-which selects the bundle target rather than the evaluation, travels.
+The submitted job scores the project's **deployed** configuration — the
+bundle files already uploaded to the workspace, not the ones in your working
+tree and not the ones in the last commit. `--submit` runs
+`databricks bundle validate` and `databricks bundle run`; it does **not**
+deploy. So change `agentkit.yaml`, a dataset, or a scorer and you must
+`databricks bundle deploy -t <target>` before submitting, or `release_gate`
+will score the previous version and record that as the evidence for your
+change.
+
+That is also why anything which would change what gets scored locally has
+nowhere to travel, and `--submit` refuses it up front rather than running
+something other than what you asked for: `--agent`, `--mode`, `--decision`,
+`--plan`, the baseline selection and establishment flags, the drift
+override, and a `--config` (or `AGENTKIT_CONFIG`) pointing anywhere but the
+project's own `agentkit.yaml`. Run those locally without `--submit`, or
+deploy the change and submit the deployed version. Only `--target`, which
+selects the bundle target rather than the evaluation, travels.
 
 **Smoke does not create an MLflow run.** A code-scorer-only pass over
 recorded answers needs nothing from MLflow, so it does not open one. That is
