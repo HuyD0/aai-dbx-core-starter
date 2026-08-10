@@ -18,7 +18,7 @@ APP_NAME ?= aai-platform-console-dev
 
 .PHONY: help check-uv install lint format format-check test build check verify \
 	sync-templates check-templates lock-templates check-template-locks \
-	bundle-validate validate-templates doctor \
+	sync-upstream resolve-upstream bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
@@ -176,6 +176,69 @@ resolve-upstream: ## Resolve a downstream clone's stamped-file conflicts after m
 		echo "resolve these by hand, then 'git commit':"; echo "$$remaining"; exit 1; \
 	fi; \
 	echo "stamped-file conflicts resolved; review 'git diff --cached', then 'git commit'"
+
+sync-upstream: ## Merge a reviewed upstream release into a clone: make sync-upstream TAG=vX.Y.Z
+	@# One-way upstream -> clone sync on a reviewed, annotated release tag. Keep
+	@# the merge staged for review, mechanically resolve only generated stamped
+	@# files, re-stamp the clone's identifiers, and run the credential-free gate.
+	@test -n "$(TAG)" || { \
+		echo "TAG is required, e.g. 'make sync-upstream TAG=v0.4.0'." >&2; \
+		exit 2; \
+	}
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { \
+		echo "sync-upstream requires a clean worktree; commit or stash local changes first." >&2; \
+		exit 2; \
+	}
+	@test "$$(git config --get merge.keepours.driver || true)" = "true" || { \
+		echo "configure the clone's keepours merge driver before syncing; see docs/enterprise-clone-runbook.md section 3a." >&2; \
+		exit 2; \
+	}
+	git fetch upstream --tags
+	@tag_ref="refs/tags/$(TAG)"; \
+	if ! git rev-parse --verify "$${tag_ref}^{commit}" >/dev/null 2>&1; then \
+		echo "$(TAG) is not a fetched release tag." >&2; \
+		exit 2; \
+	fi; \
+	if [ "$$(git cat-file -t "$$tag_ref")" != "tag" ]; then \
+		echo "$(TAG) must be an annotated release tag." >&2; \
+		exit 2; \
+	fi; \
+	tag_commit=$$(git rev-parse "$${tag_ref}^{commit}"); \
+	if git merge-base --is-ancestor "$$tag_commit" HEAD; then \
+		echo "$(TAG) is already contained in HEAD; nothing to sync." >&2; \
+		exit 2; \
+	fi
+	@if git merge --no-commit --no-ff "$(TAG)"; then \
+		echo "merged $(TAG) cleanly (staged, not committed)"; \
+	else \
+		merge_status=$$?; \
+		conflicted=$$(git diff --name-only --diff-filter=U); \
+		if [ -z "$$conflicted" ]; then \
+			echo "merge failed without file conflicts; refusing to continue." >&2; \
+			exit "$$merge_status"; \
+		fi; \
+		if printf '%s\n' "$$conflicted" | grep -qx 'Makefile'; then \
+			echo "Makefile is conflicted; resolve it by hand, then run 'make resolve-upstream'." >&2; \
+			exit "$$merge_status"; \
+		fi; \
+		echo "merge conflicts present; resolving generated stamped files..."; \
+		$(MAKE) resolve-upstream; \
+	fi
+	$(MAKE) sync-templates
+	@# A clean preflight makes these the only possible restamp outputs. Stage the
+	@# paths owned by sync-templates, then fail if anything unexpected is unstaged.
+	@git add -- databricks.yml templates
+	@unstaged=$$(git diff --name-only); \
+	untracked=$$(git ls-files --others --exclude-standard); \
+	if [ -n "$$unstaged$$untracked" ]; then \
+		echo "sync left unexpected unstaged files; inspect them before continuing:" >&2; \
+		[ -z "$$unstaged" ] || echo "$$unstaged" >&2; \
+		[ -z "$$untracked" ] || echo "$$untracked" >&2; \
+		exit 1; \
+	fi
+	$(MAKE) verify
+	@echo "sync of $(TAG) is staged. Review 'git diff --cached' and 'git log',"
+	@echo "then 'git commit' and open a PR into main."
 
 check: check-templates format-check test build ## Run the standard pre-commit checks.
 
