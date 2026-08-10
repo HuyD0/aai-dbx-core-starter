@@ -461,7 +461,8 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
         try:
             yield span
         finally:
-            assert active_spans.pop() is span
+            closed_span = active_spans.pop()
+            assert closed_span is span
 
     def trace(**_options):
         return lambda target: target
