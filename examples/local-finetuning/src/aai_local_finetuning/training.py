@@ -736,6 +736,7 @@ class _RuntimeImportLoader(importlib.abc.Loader):
         return creator(spec)
 
     def exec_module(self, module: types.ModuleType) -> None:
+        tracked_spec = getattr(module, "__spec__", None)
         executor = getattr(self._delegate, "exec_module", None)
         if self._delegate is not None and executor is None:
             raise ImportError(f"tracked loader cannot execute module {self._name}")
@@ -760,6 +761,14 @@ class _RuntimeImportLoader(importlib.abc.Loader):
             # executing.  Preserve the tracked spec/module identity while
             # retaining transparent access to the delegate through __getattr__.
             module.__loader__ = self
+        elif _record_native_finalized_source_alias(
+            self._name,
+            module,
+            tracked_spec=tracked_spec,
+            tracked_loader=self,
+            source_loader=self._delegate,
+        ):
+            return
         elif module_loader is not self:
             raise RuntimeError(
                 f"completed import has inconsistent module loader: {self._name}"
@@ -4808,6 +4817,103 @@ def _record_completed_module_load(
         _record_pyexpat_child_bindings(module)
 
 
+def _record_native_finalized_source_alias(
+    name: str,
+    module: types.ModuleType,
+    *,
+    tracked_spec: object,
+    tracked_loader: object,
+    source_loader: object | None,
+) -> bool:
+    """Bind a source compatibility shim that adopts one proven native spec.
+
+    NumPy 1.x exposes ``numpy._core._multiarray_umath`` through a Python shim
+    that deliberately copies the canonical native module's import metadata.
+    The alias remains a distinct module object.  Accept only that exact,
+    identity-bound finalization shape; arbitrary loader replacement still
+    falls through to the caller's fail-closed path.
+    """
+
+    if (
+        not isinstance(source_loader, importlib.machinery.SourceFileLoader)
+        or getattr(tracked_spec, "loader", None) is not tracked_loader
+        or source_loader.name != name
+        or getattr(tracked_spec, "origin", None) != source_loader.path
+        or sys.modules.get(name) is not module
+    ):
+        return False
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(module, "__loader__", None)
+    canonical_name = getattr(spec, "name", None)
+    if (
+        not isinstance(canonical_name, str)
+        or canonical_name == name
+        or canonical_name.partition(".")[0] != name.partition(".")[0]
+        or canonical_name.rpartition(".")[2] != name.rpartition(".")[2]
+        or not isinstance(loader, _RuntimeImportLoader)
+        or loader._kind != "native"
+        or loader._name != canonical_name
+        or not isinstance(
+            loader._delegate,
+            importlib.machinery.ExtensionFileLoader,
+        )
+        or getattr(spec, "loader", None) is not loader
+    ):
+        return False
+    canonical = sys.modules.get(canonical_name)
+    if (
+        type(canonical) is not types.ModuleType
+        or canonical is module
+        or getattr(canonical, "__spec__", None) is not spec
+        or getattr(canonical, "__loader__", None) is not loader
+    ):
+        return False
+    origin = _loaded_module_origin_path(spec)
+    if (
+        origin is None
+        or not any(
+            origin.name.endswith(suffix)
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+        )
+        or not _completed_load_matches(canonical_name, "native", origin, canonical)
+    ):
+        return False
+    captured = _capture_physical_file_identity(
+        origin,
+        label="native-finalized source alias origin",
+    )
+    native_state = _RuntimeNativeChildState(
+        name=name,
+        origin=captured,
+        parent_name=canonical_name,
+        parent_origin=origin,
+        module=module,
+        spec=spec,
+        loader=loader,
+        parent_module=canonical,
+    )
+    completed_state = _RuntimeCompletedLoadState(
+        name=name,
+        kind="native-child",
+        origin=origin,
+        module=module,
+        loader=loader,
+    )
+    key = (name, origin)
+    with _RUNTIME_PROVENANCE_LOCK:
+        observed_children = _RUNTIME_NATIVE_CHILD_MODULES.setdefault(key, [])
+        if len(observed_children) >= 64:
+            _RUNTIME_NATIVE_CHILD_MODULES_OVERFLOW.add(key)
+        else:
+            observed_children.append(native_state)
+        observed_loads = _RUNTIME_COMPLETED_LOADS.setdefault(name, [])
+        if len(observed_loads) >= 64:
+            _RUNTIME_COMPLETED_LOADS_OVERFLOW.add(name)
+        else:
+            observed_loads.append(completed_state)
+    return True
+
+
 def _record_loaded_native_module(
     name: str,
     module: types.ModuleType,
@@ -5924,13 +6030,13 @@ def _capture_runtime_package_payloads(
             )
             if _is_external_runtime_bookkeeping(portable_external):
                 continue
-            if (
-                PurePosixPath(portable_external).suffix
-                in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES
-            ):
-                explicit_paths[f"runtime-external/{portable_external}"] = (
-                    resolved_external
-                )
+            mapped_external = _external_runtime_payload_mapping(
+                portable_external,
+                distribution_name=distribution.metadata.get("Name"),
+                install_root=install_root,
+            )
+            if mapped_external is not None:
+                explicit_paths[mapped_external] = resolved_external
                 continue
             raise ValueError(
                 "installed distribution path escapes its installation root "
@@ -6410,15 +6516,19 @@ def _capture_runtime_record(
                     resolved_external,
                     install_root=install_root,
                 )
-                if not _is_external_runtime_bookkeeping(portable_path) and (
-                    PurePosixPath(portable_path).suffix
-                    not in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES
-                ):
-                    raise ValueError(
-                        "runtime package RECORD path escapes its installation "
-                        "root without a portable runtime mapping: "
-                        f"{row[0]}"
+                if not _is_external_runtime_bookkeeping(portable_path):
+                    mapped_external = _external_runtime_payload_mapping(
+                        portable_path,
+                        distribution_name=distribution.metadata.get("Name"),
+                        install_root=install_root,
                     )
+                    if mapped_external is None:
+                        raise ValueError(
+                            "runtime package RECORD path escapes its installation "
+                            "root without a portable runtime mapping: "
+                            f"{row[0]}"
+                        )
+                    portable_path = mapped_external
             key = (outside_install_root, portable_path)
             if key in seen_paths:
                 raise ValueError(
@@ -6463,6 +6573,40 @@ def _is_external_runtime_bookkeeping(record_path: str) -> bool:
         parts[: len(prefix)] == prefix
         for prefix in _RUNTIME_EXTERNAL_BOOKKEEPING_PREFIXES
     )
+
+
+def _external_runtime_payload_mapping(
+    record_path: str,
+    *,
+    distribution_name: str | None,
+    install_root: Path,
+) -> str | None:
+    """Map a narrowly contained external payload to a portable evidence name."""
+
+    portable = PurePosixPath(record_path)
+    if portable.suffix in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES:
+        return f"runtime-external/{portable.as_posix()}"
+    if not distribution_name or len(portable.parts) < 5 or portable.suffix != ".h":
+        return None
+    if (
+        install_root.name not in {"site-packages", "dist-packages"}
+        or not re.fullmatch(r"python\d+\.\d+", install_root.parent.name)
+        or portable.parts[:2] != ("include", "site")
+        or portable.parts[2] != install_root.parent.name
+    ):
+        return None
+    normalized_name = re.sub(r"[-_.]+", "-", distribution_name).lower()
+    header_owner = re.sub(r"[-_.]+", "-", portable.parts[3]).lower()
+    if header_owner != normalized_name:
+        return None
+    relative_header = PurePosixPath(*portable.parts[4:])
+    if not relative_header.parts:
+        return None
+    return PurePosixPath(
+        "runtime-include",
+        normalized_name,
+        relative_header,
+    ).as_posix()
 
 
 def _require_runtime_location(

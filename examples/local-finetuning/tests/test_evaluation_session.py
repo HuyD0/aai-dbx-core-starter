@@ -994,6 +994,62 @@ def test_external_runtime_archive_is_content_bound(
     assert before != after
 
 
+def test_external_python_header_is_contained_and_relocation_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record_path = "../../../include/site/python3.11/greenlet/greenlet.h"
+
+    def capture(prefix_name: str, content: bytes) -> tuple[object, ...]:
+        prefix = tmp_path / prefix_name
+        install_root = prefix / "lib" / "python3.11" / "site-packages"
+        distribution, _metadata, _entry_points, _payload = _write_distribution(
+            install_root,
+            name="greenlet",
+            version="3.5.4",
+        )
+        header = prefix / "include" / "site" / "python3.11" / "greenlet" / "greenlet.h"
+        header.parent.mkdir(parents=True)
+        header.write_bytes(content)
+        record = Path(distribution._path) / "RECORD"
+        with record.open("a", encoding="utf-8") as stream:
+            stream.write(f"{record_path},,\n")
+        monkeypatch.setattr(training.sys, "prefix", prefix.as_posix())
+        files, _bytecode, _roots, _imports = training._capture_runtime_package_payloads(
+            distribution,
+            install_root=install_root.resolve(strict=True),
+            inventory=training._require_distribution_file_inventory(distribution),
+        )
+        return tuple(item.evidence for item in files)
+
+    first = capture("first-environment", b"stable greenlet header\n")
+    relocated = capture("relocated-environment", b"stable greenlet header\n")
+    changed = capture("changed-environment", b"changed greenlet header\n")
+
+    assert first == relocated
+    assert first != changed
+    assert (
+        training._external_runtime_payload_mapping(
+            "include/site/python3.11/greenlet/greenlet.h",
+            distribution_name="greenlet",
+            install_root=(
+                tmp_path / "environment" / "lib" / "python3.11" / "site-packages"
+            ),
+        )
+        == "runtime-include/greenlet/greenlet.h"
+    )
+    assert (
+        training._external_runtime_payload_mapping(
+            "include/site/python3.11/unowned/greenlet.h",
+            distribution_name="greenlet",
+            install_root=(
+                tmp_path / "environment" / "lib" / "python3.11" / "site-packages"
+            ),
+        )
+        is None
+    )
+
+
 def test_editable_import_root_uses_portable_content_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1814,6 +1870,61 @@ else:
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(
+    sys.version_info[:2] != (3, 11),
+    reason="NumPy 1.x compatibility-alias regression is locked on Python 3.11",
+)
+def test_python311_numpy_native_finalized_source_alias_is_bound() -> None:
+    script = r"""
+import importlib
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+training._install_runtime_extension_finder()
+alias_name = "numpy._core._multiarray_umath"
+alias = importlib.import_module(alias_name)
+canonical_name = alias.__spec__.name
+canonical = sys.modules[canonical_name]
+assert alias is not canonical
+assert alias.__spec__ is canonical.__spec__
+assert alias.__loader__ is canonical.__loader__
+origin = training._loaded_module_origin_path(alias.__spec__)
+assert origin is not None
+assert training._completed_load_matches(canonical_name, "native", origin, canonical)
+assert training._completed_load_matches(alias_name, "native-child", origin, alias)
+
+replacement = ModuleType(alias_name)
+replacement.__spec__ = alias.__spec__
+replacement.__loader__ = alias.__loader__
+assert not training._completed_load_matches(
+    alias_name,
+    "native-child",
+    origin,
+    replacement,
+)
+
+import pandas
+import mlflow
+
+assert pandas.DataFrame({"value": [1]}).iloc[0, 0] == 1
+assert mlflow.__version__
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = (training.PROJECT_ROOT / "src").as_posix()
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=training.PROJECT_ROOT,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
