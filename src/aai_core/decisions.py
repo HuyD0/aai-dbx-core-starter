@@ -344,6 +344,13 @@ def record_decision(
     prompts, user content, or secrets bypass the record's bounded fields.
     """
 
+    # Reconstruct through validation before anything is written. The
+    # contract's guarantees — an adopt cites a passing, substantively
+    # gated result; identifiers stay bounded — hold at construction, but
+    # model_copy(update=...) skips validators, so a derived record could
+    # otherwise persist tags, metrics, and a decision.json that
+    # contradict each other.
+    record = DecisionRecord.model_validate(record.model_dump())
     resolved_name = f"decision-{record.change_id}"
     metadata = ExperimentRunMetadata(
         purpose=RunPurpose.DECISION,

@@ -136,6 +136,25 @@ def test_log_feedback_namespace_must_match_the_source_kind():
     assert captured["source"].source_id == "code:response_length_ok"
 
 
+def test_log_feedback_requires_a_string_source_id():
+    # The namespace check stringifies, but the value forwarded to
+    # AssessmentSource is the original object — so a non-string rendering
+    # as a valid identity would validate here and fail inside MLflow.
+    class Renders:
+        def __str__(self):
+            return "group:domain-reviewers"
+
+    for bad in (None, 123, Renders()):
+        with pytest.raises(TypeError, match="source_id"):
+            log_feedback(
+                trace_id="trace-1",
+                name="correct",
+                value=True,
+                source_id=bad,
+                mlflow_module=_fake_mlflow({}),
+            )
+
+
 def test_log_feedback_requires_string_identifiers():
     # str() would turn None into the nonblank literal "None" and an int
     # into a plausible id, so MLflow would be called for the wrong trace

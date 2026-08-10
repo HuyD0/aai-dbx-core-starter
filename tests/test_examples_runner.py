@@ -466,6 +466,45 @@ platform:
         "must be strings in aai-platform.yml."
     ]
 
+    # An experiment name is a path, so a placeholder component must fail
+    # preflight too — otherwise the credentialed checks run and the
+    # notebook queries the placeholder path. This holds whether the example
+    # declares platform.experiment_name in config_fields (first_trace) or
+    # leaves it to the derived check (platform_llm_operations).
+    for placeholder_path in ("/Shared/replace-with-experiment", "/Shared/unset"):
+        config.write_text(
+            f"""
+platform:
+  experiment_name: {placeholder_path}
+  team: real-team
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+            encoding="utf-8",
+        )
+        for example in ("platform_llm_operations", "first_trace"):
+            issues = runner._config_issues(runner.EXAMPLES[example])
+            assert len(issues) == 1, (example, placeholder_path)
+            assert "platform.experiment_name" in issues[0]
+
+    # A real path still passes on both routes.
+    config.write_text(
+        """
+platform:
+  experiment_name: /Shared/earnings-summary
+  team: real-team
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    for example in ("platform_llm_operations", "first_trace"):
+        assert runner._config_issues(runner.EXAMPLES[example]) == []
+
 
 def test_config_preflight_rejects_malformed_qualifiers(runner, tmp_path, monkeypatch):
     # The SDK helpers reject dotted or invalid-character qualifiers; the

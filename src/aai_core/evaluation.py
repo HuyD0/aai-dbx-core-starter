@@ -38,6 +38,18 @@ class MetricRule(ContractModel):
     required: float | None = None
     max_regression: float | None = Field(default=None, ge=0.0)
 
+    @field_validator("metric")
+    @classmethod
+    def normalize_metric_name(cls, value: str) -> str:
+        # Metric names are matched exactly against the evaluation result,
+        # so "correctness/mean " would pass validation and only surface as
+        # "metric is missing" after the judge-backed evaluate() call has
+        # already been paid for.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric must name a metric, not whitespace")
+        return trimmed
+
     @field_validator("direction", mode="before")
     @classmethod
     def parse_direction(cls, value: Any) -> MetricDirection:
@@ -70,6 +82,18 @@ class GatePolicy(ContractModel):
     fail_on_scorer_errors: bool = True
     scorer_error_metric_suffix: str = Field(default="/error_count", min_length=1)
     allow_missing_regression_baseline: bool = False
+
+    @field_validator("cost_coverage_metric", "scorer_error_metric_suffix")
+    @classmethod
+    def normalize_metric_selector(cls, value: str) -> str:
+        # Both select metrics by exact match: an untrimmed suffix makes
+        # endswith() miss every "<scorer>/error_count", silently dropping
+        # scorer health so a passing quality rule can authorize an adopt,
+        # and an untrimmed coverage metric reports real coverage unknown.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric selectors must name a metric, not whitespace")
+        return trimmed
 
 
 class GateFailure(ContractModel):
@@ -452,8 +476,16 @@ def log_gate_evidence(
     """Persist gate metrics and the ``aai.gate_passed`` tag on the active run.
 
     Call inside a governed run. Returns the tags it set.
+
+    The gate is reconstructed through validation first. ``GateResult``
+    promises that evidence cannot claim a pass its own metrics contradict,
+    but ``model_copy(update=...)`` skips validators — so a derived result
+    can report ``passed`` while its failures no longer match its policy.
+    This is the boundary release automation reads, so the promise is
+    re-established here rather than assumed.
     """
 
+    gate = GateResult.model_validate(gate.model_dump())
     mlflow = _mlflow(mlflow_module)
     if gate.metrics:
         mlflow.log_metrics(dict(gate.metrics))
@@ -499,6 +531,14 @@ def get_or_create_evaluation_dataset(
     The native dataset object is returned unchanged.
     """
 
+    # Checked before .strip(): a non-string would otherwise raise an
+    # incidental AttributeError instead of the documented contract error,
+    # and an object implementing strip() could return a valid-looking name
+    # and reach the registry.
+    if not isinstance(name, str):
+        raise TypeError(
+            f"name must be a string logical dataset name; got {type(name).__name__}"
+        )
     logical_name = name.strip()
     if not fullmatch(_NAME_COMPONENT, logical_name) or _is_placeholder(logical_name):
         raise ValueError(
@@ -576,6 +616,21 @@ def _is_placeholder(value: str) -> bool:
         or lowered.startswith("replace-with-")
         or "<" in lowered
         or ">" in lowered
+    )
+
+
+def _is_placeholder_path(value: str) -> bool:
+    """Placeholder test for slash-separated paths such as experiment names.
+
+    ``_is_placeholder`` matches the bare markers exactly and anchors
+    ``replace-with-`` at the start, so a placeholder sitting inside a path
+    (``/Shared/replace-with-experiment``, ``/Shared/unset``) slips past it
+    while looking configured. Experiment names are the one governed value
+    that arrives as a path, so they are tested component by component.
+    """
+
+    return _is_placeholder(value) or any(
+        _is_placeholder(component) for component in str(value).split("/") if component
     )
 
 

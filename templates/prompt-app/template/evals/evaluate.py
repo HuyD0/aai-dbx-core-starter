@@ -66,6 +66,10 @@ def main() -> None:
     )
     parser.add_argument("--update-baseline", action="store_true")
     args = parser.parse_args()
+    # Registry versions start at 1, so a typo must fail here rather than
+    # during the credentialed load inside Assistant.
+    if args.prompt_version is not None and args.prompt_version < 1:
+        parser.error("--prompt-version must be a positive integer")
 
     context = bootstrap(ROOT / "aai-platform.yml")
     judge_model = judge_model_uri(context.settings)

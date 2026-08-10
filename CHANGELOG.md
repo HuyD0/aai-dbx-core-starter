@@ -184,8 +184,11 @@ All notable changes to `aai-core` are documented here.
   prompt-registry preflight applies the same qualifier validation as the
   SDK helpers (placeholder vocabulary, dotted values, and invalid
   identifier characters alike), and an
-  experiment name that is a placeholder — explicit, or derived from
-  placeholder team/project/application components — reports skip instead
+  experiment name that is a placeholder — explicit, derived from
+  placeholder team/project/application components, or carrying a
+  placeholder path component such as `/Shared/replace-with-experiment`
+  (the bare markers match exactly and `replace-with-` is anchored, so a
+  whole-string test misses them mid-path) — reports skip instead
   of passing the literal through to the registry.
 - Aligned the executable examples' release decision with the documented
   vocabulary: `aai.decision` and `LIFECYCLE_RESULT` now record

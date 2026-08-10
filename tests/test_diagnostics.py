@@ -81,6 +81,36 @@ def test_doctor_treats_placeholder_experiment_names_as_unconfigured(tmp_path):
     assert "platform.experiment_name" in by_name["lifecycle:experiment"].detail
 
 
+def test_doctor_treats_placeholder_path_components_as_unconfigured(tmp_path):
+    # An experiment name is a path: the bare markers match exactly and
+    # replace-with- is anchored at the start, so a placeholder sitting
+    # inside the path would otherwise be reported ready and queried.
+    for placeholder_path in (
+        "/Shared/replace-with-experiment",
+        "/Shared/unset",
+        "/Shared/team/todo",
+    ):
+        config = tmp_path / "aai-platform.yml"
+        config.write_text(
+            VALID_CONFIG + f"  experiment_name: {placeholder_path}\n",
+            encoding="utf-8",
+        )
+
+        checks = run_doctor(config_path=config)
+
+        by_name = {check.name: check for check in checks}
+        assert by_name["lifecycle:experiment"].status == "skip", placeholder_path
+
+    # A real path with no placeholder component still passes.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        VALID_CONFIG + "  experiment_name: /Shared/earnings-summary\n",
+        encoding="utf-8",
+    )
+    by_name = {check.name: check for check in run_doctor(config_path=config)}
+    assert by_name["lifecycle:experiment"].status == "pass"
+
+
 def test_doctor_treats_derived_names_with_placeholder_components_as_unconfigured(
     tmp_path,
 ):
