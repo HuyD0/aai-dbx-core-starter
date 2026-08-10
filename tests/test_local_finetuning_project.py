@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from aai_local_finetuning import training
@@ -28,18 +29,29 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "examples" / "local-finetuning"
 
 
-@pytest.fixture
-def normalize_runtime_evidence_test_harness(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exclude pytest-only import state from strict application evidence."""
-
-    pytest_only_roots = {
+def _runtime_evidence_pytest_only_roots() -> set[Path]:
+    roots = {
         ROOT,
         ROOT / "tests",
         ROOT / "src" / "platform_app",
         ROOT / "examples" / "agentic-ops-rag" / "src",
     }
+    setuptools_module = sys.modules.get("setuptools")
+    setuptools_file = getattr(setuptools_module, "__file__", None)
+    if isinstance(setuptools_file, str):
+        package_root = Path(setuptools_file).resolve(strict=True).parent
+        vendor_root = package_root / "_vendor"
+        if package_root.name == "setuptools" and vendor_root.is_dir():
+            roots.add(vendor_root.resolve(strict=True))
+    return roots
+
+
+def _normalize_runtime_evidence_test_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exclude pytest-only import state from strict application evidence."""
+
+    pytest_only_roots = _runtime_evidence_pytest_only_roots()
 
     def resolved(entry: str) -> Path:
         candidate = Path(entry or os.getcwd())
@@ -47,16 +59,42 @@ def normalize_runtime_evidence_test_harness(
             candidate = Path.cwd() / candidate
         return candidate.resolve(strict=False)
 
+    def uses_pytest_only_root(module: object) -> bool:
+        spec = getattr(module, "__spec__", None)
+        origin = getattr(spec, "origin", None)
+        if isinstance(origin, str) and origin not in {"built-in", "frozen"}:
+            return any(
+                resolved(origin).is_relative_to(root) for root in pytest_only_roots
+            )
+        locations = getattr(spec, "submodule_search_locations", None)
+        return (
+            origin is None
+            and locations is not None
+            and any(
+                resolved(location).is_relative_to(root)
+                for location in locations
+                for root in pytest_only_roots
+            )
+        )
+
     monkeypatch.setattr(
         sys,
         "path",
         [entry for entry in sys.path if resolved(entry) not in pytest_only_roots],
     )
     loaded_modules = training._runtime_loaded_modules
+    pytest_only_module_prefixes = {
+        name for name, module in loaded_modules() if uses_pytest_only_root(module)
+    }
 
     def without_test_modules() -> tuple[tuple[str, object], ...]:
         selected: list[tuple[str, object]] = []
         for name, module in loaded_modules():
+            if any(
+                name == prefix or name.startswith(prefix + ".")
+                for prefix in pytest_only_module_prefixes
+            ):
+                continue
             if (
                 training._runtime_audit.was_preexisting(name, module)
                 and name != "_virtualenv"
@@ -77,6 +115,64 @@ def normalize_runtime_evidence_test_harness(
         return tuple(selected)
 
     monkeypatch.setattr(training, "_runtime_loaded_modules", without_test_modules)
+
+
+@pytest.fixture
+def normalize_runtime_evidence_test_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _normalize_runtime_evidence_test_harness(monkeypatch)
+
+
+def test_runtime_evidence_harness_excludes_loaded_setuptools_vendor_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = tmp_path / "site-packages" / "setuptools"
+    vendor_root = package_root / "_vendor"
+    vendor_root.mkdir(parents=True)
+    setuptools_file = package_root / "__init__.py"
+    setuptools_file.write_text("", encoding="utf-8")
+    setuptools_module = ModuleType("setuptools")
+    setuptools_module.__file__ = setuptools_file.as_posix()
+    monkeypatch.setitem(sys.modules, "setuptools", setuptools_module)
+
+    zipp_root = vendor_root / "zipp"
+    zipp_root.mkdir()
+    zipp_file = zipp_root / "__init__.py"
+    zipp_file.write_text("", encoding="utf-8")
+    zipp = ModuleType("zipp")
+    zipp.__spec__ = SimpleNamespace(
+        loader=None,
+        origin=zipp_file.as_posix(),
+        submodule_search_locations=(zipp_root.as_posix(),),
+    )
+    stdlib_alias = ModuleType("zipp.compat.overlay.zipfile")
+    stdlib_alias.__spec__ = SimpleNamespace(
+        loader=None,
+        origin=os.__file__,
+        submodule_search_locations=None,
+    )
+    jaraco_root = vendor_root / "jaraco"
+    jaraco_root.mkdir()
+    jaraco = ModuleType("jaraco")
+    jaraco.__spec__ = SimpleNamespace(
+        loader=None,
+        origin=None,
+        submodule_search_locations=(jaraco_root.as_posix(),),
+    )
+    loaded = (
+        ("zipp", zipp),
+        ("zipp.compat.overlay.zipfile", stdlib_alias),
+        ("jaraco", jaraco),
+    )
+    monkeypatch.setattr(training, "_runtime_loaded_modules", lambda: loaded)
+    monkeypatch.setattr(sys, "path", [*sys.path, vendor_root.as_posix()])
+
+    _normalize_runtime_evidence_test_harness(monkeypatch)
+
+    assert vendor_root.as_posix() not in sys.path
+    assert training._runtime_loaded_modules() == ()
 
 
 def test_local_finetuning_project_has_isolated_locked_contract():
