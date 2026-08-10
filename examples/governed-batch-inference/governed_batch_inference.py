@@ -3071,8 +3071,65 @@ def column_tag_statements(spec: BatchInferenceSpec, run_id: str) -> tuple[str, .
     return tuple(statements)
 
 
+#: Columns of the run-metadata table, in order. One definition so the
+#: DDL and the migration cannot disagree about what the table holds.
+RUN_METADATA_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("run_id", "STRING"),
+    ("spec_name", "STRING"),
+    ("spec_digest", "STRING"),
+    ("spec_yaml", "STRING"),
+    ("use_tier", "INT"),
+    ("endpoint", "STRING"),
+    ("model_version", "STRING"),
+    ("prompt_version", "STRING"),
+    ("gate_decision", "STRING"),
+    ("approved_by", "STRING"),
+    ("projected_cost_cad", "DOUBLE"),
+    ("source_table", "STRING"),
+    ("source_table_version", "BIGINT"),
+    ("target_table", "STRING"),
+    ("target_table_version", "BIGINT"),
+    ("executed_at", "TIMESTAMP"),
+)
+
+
+def run_metadata_migration_sql(
+    spec: BatchInferenceSpec, existing_columns: Sequence[str]
+) -> tuple[str, ...]:
+    """Additive migration for a run-metadata table that predates a column.
+
+    ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already
+    exists, so adding a column to the DDL silently breaks every existing
+    installation: the reservation and conflict queries reference it and
+    fail on an unresolved column before anything runs. The target table
+    has had this treatment since early on; the metadata table was given
+    new columns without it, which is the whole defect.
+
+    Returns the statements needed, empty when the table is current or
+    absent. Additive only — a column this pipeline no longer writes is
+    left alone, because dropping it would destroy recorded provenance.
+    """
+    present = {column.casefold() for column in existing_columns}
+    if not present:  # table does not exist yet; the DDL covers it
+        return ()
+    missing = [
+        f"{name} {sql_type}"
+        for name, sql_type in RUN_METADATA_COLUMNS
+        if name.casefold() not in present
+    ]
+    if not missing:
+        return ()
+    return (
+        f"ALTER TABLE {spec.run_metadata_table} ADD COLUMNS ({', '.join(missing)})",
+    )
+
+
 def create_run_metadata_table_sql(spec: BatchInferenceSpec) -> str:
-    """Layer 3: the run record everything joins back to by ``run_id``."""
+    """Layer 3: the run record everything joins back to by ``run_id``.
+
+    Pair this with ``run_metadata_migration_sql`` for tables that already
+    exist: this statement will not alter one.
+    """
     return f"""CREATE TABLE IF NOT EXISTS {spec.run_metadata_table} (
   run_id STRING,
   spec_name STRING,
@@ -3085,6 +3142,8 @@ def create_run_metadata_table_sql(spec: BatchInferenceSpec) -> str:
   gate_decision STRING,
   approved_by STRING,
   projected_cost_cad DOUBLE,
+  source_table STRING,
+  source_table_version BIGINT,
   target_table STRING,
   target_table_version BIGINT,
   executed_at TIMESTAMP
@@ -3141,7 +3200,7 @@ def run_metadata_reserve_sql(
     a record to point at. The decision is stored as ``not_required``,
     which is the truth rather than a fabricated adoption.
     """
-    _require_authorised_write(spec, report, estimate, preflight)
+    snapshot = _require_authorised_write(spec, report, estimate, preflight)
     decision = report.decision.value if report else "not_required"
     approved = (
         sql_string_literal(report.approved_by)
@@ -3162,6 +3221,8 @@ USING (
     {sql_string_literal(decision)} AS gate_decision,
     {approved} AS approved_by,
     {float(estimate.projected_cost_cad)} AS projected_cost_cad,
+    {sql_string_literal(spec.source_table)} AS source_table,
+    {int(snapshot.version)} AS source_table_version,
     {sql_string_literal(spec.target_table)} AS target_table,
     CAST(NULL AS BIGINT) AS target_table_version,
     current_timestamp() AS executed_at
@@ -3194,6 +3255,7 @@ def run_metadata_conflict_sql(
     spec: BatchInferenceSpec,
     *,
     run_id: str,
+    source_snapshot: SourceSnapshot | None = None,
     target_table_version: int | None = None,
 ) -> str:
     """Find an existing run record this run would have contradicted.
@@ -3206,6 +3268,13 @@ def run_metadata_conflict_sql(
     A still-NULL ``target_table_version`` is not a conflict: that is this
     run's own reserved record, waiting to be finalised.
 
+    Pass ``source_snapshot`` before execution. Identity alone accepts a
+    run id reused for a *later snapshot of the same unchanged spec* — a
+    nightly job is exactly that — so the reservation would stay tied to
+    the old cycle while the new MERGE landed rows carrying its id, and
+    the clash would surface only after the production write. The source
+    version is knowable before anything is spent, which is the point.
+
     Omit ``target_table_version`` before execution, when this run has not
     produced one yet. Passing a placeholder there compared every real
     version against it and flagged a conflict on any same-id retry that
@@ -3213,6 +3282,12 @@ def run_metadata_conflict_sql(
     idempotent retry into a refusal. Identity is the only thing knowable
     that early, and identity is what makes a reuse a conflict.
     """
+    snapshot_clash = (
+        ""
+        if source_snapshot is None
+        else f"""
+    OR NOT (source_table_version <=> {int(source_snapshot.version)})"""
+    )
     version_clash = (
         ""
         if target_table_version is None
@@ -3222,11 +3297,12 @@ def run_metadata_conflict_sql(
       AND target_table_version <> {int(target_table_version)}
     )"""
     )
+    digest_clash = f"NOT (spec_digest <=> {sql_string_literal(spec.spec_digest)})"
     return f"""SELECT run_id, spec_digest, target_table_version
 FROM {spec.run_metadata_table}
 WHERE run_id = {sql_string_literal(run_id)}
   AND (
-    NOT (spec_digest <=> {sql_string_literal(spec.spec_digest)}){version_clash}
+    {digest_clash}{snapshot_clash}{version_clash}
   )"""
 
 
@@ -3288,7 +3364,6 @@ def metric_key(field: str, stratum: str, metric: str) -> str:
 def log_gate_evidence(
     spec: BatchInferenceSpec,
     estimate: CostEstimate,
-    allocation: Mapping[str, int],
     report: GateReport,
 ) -> None:
     """Log spec, sample, per-field per-stratum intervals, and the decision
@@ -3308,8 +3383,15 @@ def log_gate_evidence(
     # The durable evaluation record is as much a boundary as execution
     # is: a forged adoption refused by `require_executable` was still
     # being written here, leaving MLflow claiming an adoption the gate
-    # would reject. Revalidate, then bind the scores to this spec.
-    revalidated(report, EvidenceMismatch)
+    # would reject.
+    #
+    # Every artifact, not just the report. Naming the round trip and
+    # applying it to reports was supposed to end this class of defect,
+    # and the estimate at this same boundary was missed in that very
+    # change — so the loop runs over the arguments rather than a list of
+    # names someone has to remember to extend.
+    for artifact in (report, estimate):
+        revalidated(artifact, EvidenceMismatch)
     require_matching_evidence(spec, report.scores)
     # The report is what the decision came from, so it has to belong to
     # the release being recorded. Checking only the snapshot let
@@ -3372,7 +3454,17 @@ def log_gate_evidence(
         }
     )
     mlflow.log_text(spec.to_yaml(), "governed_batch_inference/spec.yaml")
-    mlflow.log_dict(dict(allocation), "governed_batch_inference/sample_allocation.json")
+    # Derived from the evidence rather than passed alongside it. A stale
+    # allocation could claim 20 documents were sampled while the Wilson
+    # intervals logged beside it were computed from 200 — the persisted
+    # account of the experiment contradicting its own numbers. This is
+    # the realised sample, which is what the evidence actually rests on.
+    realised = {
+        score.stratum: score.n_rows
+        for score in report.scores
+        if score.stratum != WEIGHTED
+    }
+    mlflow.log_dict(realised, "governed_batch_inference/sample_allocation.json")
     mlflow.log_metric("projected_cost_cad", estimate.projected_cost_cad)
     for score in report.scores:
         for metric, interval in (
