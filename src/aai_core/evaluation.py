@@ -38,6 +38,18 @@ class MetricRule(ContractModel):
     required: float | None = None
     max_regression: float | None = Field(default=None, ge=0.0)
 
+    @field_validator("metric")
+    @classmethod
+    def normalize_metric_name(cls, value: str) -> str:
+        # Metric names are matched exactly against the evaluation result,
+        # so "correctness/mean " would pass validation and only surface as
+        # "metric is missing" after the judge-backed evaluate() call has
+        # already been paid for.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric must name a metric, not whitespace")
+        return trimmed
+
     @field_validator("direction", mode="before")
     @classmethod
     def parse_direction(cls, value: Any) -> MetricDirection:

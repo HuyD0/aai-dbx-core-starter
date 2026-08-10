@@ -296,6 +296,23 @@ def test_non_numeric_and_non_finite_native_metrics_are_not_gate_evidence():
     assert result.failures[0].reason == "metric is missing"
 
 
+def test_metric_names_are_trimmed_and_must_name_something():
+    # Metric names match the evaluation result exactly, so trailing
+    # whitespace would only surface as "metric is missing" after the
+    # judge-backed evaluate() call has already been paid for.
+    rule = MetricRule(
+        metric="  correctness/mean ",
+        direction=MetricDirection.HIGHER,
+        required=0.8,
+    )
+    assert rule.metric == "correctness/mean"
+    assert apply_gate(
+        {"correctness/mean": 0.9}, policy=GatePolicy(rules=(rule,))
+    ).passed
+    with pytest.raises(ValidationError, match="whitespace"):
+        MetricRule(metric="   ", direction=MetricDirection.HIGHER, required=0.8)
+
+
 def test_gate_contracts_are_strict_frozen_and_serializable():
     with pytest.raises(ValidationError):
         GatePolicy(minimum_cost_coverage="1.0")

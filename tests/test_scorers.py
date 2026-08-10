@@ -60,6 +60,15 @@ def test_refusal_compliance_matches_expectation_direction():
     assert refusal_compliance("I cannot help with that.", EXPECT_POLICY) == 0.0
 
 
+def test_reference_scorers_treat_malformed_expectations_as_defects():
+    # A truthy non-mapping has no .get: it is the same dataset defect as a
+    # missing mapping, not a scorer crash.
+    for malformed in ([], ["expected_response"], "expected_response", 7, object()):
+        assert keyword_coverage("Any answer.", malformed) == 0.0
+        assert refusal_compliance("I cannot help.", malformed) == 0.0
+        assert score_all("Any answer.", malformed)["refusal_compliance"] == 0.0
+
+
 def test_keyword_coverage_fails_missing_outputs():
     # An absent answer covers nothing: a keyword-free expectation such as
     # "No." must not take the nothing-to-cover branch, and str(None) must
@@ -182,10 +191,17 @@ def test_registered_bodies_stay_equivalent_to_the_pure_scorers():
         (None, EXPECT_POLICY),
         ("   ", EXPECT_POLICY),
         ("", {"expected_response": "No."}),
+        # Malformed expectations must score identically in both forms.
+        ("Any answer.", []),
+        ("Any answer.", "expected_response"),
     ]
     for pure, registered in _REGISTERED_BODIES.items():
         for outputs, expectations in cases:
-            copied = dict(expectations) if expectations is not None else None
+            # Copy real mappings so neither form can mutate the other's
+            # input; pass anything else through unchanged.
+            copied = (
+                dict(expectations) if isinstance(expectations, dict) else expectations
+            )
             assert registered(outputs, expectations) == pure(
                 outputs, copied
             ), f"{registered.__name__} drifted from {pure.__name__}"

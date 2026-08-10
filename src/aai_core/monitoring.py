@@ -85,13 +85,19 @@ def log_feedback(
             raise ValueError("span_id must not be blank when provided")
     if not isinstance(source_kind, FeedbackSourceKind):
         source_kind = FeedbackSourceKind(str(source_kind).strip().lower())
-    if not str(source_id).strip():
+    # The namespace check below stringifies, but the value forwarded to
+    # AssessmentSource is the original object — so a non-string whose
+    # str() renders "group:reviewers" would validate and then fail inside
+    # MLflow's serialization instead of recording feedback.
+    if not isinstance(source_id, str):
+        raise TypeError(f"source_id must be a string; got {type(source_id).__name__}")
+    if not source_id.strip():
         raise ValueError(
             "source_id must not be blank: governed feedback always carries "
             "a non-personal provenance identity such as 'group:domain-reviewers'"
         )
     namespace = _SOURCE_NAMESPACES[source_kind]
-    prefix, separator, identifier = str(source_id).partition(":")
+    prefix, separator, identifier = source_id.partition(":")
     if (
         not separator
         or prefix != namespace
