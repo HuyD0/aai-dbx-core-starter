@@ -559,6 +559,21 @@ def _is_placeholder(value: str) -> bool:
     )
 
 
+def _is_placeholder_path(value: str) -> bool:
+    """Placeholder test for slash-separated paths such as experiment names.
+
+    ``_is_placeholder`` matches the bare markers exactly and anchors
+    ``replace-with-`` at the start, so a placeholder sitting inside a path
+    (``/Shared/replace-with-experiment``, ``/Shared/unset``) slips past it
+    while looking configured. Experiment names are the one governed value
+    that arrives as a path, so they are tested component by component.
+    """
+
+    return _is_placeholder(value) or any(
+        _is_placeholder(component) for component in str(value).split("/") if component
+    )
+
+
 def _dataset_qualifier(role: str, value: str) -> str:
     """Fail locally on unconfigured qualifiers instead of querying the cloud."""
 

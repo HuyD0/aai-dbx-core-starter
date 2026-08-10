@@ -10,7 +10,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from re import fullmatch
 
-from aai_core.evaluation import _NAME_COMPONENT, _is_placeholder, judge_model_uri
+from aai_core.evaluation import (
+    _NAME_COMPONENT,
+    _is_placeholder,
+    _is_placeholder_path,
+    judge_model_uri,
+)
 from aai_core.identity import identity_summary
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings
@@ -79,7 +84,7 @@ def _lifecycle_checks(settings: PlatformSettings) -> list[DoctorCheck]:
     experiment = settings.effective_experiment_name
     resource = settings.resource
     derived = settings.experiment_name in {"", "unset"}
-    unconfigured = _is_placeholder(experiment) or (
+    unconfigured = _is_placeholder_path(experiment) or (
         derived
         and any(
             _is_placeholder(component)

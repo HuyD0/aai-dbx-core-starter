@@ -354,7 +354,15 @@ def _effective_experiment_issue(document: dict[str, Any]) -> str | None:
                 "`platform.experiment_name` must be a string experiment path "
                 f"(current value: {explicit!r})."
             )
-        if _is_placeholder(explicit):
+        # An experiment name is a path, and _is_placeholder matches the bare
+        # markers exactly with replace-with- anchored at the start, so a
+        # placeholder component (/Shared/replace-with-experiment,
+        # /Shared/unset) would otherwise read as configured and let the
+        # credentialed preflight query it. Mirrors
+        # aai_core.evaluation._is_placeholder_path.
+        if _is_placeholder(explicit) or any(
+            _is_placeholder(part) for part in explicit.split("/") if part
+        ):
             return (
                 "Configure `platform.experiment_name` in aai-platform.yml "
                 f"(current value: {explicit!r})."
