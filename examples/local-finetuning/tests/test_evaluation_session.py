@@ -1893,6 +1893,17 @@ assert ("charset_normalizer.md", path) in training._RUNTIME_NATIVE_CHILD_MODULES
 training.recheck_execution_snapshot(snapshot)
 
 native = charset_normalizer.md
+unbound_parent_child = ModuleType("charset_normalizer.md")
+charset_normalizer.md = unbound_parent_child
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "native-created module identity" in str(error.__cause__)
+else:
+    raise AssertionError("cached native parent binding drift was accepted")
+charset_normalizer.md = native
+training.recheck_execution_snapshot(snapshot)
+
 replacement = ModuleType("charset_normalizer.md")
 replacement.__spec__ = native.__spec__
 replacement.__loader__ = native.__loader__
@@ -1925,9 +1936,29 @@ from aai_local_finetuning import training
 
 snapshot = training.capture_execution_snapshot()
 import PIL.ImageColor
+import pyexpat
 import xml.parsers.expat
 for name in ("xml.parsers.expat.errors", "xml.parsers.expat.model"):
     assert sys.modules[name] is getattr(xml.parsers.expat, name.rpartition(".")[2])
+training.recheck_execution_snapshot(snapshot)
+
+native_errors = sys.modules["pyexpat.errors"]
+replacement_errors = ModuleType("pyexpat.errors")
+replacement_errors.__spec__ = None
+pyexpat.errors = replacement_errors
+xml.parsers.expat.errors = replacement_errors
+sys.modules["pyexpat.errors"] = replacement_errors
+sys.modules["xml.parsers.expat.errors"] = replacement_errors
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "pyexpat alias lacks canonical provenance" in str(error.__cause__)
+else:
+    raise AssertionError("replacement pyexpat alias was accepted")
+pyexpat.errors = native_errors
+xml.parsers.expat.errors = native_errors
+sys.modules["pyexpat.errors"] = native_errors
+sys.modules["xml.parsers.expat.errors"] = native_errors
 training.recheck_execution_snapshot(snapshot)
 
 native = sys.modules["PIL.ImageColor"]
@@ -1946,6 +1977,180 @@ except RuntimeError as error:
     )
 else:
     raise AssertionError("replacement source module was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("claim_kind", ("built-in", "frozen"))
+def test_pre_audit_interpreter_real_name_claims_fail_closed(
+    claim_kind: str,
+) -> None:
+    script = r"""
+import importlib.machinery
+import sys
+from types import ModuleType
+
+kind = sys.argv[1]
+if kind == "built-in":
+    target = "_tracemalloc"
+    assert target not in sys.modules
+    donor_spec = importlib.machinery.ModuleSpec(
+        "time",
+        importlib.machinery.BuiltinImporter,
+        origin="built-in",
+    )
+    claimed = importlib.machinery.BuiltinImporter.create_module(donor_spec)
+    claimed.__name__ = target
+    loader = importlib.machinery.BuiltinImporter
+    origin = "built-in"
+else:
+    target = "__hello__"
+    assert target not in sys.modules
+    claimed = ModuleType(target)
+    code = importlib.machinery.FrozenImporter.get_code(target)
+    assert code is not None
+    exec(code, vars(claimed))
+    loader = importlib.machinery.FrozenImporter
+    origin = "frozen"
+claimed.__spec__ = importlib.machinery.ModuleSpec(
+    target,
+    loader,
+    origin=origin,
+)
+claimed.__loader__ = loader
+sys.modules[target] = claimed
+
+from aai_local_finetuning import training
+
+try:
+    training.capture_execution_snapshot()
+except RuntimeError as error:
+    assert f"loaded interpreter module lacks provenance: {target}" in str(error)
+else:
+    raise AssertionError(f"pre-audit {origin} real-name claim was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, claim_kind],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_lazy_python_runtime_source_and_native_identity_are_bound() -> None:
+    script = r"""
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+assert "wave" not in sys.modules
+assert "_ctypes_test" not in sys.modules
+snapshot = training.capture_execution_snapshot()
+import wave
+import _ctypes_test
+training.recheck_execution_snapshot(snapshot)
+
+for name in ("wave", "_ctypes_test"):
+    native = sys.modules[name]
+    replacement = ModuleType(name)
+    replacement.__spec__ = native.__spec__
+    replacement.__loader__ = native.__loader__
+    replacement.__package__ = native.__package__
+    sys.modules[name] = replacement
+    try:
+        training.recheck_execution_snapshot(snapshot)
+    except RuntimeError as error:
+        assert "identity lacks completed import provenance" in str(error.__cause__)
+    else:
+        raise AssertionError(f"replacement Python runtime module was accepted: {name}")
+    sys.modules[name] = native
+    training.recheck_execution_snapshot(snapshot)
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_real_scipy_spec_less_native_children_bind_parent_provenance() -> None:
+    script = r"""
+import sys
+from types import ModuleType
+from aai_local_finetuning import training
+
+assert "scipy.optimize._highspy._core" not in sys.modules
+initial_cython_names = {
+    name for name in sys.modules if name.startswith("_cython_")
+}
+snapshot = training.capture_execution_snapshot()
+import scipy.optimize
+
+parent_name = "scipy.optimize._highspy._core"
+parent = sys.modules[parent_name]
+child_names = (
+    f"{parent_name}.cb",
+    f"{parent_name}.simplex_constants",
+)
+for name in child_names:
+    child = sys.modules[name]
+    assert child.__spec__ is None
+    assert child.__file__ == parent.__file__
+    assert getattr(parent, name.rpartition(".")[2]) is child
+cython_names = sorted(
+    name
+    for name in sys.modules
+    if name.startswith("_cython_") and name not in initial_cython_names
+)
+assert cython_names
+for name in cython_names:
+    states = training._RUNTIME_NATIVE_SPECLESS_CHILD_MODULES.get(name, ())
+    assert len(states) == 1
+    assert states[0].module is sys.modules[name]
+training.recheck_execution_snapshot(snapshot)
+
+cython_name = cython_names[0]
+native_cython = sys.modules[cython_name]
+replacement_cython = ModuleType(cython_name)
+replacement_cython.__spec__ = None
+sys.modules[cython_name] = replacement_cython
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "spec-less child lacks completed parent provenance" in str(error.__cause__)
+else:
+    raise AssertionError("replacement Cython runtime child was accepted")
+sys.modules[cython_name] = native_cython
+training.recheck_execution_snapshot(snapshot)
+
+name = child_names[-1]
+native = sys.modules[name]
+replacement = ModuleType(name)
+replacement.__spec__ = None
+replacement.__file__ = native.__file__
+setattr(parent, name.rpartition(".")[2], replacement)
+sys.modules[name] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "spec-less child lacks completed parent provenance" in str(error.__cause__)
+else:
+    raise AssertionError("replacement highspy native child was accepted")
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],

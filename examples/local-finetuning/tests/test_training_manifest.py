@@ -300,7 +300,7 @@ def test_success_manifest_binds_all_model_data_and_adapter_bytes(
     assert _verify(inputs) == manifest
 
 
-def test_training_child_ignores_mutable_python_import_overrides(
+def test_training_child_ignores_mutable_runtime_environment_overrides(
     training_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -312,7 +312,19 @@ def test_training_child_ignores_mutable_python_import_overrides(
         "raise RuntimeError('unbound mlx_lm executed')\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("PYTHONPATH", malicious_root.as_posix())
+    injected_environment = {
+        "PYTHONPATH": malicious_root.as_posix(),
+        "PYTHONHOME": (malicious_root / "python-home").as_posix(),
+        "DYLD_INSERT_LIBRARIES": (malicious_root / "inject.dylib").as_posix(),
+        "DYLD_LIBRARY_PATH": (malicious_root / "dyld-libs").as_posix(),
+        "LD_PRELOAD": (malicious_root / "inject.so").as_posix(),
+        "LD_LIBRARY_PATH": (malicious_root / "ld-libs").as_posix(),
+        "LD_AUDIT": (malicious_root / "audit.so").as_posix(),
+        "MLX_METAL_CACHE_DIR": (malicious_root / "mlx-cache").as_posix(),
+        "HF_HOME": (malicious_root / "huggingface").as_posix(),
+    }
+    for name, value in injected_environment.items():
+        monkeypatch.setenv(name, value)
 
     def isolated_run(
         command: list[str],
@@ -320,11 +332,13 @@ def test_training_child_ignores_mutable_python_import_overrides(
     ) -> subprocess.CompletedProcess[str]:
         environment = kwargs.get("env")
         assert isinstance(environment, dict)
-        assert not any(name.upper().startswith("PYTHON") for name in environment)
+        assert environment == {"PATH": os.defpath}
+        assert injected_environment.keys().isdisjoint(environment)
         assert command[:5] == [sys.executable, "-I", "-B", "-m", "mlx_lm"]
-        original = os.environ["PYTHONPATH"]
-        os.environ["PYTHONPATH"] = (malicious_root / "replacement").as_posix()
-        os.environ["PYTHONPATH"] = original
+        originals = {name: os.environ[name] for name in injected_environment}
+        for name in injected_environment:
+            os.environ[name] = (malicious_root / f"replacement-{name}").as_posix()
+        os.environ.update(originals)
         staging = Path(command[command.index("--adapter-path") + 1])
         (staging / "adapters.safetensors").write_bytes(b"isolated-adapter")
         (staging / "adapter_config.json").write_text('{"rank":8}\n')

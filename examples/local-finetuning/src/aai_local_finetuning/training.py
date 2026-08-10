@@ -5,6 +5,7 @@ from __future__ import annotations
 import _imp
 import ast
 import csv
+import ctypes
 import hashlib
 import importlib.abc
 import importlib.machinery
@@ -654,6 +655,8 @@ class _RuntimeNativeSpecLessChildState:
     name: str
     parent_name: str
     parent_origin: Path
+    binding_name: str | None
+    origin: Path | None
     module: object = field(repr=False, compare=False)
     parent_module: object = field(repr=False, compare=False)
 
@@ -1005,6 +1008,8 @@ _RUNTIME_COMPLETED_LOADS: dict[str, list[_RuntimeCompletedLoadState]] = {}
 _RUNTIME_COMPLETED_LOADS_OVERFLOW: set[str] = set()
 _RUNTIME_MLX_CHILD_BINDINGS: dict[str, list[tuple[object, object]]] = {}
 _RUNTIME_MLX_CHILD_BINDINGS_OVERFLOW: set[str] = set()
+_RUNTIME_PYEXPAT_CHILD_BINDINGS: dict[str, list[tuple[object, object]]] = {}
+_RUNTIME_PYEXPAT_CHILD_BINDINGS_OVERFLOW: set[str] = set()
 _RUNTIME_INITIAL_MODULE_FILES: dict[
     tuple[str, Path],
     _CapturedPhysicalFile,
@@ -1016,17 +1021,61 @@ _RUNTIME_PROVENANCE_CACHE_MAX_ENTRIES = 8_192
 _RUNTIME_PROVENANCE_CACHE: OrderedDict[tuple[object, ...], None] = OrderedDict()
 _RUNTIME_PROVENANCE_AUDIT_INSTALLED = False
 _RUNTIME_EXTENSION_FINDER: _RuntimeImportFinder | None = None
+
+
+class _PyModuleDefBase(ctypes.Structure):
+    _fields_ = [
+        ("ob_refcnt", ctypes.c_ssize_t),
+        ("ob_type", ctypes.c_void_p),
+        ("m_init", ctypes.c_void_p),
+        ("m_index", ctypes.c_ssize_t),
+        ("m_copy", ctypes.c_void_p),
+    ]
+
+
+class _PyModuleDef(ctypes.Structure):
+    _fields_ = [
+        ("m_base", _PyModuleDefBase),
+        ("m_name", ctypes.c_char_p),
+    ]
+
+
+_PYMODULE_GET_DEF = getattr(ctypes.pythonapi, "PyModule_GetDef", None)
+if _PYMODULE_GET_DEF is not None:
+    _PYMODULE_GET_DEF.argtypes = [ctypes.py_object]
+    _PYMODULE_GET_DEF.restype = ctypes.c_void_p
 _RUNTIME_BUILTIN_MODULE_NAMES = frozenset(sys.builtin_module_names)
 _RUNTIME_FROZEN_MODULE_NAMES = frozenset(_imp._frozen_module_names())
+_RUNTIME_PREAUDIT_FROZEN_MODULE_NAMES = frozenset(
+    {
+        "_collections_abc",
+        "_frozen_importlib",
+        "_frozen_importlib_external",
+        "_sitebuiltins",
+        "abc",
+        "codecs",
+        "genericpath",
+        "importlib.machinery",
+        "importlib.util",
+        "io",
+        "os",
+        "posixpath" if os.name == "posix" else "ntpath",
+        "site",
+        "stat",
+        "zipimport",
+    }
+)
 _RUNTIME_SPECLESS_MODULE_NAMES = frozenset({"__main__"})
 _RUNTIME_SPECLESS_MODULE_ALIASES = {"__mp_main__": "__main__"}
 _RUNTIME_SPECLESS_PARENT_ALIASES = {
-    "pyexpat.errors": ("pyexpat", "errors"),
-    "pyexpat.model": ("pyexpat", "model"),
     "typing.io": ("typing", "io"),
     "typing.re": ("typing", "re"),
-    "xml.parsers.expat.errors": ("xml.parsers.expat", "errors"),
-    "xml.parsers.expat.model": ("xml.parsers.expat", "model"),
+}
+_RUNTIME_PYEXPAT_CHILD_ALIASES = {
+    "pyexpat.errors": ("errors", "pyexpat.errors"),
+    "pyexpat.model": ("model", "pyexpat.model"),
+    "xml.parsers.expat.errors": ("errors", "pyexpat.errors"),
+    "xml.parsers.expat.model": ("model", "pyexpat.model"),
 }
 _RUNTIME_MLX_SPECLESS_CHILDREN = frozenset(
     {
@@ -1431,15 +1480,15 @@ def _captured_executable_matches(captured: _CapturedExecutable) -> bool:
 
 
 def _child_environment() -> tuple[tuple[str, str], ...]:
-    """Return a fixed environment with Python import overrides removed."""
+    """Return the complete, fixed child environment contract.
 
-    return tuple(
-        sorted(
-            (name, value)
-            for name, value in os.environ.items()
-            if not name.upper().startswith("PYTHON")
-        )
-    )
+    The absolute interpreter and isolated-mode flags make ambient lookup state
+    unnecessary.  Keeping only the platform default executable search path also
+    excludes Python overrides, native-loader injection variables (``DYLD_*`` and
+    ``LD_*``), credentials, tool configuration, and other unrecorded inputs.
+    """
+
+    return (("PATH", os.defpath),)
 
 
 def _disable_runtime_bytecode_writes() -> None:
@@ -3767,9 +3816,20 @@ def _validate_loaded_module_origins(
         if origin is None:
             locations = tuple(getattr(spec, "submodule_search_locations", ()) or ())
             if not locations:
-                raise RuntimeError(
-                    f"loaded module lacks a resolvable origin: {module_name}"
+                captured_synthetic = _validate_six_moves_module(
+                    module_name,
+                    module,
+                    spec,
+                    state=state,
+                    roots=roots,
+                    captured_by_path=captured_by_path,
+                    initial=initial_namespaces.get(module_name),
                 )
+                if module_name in initial_namespaces:
+                    observed_namespaces.add(module_name)
+                if capture_initial:
+                    captured_namespaces.append(captured_synthetic)
+                continue
             _validate_namespace_locations(
                 module_name,
                 locations,
@@ -3799,11 +3859,30 @@ def _validate_loaded_module_origins(
                     )
                 expected_token = canonical_token
         if expected_token is None:
-            _reject_unbound_loaded_origin(
+            path = _loaded_module_origin_path(spec)
+            if path is None:
+                raise RuntimeError(f"loaded module lacks a file origin: {module_name}")
+            matched = _matched_loaded_origin(path, list(state.root_tokens))
+            if matched is None or not matched[1].startswith("python-runtime:"):
+                _reject_unbound_loaded_origin(
+                    module_name,
+                    spec,
+                    state=state,
+                )
+                continue
+            initial = initial_modules.get(module_name)
+            captured = _validate_loaded_module_file(
                 module_name,
-                spec,
-                state=state,
+                module,
+                path,
+                captured_by_path=captured_by_path,
+                initial=initial,
+                allow_runtime_initial=True,
             )
+            if initial is not None:
+                observed_initial.add(module_name)
+            if capture_initial:
+                captured_modules.append(captured)
             continue
         path = _loaded_module_origin_path(spec)
         if path is None:
@@ -3942,6 +4021,75 @@ def _validate_namespace_module(
     )
 
 
+def _validate_six_moves_module(
+    name: str,
+    module: object,
+    spec: object,
+    *,
+    state: _CapturedImportEnvironment,
+    roots: list[tuple[Path, str]],
+    captured_by_path: dict[Path, _CapturedPhysicalFile],
+    initial: _LoadedNamespaceModuleState | None,
+) -> _LoadedNamespaceModuleState:
+    if name != "six.moves":
+        raise RuntimeError(f"loaded module lacks a resolvable origin: {name}")
+    parent = sys.modules.get("six")
+    parent_spec = getattr(parent, "__spec__", None)
+    loader = getattr(spec, "loader", None)
+    importer = getattr(parent, "_importer", None)
+    moved_type = getattr(parent, "_MovedItems", None)
+    if (
+        not isinstance(parent, types.ModuleType)
+        or parent_spec is None
+        or sys.modules.get(name) is not module
+        or getattr(parent, "moves", None) is not module
+        or getattr(spec, "name", None) != name
+        or getattr(spec, "origin", None) is not None
+        or tuple(getattr(spec, "submodule_search_locations", ()) or ())
+        or loader is not importer
+        or getattr(module, "__loader__", None) is not importer
+        or type(module) is not moved_type
+        or getattr(moved_type, "__module__", None) != "six"
+        or getattr(module, "__package__", None) != name
+        or getattr(module, "__file__", None) is not None
+        or sum(item is importer for item in sys.meta_path) != 1
+    ):
+        raise RuntimeError("six.moves lacks authenticated loader provenance")
+    if initial is not None and (
+        initial.module is not module
+        or initial.spec is not spec
+        or initial.loader is not loader
+        or initial.locations
+    ):
+        raise RuntimeError("six.moves module identity changed")
+    parent_path = _loaded_module_origin_path(parent_spec)
+    expected_token = dict(state.protected_origins).get("six")
+    if (
+        parent_path is None
+        or expected_token is None
+        or _loaded_origin_token(parent_path, roots) != expected_token
+    ):
+        raise RuntimeError("six.moves parent violates captured precedence")
+    initial_parent = next(
+        (item for item in state.loaded_modules if item.name == "six"),
+        None,
+    )
+    _validate_loaded_module_file(
+        "six",
+        parent,
+        parent_path,
+        captured_by_path=captured_by_path,
+        initial=initial_parent,
+    )
+    return _LoadedNamespaceModuleState(
+        name=name,
+        locations=(),
+        module=module,
+        spec=spec,
+        loader=loader,
+    )
+
+
 def _validate_interpreter_module(
     name: str,
     module: object,
@@ -3985,18 +4133,22 @@ def _validate_interpreter_module(
         or initial.canonical_name != canonical_name
     ):
         raise RuntimeError(f"loaded interpreter module identity changed: {name}")
-    if not _completed_load_matches(
-        name,
-        origin,
-        origin,
-        module,
-    ) and not _initial_module_matches(
+    completed = _completed_load_matches(name, origin, origin, module)
+    initial_matches = _initial_module_matches(
         name,
         module,
         spec,
         origin=origin,
         locations=(),
         allow_preexisting=True,
+    )
+    if not completed and not (
+        initial_matches
+        and _interpreter_module_has_provenance(
+            module,
+            canonical_name=canonical_name,
+            origin=origin,
+        )
     ):
         raise RuntimeError(f"loaded interpreter module lacks provenance: {name}")
     return _LoadedInterpreterModuleState(
@@ -4009,16 +4161,19 @@ def _validate_interpreter_module(
     )
 
 
-def _supported_spec_less_module_name(name: str) -> bool:
+def _cython_runtime_module_name(name: str) -> bool:
     return (
-        name in _RUNTIME_SPECLESS_MODULE_NAMES
-        or name == "cython_runtime"
+        name == "cython_runtime"
         or re.fullmatch(
-            r"_cython_\d+(?:_\d+)+",
+            r"_cython_\d+(?:_\d+)+(?:limited)?(?:_fastcall)?(?:nofinalize)?",
             name,
         )
         is not None
     )
+
+
+def _supported_spec_less_module_name(name: str) -> bool:
+    return name in _RUNTIME_SPECLESS_MODULE_NAMES or _cython_runtime_module_name(name)
 
 
 def _validate_spec_less_module(
@@ -4042,6 +4197,66 @@ def _validate_spec_less_module(
         return _LoadedSpecLessModuleState(
             name=name,
             parent_name=canonical_alias,
+            module=module,
+        )
+
+    pyexpat_alias = _RUNTIME_PYEXPAT_CHILD_ALIASES.get(name)
+    if pyexpat_alias is not None:
+        child_name, canonical_child_name = pyexpat_alias
+        parent = sys.modules.get("pyexpat")
+        parent_spec = getattr(parent, "__spec__", None)
+        alias_parent_name = name.rpartition(".")[0]
+        alias_parent = sys.modules.get(alias_parent_name)
+        with _RUNTIME_PROVENANCE_LOCK:
+            bindings_overflowed = (
+                canonical_child_name in _RUNTIME_PYEXPAT_CHILD_BINDINGS_OVERFLOW
+            )
+            bindings = tuple(
+                _RUNTIME_PYEXPAT_CHILD_BINDINGS.get(canonical_child_name, ())
+            )
+        parent_initial = _initial_module_matches(
+            "pyexpat",
+            parent,
+            parent_spec,
+            origin="built-in",
+            locations=(),
+            allow_preexisting=True,
+        )
+        if (
+            not isinstance(parent, types.ModuleType)
+            or parent_spec is None
+            or sys.modules.get(canonical_child_name) is not module
+            or getattr(parent, child_name, None) is not module
+            or alias_parent is None
+            or getattr(alias_parent, child_name, None) is not module
+            or bindings_overflowed
+            or len(bindings) != 1
+            or bindings[0][0] is not parent
+            or bindings[0][1] is not module
+            or not (
+                _completed_load_matches(
+                    "pyexpat",
+                    "built-in",
+                    "built-in",
+                    parent,
+                )
+                or (
+                    parent_initial
+                    and _interpreter_module_has_provenance(
+                        parent,
+                        canonical_name="pyexpat",
+                        origin="built-in",
+                    )
+                )
+            )
+        ):
+            raise RuntimeError(
+                f"loaded pyexpat alias lacks canonical provenance: {name}"
+            )
+        _require_inert_spec_less_shape(name, module)
+        return _LoadedSpecLessModuleState(
+            name=name,
+            parent_name="pyexpat",
             module=module,
         )
 
@@ -4071,6 +4286,16 @@ def _validate_spec_less_module(
             or native_child.module is not module
             or sys.modules.get(native_child.parent_name)
             is not native_child.parent_module
+            or (
+                native_child.binding_name is not None
+                and getattr(
+                    native_child.parent_module,
+                    native_child.binding_name,
+                    None,
+                )
+                is not module
+            )
+            or _spec_less_native_child_origin(module) != native_child.origin
             or not _completed_load_matches(
                 native_child.parent_name,
                 "native",
@@ -4087,7 +4312,8 @@ def _validate_spec_less_module(
             raise RuntimeError(
                 f"loaded spec-less child lacks completed parent provenance: {name}"
             )
-        _require_inert_spec_less_shape(name, module)
+        if native_child.binding_name is None:
+            _require_inert_spec_less_shape(name, module)
         return _LoadedSpecLessModuleState(
             name=name,
             parent_name=native_child.parent_name,
@@ -4147,16 +4373,6 @@ def _validate_spec_less_module(
     baseline = _RUNTIME_INITIAL_SPECLESS_MODULES.get(name)
     if name in _RUNTIME_SPECLESS_MODULE_NAMES and baseline is module:
         return _LoadedSpecLessModuleState(name=name, parent_name=None, module=module)
-    if (
-        (
-            name == "cython_runtime"
-            or re.fullmatch(r"_cython_\d+(?:_\d+)+", name) is not None
-        )
-        and baseline is module
-        and not _runtime_audit.was_preexisting(name, module)
-    ):
-        _require_inert_spec_less_shape(name, module)
-        return _LoadedSpecLessModuleState(name=name, parent_name=None, module=module)
     raise RuntimeError(f"loaded module lacks origin metadata: {name}")
 
 
@@ -4170,6 +4386,30 @@ def _require_inert_spec_less_shape(name: str, module: object) -> None:
         raise RuntimeError(f"loaded spec-less module has executable metadata: {name}")
 
 
+def _spec_less_native_child_origin(module: object) -> Path | None:
+    if (
+        type(module) is not types.ModuleType
+        or getattr(module, "__loader__", None) is not None
+        or getattr(module, "__package__", None) is not None
+    ):
+        raise RuntimeError("loaded spec-less native child has executable metadata")
+    raw_origin = getattr(module, "__file__", None)
+    if raw_origin is None:
+        return None
+    if not isinstance(raw_origin, str) or not raw_origin:
+        raise RuntimeError("loaded spec-less native child has an invalid origin")
+    path = Path(raw_origin)
+    if not path.is_absolute():
+        path = Path(os.path.abspath(path))
+    _require_no_lexical_symlink_components(
+        path,
+        label="spec-less native child origin",
+    )
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("loaded spec-less native child origin is unsafe")
+    return path.resolve(strict=True)
+
+
 def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> None:
     baseline = dict(state.execution_counts)
     current = dict(_runtime_execution_counts())
@@ -4181,7 +4421,6 @@ def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> Non
     if not changed:
         return
 
-    roots = list(state.root_tokens)
     initial_paths = {item.origin.path for item in state.loaded_modules}
     loaded_paths: set[Path] = set()
     for _name, module in _runtime_loaded_modules():
@@ -4199,10 +4438,9 @@ def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> Non
         changed.items(),
         key=lambda item: item[0].as_posix(),
     ):
-        matched = _matched_loaded_origin(path, roots)
-        if matched is not None and matched[1].startswith("python-runtime:"):
+        if _valid_defusedxml_elementtree_reimport(path):
             continue
-        if before or path in initial_paths or after - before > 1:
+        if path in initial_paths or after - before > 1:
             raise RuntimeError(
                 f"governed module code executed again during the operation: {path}"
             )
@@ -4260,14 +4498,15 @@ def _validate_loaded_module_file(
     *,
     captured_by_path: dict[Path, _CapturedPhysicalFile],
     initial: _LoadedModuleState | None,
+    allow_runtime_initial: bool = False,
 ) -> _LoadedModuleState:
     expected = captured_by_path.get(path)
-    if expected is None:
+    current = _capture_physical_file_identity(path, label="loaded module origin")
+    if expected is None and not allow_runtime_initial:
         raise RuntimeError(
             f"loaded module file is not bound to captured bytes: {module_name}"
         )
-    current = _capture_physical_file_identity(path, label="loaded module origin")
-    if current != expected:
+    if expected is not None and current != expected:
         raise RuntimeError(
             f"loaded module file identity differs from captured bytes: {module_name}"
         )
@@ -4282,6 +4521,7 @@ def _validate_loaded_module_file(
         module,
         path,
         current,
+        allow_runtime_initial=allow_runtime_initial,
     )
     return _LoadedModuleState(name=module_name, origin=current, module=module)
 
@@ -4527,7 +4767,7 @@ def _record_completed_module_load(
     name: str,
     kind: Literal["source", "native", "namespace", "built-in", "frozen"],
     module: types.ModuleType,
-    loader: _RuntimeImportLoader,
+    loader: object,
 ) -> None:
     spec = getattr(module, "__spec__", None)
     if spec is None or getattr(spec, "loader", None) is not loader:
@@ -4564,12 +4804,14 @@ def _record_completed_module_load(
             observed.append(state)
     if kind == "native":
         _record_loaded_native_module(name, module, loader)
+    elif kind == "built-in" and name == "pyexpat":
+        _record_pyexpat_child_bindings(module)
 
 
 def _record_loaded_native_module(
     name: str,
     module: types.ModuleType,
-    loader: _RuntimeImportLoader,
+    loader: object,
 ) -> None:
     spec = getattr(module, "__spec__", None)
     path = _loaded_module_origin_path(spec) if spec is not None else None
@@ -4615,7 +4857,7 @@ def _record_native_child_modules(
         )
     for name in sorted(set(sys.modules).difference(initial_module_names)):
         child = sys.modules.get(name)
-        if not isinstance(child, types.ModuleType):
+        if type(child) is not types.ModuleType:
             continue
         with _RUNTIME_PROVENANCE_LOCK:
             already_tracked = any(
@@ -4625,13 +4867,37 @@ def _record_native_child_modules(
             continue
         spec = getattr(child, "__spec__", None)
         if spec is None:
-            if not _supported_spec_less_module_name(name):
+            binding_parent_name, separator, binding_name = name.rpartition(".")
+            is_parent_child = (
+                bool(separator)
+                and binding_parent_name == parent_name
+                and getattr(parent_module, binding_name, None) is child
+            )
+            if name in _RUNTIME_MLX_SPECLESS_CHILDREN and parent_name == "mlx.core":
+                if not is_parent_child:
+                    raise RuntimeError(
+                        f"loaded MLX native child lacks its parent binding: {name}"
+                    )
+                _require_inert_spec_less_shape(name, child)
                 continue
-            _require_inert_spec_less_shape(name, child)
+            child_origin = _spec_less_native_child_origin(child)
+            if is_parent_child:
+                if child_origin != parent_origin:
+                    raise RuntimeError(
+                        "native spec-less child has an inconsistent origin: " f"{name}"
+                    )
+            elif _supported_spec_less_module_name(name):
+                _require_inert_spec_less_shape(name, child)
+                binding_name = None
+                child_origin = None
+            else:
+                continue
             spec_less_state = _RuntimeNativeSpecLessChildState(
                 name=name,
                 parent_name=parent_name,
                 parent_origin=parent_origin,
+                binding_name=binding_name,
+                origin=child_origin,
                 module=child,
                 parent_module=parent_module,
             )
@@ -4741,6 +5007,23 @@ def _record_mlx_child_bindings(parent: types.ModuleType) -> None:
                 observed.append((parent, child))
 
 
+def _record_pyexpat_child_bindings(parent: types.ModuleType) -> None:
+    for child_name in ("errors", "model"):
+        module_name = f"pyexpat.{child_name}"
+        child = getattr(parent, child_name, None)
+        if child is None or sys.modules.get(module_name) is not child:
+            raise RuntimeError(
+                f"loaded pyexpat child lacks its canonical binding: {module_name}"
+            )
+        _require_inert_spec_less_shape(module_name, child)
+        with _RUNTIME_PROVENANCE_LOCK:
+            observed = _RUNTIME_PYEXPAT_CHILD_BINDINGS.setdefault(module_name, [])
+            if len(observed) >= 64:
+                _RUNTIME_PYEXPAT_CHILD_BINDINGS_OVERFLOW.add(module_name)
+            else:
+                observed.append((parent, child))
+
+
 def _install_runtime_extension_finder() -> None:
     global _RUNTIME_EXTENSION_FINDER
     if _RUNTIME_EXTENSION_FINDER is not None:
@@ -4807,8 +5090,105 @@ def _install_runtime_provenance_audit() -> None:
         if isinstance(mlx_core, types.ModuleType):
             if not _runtime_audit.was_preexisting("mlx.core", mlx_core):
                 _record_mlx_child_bindings(mlx_core)
+        pyexpat = sys.modules.get("pyexpat")
+        if isinstance(pyexpat, types.ModuleType):
+            _record_pyexpat_child_bindings(pyexpat)
         _runtime_audit.activate(_runtime_exec_audit_hook)
+        _record_bootstrap_native_spec_less_children()
         _RUNTIME_PROVENANCE_AUDIT_INSTALLED = True
+
+
+def _record_bootstrap_native_spec_less_children() -> None:
+    """Authenticate Cython helpers created after the earliest audit boundary."""
+
+    for child_name, child in sorted(_RUNTIME_INITIAL_SPECLESS_MODULES.items()):
+        if not _cython_runtime_module_name(
+            child_name
+        ) or _runtime_audit.was_preexisting(child_name, child):
+            continue
+        _require_inert_spec_less_shape(child_name, child)
+        marker = child_name.encode("ascii")
+        candidates: list[tuple[str, Path, types.ModuleType, object]] = []
+        for (parent_name, path), captured in sorted(
+            _RUNTIME_INITIAL_MODULE_FILES.items(),
+            key=lambda item: (item[0][0], item[0][1].as_posix()),
+        ):
+            parent = _RUNTIME_INITIAL_MODULE_OBJECTS.get((parent_name, path))
+            if (
+                not isinstance(parent, types.ModuleType)
+                or _runtime_audit.was_preexisting(parent_name, parent)
+                or not any(
+                    path.name.endswith(suffix)
+                    for suffix in importlib.machinery.EXTENSION_SUFFIXES
+                )
+            ):
+                continue
+            spec = getattr(parent, "__spec__", None)
+            loader = getattr(spec, "loader", None)
+            if (
+                sys.modules.get(parent_name) is not parent
+                or spec is None
+                or getattr(parent, "__loader__", None) is not loader
+                or not isinstance(loader, importlib.machinery.ExtensionFileLoader)
+            ):
+                continue
+            with _RUNTIME_PROVENANCE_LOCK:
+                imported = tuple(
+                    _RUNTIME_IMPORTED_NATIVE_FILES.get((parent_name, path), ())
+                )
+                overflowed = (
+                    parent_name,
+                    path,
+                ) in _RUNTIME_IMPORTED_NATIVE_FILES_OVERFLOW
+            if overflowed or set(imported) != {captured}:
+                continue
+            try:
+                raw = path.read_bytes()
+                after = _capture_physical_file_identity(
+                    path,
+                    label="bootstrap native parent",
+                )
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if after == captured and marker in raw:
+                candidates.append((parent_name, path, parent, loader))
+        if len(candidates) != 1:
+            continue
+        parent_name, parent_origin, parent, loader = candidates[0]
+        if not _completed_load_matches(
+            parent_name,
+            "native",
+            parent_origin,
+            parent,
+        ):
+            _record_completed_module_load(
+                parent_name,
+                "native",
+                parent,
+                loader,
+            )
+        child_state = _RuntimeNativeSpecLessChildState(
+            name=child_name,
+            parent_name=parent_name,
+            parent_origin=parent_origin,
+            binding_name=None,
+            origin=None,
+            module=child,
+            parent_module=parent,
+        )
+        completed_state = _RuntimeCompletedLoadState(
+            name=child_name,
+            kind="spec-less-child",
+            origin=parent_origin,
+            module=child,
+            loader=None,
+        )
+        with _RUNTIME_PROVENANCE_LOCK:
+            _RUNTIME_NATIVE_SPECLESS_CHILD_MODULES.setdefault(
+                child_name,
+                [],
+            ).append(child_state)
+            _RUNTIME_COMPLETED_LOADS.setdefault(child_name, []).append(completed_state)
 
 
 def _completed_load_matches(
@@ -4828,8 +5208,16 @@ def _completed_load_matches(
     with _RUNTIME_PROVENANCE_LOCK:
         overflowed = name in _RUNTIME_COMPLETED_LOADS_OVERFLOW
         states = tuple(_RUNTIME_COMPLETED_LOADS.get(name, ()))
-    if overflowed or len(states) != 1:
+    if overflowed:
         return False
+    if len(states) != 1:
+        return (
+            name == "xml.etree.ElementTree"
+            and kind == "source"
+            and isinstance(origin, Path)
+            and _valid_defusedxml_elementtree_reimport(origin)
+            and sum(item.module is module for item in states) == 1
+        )
     state = states[0]
     spec = getattr(module, "__spec__", None)
     active_loader = getattr(spec, "loader", None)
@@ -4840,6 +5228,102 @@ def _completed_load_matches(
         and state.loader is active_loader
         and getattr(module, "__loader__", None) is active_loader
     )
+
+
+def _valid_defusedxml_elementtree_reimport(path: Path) -> bool:
+    """Validate defusedxml's one deliberate, retained pure-Python reload."""
+
+    if not path.is_absolute() or not any(
+        path == root / "xml" / "etree" / "ElementTree.py"
+        for root in _python_stdlib_root_tokens()
+    ):
+        return False
+    current_module = sys.modules.get("xml.etree.ElementTree")
+    facade = sys.modules.get("defusedxml.ElementTree")
+    if not isinstance(current_module, types.ModuleType) or not isinstance(
+        facade,
+        types.ModuleType,
+    ):
+        return False
+    with _RUNTIME_PROVENANCE_LOCK:
+        element_states = tuple(
+            _RUNTIME_COMPLETED_LOADS.get("xml.etree.ElementTree", ())
+        )
+        facade_states = tuple(
+            _RUNTIME_COMPLETED_LOADS.get("defusedxml.ElementTree", ())
+        )
+        executed = tuple(_RUNTIME_EXECUTED_MODULE_CODE.get(path, ()))
+        overflowed = (
+            "xml.etree.ElementTree" in _RUNTIME_COMPLETED_LOADS_OVERFLOW
+            or "defusedxml.ElementTree" in _RUNTIME_COMPLETED_LOADS_OVERFLOW
+            or path in _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW
+        )
+    if overflowed or len(element_states) != 2 or len(facade_states) != 1:
+        return False
+    endpoint_states = [item for item in element_states if item.module is current_module]
+    transient_states = [
+        item for item in element_states if item.module is not current_module
+    ]
+    if len(endpoint_states) != 1 or len(transient_states) != 1:
+        return False
+    for item in element_states:
+        spec = getattr(item.module, "__spec__", None)
+        if (
+            item.kind != "source"
+            or item.name != "xml.etree.ElementTree"
+            or item.origin != path
+            or spec is None
+            or getattr(spec, "loader", None) is not item.loader
+            or getattr(item.module, "__loader__", None) is not item.loader
+        ):
+            return False
+    facade_state = facade_states[0]
+    facade_spec = getattr(facade, "__spec__", None)
+    if (
+        facade_state.kind != "source"
+        or facade_state.module is not facade
+        or facade_spec is None
+        or getattr(facade_spec, "loader", None) is not facade_state.loader
+        or getattr(facade, "__loader__", None) is not facade_state.loader
+        or not isinstance(facade_state.origin, Path)
+        or facade_state.origin.name != "ElementTree.py"
+        or facade_state.origin.parent.name != "defusedxml"
+    ):
+        return False
+    transient = transient_states[0].module
+    parser = getattr(transient, "XMLParser", None)
+    iterparse = getattr(transient, "iterparse", None)
+    if (
+        getattr(facade, "_XMLParser", None) is not parser
+        or getattr(facade, "_iterparse", None) is not iterparse
+        or not isinstance(parser, type)
+        or not isinstance(iterparse, types.FunctionType)
+        or iterparse.__globals__ is not vars(transient)
+    ):
+        return False
+    try:
+        current = _capture_physical_file_identity(
+            path,
+            label="defusedxml ElementTree source",
+        )
+        canonical = _source_module_semantic_code(path, current)
+    except (OSError, RuntimeError, SyntaxError, ValueError):
+        return False
+    canonical_codes = _canonical_code_tree(canonical)
+    if {_canonical_code_object(code) for code in executed} != {
+        canonical
+    } or _canonical_code_object(iterparse.__code__) not in canonical_codes:
+        return False
+    for value in vars(parser).values():
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if (
+            isinstance(value, types.FunctionType)
+            and value.__globals__ is vars(transient)
+            and _canonical_code_object(value.__code__) not in canonical_codes
+        ):
+            return False
+    return True
 
 
 def _initial_module_matches(
@@ -4864,11 +5348,186 @@ def _initial_module_matches(
     )
 
 
+def _module_has_c_definition(
+    module: object,
+    *,
+    expected_name: str | None = None,
+) -> bool:
+    if type(module) is not types.ModuleType or _PYMODULE_GET_DEF is None:
+        return False
+    try:
+        definition = _PYMODULE_GET_DEF(module)
+        if not definition:
+            return False
+        if expected_name is None:
+            return True
+        raw_name = ctypes.cast(
+            definition,
+            ctypes.POINTER(_PyModuleDef),
+        ).contents.m_name
+        expected_definition_name = {
+            "_decimal": "decimal",
+            "_io": "io",
+        }.get(expected_name, expected_name)
+        return (
+            raw_name is not None
+            and raw_name.decode("utf-8") == expected_definition_name
+        )
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return False
+
+
+def _canonical_code_tree(code: types.CodeType) -> frozenset[types.CodeType]:
+    nested = {
+        canonical
+        for value in code.co_consts
+        if isinstance(value, types.CodeType)
+        for canonical in _canonical_code_tree(value)
+    }
+    nested.add(_canonical_code_object(code))
+    return frozenset(nested)
+
+
+def _module_matches_canonical_python_code(
+    module: object,
+    *,
+    canonical_name: str,
+    code: types.CodeType,
+    allowed_module_names: frozenset[str] | None = None,
+) -> bool:
+    if type(module) is not types.ModuleType:
+        return False
+    namespace = vars(module)
+    allowed_names = allowed_module_names or frozenset({canonical_name})
+    if namespace.get("__name__") not in allowed_names:
+        return False
+    expected_doc = code.co_consts[0] if code.co_consts else None
+    if expected_doc is not None and not isinstance(expected_doc, str):
+        expected_doc = None
+    if namespace.get("__doc__") != expected_doc:
+        return False
+    anchors = {
+        name
+        for name in code.co_names
+        if name not in {"__builtins__", "__loader__", "__spec__"}
+    }
+    required_anchors = max(1, len(anchors) // 2) if anchors else 0
+    if len(anchors.intersection(namespace)) < required_anchors:
+        return False
+    canonical_codes = _canonical_code_tree(code)
+    observed_own_code = False
+
+    def valid_callable(value: object) -> bool:
+        nonlocal observed_own_code
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if not isinstance(value, types.FunctionType):
+            return True
+        owns_globals = value.__globals__ is namespace
+        claims_module = value.__module__ in allowed_names
+        if not owns_globals and not claims_module:
+            return True
+        if not owns_globals:
+            return False
+        observed_own_code = True
+        return _canonical_code_object(value.__code__) in canonical_codes
+
+    for value in namespace.values():
+        if not valid_callable(value):
+            return False
+        if isinstance(value, type) and value.__module__ in allowed_names:
+            if any(not valid_callable(member) for member in vars(value).values()):
+                return False
+    return observed_own_code or bool(anchors)
+
+
+def _interpreter_module_has_provenance(
+    module: object,
+    *,
+    canonical_name: str,
+    origin: str,
+) -> bool:
+    if origin == "built-in":
+        return _module_has_c_definition(module, expected_name=canonical_name)
+    if origin != "frozen":
+        return False
+    if (
+        _runtime_audit.was_preexisting(canonical_name, module)
+        and canonical_name not in _RUNTIME_PREAUDIT_FROZEN_MODULE_NAMES
+    ):
+        return False
+    try:
+        code = importlib.machinery.FrozenImporter.get_code(canonical_name)
+    except (ImportError, RuntimeError):
+        return False
+    allowed_names = {canonical_name}
+    try:
+        frozen_details = _imp.find_frozen(canonical_name)
+    except (ImportError, RuntimeError):
+        frozen_details = None
+    if (
+        frozen_details is not None
+        and len(frozen_details) >= 3
+        and isinstance(frozen_details[2], str)
+        and frozen_details[2]
+    ):
+        allowed_names.add(frozen_details[2])
+    active_name = getattr(module, "__name__", None)
+    canonical_name_constants = {
+        value
+        for value in code.co_consts
+        if isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", value) is not None
+    }
+    if isinstance(active_name, str) and (
+        sys.modules.get(active_name) is module
+        or active_name in canonical_name_constants
+    ):
+        allowed_names.add(active_name)
+    return code is not None and _module_matches_canonical_python_code(
+        module,
+        canonical_name=canonical_name,
+        code=code,
+        allowed_module_names=frozenset(allowed_names),
+    )
+
+
+def _runtime_initial_file_module_has_provenance(
+    module: object,
+    path: Path,
+) -> bool:
+    if any(
+        path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES
+    ):
+        return _module_has_c_definition(module)
+    if path.suffix != ".py" or type(module) is not types.ModuleType:
+        return False
+    spec = getattr(module, "__spec__", None)
+    canonical_name = getattr(spec, "name", None)
+    if (
+        not isinstance(canonical_name, str)
+        or sys.modules.get(canonical_name) is not module
+    ):
+        return False
+    try:
+        raw = path.read_bytes()
+        code = compile(raw, path.as_posix(), "exec", dont_inherit=True)
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return _module_matches_canonical_python_code(
+        module,
+        canonical_name=canonical_name,
+        code=code,
+    )
+
+
 def _require_loaded_code_provenance(
     module_name: str,
     module: object,
     path: Path,
     current: _CapturedPhysicalFile,
+    *,
+    allow_runtime_initial: bool = False,
 ) -> None:
     module_spec = getattr(module, "__spec__", None)
     canonical_name = getattr(module_spec, "name", None)
@@ -4934,6 +5593,7 @@ def _require_loaded_code_provenance(
             provenance_name,
             path,
             current,
+            allow_runtime_initial,
             id(module),
             id(module_spec),
             id(getattr(module_spec, "loader", None)),
@@ -4958,6 +5618,16 @@ def _require_loaded_code_provenance(
                     id(item.spec),
                     id(item.loader),
                     id(item.parent_module),
+                    id(sys.modules.get(item.parent_name)),
+                    id(
+                        getattr(
+                            sys.modules.get(item.name.rpartition(".")[0]),
+                            item.name.rpartition(".")[2],
+                            None,
+                        )
+                        if item.name.rpartition(".")[1]
+                        else None
+                    ),
                 )
                 for item in native_children
             ),
@@ -5078,6 +5748,14 @@ def _require_loaded_code_provenance(
                 "loaded native-created module identity lacks completed parent "
                 f"provenance: {module_name}"
             )
+        _cache_runtime_provenance(cache_key)
+        return
+    if (
+        allow_runtime_initial
+        and initial == current
+        and initial_module is module
+        and _runtime_initial_file_module_has_provenance(module, path)
+    ):
         _cache_runtime_provenance(cache_key)
         return
     if initial == current and _trusted_pre_audit_module(module_name, module):
