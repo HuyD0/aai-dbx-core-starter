@@ -199,14 +199,19 @@ An HTTP target that needs a token — `request_mapping.auth_env` names the
 environment variable, never the value — has to be `https://`. Loopback is the
 exception, because a local stub never puts the credential on a network.
 
-An HTTP endpoint is sent **every field the row carries**, not just a
-recognisable one like `question`. The single-value shorthand applies only
-when a row genuinely has one input field. This matters because the failure
-it prevents is invisible: an endpoint handed the question without the
-`context` or `history` beside it still answers, and that answer still
-becomes promotion evidence — for an invocation the dataset never described.
-Write `request_mapping` for the whole row, and a field the endpoint cannot
-accept is a configuration error rather than a silent omission.
+An HTTP endpoint is sent **every field the row's `inputs` object carries**,
+not just a recognisable one like `question`. The single-value shorthand
+applies only when `inputs` genuinely has one field. This matters because the
+failure it prevents is invisible: an endpoint handed the question without the
+`context` or `history` beside it still answers, and that answer still becomes
+promotion evidence — for an invocation the dataset never described. Write
+`request_mapping` for the whole `inputs` object, and a field the endpoint
+cannot accept is a configuration error rather than a silent omission.
+
+Only `inputs` travels. A row's `expectations`, `outputs` and `trace` are what
+the answer is scored *against*, so they never reach the agent — and copying
+one of them into `inputs` to make it arrive hands the agent its own answer
+sheet, which turns the comparison into evidence of nothing.
 
 ### Where the answers come from
 
