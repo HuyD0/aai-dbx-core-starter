@@ -186,6 +186,25 @@ The course uses the same lifecycle vocabulary as the platform—`baseline ->
 change -> result -> decision`, with `adopt`, `reject`, or `inconclusive`—while
 keeping sklearn out of the SDK runtime.
 
+### Learn governed agentic operations and RAG
+
+The standalone [agentic operations RAG workshop](examples/agentic-ops-rag/README.md)
+adapts a progressive public RAG course outline to this platform's MLflow 3,
+Databricks, Microsoft Foundry, Azure AI Search, identity, and release contracts.
+Its six generated notebooks use original synthetic runbooks and execute without
+credentials by default; real provider calls are explicit opt-ins.
+
+```bash
+make ops-rag-install
+make ops-rag-check
+make ops-rag-notebook
+```
+
+The workshop compares text, vector, hybrid, and reranked retrieval, records
+normalized MLflow document evidence, enforces tenant and action boundaries, and
+finishes with a baseline/change/result/decision release gate. Production work
+graduates to the existing `rag-app` or `agent-app` template.
+
 ## Install for SDK development
 
 ```bash
