@@ -552,6 +552,27 @@ def test_dataset_helper_creates_without_unsupported_tags():
     assert result.merged_records is None
 
 
+def test_dataset_helper_requires_a_string_dataset_name():
+    # .strip() on a non-string raises an incidental AttributeError rather
+    # than the documented contract error, and an object implementing
+    # strip() could return a valid-looking name and reach the registry.
+    class Sneaky:
+        def strip(self):
+            return "regression_v1"
+
+    for bad in (None, 123, Sneaky()):
+        datasets = FakeDatasetApi()
+        with pytest.raises(TypeError, match="name"):
+            get_or_create_evaluation_dataset(
+                name=bad,
+                catalog="main",
+                schema="default",
+                experiment_id="experiment-1",
+                mlflow_module=_dataset_mlflow(datasets),
+            )
+        assert datasets.create_arguments is None
+
+
 def test_dataset_helper_requires_string_qualifiers():
     # str(None) is "None" and str(123) is "123": both satisfy the
     # identifier charset and would name a real but unintended securable.

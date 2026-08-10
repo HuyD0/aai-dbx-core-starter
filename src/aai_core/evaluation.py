@@ -479,6 +479,14 @@ def get_or_create_evaluation_dataset(
     The native dataset object is returned unchanged.
     """
 
+    # Checked before .strip(): a non-string would otherwise raise an
+    # incidental AttributeError instead of the documented contract error,
+    # and an object implementing strip() could return a valid-looking name
+    # and reach the registry.
+    if not isinstance(name, str):
+        raise TypeError(
+            f"name must be a string logical dataset name; got {type(name).__name__}"
+        )
     logical_name = name.strip()
     if not fullmatch(_NAME_COMPONENT, logical_name) or _is_placeholder(logical_name):
         raise ValueError(

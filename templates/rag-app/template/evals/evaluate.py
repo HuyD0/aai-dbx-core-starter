@@ -81,6 +81,10 @@ def main() -> None:
         "so future runs regression-check against this release.",
     )
     args = parser.parse_args()
+    # Registry versions start at 1, so a typo must fail here rather than
+    # during the credentialed load inside RAGAgent.
+    if args.prompt_version is not None and args.prompt_version < 1:
+        parser.error("--prompt-version must be a positive integer")
 
     context = bootstrap(ROOT / "aai-platform.yml")
     version = resolve_version(context, args.prompt_version)
