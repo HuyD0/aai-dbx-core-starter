@@ -589,3 +589,39 @@ def test_an_unreadable_trace_still_gets_the_assumption():
 
     assert dict(cost.calls_by_scorer)["retrieval_relevance"] == 30
     assert cost.fanout_counted is False
+
+
+def test_a_dangling_retriever_parent_keeps_the_conservative_assumption():
+    """An unresolved span graph cannot supply an exact budget multiplier."""
+
+    row = {
+        "inputs": {"question": "q"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {"span_id": "root", "type": "LLM"},
+                    {
+                        "span_id": "search",
+                        "parent_span_id": "absent",
+                        "type": "RETRIEVER",
+                        "outputs": [
+                            {"page_content": "one"},
+                            {"page_content": "two"},
+                        ],
+                    },
+                ]
+            }
+        },
+    }
+
+    cost = estimate(
+        [row],
+        _judge_plan("retrieval_groundedness", "retrieval_relevance"),
+        chunks_per_row=10,
+    )
+
+    assert dict(cost.calls_by_scorer) == {
+        "retrieval_groundedness": 1,
+        "retrieval_relevance": 10,
+    }
+    assert cost.fanout_counted is False
