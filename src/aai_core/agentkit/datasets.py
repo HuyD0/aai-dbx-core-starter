@@ -1833,7 +1833,9 @@ def _span_outputs(span: Mapping[str, Any]) -> Any | None:
         if isinstance(candidate, (str, bytes)):
             if serialized:
                 candidate = _decode_json_evidence(
-                    candidate, subject="trace span outputs"
+                    candidate,
+                    subject="trace span outputs",
+                    syntax_fallback=True,
                 )
             else:
                 decoded, plain_candidate = _try_decode_json(candidate)
@@ -1969,11 +1971,21 @@ def _try_decode_json(value: Any) -> tuple[bool, Any]:
         return False, None
 
 
-def _decode_json_evidence(value: Any, *, subject: str) -> Any:
-    """Decode JSON whose malformed evidence must refuse the operation."""
+def _decode_json_evidence(
+    value: Any, *, subject: str, syntax_fallback: bool = False
+) -> Any:
+    """Decode evidence, optionally retaining an ordinary syntax failure.
+
+    Decoder limits are never a fallback: they remain governed refusals even
+    where an opaque non-JSON output conservatively counts as one result.
+    """
 
     try:
         return json.loads(value)
+    except json.JSONDecodeError as error:
+        if syntax_fallback:
+            return value
+        raise ConfigError(f"{subject} is not valid JSON") from error
     except (TypeError, ValueError, RecursionError) as error:
         raise ConfigError(f"{subject} is not valid JSON") from error
 
