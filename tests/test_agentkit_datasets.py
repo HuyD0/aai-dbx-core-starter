@@ -40,6 +40,13 @@ def _write_dataset(tmp_path, rows, name="golden.json"):
     return path
 
 
+def _nested_mapping(depth, leaf="value"):
+    value = leaf
+    for _ in range(depth):
+        value = {"nested": value}
+    return value
+
+
 def _encoded_id(value, width):
     return base64.b64encode(int(value).to_bytes(width, "big")).decode("ascii")
 
@@ -545,6 +552,34 @@ def test_attach_answer_sheet_jsonl_rejects_invalid_documents(
 
 
 @pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "9" * 5_000,
+        "[" * 10_000 + "0" + "]" * 10_000,
+    ],
+    ids=("integer-limit", "recursion-limit"),
+)
+def test_attach_answer_sheet_governs_json_decoder_limits(tmp_path, suffix, payload):
+    _write_dataset(tmp_path, _rows(1))
+    sheet = tmp_path / f"answers{suffix}"
+    sheet.write_text(
+        f"[{payload}]" if suffix == ".json" else f"\n{payload}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="is not valid JSON") as excinfo:
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    message = str(excinfo.value)
+    assert payload[:100] not in message
+    if suffix == ".jsonl":
+        assert "line 2" in message
+    else:
+        assert " line " not in message
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
 def test_attach_answer_sheet_rejects_duplicate_normalized_inputs(tmp_path, suffix):
     rows = _rows(1)
     _write_dataset(tmp_path, rows)
@@ -568,6 +603,50 @@ def test_attach_answer_sheet_rejects_duplicate_normalized_inputs(tmp_path, suffi
     message = str(excinfo.value)
     assert "first seen" in message
     assert "question 0" not in message
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_attach_answer_sheet_rejects_overly_nested_inputs(tmp_path, suffix):
+    _write_dataset(tmp_path, _rows(1))
+    record = {"inputs": _nested_mapping(70), "outputs": "answer"}
+    sheet = tmp_path / f"answers{suffix}"
+    sheet.write_text(
+        json.dumps([record]) if suffix == ".json" else json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="too deeply nested or complex") as excinfo:
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    assert "value" not in str(excinfo.value)
+
+
+def test_attach_answer_sheet_preserves_ordinary_nested_inputs_and_outputs(tmp_path):
+    inputs = _nested_mapping(8, "question")
+    output = _nested_mapping(8, "answer")
+    _write_dataset(tmp_path, [{"inputs": inputs}])
+    sheet = tmp_path / "answers.jsonl"
+    sheet.write_text(
+        json.dumps({"inputs": inputs, "outputs": output}), encoding="utf-8"
+    )
+
+    replayed = attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    assert replayed.rows[0]["outputs"] == output
+
+
+def test_dataset_digest_governs_recursive_input_normalization():
+    inputs = _nested_mapping(2_000)
+
+    with pytest.raises(ConfigError, match="dataset row 0 inputs.*too deeply"):
+        dataset_digest([{"inputs": inputs}])
+
+
+def test_load_dataset_rejects_overly_nested_inputs(tmp_path):
+    _write_dataset(tmp_path, [{"inputs": _nested_mapping(70)}])
+
+    with pytest.raises(ConfigError, match="dataset row 0 inputs.*too deeply"):
+        load_dataset("golden.json", root=tmp_path)
 
 
 @pytest.mark.parametrize(
