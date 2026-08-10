@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from aai_local_finetuning import training
@@ -28,18 +29,31 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "examples" / "local-finetuning"
 
 
-@pytest.fixture
-def normalize_runtime_evidence_test_harness(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exclude pytest-only import state from strict application evidence."""
-
-    pytest_only_roots = {
+def _runtime_evidence_pytest_only_roots() -> set[Path]:
+    roots = {
         ROOT,
         ROOT / "tests",
         ROOT / "src" / "platform_app",
         ROOT / "examples" / "agentic-ops-rag" / "src",
     }
+    setuptools_module = sys.modules.get("setuptools")
+    setuptools_file = getattr(setuptools_module, "__file__", None)
+    if isinstance(setuptools_file, str):
+        package_root = Path(setuptools_file).resolve(strict=True).parent
+        vendor_root = package_root / "_vendor"
+        if package_root.name == "setuptools" and vendor_root.is_dir():
+            roots.add(vendor_root.resolve(strict=True))
+    return roots
+
+
+def _normalize_runtime_evidence_test_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exclude pytest-only import state from strict application evidence."""
+
+    loaded_modules = training._runtime_loaded_modules
+    test_start_modules = dict(loaded_modules())
+    pytest_only_roots = _runtime_evidence_pytest_only_roots()
 
     def resolved(entry: str) -> Path:
         candidate = Path(entry or os.getcwd())
@@ -52,15 +66,11 @@ def normalize_runtime_evidence_test_harness(
         "path",
         [entry for entry in sys.path if resolved(entry) not in pytest_only_roots],
     )
-    loaded_modules = training._runtime_loaded_modules
 
     def without_test_modules() -> tuple[tuple[str, object], ...]:
         selected: list[tuple[str, object]] = []
         for name, module in loaded_modules():
-            if (
-                training._runtime_audit.was_preexisting(name, module)
-                and name != "_virtualenv"
-            ):
+            if name != "_virtualenv" and test_start_modules.get(name) is module:
                 continue
             spec = getattr(module, "__spec__", None)
             loader = getattr(spec, "loader", None)
@@ -77,6 +87,53 @@ def normalize_runtime_evidence_test_harness(
         return tuple(selected)
 
     monkeypatch.setattr(training, "_runtime_loaded_modules", without_test_modules)
+
+
+@pytest.fixture
+def normalize_runtime_evidence_test_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _normalize_runtime_evidence_test_harness(monkeypatch)
+
+
+def test_runtime_evidence_harness_filters_unchanged_test_start_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = tmp_path / "site-packages" / "setuptools"
+    vendor_root = package_root / "_vendor"
+    vendor_root.mkdir(parents=True)
+    setuptools_file = package_root / "__init__.py"
+    setuptools_file.write_text("", encoding="utf-8")
+    setuptools_module = ModuleType("setuptools")
+    setuptools_module.__file__ = setuptools_file.as_posix()
+    monkeypatch.setitem(sys.modules, "setuptools", setuptools_module)
+
+    unchanged = ModuleType("_openssl.lib")
+    replacement = ModuleType("_openssl.lib")
+    runtime_import = ModuleType("runtime_import")
+    virtualenv = ModuleType("_virtualenv")
+    loaded = [("_openssl.lib", unchanged), ("_virtualenv", virtualenv)]
+    monkeypatch.setattr(training, "_runtime_loaded_modules", lambda: tuple(loaded))
+    monkeypatch.setattr(sys, "path", [*sys.path, vendor_root.as_posix()])
+
+    _normalize_runtime_evidence_test_harness(monkeypatch)
+
+    assert vendor_root.as_posix() not in sys.path
+    assert training._runtime_loaded_modules() == (("_virtualenv", virtualenv),)
+
+    loaded.append(("runtime_import", runtime_import))
+    assert training._runtime_loaded_modules() == (
+        ("_virtualenv", virtualenv),
+        ("runtime_import", runtime_import),
+    )
+
+    loaded[0] = ("_openssl.lib", replacement)
+    assert training._runtime_loaded_modules() == (
+        ("_openssl.lib", replacement),
+        ("_virtualenv", virtualenv),
+        ("runtime_import", runtime_import),
+    )
 
 
 def test_local_finetuning_project_has_isolated_locked_contract():

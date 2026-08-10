@@ -648,6 +648,7 @@ class _RuntimeNativeChildState:
     spec: object = field(repr=False, compare=False)
     loader: object = field(repr=False, compare=False)
     parent_module: object = field(repr=False, compare=False)
+    source_origin: _CapturedPhysicalFile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -736,6 +737,7 @@ class _RuntimeImportLoader(importlib.abc.Loader):
         return creator(spec)
 
     def exec_module(self, module: types.ModuleType) -> None:
+        tracked_spec = getattr(module, "__spec__", None)
         executor = getattr(self._delegate, "exec_module", None)
         if self._delegate is not None and executor is None:
             raise ImportError(f"tracked loader cannot execute module {self._name}")
@@ -760,6 +762,14 @@ class _RuntimeImportLoader(importlib.abc.Loader):
             # executing.  Preserve the tracked spec/module identity while
             # retaining transparent access to the delegate through __getattr__.
             module.__loader__ = self
+        elif _record_native_finalized_source_alias(
+            self._name,
+            module,
+            tracked_spec=tracked_spec,
+            tracked_loader=self,
+            source_loader=self._delegate,
+        ):
+            return
         elif module_loader is not self:
             raise RuntimeError(
                 f"completed import has inconsistent module loader: {self._name}"
@@ -3853,7 +3863,17 @@ def _validate_loaded_module_origins(
         if isinstance(canonical_name, str) and canonical_name != module_name:
             canonical_token = expected.get(canonical_name.partition(".")[0])
             if canonical_token is not None:
-                if sys.modules.get(canonical_name) is not module:
+                canonical_module = sys.modules.get(canonical_name)
+                alias_path = _loaded_module_origin_path(spec)
+                if canonical_module is not module and (
+                    alias_path is None
+                    or not _completed_load_matches(
+                        module_name,
+                        "native-child",
+                        alias_path,
+                        module,
+                    )
+                ):
                     raise RuntimeError(
                         f"loaded module alias has no canonical binding: {module_name}"
                     )
@@ -4421,6 +4441,7 @@ def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> Non
     if not changed:
         return
 
+    initial_names = {item.name for item in state.loaded_modules}
     initial_paths = {item.origin.path for item in state.loaded_modules}
     loaded_paths: set[Path] = set()
     for _name, module in _runtime_loaded_modules():
@@ -4433,6 +4454,22 @@ def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> Non
             continue
         if path is not None:
             loaded_paths.add(path)
+
+    with _RUNTIME_PROVENANCE_LOCK:
+        finalized_source_aliases = tuple(
+            states[0]
+            for states in _RUNTIME_NATIVE_CHILD_MODULES.values()
+            if len(states) == 1 and states[0].source_origin is not None
+        )
+    for alias in finalized_source_aliases:
+        source_origin = alias.source_origin
+        assert source_origin is not None
+        if alias.name in initial_names:
+            initial_paths.add(source_origin.path)
+        if sys.modules.get(
+            alias.name
+        ) is alias.module and _native_child_source_execution_matches(alias):
+            loaded_paths.add(source_origin.path)
 
     for path, (before, after) in sorted(
         changed.items(),
@@ -4806,6 +4843,126 @@ def _record_completed_module_load(
         _record_loaded_native_module(name, module, loader)
     elif kind == "built-in" and name == "pyexpat":
         _record_pyexpat_child_bindings(module)
+
+
+def _record_native_finalized_source_alias(
+    name: str,
+    module: types.ModuleType,
+    *,
+    tracked_spec: object,
+    tracked_loader: object,
+    source_loader: object | None,
+) -> bool:
+    """Bind a source compatibility shim that adopts one proven native spec.
+
+    NumPy 1.x exposes ``numpy._core._multiarray_umath`` through a Python shim
+    that deliberately copies the canonical native module's import metadata.
+    The alias remains a distinct module object.  Accept only that exact,
+    identity-bound finalization shape; arbitrary loader replacement still
+    falls through to the caller's fail-closed path.
+    """
+
+    if (
+        not isinstance(source_loader, importlib.machinery.SourceFileLoader)
+        or getattr(tracked_spec, "loader", None) is not tracked_loader
+        or source_loader.name != name
+        or getattr(tracked_spec, "origin", None) != source_loader.path
+        or sys.modules.get(name) is not module
+    ):
+        return False
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(module, "__loader__", None)
+    canonical_name = getattr(spec, "name", None)
+    if (
+        not isinstance(canonical_name, str)
+        or canonical_name == name
+        or canonical_name.partition(".")[0] != name.partition(".")[0]
+        or canonical_name.rpartition(".")[2] != name.rpartition(".")[2]
+        or not isinstance(loader, _RuntimeImportLoader)
+        or loader._kind != "native"
+        or loader._name != canonical_name
+        or not isinstance(
+            loader._delegate,
+            importlib.machinery.ExtensionFileLoader,
+        )
+        or getattr(spec, "loader", None) is not loader
+    ):
+        return False
+    canonical = sys.modules.get(canonical_name)
+    if (
+        type(canonical) is not types.ModuleType
+        or canonical is module
+        or getattr(canonical, "__spec__", None) is not spec
+        or getattr(canonical, "__loader__", None) is not loader
+    ):
+        return False
+    origin = _loaded_module_origin_path(spec)
+    if (
+        origin is None
+        or not any(
+            origin.name.endswith(suffix)
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+        )
+        or not _completed_load_matches(canonical_name, "native", origin, canonical)
+    ):
+        return False
+    captured = _capture_physical_file_identity(
+        origin,
+        label="native-finalized source alias origin",
+    )
+    source_path = Path(source_loader.path)
+    if not source_path.is_absolute():
+        source_path = Path(os.path.abspath(source_path))
+    _require_no_lexical_symlink_components(
+        source_path,
+        label="native-finalized alias source origin",
+    )
+    if source_path.is_symlink():
+        raise ValueError(
+            f"native-finalized alias source origin is a symbolic link: {source_path}"
+        )
+    source_path = source_path.resolve(strict=True)
+    if source_path.suffix != ".py":
+        return False
+    source_origin = _capture_physical_file_identity(
+        source_path,
+        label="native-finalized alias source origin",
+    )
+    native_state = _RuntimeNativeChildState(
+        name=name,
+        origin=captured,
+        parent_name=canonical_name,
+        parent_origin=origin,
+        module=module,
+        spec=spec,
+        loader=loader,
+        parent_module=canonical,
+        source_origin=source_origin,
+    )
+    if not _native_child_source_execution_matches(native_state):
+        raise RuntimeError(
+            f"native-finalized alias lacks matching source execution: {name}"
+        )
+    completed_state = _RuntimeCompletedLoadState(
+        name=name,
+        kind="native-child",
+        origin=origin,
+        module=module,
+        loader=loader,
+    )
+    key = (name, origin)
+    with _RUNTIME_PROVENANCE_LOCK:
+        observed_children = _RUNTIME_NATIVE_CHILD_MODULES.setdefault(key, [])
+        if len(observed_children) >= 64:
+            _RUNTIME_NATIVE_CHILD_MODULES_OVERFLOW.add(key)
+        else:
+            observed_children.append(native_state)
+        observed_loads = _RUNTIME_COMPLETED_LOADS.setdefault(name, [])
+        if len(observed_loads) >= 64:
+            _RUNTIME_COMPLETED_LOADS_OVERFLOW.add(name)
+        else:
+            observed_loads.append(completed_state)
+    return True
 
 
 def _record_loaded_native_module(
@@ -5521,6 +5678,32 @@ def _runtime_initial_file_module_has_provenance(
     )
 
 
+def _native_child_source_execution_matches(
+    state: _RuntimeNativeChildState,
+) -> bool:
+    source_origin = state.source_origin
+    if source_origin is None:
+        return True
+    source_path = source_origin.path
+    try:
+        current = _capture_physical_file_identity(
+            source_path,
+            label="native-finalized alias source origin",
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+    with _RUNTIME_PROVENANCE_LOCK:
+        overflowed = source_path in _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW
+        executed = tuple(_RUNTIME_EXECUTED_MODULE_CODE.get(source_path, ()))
+    if overflowed or current != source_origin or not executed:
+        return False
+    try:
+        canonical = _source_module_semantic_code(source_path, current)
+    except (OSError, RuntimeError, SyntaxError, ValueError):
+        return False
+    return {_canonical_code_object(code) for code in executed} == {canonical}
+
+
 def _require_loaded_code_provenance(
     module_name: str,
     module: object,
@@ -5618,6 +5801,7 @@ def _require_loaded_code_provenance(
                     id(item.spec),
                     id(item.loader),
                     id(item.parent_module),
+                    item.source_origin,
                     id(sys.modules.get(item.parent_name)),
                     id(
                         getattr(
@@ -5743,6 +5927,7 @@ def _require_loaded_code_provenance(
                 path,
                 module,
             )
+            or not _native_child_source_execution_matches(state)
         ):
             raise RuntimeError(
                 "loaded native-created module identity lacks completed parent "
@@ -5924,13 +6109,13 @@ def _capture_runtime_package_payloads(
             )
             if _is_external_runtime_bookkeeping(portable_external):
                 continue
-            if (
-                PurePosixPath(portable_external).suffix
-                in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES
-            ):
-                explicit_paths[f"runtime-external/{portable_external}"] = (
-                    resolved_external
-                )
+            mapped_external = _external_runtime_payload_mapping(
+                portable_external,
+                distribution_name=distribution.metadata.get("Name"),
+                install_root=install_root,
+            )
+            if mapped_external is not None:
+                explicit_paths[mapped_external] = resolved_external
                 continue
             raise ValueError(
                 "installed distribution path escapes its installation root "
@@ -6410,15 +6595,19 @@ def _capture_runtime_record(
                     resolved_external,
                     install_root=install_root,
                 )
-                if not _is_external_runtime_bookkeeping(portable_path) and (
-                    PurePosixPath(portable_path).suffix
-                    not in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES
-                ):
-                    raise ValueError(
-                        "runtime package RECORD path escapes its installation "
-                        "root without a portable runtime mapping: "
-                        f"{row[0]}"
+                if not _is_external_runtime_bookkeeping(portable_path):
+                    mapped_external = _external_runtime_payload_mapping(
+                        portable_path,
+                        distribution_name=distribution.metadata.get("Name"),
+                        install_root=install_root,
                     )
+                    if mapped_external is None:
+                        raise ValueError(
+                            "runtime package RECORD path escapes its installation "
+                            "root without a portable runtime mapping: "
+                            f"{row[0]}"
+                        )
+                    portable_path = mapped_external
             key = (outside_install_root, portable_path)
             if key in seen_paths:
                 raise ValueError(
@@ -6463,6 +6652,40 @@ def _is_external_runtime_bookkeeping(record_path: str) -> bool:
         parts[: len(prefix)] == prefix
         for prefix in _RUNTIME_EXTERNAL_BOOKKEEPING_PREFIXES
     )
+
+
+def _external_runtime_payload_mapping(
+    record_path: str,
+    *,
+    distribution_name: str | None,
+    install_root: Path,
+) -> str | None:
+    """Map a narrowly contained external payload to a portable evidence name."""
+
+    portable = PurePosixPath(record_path)
+    if portable.suffix in _RUNTIME_EXTERNAL_PAYLOAD_SUFFIXES:
+        return f"runtime-external/{portable.as_posix()}"
+    if not distribution_name or len(portable.parts) < 5 or portable.suffix != ".h":
+        return None
+    if (
+        install_root.name not in {"site-packages", "dist-packages"}
+        or not re.fullmatch(r"python\d+\.\d+", install_root.parent.name)
+        or portable.parts[:2] != ("include", "site")
+        or portable.parts[2] != install_root.parent.name
+    ):
+        return None
+    normalized_name = re.sub(r"[-_.]+", "-", distribution_name).lower()
+    header_owner = re.sub(r"[-_.]+", "-", portable.parts[3]).lower()
+    if header_owner != normalized_name:
+        return None
+    relative_header = PurePosixPath(*portable.parts[4:])
+    if not relative_header.parts:
+        return None
+    return PurePosixPath(
+        "runtime-include",
+        normalized_name,
+        relative_header,
+    ).as_posix()
 
 
 def _require_runtime_location(
