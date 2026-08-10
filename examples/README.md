@@ -17,18 +17,20 @@ offline contract
   → layered and calibrated judges
   → logical-model cost/quality analysis
   → optional aligned-judge prompt optimization
+  → recorded decisions and evidence-gated promotion
+  → platform-team LLM operations
   → enterprise model-selection workshop
 ```
 
 The first four MLflow examples run locally and deterministically without a
 model, cloud access, or credentials. The connected setup, small stable-adapter
-call, and native async/streaming notebook come next. Advanced labs 08–11 are
-credential-free decision fixtures; lab 12 is a disabled-by-default connected
-optimization skeleton whose experimental dependencies are not in the
-certified locks. Lab 13 is a credential-free, complete model-selection
-reference whose demonstrations and verification cells make no remote request.
-Its intentional learner stubs live only in a separate
-[`workshops/`](workshops/13_compare_and_select_llms_exercises.ipynb) copy.
+call, and native async/streaming notebook come next. Advanced labs 08–11 and
+13 are credential-free decision fixtures; lab 12 is a disabled-by-default
+connected optimization skeleton whose experimental dependencies are not in
+the certified locks; lab 14 is the platform operator's connected loop with a
+credential-free default path. Lab 15 is a complete, credential-free model-
+selection reference whose intentional learner stubs live only in a separate
+[`workshops/`](workshops/15_compare_and_select_llms_exercises.ipynb) copy.
 
 Every latency, token, and cost value in the credential-free stages is labelled
 `simulated_offline_fixture`; those values teach evidence shape and comparison
@@ -55,6 +57,51 @@ registry aliases, inference, drift, and the move to Databricks. Start with:
 make classification-install
 make classification-check
 make classification-notebook
+```
+
+## Separate governed batch inference pattern
+
+[`governed-batch-inference/`](governed-batch-inference/README.md) is a
+standalone reference implementation for running `ai_query` over large tables
+without shipping unvalidated model output into finance data products. It is
+not a stage in the numbered curriculum: one Databricks notebook plus a pure,
+unit-tested Python module walk `declare → estimate → sample → evaluate →
+gate → execute → land → monitor` end to end on synthetic tax documents, with
+Wilson-lower-bound gates, worst-stratum rules for high-criticality fields, an
+abstention path, and three-layer provenance. Its statistics are pinned by
+`tests/test_governed_batch_inference.py`.
+
+## Separate offline Apple-silicon fine-tuning study
+
+[`local-finetuning/`](local-finetuning/README.md) is an Apple-silicon,
+offline-first Bitext and MLX-LM study project. It prepares all third-party
+assets before travel, proves local execution with sockets blocked, compares
+deterministic and prompting baselines with a LoRA change, logs local MLflow
+evidence, and includes a deterministic application-readiness capstone. Start
+from the repository root:
+
+```bash
+make study-prepare-flight
+make study-offline-check
+```
+
+## Separate agentic operations and RAG workshop
+
+[`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone six-notebook
+workshop on governed RAG pipelines: trusted routing and access filters,
+structure-aware chunking, embedding/index compatibility, Azure AI Search and
+Databricks AI Search retrieval modes, MLflow 3 tracing and evaluation, human
+approval before operational side effects, and an evidence-backed release
+decision.
+
+It is an original adaptation of a public RAG course outline, built for this
+stack with synthetic data, keyless connected paths, generated notebooks, and
+the repository's exact dependency lock. Start with:
+
+```bash
+make ops-rag-install
+make ops-rag-check
+make ops-rag-notebook
 ```
 
 ## Why this curriculum exists
@@ -188,7 +235,9 @@ only that store at `http://127.0.0.1:5000`.
 | 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | How deterministic checks and human calibration become separate UC datasets linked to a report-only judge run. |
 | 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality comes before cost, with actual synthetic cases registered separately from simulated measurement artifacts. |
 | 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | How disjoint UC datasets, immutable prompt versions, readable real-call traces, and held-out runs prevent optimizer-to-production shortcuts. |
-| 13 | [`13_compare_and_select_llms.ipynb`](13_compare_and_select_llms.ipynb) | A complete reference for same-case model A/B accuracy, blinded judge win rates, session TCO, and fail-closed governance checks with SDK-compatible offline fixtures. |
+| 13 | [`13_decision_and_promotion_lifecycle.ipynb`](13_decision_and_promotion_lifecycle.ipynb) | Why every comparison ends in a recorded `adopt`/`reject`/`inconclusive` decision, and why the `production` prompt alias moves only on adopt-grade evidence. |
+| 14 | [`14_platform_llm_operations.ipynb`](14_platform_llm_operations.ipynb) | The platform team's operating loop: judge governance, gateway request tags, cost-by-tag queries, fleet provenance, monitoring adoption, and rollback levers. |
+| 15 | [`15_compare_and_select_llms.ipynb`](15_compare_and_select_llms.ipynb) | A complete reference for same-case model A/B accuracy, blinded judge win rates, session TCO, and fail-closed governance checks with SDK-compatible offline fixtures. |
 
 Open any advanced lab through the stable runner name, for example:
 
@@ -198,16 +247,20 @@ make local-example EXAMPLE=multi_turn_session_evaluation
 make local-example EXAMPLE=layered_judges
 make local-example EXAMPLE=cost_quality_tradeoff
 make local-example EXAMPLE=agent_alignment_optimization
+make local-example EXAMPLE=decision_promotion_lifecycle
 make local-example EXAMPLE=compare_and_select_llms
 ```
 
 The command prints the exact numbered path and selected kernel. The default
-path for all six advanced labs makes no model request and writes no remote
-evidence. Labs 08–12 expose explicit Databricks switches for their governed
-evidence paths; lab 13 provides a completed production-handoff reference and
-remains offline until the learner deliberately substitutes configured logical
-models. Use its [separate workshop](workshops/13_compare_and_select_llms_exercises.ipynb)
-to practise the calculations without weakening the canonical run-all path.
+path for every locally runnable advanced lab makes no model request and writes
+no remote evidence. Connected evidence paths stay behind explicit switches.
+The platform-operations lab runs through the workspace runner
+(`make workspace-example EXAMPLE=platform_llm_operations`) because its
+connected checks address the operator, not the application developer; its
+deterministic cells still run anywhere. Lab 15 remains offline until the learner
+deliberately substitutes configured logical models; use its
+[separate workshop](workshops/15_compare_and_select_llms_exercises.ipynb) to
+practise without weakening the canonical run-all path.
 
 ### Cookbook adaptations
 
@@ -432,14 +485,16 @@ Use `make examples-list` to see the runner's accepted names and modes.
 | `08_tool_trajectory_evaluation.ipynb`, `09_multi_turn_session_evaluation.ipynb` | `templates/agent-app` and its optional LangGraph recipe |
 | `10_layered_judges.ipynb` | `templates/evaluation-project` |
 | `11_cost_quality_tradeoff.ipynb`, `12_agent_alignment_optimization.ipynb` | a connected prompt or agent project after dependency and judge approval |
-| `13_compare_and_select_llms.ipynb` | a governed model-selection experiment after golden-data, judge, pricing, and provider-catalog approval |
+| `13_decision_and_promotion_lifecycle.ipynb` | `templates/prompt-app` promotion scripts and every template's release gate |
+| `14_platform_llm_operations.ipynb` | the platform team's operating runbook ([platform operations](../docs/platform-operations.md)) |
+| `15_compare_and_select_llms.ipynb` | a governed model-selection experiment after golden-data, judge, pricing, and provider-catalog approval |
 | `00_offline_hello_world.py` | every template's hermetic test pattern |
 
 ## Notebook conventions
 
 - Jupyter (`.ipynb`) is for local exploration, credential-free workshops, and
   explicitly guarded connected labs, including `07_first_llm_call.ipynb` through
-  `13_compare_and_select_llms.ipynb`.
+  `15_compare_and_select_llms.ipynb`.
 - Advanced cells show one teaching decision at a time. Typed mechanics for
   streaming, scoring, evidence persistence, optimization, and model selection
   live under [`support/`](support/) so they can be tested directly and reused

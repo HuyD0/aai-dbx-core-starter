@@ -23,13 +23,15 @@ from mlflow.genai.scorers import RelevanceToQuery, RetrievalGroundedness, Safety
 
 from aai_core import bootstrap
 from aai_core.agents import AgentRequest
+from aai_core.decisions import Decision, DecisionRecord, record_decision
 from aai_core.evaluation import (
     GatePolicy,
     MetricRule,
     apply_gate,
+    judge_model_uri,
 )
 from aai_core.experiments import record_reproducibility
-from aai_core.providers.types import ProviderConfigurationError
+from aai_core.prompts import prompt_digest
 from app.config import DATASET_NAME, PROMPT_NAME
 from app.rag import DEFAULT_RAG_LIMITS, RAGAgent, rag_limit_parameters
 from app.release_evidence import (
@@ -60,6 +62,18 @@ def load_baseline() -> dict[str, float]:
     return {name: float(value) for name, value in metrics.items()}
 
 
+def resolve_version(context, requested: int) -> int:
+    """Resolve and verify the exact immutable registry version requested."""
+
+    registered = context.prompts.load(
+        PROMPT_NAME, version=requested, cache_ttl_seconds=0
+    )
+    resolved = int(registered.version)
+    if resolved != requested:
+        raise RuntimeError("Prompt Registry returned a different immutable version")
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -88,19 +102,13 @@ def main() -> None:
         parser.error(str(error))
 
     context = bootstrap(ROOT / "aai-platform.yml")
-    version = args.prompt_version
-    agent = RAGAgent(context, prompt_version=version)
-
-    def predict_fn(question: str) -> str:
-        response = agent.invoke(
-            AgentRequest(messages=[{"role": "user", "content": question}])
-        )
-        return response.content
+    judge_model = judge_model_uri(context.settings)
+    version = resolve_version(context, args.prompt_version)
+    target_identity, judge_identity = _evaluation_model_identities(context.settings)
 
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
-    judge_model, target_identity, judge_identity = _evaluation_models(context.settings)
     baseline = load_baseline()
     policy = GatePolicy(
         rules=tuple(load_thresholds()),
@@ -114,6 +122,14 @@ def main() -> None:
     configuration = release_configuration(context.settings)
     config_digests = configuration_digests(configuration)
     limit_parameters = rag_limit_parameters(DEFAULT_RAG_LIMITS)
+    agent = RAGAgent(context, prompt_version=version)
+
+    def predict_fn(question: str) -> str:
+        response = agent.invoke(
+            AgentRequest(messages=[{"role": "user", "content": question}])
+        )
+        return response.content
+
     # A governed MLflow run: aai.* tags, pinned prompt URI + dataset as
     # params, exact code/config/world joins, gate metrics, verdict tag, and
     # the evaluation traces attached.
@@ -133,8 +149,11 @@ def main() -> None:
             **config_digests,
             **limit_parameters,
         },
-    ) as active_run:
-        _validate_dataset_association(dataset, active_run.info.experiment_id)
+    ) as evaluation_run:
+        registered = context.prompts.load(
+            PROMPT_NAME, version=version, cache_ttl_seconds=0
+        )
+        _validate_dataset_association(dataset, evaluation_run.info.experiment_id)
         record_reproducibility()
         native_result = mlflow.genai.evaluate(
             data=dataset,
@@ -164,8 +183,33 @@ def main() -> None:
                 "aai.judge_model": judge_identity,
             }
         )
-    report.require_passed()
-    if args.update_baseline:
+        evaluation_run_id = str(evaluation_run.info.run_id)
+    template = getattr(registered, "template", None)
+    if not isinstance(template, (str, list)):
+        raise TypeError(
+            "The evaluated prompt version exposes no template for decision evidence."
+        )
+    decision = Decision.ADOPT if report.passed else Decision.REJECT
+    decision_run_id = record_decision(
+        DecisionRecord(
+            decision=decision,
+            change_id=f"prompt-v{version}",
+            change_summary=f"Evaluate pinned prompt version {version} for release.",
+            rationale=(
+                "The release gate passed for the exact registered prompt version."
+                if report.passed
+                else "The release gate failed for the exact registered prompt version."
+            ),
+            change_run_id=evaluation_run_id,
+            gate=report,
+            prompt_name=context.prompts.qualify(PROMPT_NAME),
+            prompt_version=version,
+            prompt_digest=prompt_digest(template),
+            decided_by="code:release-gate",
+        ),
+        experiments=context.experiments,
+    )
+    if report.passed and args.update_baseline:
         BASELINE.write_text(
             json.dumps({"metrics": dict(report.metrics)}, indent=2, sort_keys=True)
             + "\n",
@@ -177,25 +221,24 @@ def main() -> None:
             "release": context.tags.release,
             "prompt_version": version,
             "knowledge_version": world_version,
-            "evaluation_run": active_run.info.run_id,
+            "evaluation_run": evaluation_run_id,
             "metrics": report.metrics,
             "baseline_updated": args.update_baseline,
+            "decision": decision.value,
+            "decision_run_id": decision_run_id,
         }
     )
+    report.require_passed()
 
 
-def _evaluation_models(settings) -> tuple[str, str, str]:
+def _evaluation_model_identities(settings) -> tuple[str, str]:
     target = _model_config(settings, "general-chat")
     judge = _model_config(settings, "judge-model")
-    if judge["provider"].casefold() != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
     if (
         judge["provider"].casefold() == target["provider"].casefold()
         and judge["deployment"].casefold() == target["deployment"].casefold()
     ):
-        raise ProviderConfigurationError(
+        raise ValueError(
             "judge-model must use a deployment distinct from general-chat; "
             "a release gate cannot rely on the target judging itself"
         )
@@ -203,22 +246,22 @@ def _evaluation_models(settings) -> tuple[str, str, str]:
         target_identity = model_identity(settings, "general-chat")
         judge_identity = model_identity(settings, "judge-model")
     except (TypeError, ValueError, RuntimeError) as error:
-        raise ProviderConfigurationError(
+        raise ValueError(
             "Evaluation model identity configuration is invalid"
         ) from error
-    return f"endpoints:/{judge['deployment']}", target_identity, judge_identity
+    return target_identity, judge_identity
 
 
 def _model_config(settings, logical_name: str) -> dict[str, str]:
     config = settings.models.get(logical_name)
     if not isinstance(config, Mapping):
-        raise ProviderConfigurationError(f"{logical_name} must be configured")
+        raise ValueError(f"{logical_name} must be configured")
     provider = config.get("provider")
     deployment = config.get("deployment")
     if not isinstance(provider, str) or not provider.strip():
-        raise ProviderConfigurationError(f"{logical_name} requires a provider")
+        raise ValueError(f"{logical_name} requires a provider")
     if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError(f"{logical_name} requires a deployment")
+        raise ValueError(f"{logical_name} requires a deployment")
     return {
         "provider": provider.strip(),
         "deployment": deployment.strip(),

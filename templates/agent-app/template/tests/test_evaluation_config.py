@@ -7,12 +7,11 @@ import pytest
 
 from aai_core import tracing
 from aai_core.agents import AgentDecision, AgentDecisionType, AgentResponse
-from aai_core.providers.types import ProviderConfigurationError
 from aai_core.tags import ResourceContext
 from evals.evaluate import (
     _build_predict_fn,
     _case_key,
-    _evaluation_models,
+    _evaluation_model_identities,
     load_thresholds,
 )
 
@@ -40,7 +39,7 @@ def _settings(
 
 
 def test_cross_provider_deployment_names_do_not_imply_same_target():
-    _, target, judge = _evaluation_models(
+    target, judge = _evaluation_model_identities(
         _settings(target_provider="foundry", target="chat", judge="chat")
     )
 
@@ -49,7 +48,7 @@ def test_cross_provider_deployment_names_do_not_imply_same_target():
 
 
 def test_foundry_endpoint_origin_is_part_of_target_identity():
-    _, first, _ = _evaluation_models(
+    first, _ = _evaluation_model_identities(
         _settings(
             target_provider="foundry",
             target="chat",
@@ -57,7 +56,7 @@ def test_foundry_endpoint_origin_is_part_of_target_identity():
             endpoint="https://foundry.example.invalid/api/projects/a/",
         )
     )
-    _, second, _ = _evaluation_models(
+    second, _ = _evaluation_model_identities(
         _settings(
             target_provider="foundry",
             target="chat",
@@ -65,7 +64,7 @@ def test_foundry_endpoint_origin_is_part_of_target_identity():
             endpoint="https://foundry.example.invalid/api/projects/b",
         )
     )
-    _, equivalent_first, _ = _evaluation_models(
+    equivalent_first, _ = _evaluation_model_identities(
         _settings(
             target_provider="foundry",
             target="chat",
@@ -81,8 +80,8 @@ def test_foundry_endpoint_origin_is_part_of_target_identity():
 
 
 def test_same_provider_and_deployment_cannot_self_judge():
-    with pytest.raises(ProviderConfigurationError, match="cannot rely"):
-        _evaluation_models(
+    with pytest.raises(ValueError, match="cannot rely"):
+        _evaluation_model_identities(
             _settings(target_provider="databricks", target="chat", judge="CHAT")
         )
 

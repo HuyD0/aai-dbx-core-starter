@@ -170,11 +170,15 @@ live-validate the managed UI and conversion behavior in the target workspace.
    MLflow Assessments and are never written back into the original decision
    span. The gate loads and passes the native UC dataset, verifies it exactly
    matches the repository-reviewed suite, and records target/judge identities
-   plus gate-policy and baseline digests. After a released run, append
+   plus gate-policy and baseline digests. It also records an adopt or reject
+   decision run and prints both the evaluation run ID and `decision_run_id`.
+   The SDK's strict judge resolver runs before tracing, prompt loading, or agent
+   construction, so a missing, placeholder, non-Databricks, or malformed
+   endpoint fails locally. After a released run, append
    `EVALUATE_ARGS=--update-baseline`.
 5. Materialize immutable release evidence from that passing run:
    `python scripts/create_release.py --prompt-version <n> --evaluation-run
-   <run-id> --world-version <source-snapshot>`. The v2 manifest records the
+   <evaluation-run-id> --world-version <source-snapshot>`. The v2 manifest records the
    World/Learning/Control digests, tool and execution limits, dataset digest,
    AI Platform manifest hash, readiness profile, budget policy, service
    levels, owner, and cost center. A default/manual **remote** bundle gate is
@@ -187,7 +191,9 @@ live-validate the managed UI and conversion behavior in the target workspace.
    `BUNDLE_VAR_source_state=false`. `create_release.py` fails closed for a ref
    name, short SHA, dirty/unknown source, or a gate run from different code.
 6. Promote the prompt (`python scripts/promote_prompt.py --version <n>
-   --to validation|production`).
+   --decision-run-id <decision-run-id> --to validation|production`). The script reloads
+   and verifies the persisted decision artifact, tags, gate metrics, and exact
+   prompt binding before moving either alias.
 {{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
 7. Before enabling deployment, have the approved platform process create the
    Databricks App named `{{.application_name}}-dev`. App creation provisions

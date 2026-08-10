@@ -1,4 +1,9 @@
-"""Strict datasets and adapters for things under evaluation."""
+"""Strict project datasets and adapters for things under evaluation.
+
+AgentKit owns general target resolution. The Pydantic models here deliberately
+remain project-local: the bundled golden suite and answer sheet have a narrower
+contract with stable case IDs, bounded text, and an exact one-to-one mapping.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +15,16 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from aai_core import PlatformContext
+from aai_core.agentkit.config import ProjectContext
+from aai_core.agentkit.targets import build_predict_fn, resolve_target
 
 MAX_QUESTION_CHARS = 8_000
 MAX_ANSWER_CHARS = 8_192
 
 
 class AnswerRecord(BaseModel):
+    """One reviewed, bounded answer keyed by stable case identity."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -31,6 +40,8 @@ class AnswerRecord(BaseModel):
 
 
 class CaseInputs(BaseModel):
+    """Strict inputs for a reviewed golden case."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
@@ -44,6 +55,8 @@ class CaseInputs(BaseModel):
 
 
 class CaseExpectations(BaseModel):
+    """Strict expected output for a reviewed case."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     expected_response: str = Field(min_length=1, max_length=MAX_ANSWER_CHARS)
@@ -57,12 +70,16 @@ class CaseExpectations(BaseModel):
 
 
 class CaseTags(BaseModel):
+    """Stable identity carried with a reviewed case."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 class EvaluationCase(BaseModel):
+    """One golden evaluation case."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     inputs: CaseInputs
@@ -75,6 +92,8 @@ class EvaluationCase(BaseModel):
 
 
 class EdgeInputs(BaseModel):
+    """Inputs for a deliberately adversarial edge case."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     # Empty questions are intentional adversarial cases and remain valid here.
@@ -82,6 +101,8 @@ class EdgeInputs(BaseModel):
 
 
 class EdgeCase(BaseModel):
+    """One bounded edge case; edge cases remain report-only."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     inputs: EdgeInputs
@@ -89,6 +110,8 @@ class EdgeCase(BaseModel):
 
 
 def load_evaluation_cases(path: str | Path) -> list[dict[str, Any]]:
+    """Load the golden suite and require unique stable case IDs."""
+
     payload = _json_records(path)
     cases = [EvaluationCase.model_validate(record, strict=True) for record in payload]
     _require_unique((case.case_id for case in cases), "case id")
@@ -96,6 +119,8 @@ def load_evaluation_cases(path: str | Path) -> list[dict[str, Any]]:
 
 
 def load_edge_cases(path: str | Path) -> list[dict[str, Any]]:
+    """Load bounded adversarial cases and reject duplicate questions."""
+
     payload = _json_records(path)
     cases = [EdgeCase.model_validate(record, strict=True) for record in payload]
     _require_unique((case.inputs.question for case in cases), "edge-case question")
@@ -126,10 +151,27 @@ def answer_sheet_predict_fn(
     return predict
 
 
+def validate_bundled_data(root: str | Path, *, include_answer_sheet: bool) -> None:
+    """Validate the generated project's reviewed data before evaluation.
+
+    AgentKit additionally validates whichever dataset is selected in
+    ``agentkit.yaml``. This narrower preflight protects the bundled examples'
+    stable case-ID and answer-sheet contract before any target or judge call.
+    """
+
+    project_root = Path(root)
+    data = project_root / "evals" / "data"
+    cases = load_evaluation_cases(data / "golden_cases.json")
+    load_edge_cases(data / "edge_cases.json")
+    if include_answer_sheet:
+        answer_sheet_predict_fn(data / "answer_sheet.json", expected_cases=cases)
+
+
 def endpoint_predict_fn(
-    context: PlatformContext, logical_name: str = "target-model"
+    context: PlatformContext,
+    logical_name: str = "target-model",
 ) -> Callable[[str], str]:
-    """Call the configured target with bounded input and output."""
+    """Call a logical model with bounded input, tokens, and output."""
 
     model = context.providers.model(logical_name)
 
@@ -143,6 +185,25 @@ def endpoint_predict_fn(
             raise RuntimeError("target returned an empty or oversized response")
         return response.content
 
+    return predict
+
+
+def agent_predict_fn(
+    project: ProjectContext | None = None,
+) -> Callable[..., Any]:
+    """Resolve and build the target selected by ``agentkit.yaml``."""
+
+    context = project or ProjectContext.load(
+        Path(__file__).resolve().parents[2] / "agentkit.yaml"
+    )
+    target = resolve_target(
+        context.config.agent,
+        root=context.root,
+        settings=context.settings,
+    )
+    predict = build_predict_fn(target, project=context)
+    if predict is None:
+        raise ValueError("the configured target is an answer sheet, not a live agent")
     return predict
 
 

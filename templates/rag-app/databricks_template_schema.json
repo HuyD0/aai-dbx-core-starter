@@ -169,6 +169,6 @@
       "pattern_match_failure_message": "Use 1-128 letters, numbers, dots, underscores, colons, slashes, plus signs, or hyphens."
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. python evals/evaluate.py --prompt-version <version>  # note decision_run_id\n  6. python scripts/promote_prompt.py --version <version> --decision-run-id <run-id> --to validation\n  7. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
   "min_databricks_cli_version": "v1.6.0"
 }

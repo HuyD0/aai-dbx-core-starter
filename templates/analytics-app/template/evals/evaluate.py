@@ -26,9 +26,8 @@ import mlflow
 from mlflow.genai.scorers import Correctness, Safety, scorer
 
 from aai_core import bootstrap
-from aai_core.evaluation import GatePolicy, MetricRule, apply_gate
+from aai_core.evaluation import GatePolicy, MetricRule, apply_gate, judge_model_uri
 from aai_core.experiments import record_reproducibility
-from aai_core.providers.types import ProviderConfigurationError
 from aai_core.tracing import TraceIntegration, traced
 from app.agent import AnalyticsAgent
 from app.config import DATASET_NAME, DEMO_CATALOG, DEMO_SCHEMA, resolve_warehouse_id
@@ -86,6 +85,7 @@ def main() -> None:
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     context.configure_tracing(integration=TraceIntegration.SDK)
     warehouse_id = resolve_warehouse_id(args.warehouse_id)
     cases = json.loads(
@@ -98,7 +98,7 @@ def main() -> None:
 
     thresholds = load_thresholds()
     baseline = load_baseline()
-    judge_model, target_identity, judge_identity = _evaluation_models(context.settings)
+    target_identity, judge_identity = _evaluation_model_identities(context.settings)
     policy = GatePolicy(
         rules=tuple(thresholds),
         # Tokenomics is part of the gate: answers must carry token accounting
@@ -135,7 +135,10 @@ def main() -> None:
                     "target_model": target_identity,
                     "judge_model": judge_identity,
                 },
-            ):
+            ) as evaluation_run:
+                _validate_dataset_association(
+                    dataset, evaluation_run.info.experiment_id
+                )
                 record_reproducibility()
                 native_result = mlflow.genai.evaluate(
                     data=dataset,
@@ -246,36 +249,32 @@ def _semantic_model_version() -> str:
     return f"{info.get('name', 'unknown')}-v{info.get('version', 0)}"
 
 
-def _evaluation_models(settings) -> tuple[str, str, str]:
+def _evaluation_model_identities(settings) -> tuple[str, str]:
     target = _model_config(settings, "general-chat")
     judge = _model_config(settings, "judge-model")
-    if judge["provider"] != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
     if (
         judge["provider"].casefold() == target["provider"].casefold()
         and judge["deployment"].casefold() == target["deployment"].casefold()
     ):
-        raise ProviderConfigurationError(
+        raise ValueError(
             "judge-model must use a deployment distinct from general-chat; "
             "a release gate cannot rely on the target judging itself"
         )
     target_identity = f"{target['provider']}:{target['deployment']}"
     judge_identity = f"{judge['provider']}:{judge['deployment']}"
-    return f"endpoints:/{judge['deployment']}", target_identity, judge_identity
+    return target_identity, judge_identity
 
 
 def _model_config(settings, logical_name: str) -> dict[str, str]:
     config = settings.models.get(logical_name)
     if not isinstance(config, Mapping):
-        raise ProviderConfigurationError(f"{logical_name} must be configured")
+        raise ValueError(f"{logical_name} must be configured")
     provider = config.get("provider")
     deployment = config.get("deployment")
     if not isinstance(provider, str) or not provider.strip():
-        raise ProviderConfigurationError(f"{logical_name} requires a provider")
+        raise ValueError(f"{logical_name} requires a provider")
     if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError(f"{logical_name} requires a deployment")
+        raise ValueError(f"{logical_name} requires a deployment")
     return {
         "provider": provider.strip(),
         "deployment": deployment.strip(),
@@ -286,6 +285,10 @@ def _load_release_dataset(name: str, reviewed_cases: list[dict]):
     """Load the governed suite and fail closed on any unreviewed row drift."""
 
     dataset = mlflow.genai.datasets.get_dataset(name=name)
+    if not isinstance(dataset.dataset_id, str) or not dataset.dataset_id.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable dataset ID")
+    if not isinstance(dataset.digest, str) or not dataset.digest.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable digest")
     registered_cases = dataset.to_df().to_dict(orient="records")
     expected = Counter(_case_key(record) for record in reviewed_cases)
     actual = Counter(_case_key(record) for record in registered_cases)
@@ -299,6 +302,15 @@ def _load_release_dataset(name: str, reviewed_cases: list[dict]):
             "versioned DATASET_NAME rather than evaluating unreviewed rows."
         )
     return dataset
+
+
+def _validate_dataset_association(dataset, experiment_id: str) -> None:
+    associated = {str(value) for value in (dataset.experiment_ids or [])}
+    if str(experiment_id) not in associated:
+        raise RuntimeError(
+            "The release dataset is not associated with this application's "
+            "configured experiment"
+        )
 
 
 def _case_key(record: Mapping) -> str:

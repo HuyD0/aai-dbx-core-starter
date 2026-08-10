@@ -31,21 +31,11 @@ import mlflow
 from mlflow.genai.scorers import Safety, ScorerSamplingConfig
 
 from aai_core import bootstrap
-from aai_core.providers.types import ProviderConfigurationError
+from aai_core.evaluation import judge_model_uri
 
 context = bootstrap()  # discovers aai-platform.yml (env override / upward search)
+judge_model = judge_model_uri(context.settings)
 print({"experiment": context.settings.effective_experiment_name})
-
-
-def judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not config or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
-    # Registered production scorers require the Databricks judge URI scheme;
-    # endpoints:/ is valid for direct evaluation but is rejected on register().
-    return f"databricks:/{config['deployment']}"
 
 
 MANAGED_MONITORING_PREFLIGHT_COMPLETE = False
@@ -68,10 +58,8 @@ def require_managed_monitoring_preflight(confirmed: bool) -> None:
 require_managed_monitoring_preflight(MANAGED_MONITORING_PREFLIGHT_COMPLETE)
 mlflow.set_experiment(context.settings.effective_experiment_name)
 
-safety = Safety(model=judge_model_uri(context.settings)).register(
-    name="production_safety"
-)
-safety = safety.start(sampling_config=ScorerSamplingConfig(sample_rate=0.1))
+safety = Safety(model=judge_model).register(name="production_safety")
+safety.start(sampling_config=ScorerSamplingConfig(sample_rate=0.1))
 print("registered production_safety at 10% sampling")
 
 # COMMAND ----------

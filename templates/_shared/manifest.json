@@ -70,6 +70,9 @@
       "analytics-app",
       "evaluation-project",
       "experiment-starter"
+    ],
+    "tests/test_manifest_dataset.py": [
+      "evaluation-project"
     ]
   }
 }

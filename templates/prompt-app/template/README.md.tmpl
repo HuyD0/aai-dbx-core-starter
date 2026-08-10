@@ -33,15 +33,21 @@ provider integration.
    `python evals/evaluate.py` — explicitly routed LLM judges (Correctness,
    RelevanceToQuery, Safety) against `evals/data/release_cases.json` with the
    thresholds in `evals/gate_config.json`; evaluation always pins an exact
-   version, never an alias. After a released run passes, refresh the
-   regression baseline with `--update-baseline`.
+   version, never an alias. The SDK's strict judge resolver runs before prompt
+   registry access or assistant construction, so invalid configuration fails
+   locally before target work. After a released run passes, refresh the
+   regression baseline with `--update-baseline`. The gate records an adopt or
+   reject decision run and prints its `decision_run_id`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset
    by name.
 4. Promote only after the gate passes:
-   `python scripts/promote_prompt.py --version <n> --to validation`, then
-   `--to production` at release approval. Production deploys load the
-   `production` alias — promotion must happen before the first prod deploy.
+   `python scripts/promote_prompt.py --version <n> --decision-run-id <run-id>
+   --to validation`, then repeat with `--to production` at release approval.
+   Promotion reloads and verifies the persisted decision artifact, tags, gate
+   metrics, and exact prompt binding before moving the alias. Production
+   deploys load the `production` alias — promotion must happen before the
+   first prod deploy.
 5. Deploy the evaluation job: `databricks bundle validate -t dev` then
    `databricks bundle deploy -t dev`.
 

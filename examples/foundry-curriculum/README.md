@@ -13,7 +13,7 @@ foundry-curriculum/
 ├── config/
 │   ├── .gitignore
 │   ├── aai-platform.dev.example.yml   portable, tracked example
-│   └── aai-platform.dev.yml           local endpoint config, ignored by Git
+│   └── aai-platform.dev.yml           local clone config, ignored by Git
 ├── data/
 │   ├── evaluation_cases.jsonl         20 held-out starter cases
 │   ├── context_cases.jsonl            context/security regression cases
@@ -53,20 +53,25 @@ application behavior and evidence shape, never provider performance.
 
 ## Configure it
 
-A clean checkout intentionally contains only the portable example. Before
-opening any notebook, copy it to the ignored local development path:
+In a fresh clone, create the ignored local configuration from the portable
+example before editing settings or opening a notebook. From the repository
+root, run:
 
 ```bash
-cp examples/foundry-curriculum/config/aai-platform.dev.example.yml examples/foundry-curriculum/config/aai-platform.dev.yml
+cp examples/foundry-curriculum/config/aai-platform.dev.example.yml \
+  examples/foundry-curriculum/config/aai-platform.dev.yml
 ```
 
-Edit the new file so `platform.repository` names this clone as
-`<owner>/<repository>`. Disconnected exercises may keep the Foundry endpoint
-and deployment placeholders. Replace both before making a connected request:
+Edit `examples/foundry-curriculum/config/aai-platform.dev.yml`, not the tracked
+example. Set the clone's repository and approved catalog, then complete the
+Foundry **project** endpoint and model deployment before making a connected
+request:
 
 ```yaml
 platform:
   repository: <owner>/<repository>
+  catalog: <approved catalog>
+
 providers:
   models:
     foundry-chat:
@@ -115,7 +120,8 @@ Open the repository in VS Code or JupyterLab, choose `.venv/bin/python`, and run
 the notebooks in order. Every notebook is safe to run without a cloud request
 by default. The first connected call requires both:
 
-1. a real `deployment` value in the selected configuration; and
+1. real project `endpoint` and model `deployment` values in the selected
+   configuration; and
 2. changing that notebook's explicit `RUN_CONNECTED` switch to `True`.
 
 Advanced notebooks have narrower switches such as `RUN_A2A_CONNECTED`,

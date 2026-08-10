@@ -15,6 +15,10 @@ LOCAL_MLFLOW_URI = sqlite:///$(LOCAL_MLFLOW_DB)
 # resource; it is stopped by default so a forgotten console cannot bill.
 APP_PORT ?= 8000
 APP_NAME ?= aai-platform-console-dev
+OPS_RAG_DIR := $(CURDIR)/examples/agentic-ops-rag
+OPS_RAG_KERNEL := aai-agentic-ops-rag
+OPS_RAG_MLFLOW_DIR := $(OPS_RAG_DIR)/.aai
+OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 
 .PHONY: help check-uv install lint format format-check typecheck test coverage audit \
 	build check verify \
@@ -23,9 +27,12 @@ APP_NAME ?= aai-platform-console-dev
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
+	study-prepare-flight study-offline-check study-lab notebook \
 	classification-install classification-prepare classification-train \
 	classification-doctor classification-reset classification-check \
-	classification-notebook classification-ui
+	classification-notebook classification-ui \
+	ops-rag-install ops-rag-doctor ops-rag-render ops-rag-check \
+	ops-rag-notebook ops-rag-ui
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -54,7 +61,7 @@ hooks-install: install ## Install the repository's pre-commit and pre-push hooks
 hooks-run: pre-commit pre-push ## Run both Git hook stages now.
 
 examples-install: check-uv ## Install locked Databricks, GenAI, and interactive example dependencies.
-	$(UV) sync --extra dev --extra databricks --extra genai --extra examples --locked
+	$(UV) sync --extra dev --extra foundry --extra azure-search --extra databricks --extra genai --extra examples --locked
 	@$(PYTHON) -c 'import sys; import databricks.sdk; import ipykernel; import jupyterlab; import mlflow; print(f"Example dependencies ready in {sys.executable} (MLflow {mlflow.__version__})")'
 
 quickstart: install ## Prove a fresh clone works without credentials.
@@ -82,6 +89,18 @@ local-ui: examples-install ## Serve the isolated local MLflow store at http://12
 		--backend-store-uri "$(LOCAL_MLFLOW_URI)" \
 		--default-artifact-root "$(LOCAL_MLFLOW_DIR)/mlruns"
 
+study-prepare-flight: ## Prepare the Apple-silicon fine-tuning project while online.
+	$(MAKE) -C examples/local-finetuning prepare-flight
+
+study-offline-check: ## Prove the prepared fine-tuning project is plane-ready.
+	$(MAKE) -C examples/local-finetuning flight-check
+
+study-lab: ## Run the fine-tuning project's deterministic offline study path.
+	$(MAKE) -C examples/local-finetuning study-smoke
+
+notebook: ## Open the offline fine-tuning notebook course.
+	$(MAKE) -C examples/local-finetuning notebook
+
 classification-install: check-uv ## Install the locked local classification course.
 	$(MAKE) -C examples/local-classification install
 
@@ -105,6 +124,35 @@ classification-notebook: check-uv ## Open the local classification notebook cour
 
 classification-ui: check-uv ## Serve the classification course's local MLflow UI.
 	$(MAKE) -C examples/local-classification mlflow-ui
+
+ops-rag-install: examples-install ## Install the locked agentic operations RAG workshop environment.
+	@$(PYTHON) -c 'import azure.search.documents; import openai; print("Agentic operations RAG provider extras ready")'
+
+ops-rag-doctor: ops-rag-install ## Check the workshop without cloud calls; add CONNECTED=1 to require filled config.
+	$(PYTHON) $(OPS_RAG_DIR)/scripts/doctor.py $(if $(CONNECTED),--connected,)
+
+ops-rag-render: ## Regenerate the workshop notebooks from reviewable Python sources.
+	$(PYTHON) $(OPS_RAG_DIR)/scripts/render_notebooks.py
+
+ops-rag-check: ops-rag-install ## Test and execute all credential-free workshop lessons.
+	$(PYTHON) -m pytest -q tests/test_agentic_ops_rag.py
+	$(PYTHON) $(OPS_RAG_DIR)/scripts/check_notebooks.py --execute
+
+ops-rag-notebook: ops-rag-install ## Open the workshop at lesson 00 in JupyterLab.
+	$(PYTHON) -m ipykernel install --prefix "$(CURDIR)/.venv" \
+		--name "$(OPS_RAG_KERNEL)" --display-name "AAI Agentic Operations RAG"
+	PATH="$(CURDIR)/.venv/bin:$$PATH" \
+		JUPYTER_PATH="$(CURDIR)/.venv/share/jupyter" \
+		$(PYTHON) -m jupyterlab \
+		--ServerApp.root_dir="$(OPS_RAG_DIR)" \
+		--LabApp.default_url="/lab/tree/notebooks/00_environment_and_stack_map.ipynb" \
+		--LabApp.extension_manager=readonly
+
+ops-rag-ui: ops-rag-install ## Serve the workshop's isolated MLflow UI at http://127.0.0.1:5001.
+	@mkdir -p "$(OPS_RAG_MLFLOW_DIR)/mlruns"
+	$(PYTHON) -m mlflow ui --host 127.0.0.1 --port 5001 \
+		--backend-store-uri "$(OPS_RAG_MLFLOW_URI)" \
+		--default-artifact-root "$(OPS_RAG_MLFLOW_DIR)/mlruns"
 
 workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect
@@ -149,6 +197,12 @@ coverage: check-uv ## Run SDK tests with branch coverage and the release quality
 audit: ## Audit the locked environment for published dependency advisories.
 	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
 		--policy templates/_shared/files/security-audit.toml --uv-project .
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--uv-project examples/local-classification
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--uv-project examples/local-finetuning
 	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
 		--policy templates/_shared/files/security-audit.toml \
 		--requirement examples/local-classification/src/aai_local_classification/model-requirements.lock

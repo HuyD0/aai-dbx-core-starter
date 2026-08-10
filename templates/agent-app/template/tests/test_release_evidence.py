@@ -10,7 +10,7 @@ from aai_core import __version__
 from aai_core.experiments import record_reproducibility
 from app.controls import DEFAULT_AGENT_LIMITS
 from app.tools import build_registry
-from evals.evaluate import _evaluation_models
+from evals.evaluate import _evaluation_model_identities
 from scripts import create_release
 
 SOURCE_COMMIT = "c" * 40
@@ -292,7 +292,7 @@ def test_foundry_eval_and_release_use_the_same_endpoint_aware_identity():
         }
     )
 
-    _, evaluated_identity, _ = _evaluation_models(settings)
+    evaluated_identity, _ = _evaluation_model_identities(settings)
 
     assert create_release._model_identity(settings, "general-chat") == (
         evaluated_identity

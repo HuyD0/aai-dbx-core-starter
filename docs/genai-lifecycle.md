@@ -173,6 +173,10 @@ explicitly permits it. Prefer stable identifiers and controlled excerpts.
 
 ## Evaluation layers
 
+The `agentkit` CLI implements this chain for agent evaluation — it decides the
+run ontology, resolves scorers from the shared registry, and generates the
+lineage described below. See `docs/agent-evaluation.md`.
+
 - Unit and schema tests.
 - Deterministic policy and tool tests.
 - Retrieval and access-control evaluation.
@@ -292,7 +296,10 @@ It is distinct from the schema-v2 application maturity tag
 `ResourceContext.lifecycle="validation"`. Historical schema-v1 evidence with
 the `candidate` lifecycle remains readable with a deprecation warning.
 Evaluation and release evidence always bind the exact prompt URI, version, and
-content digest even when runtime configuration loads an alias.
+content digest even when runtime configuration loads an alias. Promotion also
+cites the finished MLflow decision
+run: the SDK reloads `decision/decision.json` and verifies its digest, lifecycle
+tags, gate metrics, run purpose, identity, and status before moving the alias.
 
 ## Reproducibility manifest
 
@@ -349,11 +356,18 @@ The repository examples implement this contract in order:
 13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
     training, and final held-out release evidence separate; it is disabled by
     default and cannot move a production alias.
-14. `13_compare_and_select_llms.ipynb` is a credential-free interactive
+14. `13_decision_and_promotion_lifecycle.ipynb` ends the comparison in a
+    recorded adopt/reject decision bound to its gate evidence and shows the
+    production alias refusing to move without adopt-grade evidence.
+15. `14_platform_llm_operations.ipynb` walks the platform team's operating
+    loop: judge governance, gateway request tags, cost by tag, fleet
+    provenance, monitoring adoption, and rollback levers.
+16. `15_compare_and_select_llms.ipynb` is a credential-free interactive
     workshop that compares baseline/change logical models through a golden
     dataset, blinded pairwise judging, session-level TCO, and a fail-closed
-    governance evidence preflight. Its learner stubs are intentionally
-    incomplete, and its simulated measurements cannot authorize a release.
+    governance evidence preflight. Its separate learner workshop contains the
+    intentional stubs; the canonical notebook is complete, and its simulated
+    measurements cannot authorize a release.
 
 The executable lifecycle scripts emit hypothesis, baseline, change, result,
 decision, and release. The advanced notebooks preserve that vocabulary while
@@ -362,6 +376,7 @@ remaining exploration and teaching artifacts. See
 
 ## Current references
 
+- [LLMOps playbook](llmops-playbook.md)
 - [Cookbook relevance assessment](mlflow-cookbook-assessment.md)
 - [MLflow GenAI evaluation and monitoring](https://mlflow.org/docs/latest/genai/eval-monitor/)
 - [MLflow automatic evaluation](https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/)

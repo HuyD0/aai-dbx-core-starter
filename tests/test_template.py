@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,37 @@ REQUIRED_TAGS = {
     "lifecycle",
     "tag_schema_version",
 }
+CURRENT_TEMPLATE_VERSIONS = {
+    "analytics-app": "1.1.0",
+    "experiment-starter": "1.2.0",
+}
+STRICT_JUDGE_CALLS = (
+    pytest.param(
+        "agent-app/template/evals/evaluate.py",
+        "agent = ToolAgent(",
+        id="agent-evaluation",
+    ),
+    pytest.param(
+        "prompt-app/template/evals/evaluate.py",
+        "version = resolve_version(",
+        id="prompt-evaluation",
+    ),
+    pytest.param(
+        "rag-app/template/evals/evaluate.py",
+        "version = resolve_version(",
+        id="rag-evaluation",
+    ),
+    pytest.param(
+        "analytics-app/template/evals/evaluate.py",
+        "warehouse_id = resolve_warehouse_id(",
+        id="analytics-evaluation",
+    ),
+    pytest.param(
+        "agent-app/template/notebooks/02_enable_monitoring.py",
+        "mlflow.set_experiment(",
+        id="agent-monitoring",
+    ),
+)
 
 
 def discover_templates() -> list[Path]:
@@ -247,6 +279,22 @@ def render(template: Path, combo: dict, tmp_path_factory) -> Path:
 # ---------------------------------------------------------------- static tier
 
 
+@pytest.mark.parametrize("relative_path,target_work", STRICT_JUDGE_CALLS)
+def test_generated_llmops_resolves_judges_canonically_before_target_work(
+    relative_path: str, target_work: str
+):
+    source = (TEMPLATES_DIR / relative_path).read_text()
+    resolution = "judge_model = judge_model_uri(context.settings)"
+
+    assert "from aai_core.evaluation import" in source
+    assert source.count(resolution) == 1
+    assert "def _judge_model_uri" not in source
+    assert "def judge_model_uri" not in source
+    assert "ProviderConfigurationError" not in source
+    assert source.index("context = bootstrap") < source.index(resolution)
+    assert source.index(resolution) < source.index(target_work)
+
+
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
 def test_template_source_has_no_secret_references(template: Path):
     offenders = [
@@ -265,6 +313,15 @@ def test_template_prompt_promotion_uses_validation_alias(template: Path):
         assert '"candidate"' not in text
         assert '"validation"' in text
         assert '"production"' in text
+        assert "context.prompts.promote(" in text
+        assert ".set_alias(" not in text
+        assert '"--decision-run-id"' in text
+
+        evaluation = (template / "template" / "evals" / "evaluate.py").read_text()
+        assert "record_decision(" in evaluation
+        assert "change_run_id=evaluation_run_id" in evaluation
+        assert "prompt_version=version" in evaluation
+        assert "prompt_digest=prompt_digest(" in evaluation
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
@@ -332,6 +389,16 @@ def test_template_schema_shared_contract(template: Path):
     assert properties["project_name"]["pattern"] == "^[a-z][a-z0-9-]+$"
     if "model_provider" in properties:
         assert properties["model_provider"]["enum"] == ["databricks", "foundry"]
+    assert properties["aai_core_version"]["default"] == COMPATIBILITY["sdk"]["version"]
+    assert (
+        COMPATIBILITY["templates"][template.name]["aai_core"]
+        == COMPATIBILITY["sdk"]["version"]
+    )
+    if template.name in CURRENT_TEMPLATE_VERSIONS:
+        assert (
+            COMPATIBILITY["templates"][template.name]["version"]
+            == CURRENT_TEMPLATE_VERSIONS[template.name]
+        )
     if template.name == "agent-app":
         application_name = properties["application_name"]
         assert application_name["maxLength"] == 26
@@ -513,7 +580,24 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
             assert "databricks bundle run agent_app -t dev" not in readme
             assert "Serving resources were intentionally omitted" in readme
 
+    _assert_evaluation_release_contract(template, output)
     _assert_rag_release_contract(template, output, bundle, stamp)
+
+
+def _assert_evaluation_release_contract(template: Path, output: Path) -> None:
+    if template.name != "evaluation-project":
+        return
+    release_gate = yaml.safe_load(
+        (output / "resources" / "evaluation_job.yml").read_text()
+    )["resources"]["jobs"]["release_gate"]
+    assert release_gate["tasks"][0]["spark_python_task"]["parameters"] == ["--yes"]
+    deployment_gate = yaml.safe_load(
+        (output / "resources" / "optional" / "deployment_job.yml").read_text()
+    )["resources"]["jobs"]["agent_deployment_gate"]
+    assert deployment_gate["tasks"][0]["spark_python_task"]["parameters"][:2] == [
+        "--yes",
+        "--model-name",
+    ]
 
 
 def _assert_rag_release_contract(
@@ -627,3 +711,139 @@ def test_requirements_ci_uses_pip_source():
     for template in TEMPLATES:
         content = (template / "template" / "requirements-ci.txt.tmpl").read_text()
         assert "aai-core @ {{.aai_core_pip_source}}" in content
+
+
+def _template_script(name):
+    """Load one of the evaluation-project scripts as a module.
+
+    They are plain .py files (not .tmpl), so they can be exercised without
+    rendering a project — and the deployment gate's correctness is worth
+    testing directly rather than only through a render.
+    """
+
+    import importlib.util
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "templates"
+        / "evaluation-project"
+        / "template"
+        / name
+    )
+    spec = importlib.util.spec_from_file_location(f"_tmpl_{path.stem}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_approval_prefers_the_run_the_evaluation_task_handed_over(capsys):
+    """A concurrent evaluation of the same version must not win.
+
+    The search is by model version and start time, so another manual or
+    automated run finishing first would send the reviewer to evidence from
+    a different dataset, config, or gate.
+    """
+
+    script = _template_script("scripts/link_deployment_job.py")
+    searched = []
+    script._evaluation_run_id = lambda *args: searched.append(args) or "wrong-run"
+
+    script.await_approval("main.eval.agent", "7", "the-exact-run")
+
+    output = capsys.readouterr().out
+    assert "agentkit evidence --run the-exact-run" in output
+    assert "wrong-run" not in output
+    assert searched == []
+
+
+def test_approval_falls_back_to_the_search_and_says_so(capsys):
+    script = _template_script("scripts/link_deployment_job.py")
+    script._evaluation_run_id = lambda *args: "found-by-search"
+
+    script.await_approval("main.eval.agent", "7", "   ")
+
+    output = capsys.readouterr().out
+    assert "agentkit evidence --run found-by-search" in output
+    assert "not handed over by the evaluation task" in output
+
+
+def test_the_evaluation_shim_publishes_the_run_it_recorded(tmp_path, monkeypatch):
+    script = _template_script("evals/evaluate.py")
+    results = tmp_path / ".aai" / "agentkit" / "results"
+    results.mkdir(parents=True)
+    (results / "20260803T000000Z-eval.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "command": "eval",
+                "recorded_at": "2026-08-03T00:00:00Z",
+                "run_id": "run-from-this-job",
+                "agent": "models:/main.eval.agent/7",
+                "mode": "live",
+                "dataset": {"ref": "d.json", "digest": "abc123", "rows": 12},
+                "scope": {"mode": "full", "rows": 12},
+                "metrics": {},
+                "versions": {"agent": "a", "aai_core": "0.4.0"},
+                "decision": "inconclusive",
+                "change_id": "abc",
+                "gate_passed": True,
+            }
+        )
+    )
+
+    runtime_imports = []
+    original_import = __import__
+
+    def track_runtime_import(name, *args, **kwargs):
+        if name == "databricks.sdk.runtime":
+            runtime_imports.append(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(script, "find_spec", lambda name: None)
+    monkeypatch.setattr("builtins.__import__", track_runtime_import)
+
+    # No dbutils outside a Databricks job: importantly, even importing the
+    # local SDK fallback can authenticate and retry, so the shim must avoid
+    # that import rather than merely catch its eventual error.
+    assert script.publish_evidence_run_id(tmp_path) == "run-from-this-job"
+    assert script.publish_evidence_run_id(tmp_path / "empty") is None
+    assert runtime_imports == []
+
+    writes = []
+    runtime = types.ModuleType("databricks.sdk.runtime")
+    runtime.dbutils = types.SimpleNamespace(
+        jobs=types.SimpleNamespace(
+            taskValues=types.SimpleNamespace(
+                set=lambda **values: writes.append(values),
+            )
+        )
+    )
+    monkeypatch.setitem(sys.modules, "databricks.sdk.runtime", runtime)
+    monkeypatch.setattr(script, "find_spec", lambda name: object())
+
+    assert script.publish_evidence_run_id(tmp_path) == "run-from-this-job"
+    assert writes == [{"key": "evidence_run_id", "value": "run-from-this-job"}]
+    assert runtime_imports == ["databricks.sdk.runtime"]
+
+
+def test_the_evaluation_shim_requires_explicit_spend_confirmation():
+    script = _template_script("evals/evaluate.py")
+
+    assert script.build_arguments([]) == ["eval"]
+    assert script.build_arguments(["--yes"]) == ["eval", "--yes"]
+    assert script.build_arguments(
+        [
+            "--yes",
+            "--model-name",
+            "main.eval.agent",
+            "--model-version",
+            "7",
+        ]
+    ) == [
+        "eval",
+        "--yes",
+        "--agent",
+        "models:/main.eval.agent/7",
+        "--mode",
+        "live",
+    ]

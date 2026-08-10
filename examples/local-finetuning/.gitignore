@@ -1,0 +1,32 @@
+# This project deliberately separates tracked curriculum from local study assets.
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+
+# Kaggle source files are immutable local inputs. Never commit credentials.
+data/raw/*
+!data/raw/README.md
+data/interim/*
+!data/interim/README.md
+data/processed/*
+!data/processed/README.md
+data/splits/*
+!data/splits/README.md
+data/eval/*
+!data/eval/README.md
+
+# Model weights, adapters, experiment stores, and generated reports stay local.
+models/
+artifacts/
+.cache/
+.aai/
+mlflow.db
+mlruns/
+
+# Kaggle and Hugging Face credentials must never be stored in the project.
+kaggle.json
+access_token
+.env
+*.env

@@ -61,7 +61,9 @@ and evaluates the native MLflow EvaluationDataset named in `ai-app.yaml`.
 Each run records its dataset ID/digest alongside semantic-model version,
 knowledge digest, model + judge identity, git provenance, token usage, and
 verdict. The gate fails if the registered suite differs from the reviewed
-`evals/data/golden_cases.json` source.
+`evals/data/golden_cases.json` source. The SDK's strict judge resolver runs
+before warehouse resolution or agent construction, so invalid judge
+configuration fails before live target work.
 
 ## External prerequisites (platform-owned, one-time)
 

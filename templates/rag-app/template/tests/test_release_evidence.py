@@ -16,7 +16,7 @@ from app.release_evidence import (
     model_identity,
     release_configuration,
 )
-from evals.evaluate import _evaluation_models
+from evals.evaluate import _evaluation_model_identities
 from scripts import create_release
 
 SOURCE_COMMIT = "c" * 40
@@ -315,7 +315,7 @@ def test_configuration_evidence_is_secret_free_and_endpoint_aware():
     assert "endpoint" not in configuration["model"]
     assert len(configuration["model"]["endpoint_sha256"]) == 64
     assert "https://" not in json.dumps(configuration)
-    _, evaluated_target, _ = _evaluation_models(settings)
+    evaluated_target, _ = _evaluation_model_identities(settings)
     assert evaluated_target == model_identity(settings, "general-chat")
 
 

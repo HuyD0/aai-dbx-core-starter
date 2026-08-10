@@ -10,7 +10,7 @@ platform:
   repository: replace-with-owner/replace-with-repository
   release: dev
   tag_schema_version: "1"
-  catalog: dbx_dev
+  catalog: replace-with-catalog
   schema: foundry_learning
   experiment_name: /Shared/foundry-curriculum
   azure_identity: azure_cli

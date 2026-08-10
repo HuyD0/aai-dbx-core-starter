@@ -26,13 +26,15 @@ from mlflow.genai.scorers import Correctness, Safety
 
 from aai_core import bootstrap
 from aai_core.agents import AgentRequest
+from aai_core.decisions import Decision, DecisionRecord, record_decision
 from aai_core.evaluation import (
     GatePolicy,
     MetricRule,
     apply_gate,
+    judge_model_uri,
 )
 from aai_core.experiments import record_reproducibility
-from aai_core.providers.types import ProviderConfigurationError
+from aai_core.prompts import prompt_digest
 from aai_core.tracing import TraceIntegration, traced
 from app.agent import ToolAgent
 from app.config import DATASET_NAME, PROMPT_NAME
@@ -79,6 +81,7 @@ def main() -> None:
         parser.error("--prompt-version must be a positive integer")
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     context.configure_tracing(integration=TraceIntegration.SDK)
     version = args.prompt_version
     cases = json.loads(
@@ -87,7 +90,7 @@ def main() -> None:
 
     thresholds = load_thresholds()
     baseline = load_baseline()
-    judge_model, target_identity, judge_identity = _evaluation_models(context.settings)
+    target_identity, judge_identity = _evaluation_model_identities(context.settings)
     policy = GatePolicy(
         rules=tuple(thresholds),
         allow_missing_regression_baseline=args.update_baseline and not baseline,
@@ -123,7 +126,13 @@ def main() -> None:
                     "agent_limits_digest": DEFAULT_AGENT_LIMITS.digest,
                     **limit_parameters,
                 },
-            ) as active_run:
+            ) as evaluation_run:
+                registered = context.prompts.load(
+                    PROMPT_NAME, version=version, cache_ttl_seconds=0
+                )
+                _validate_dataset_association(
+                    dataset, evaluation_run.info.experiment_id
+                )
                 record_reproducibility()
                 native_result = mlflow.genai.evaluate(
                     data=dataset,
@@ -156,11 +165,36 @@ def main() -> None:
                         "aai.judge_model": judge_identity,
                     }
                 )
+                evaluation_run_id = str(evaluation_run.info.run_id)
         finally:
             runner.run(agent.aclose())
 
-    report.require_passed()
-    if args.update_baseline:
+    template = getattr(registered, "template", None)
+    if not isinstance(template, (str, list)):
+        raise TypeError(
+            "The evaluated prompt version exposes no template for decision evidence."
+        )
+    decision = Decision.ADOPT if report.passed else Decision.REJECT
+    decision_run_id = record_decision(
+        DecisionRecord(
+            decision=decision,
+            change_id=f"prompt-v{version}",
+            change_summary=f"Evaluate pinned prompt version {version} for release.",
+            rationale=(
+                "The release gate passed for the exact registered prompt version."
+                if report.passed
+                else "The release gate failed for the exact registered prompt version."
+            ),
+            change_run_id=evaluation_run_id,
+            gate=report,
+            prompt_name=context.prompts.qualify(PROMPT_NAME),
+            prompt_version=version,
+            prompt_digest=prompt_digest(template),
+            decided_by="code:release-gate",
+        ),
+        experiments=context.experiments,
+    )
+    if report.passed and args.update_baseline:
         BASELINE.write_text(
             json.dumps({"metrics": dict(report.metrics)}, indent=2, sort_keys=True)
             + "\n",
@@ -169,11 +203,14 @@ def main() -> None:
     print(
         {
             "prompt_version": version,
-            "evaluation_run": active_run.info.run_id,
+            "evaluation_run": evaluation_run_id,
             "metrics": report.metrics,
             "baseline_updated": args.update_baseline,
+            "decision": decision.value,
+            "decision_run_id": decision_run_id,
         }
     )
+    report.require_passed()
 
 
 def _build_predict_fn(agent: ToolAgent, runner: asyncio.Runner):
@@ -192,42 +229,41 @@ def _build_predict_fn(agent: ToolAgent, runner: asyncio.Runner):
     return predict_fn
 
 
-def _evaluation_models(settings) -> tuple[str, str, str]:
+def _evaluation_model_identities(settings) -> tuple[str, str]:
     target = _model_config(settings, "general-chat")
     judge = _model_config(settings, "judge-model")
-    if judge["provider"] != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
     if (
         judge["provider"].casefold() == target["provider"].casefold()
         and judge["deployment"].casefold() == target["deployment"].casefold()
     ):
-        raise ProviderConfigurationError(
+        raise ValueError(
             "judge-model must use a deployment distinct from general-chat; "
             "a release gate cannot rely on the target judging itself"
         )
     target_identity = _evaluation_model_identity(target)
     judge_identity = f"{judge['provider']}:{judge['deployment']}"
-    return f"endpoints:/{judge['deployment']}", target_identity, judge_identity
+    return target_identity, judge_identity
 
 
 def _model_config(settings, logical_name: str) -> dict[str, str]:
     config = settings.models.get(logical_name)
     if not isinstance(config, Mapping):
-        raise ProviderConfigurationError(f"{logical_name} must be configured")
+        raise ValueError(f"{logical_name} must be configured")
     provider = config.get("provider")
     deployment = config.get("deployment")
     if not isinstance(provider, str) or not provider.strip():
-        raise ProviderConfigurationError(f"{logical_name} requires a provider")
+        raise ValueError(f"{logical_name} requires a provider")
     if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError(f"{logical_name} requires a deployment")
+        raise ValueError(f"{logical_name} requires a deployment")
     normalized = {
         "provider": provider.strip(),
         "deployment": deployment.strip(),
     }
-    if "endpoint" in config:
-        normalized["endpoint"] = config["endpoint"]
+    endpoint = config.get("endpoint")
+    if endpoint is not None:
+        if not isinstance(endpoint, str):
+            raise TypeError(f"{logical_name} endpoint must be a string")
+        normalized["endpoint"] = endpoint
     return normalized
 
 
@@ -240,9 +276,7 @@ def _evaluation_model_identity(config: Mapping) -> str:
 
 def _endpoint_sha256(value) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ProviderConfigurationError(
-            "Foundry model configuration requires an HTTPS endpoint"
-        )
+        raise ValueError("Foundry model configuration requires an HTTPS endpoint")
     endpoint = value.strip()
     parsed = urlsplit(endpoint)
     if (
@@ -254,29 +288,23 @@ def _endpoint_sha256(value) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise ProviderConfigurationError(
+        raise ValueError(
             "Foundry endpoint must be HTTPS without userinfo, query, or fragment"
         )
     try:
         port = parsed.port
     except ValueError as error:
-        raise ProviderConfigurationError(
-            "Foundry endpoint contains an invalid port"
-        ) from error
+        raise ValueError("Foundry endpoint contains an invalid port") from error
     raw_hostname = parsed.hostname.rstrip(".")
     try:
         hostname = raw_hostname.encode("idna").decode("ascii").casefold()
     except UnicodeError as error:
-        raise ProviderConfigurationError(
-            "Foundry endpoint contains an invalid hostname"
-        ) from error
+        raise ValueError("Foundry endpoint contains an invalid hostname") from error
     if ":" in hostname:
         hostname = f"[{hostname}]"
     path = re.sub(r"/+", "/", parsed.path or "/")
     if any(segment in {".", ".."} for segment in path.split("/")):
-        raise ProviderConfigurationError(
-            "Foundry endpoint path must not contain dot segments"
-        )
+        raise ValueError("Foundry endpoint path must not contain dot segments")
     if path != "/":
         path = path.rstrip("/")
     normalized = f"https://{hostname}:{port or 443}{path}"
@@ -285,6 +313,10 @@ def _endpoint_sha256(value) -> str:
 
 def _load_release_dataset(name: str, reviewed_cases: list[dict]):
     dataset = mlflow.genai.datasets.get_dataset(name=name)
+    if not isinstance(dataset.dataset_id, str) or not dataset.dataset_id.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable dataset ID")
+    if not isinstance(dataset.digest, str) or not dataset.digest.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable digest")
     registered_cases = dataset.to_df().to_dict(orient="records")
     expected = Counter(_case_key(record) for record in reviewed_cases)
     actual = Counter(_case_key(record) for record in registered_cases)
@@ -298,6 +330,15 @@ def _load_release_dataset(name: str, reviewed_cases: list[dict]):
             "versioned DATASET_NAME rather than evaluating unreviewed rows."
         )
     return dataset
+
+
+def _validate_dataset_association(dataset, experiment_id: str) -> None:
+    associated = {str(value) for value in (dataset.experiment_ids or [])}
+    if str(experiment_id) not in associated:
+        raise RuntimeError(
+            "The release dataset is not associated with this application's "
+            "configured experiment"
+        )
 
 
 def _case_key(record: Mapping) -> str:

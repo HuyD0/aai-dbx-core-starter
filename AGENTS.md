@@ -144,6 +144,13 @@ These are non-secret identifiers. Do not classify them as secrets.
 - Do not permit applications to override controlled ownership/cost fields.
 - Keep MLflow classic evaluation and `mlflow.genai.evaluate()` concepts
   separate.
+- `aai_core.agentkit` owns the agent-evaluation ontology (what a run is, which
+  experiment it belongs to, what a comparison requires) and the shared scorer
+  registry. Scorer name, judge binding, judge prompt, input contract, and scale
+  are versioned platform assets: a project selects scorers and sets thresholds,
+  never redefines one. Templates consume the toolkit; they do not restate it.
+  Its exit codes are a stable CI contract — `0` pass, `2` threshold failed,
+  `1` configuration or runtime error.
 - RAG retriever spans must emit MLflow document fields `page_content`,
   `doc_uri`, `chunk_id`, metadata, and optional id.
 - Treat code, model, prompt, tool, index, embedding, and chunking changes as

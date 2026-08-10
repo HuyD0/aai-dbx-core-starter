@@ -170,6 +170,19 @@ jobs:
             } | sort -u
           )
 
+      - name: Audit standalone course dependency graphs
+        if: matrix.python == '3.12'
+        run: |
+          for project in \
+            examples/local-classification \
+            examples/local-finetuning; do
+            echo "auditing $project"
+            .venv/bin/python \
+              templates/_shared/files/scripts/audit_dependencies.py \
+              --policy templates/_shared/files/security-audit.toml \
+              --uv-project "$project"
+          done
+
       - name: Exercise provider and Foundry import boundaries
         run: |
           .venv/bin/python - <<'PY'

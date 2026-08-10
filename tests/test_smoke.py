@@ -1,5 +1,6 @@
 """Credential-free regression tests for the platform's security boundaries."""
 
+import ast
 import asyncio
 import importlib.util
 import json
@@ -26,7 +27,7 @@ ADVANCED_SUPPORT_BY_NOTEBOOK = {
     "10_layered_judges.ipynb": ("agent_assurance.py",),
     "11_cost_quality_tradeoff.ipynb": ("cost_quality.py",),
     "12_agent_alignment_optimization.ipynb": ("optimization.py",),
-    "13_compare_and_select_llms.ipynb": ("model_selection.py",),
+    "15_compare_and_select_llms.ipynb": ("model_selection.py",),
 }
 
 
@@ -95,7 +96,7 @@ def test_learning_artifacts_have_one_contiguous_numbered_order():
     )
 
     assert [path.name[:2] for path in artifacts] == [
-        f"{number:02d}" for number in range(14)
+        f"{number:02d}" for number in range(16)
     ]
     assert all(
         not re.match(r"\d{2}_", helper)
@@ -113,7 +114,9 @@ def test_all_numbered_example_notebooks_are_safe_clean_and_compilable():
         "10_layered_judges.ipynb",
         "11_cost_quality_tradeoff.ipynb",
         "12_agent_alignment_optimization.ipynb",
-        "13_compare_and_select_llms.ipynb",
+        "13_decision_and_promotion_lifecycle.ipynb",
+        "14_platform_llm_operations.ipynb",
+        "15_compare_and_select_llms.ipynb",
     ]
 
     for path in notebooks:
@@ -155,8 +158,8 @@ def test_advanced_notebook_cells_keep_one_teaching_step_visible():
         "cleanup",
         "next_lesson",
     }
-    for number in range(7, 14):
-        path = next((ROOT / "examples").glob(f"{number:02d}_*.ipynb"))
+    for notebook_name in ADVANCED_SUPPORT_BY_NOTEBOOK:
+        path = ROOT / "examples" / notebook_name
         notebook = json.loads(path.read_text(encoding="utf-8"))
         assert required_metadata <= notebook["metadata"]["aai_lesson"].keys()
         for cell in notebook["cells"]:
@@ -175,7 +178,7 @@ def test_advanced_notebook_cells_keep_one_teaching_step_visible():
 
 def test_model_selection_workshop_has_the_required_interactive_pattern():
     notebook = json.loads(
-        (ROOT / "examples" / "13_compare_and_select_llms.ipynb").read_text(
+        (ROOT / "examples" / "15_compare_and_select_llms.ipynb").read_text(
             encoding="utf-8"
         )
     )
@@ -254,7 +257,7 @@ def test_model_selection_workshop_has_the_required_interactive_pattern():
             ROOT
             / "examples"
             / "workshops"
-            / "13_compare_and_select_llms_exercises.ipynb"
+            / "15_compare_and_select_llms_exercises.ipynb"
         ).read_text(encoding="utf-8")
     )
     workshop_stubs = [
@@ -274,7 +277,7 @@ def test_model_selection_working_examples_execute_without_credentials(monkeypatc
     monkeypatch.syspath_prepend(str(ROOT))
     deny_example_credentials_and_network(monkeypatch)
     notebook = json.loads(
-        (ROOT / "examples" / "13_compare_and_select_llms.ipynb").read_text(
+        (ROOT / "examples" / "15_compare_and_select_llms.ipynb").read_text(
             encoding="utf-8"
         )
     )
@@ -290,7 +293,7 @@ def test_model_selection_working_examples_execute_without_credentials(monkeypatc
             exec(
                 compile(
                     "".join(cell.get("source", [])),
-                    f"13_compare_and_select_llms.ipynb:{cell['id']}",
+                    f"15_compare_and_select_llms.ipynb:{cell['id']}",
                     "exec",
                 ),
                 namespace,
@@ -308,7 +311,7 @@ def test_model_selection_working_examples_execute_without_credentials(monkeypatc
             exec(
                 compile(
                     "".join(cell.get("source", [])),
-                    f"13_compare_and_select_llms.ipynb:{cell['id']}",
+                    f"15_compare_and_select_llms.ipynb:{cell['id']}",
                     "exec",
                 ),
                 namespace,
@@ -365,6 +368,41 @@ def test_advanced_notebooks_preserve_release_guardrails():
     assert "link_prompt_versions_to_trace(" in optimization
     assert "max_metric_calls" in optimization
     assert "set_prompt_alias" not in optimization
+
+    # Lesson 14 intentionally stays self-contained rather than using the
+    # refactored support-module pattern enforced for the advanced notebooks.
+    operations = (ROOT / "examples" / "14_platform_llm_operations.ipynb").read_text(
+        encoding="utf-8"
+    )
+    operations_notebook = json.loads(operations)
+    provenance_source = next(
+        "".join(cell["source"])
+        for cell in operations_notebook["cells"]
+        if "provenance_stamp =" in "".join(cell.get("source", []))
+    )
+    provenance_tree = ast.parse(provenance_source)
+    provenance_assignment = next(
+        node
+        for node in provenance_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "provenance_stamp"
+            for target in node.targets
+        )
+    )
+    provenance_stamp = ast.literal_eval(provenance_assignment.value)
+    generated_stamp = json.loads(
+        (ROOT / "templates/prompt-app/template/.aai-template.json.tmpl").read_text()
+    )
+    generated_stamp["generated_with"] = {
+        "project_name": "fictional-earnings",
+        "application_name": "earnings-summary",
+        "team": "fictional-app-team",
+        "model_provider": "databricks",
+        "prompt_name": "earnings_summary",
+        "aai_core_version": "0.4.0",
+    }
+    assert provenance_stamp == generated_stamp
 
 
 def test_tool_trajectory_fixture_separates_decisions_execution_and_assessment():
@@ -609,12 +647,22 @@ def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
 def test_advanced_notebooks_run_all_on_the_credential_free_default_path(monkeypatch):
     pytest.importorskip("pandas")
     deny_example_credentials_and_network(monkeypatch)
-    for path in sorted((ROOT / "examples").glob("0[89]_*.ipynb")) + sorted(
-        (ROOT / "examples").glob("1[0-2]_*.ipynb")
-    ):
+    # 14 is connected-guarded like 05/07 and deliberately excluded here.
+    paths = (
+        sorted((ROOT / "examples").glob("0[89]_*.ipynb"))
+        + sorted((ROOT / "examples").glob("1[0-3]_*.ipynb"))
+        + [ROOT / "examples" / "15_compare_and_select_llms.ipynb"]
+    )
+    for path in paths:
         notebook = json.loads(path.read_text(encoding="utf-8"))
         for repeat in range(2):
-            namespace = {"__name__": f"notebook_{path.stem}_{repeat}"}
+            notebook_shell = SimpleNamespace(
+                run_line_magic=lambda *_args, **_kwargs: None
+            )
+            namespace = {
+                "__name__": f"notebook_{path.stem}_{repeat}",
+                "get_ipython": lambda shell=notebook_shell: shell,
+            }
             for index, cell in enumerate(notebook["cells"]):
                 if cell["cell_type"] != "code":
                     continue

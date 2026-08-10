@@ -25,7 +25,7 @@
       "dependency_lock_format": "universal-transitive-v1"
     },
     "evaluation-project": {
-      "version": "1.2.0",
+      "version": "2.0.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
@@ -109,10 +109,32 @@
       "owner": "application",
       "note": "Supported through MLflow LangChain autologging; graph and state APIs are not wrapped by aai-core."
     },
+    "decision_records": {
+      "support": "preview",
+      "owner": "aai-core"
+    },
+    "deterministic_scorers": {
+      "support": "preview",
+      "owner": "aai-core"
+    },
+    "production_feedback_curation": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance",
+      "note": "Scorer sampling registration runs from a Databricks notebook; aai-core supplies judge resolution, feedback, and trace curation."
+    },
+    "prompt_promotion_gating": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance"
+    },
     "self_service_analytics": {
       "support": "preview",
       "owner": "template-owned",
       "note": "Semantic contract, warehouse executor protocol, and provenance discipline are generated application code in analytics-app; aai-core wraps none of it."
+    },
+    "agent_evaluation_toolkit": {
+      "support": "preview",
+      "owner": "aai-core",
+      "note": "agentkit CLI: comparison-first evaluation, shared scorer registry, promotion gate"
     }
   }
 }
