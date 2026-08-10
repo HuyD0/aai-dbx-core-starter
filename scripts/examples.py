@@ -284,7 +284,25 @@ def _is_placeholder(value: Any) -> bool:
 
 # Unity Catalog qualifier fields: exactly one level each, so a dotted value
 # is a configuration error the connected SDK helpers will reject.
+def _is_placeholder_path(value: Any) -> bool:
+    """Component-aware placeholder test for slash-separated paths.
+
+    ``_is_placeholder`` matches the bare markers exactly and anchors
+    ``replace-with-`` at the start, so a placeholder inside a path
+    (``/Shared/unset``) looks configured. Mirrors
+    ``aai_core.evaluation._is_placeholder_path``.
+    """
+
+    return _is_placeholder(value) or any(
+        _is_placeholder(part) for part in str(value).split("/") if part
+    )
+
+
 _QUALIFIER_FIELDS = {"platform.catalog", "platform.schema"}
+
+# Governed values that arrive as slash-separated paths, so the placeholder
+# vocabulary has to be applied per component rather than to the whole string.
+_PATH_FIELDS = {"platform.experiment_name"}
 
 
 def _config_issues(example: Example) -> list[str]:
@@ -311,7 +329,11 @@ def _config_issues(example: Example) -> list[str]:
                 f"`{dotted_path}` must be a string in aai-platform.yml "
                 f"(current value: {value!r})."
             )
-        elif _is_placeholder(value):
+        elif (
+            _is_placeholder_path(value)
+            if dotted_path in _PATH_FIELDS
+            else _is_placeholder(value)
+        ):
             issues.append(
                 f"Configure `{dotted_path}` in aai-platform.yml "
                 f"(current value: {value!r})."
@@ -354,15 +376,7 @@ def _effective_experiment_issue(document: dict[str, Any]) -> str | None:
                 "`platform.experiment_name` must be a string experiment path "
                 f"(current value: {explicit!r})."
             )
-        # An experiment name is a path, and _is_placeholder matches the bare
-        # markers exactly with replace-with- anchored at the start, so a
-        # placeholder component (/Shared/replace-with-experiment,
-        # /Shared/unset) would otherwise read as configured and let the
-        # credentialed preflight query it. Mirrors
-        # aai_core.evaluation._is_placeholder_path.
-        if _is_placeholder(explicit) or any(
-            _is_placeholder(part) for part in explicit.split("/") if part
-        ):
+        if _is_placeholder_path(explicit):
             return (
                 "Configure `platform.experiment_name` in aai-platform.yml "
                 f"(current value: {explicit!r})."
