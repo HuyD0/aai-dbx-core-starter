@@ -238,7 +238,7 @@ building:
 |---|---|
 | `experiment-starter` | Reproducible MLflow experiments (LLM-free): dataset lineage, tags, metrics, artifacts, deterministic gate |
 | `prompt-app` | A governed prompt lifecycle: versioned registration, pinned-version LLM-judge evaluation, gated alias promotion |
-| `evaluation-project` | A standalone eval harness for an existing app/endpoint: UC datasets, reusable scorers, baselines, CI regression gate, published results |
+| `evaluation-project` | A standalone eval harness for an existing app/endpoint, driven by the `agentkit` CLI: UC datasets, registry scorers, pinned baselines, CI regression gate, published evidence |
 | `rag-app` | Governed RAG: chunking pipeline, declared vector index (or Azure AI Search), traced grounded generation, groundedness gate |
 | `agent-app` | Tool-using agents: application-owned async loop, Pydantic outputs/tools, trajectory-aware evals, native MLflow Agent Server invoke/stream, and optional LangGraph recipe |
 | `analytics-app` | Self-service analytics: a runbook agent over a neutral git-versioned semantic layer, knowledge-doc router, provenance footers, snapshot-pinned golden evals, and a warehouse-portable executor protocol |
@@ -312,6 +312,25 @@ Read [`AGENTS.md`](AGENTS.md) before making repository changes. Connection and
 recovery instructions remain in [`docs/cloud-setup.md`](docs/cloud-setup.md);
 cloud and identity resources are provisioned outside this repository.
 
+## Evaluating an agent
+
+`agentkit` is the paved road for agent evaluation, built around one idea: an
+experiment is a comparison, not a log. It scores this version of an agent
+against the recorded baseline on the same dataset with the same versioned
+scorers, and generates the MLflow run, lineage, and evidence as byproducts.
+
+```bash
+agentkit smoke                        # seconds, free, no cluster
+agentkit compare --establish-baseline # this run IS the baseline
+agentkit compare                      # is this better than what we had?
+agentkit gate                         # exit 0 pass / 2 threshold failed
+agentkit evidence                     # the release record
+```
+
+Read [`docs/agent-evaluation.md`](docs/agent-evaluation.md) for why comparison
+is the unit of evidence, how the shared scorer registry keeps one team's 0.8
+comparable with another's, and what the gate refuses.
+
 ## Learning paths
 
 - `make quickstart` — clone-to-running, with zero credentials
@@ -335,7 +354,11 @@ cloud and identity resources are provisioned outside this repository.
 - [10 — Layered and calibrated judges](examples/10_layered_judges.ipynb)
 - [11 — Cost-quality trade-off](examples/11_cost_quality_tradeoff.ipynb)
 - [12 — Optional agent alignment and optimization](examples/12_agent_alignment_optimization.ipynb)
+- [13 — Decision records and gated promotion](examples/13_decision_and_promotion_lifecycle.ipynb)
+- [14 — Platform LLM operations](examples/14_platform_llm_operations.ipynb)
 - [Developer guide](docs/developer-guide.md)
+- [LLMOps playbook](docs/llmops-playbook.md) — industry LLMOps practice map
+  onto this platform, for application teams and the platform team
 - [Platform architecture](docs/platform-architecture.md)
 - [Secrets and identity](docs/secrets-and-identity.md)
 - [SDK versioning policy](docs/versioning.md)

@@ -167,7 +167,7 @@
     },
     "aai_core_version": {
       "type": "string",
-      "default": "0.3.0",
+      "default": "0.4.0",
       "description": "Pinned aai-core SDK version",
       "order": 17
     },
@@ -196,5 +196,5 @@
       "order": 21
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. Set variables.prompt_version.default in databricks.yml to that version\n  6. python evals/evaluate.py --prompt-version <version>\n  7. Complete the external App onboarding and one-time bundle bind in README.md\n  8. databricks bundle deploy -t dev\n  9. databricks bundle run release_gate -t dev\n{{if and (eq .include_serving \"yes\") (eq .model_provider \"databricks\")}} 10. databricks bundle run agent_app -t dev  # same prompt version; only after the gate{{else}} 10. Serving resources were intentionally omitted for this configuration. Add a gateway-fronted Databricks endpoint and regenerate or add the reviewed deployment resources before serving.{{end}} Run `make help` for every target."
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. Set variables.prompt_version.default in databricks.yml to that version\n  6. python evals/evaluate.py --prompt-version <version>  # note decision_run_id\n  7. python scripts/promote_prompt.py --version <version> --decision-run-id <run-id> --to validation\n  8. Complete the external App onboarding and one-time bundle bind in README.md\n  9. databricks bundle deploy -t dev\n 10. databricks bundle run release_gate -t dev\n{{if and (eq .include_serving \"yes\") (eq .model_provider \"databricks\")}} 11. databricks bundle run agent_app -t dev  # same prompt version; only after the gate{{else}} 11. Serving resources were intentionally omitted for this configuration. Add a gateway-fronted Databricks endpoint and regenerate or add the reviewed deployment resources before serving.{{end}} Run `make help` for every target."
 }

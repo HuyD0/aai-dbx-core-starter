@@ -113,16 +113,26 @@ COMBOS = {
     "evaluation-project": [
         {
             "name": "databricks-judge",
-            "overrides": {"project_name": "test-evaluation"},
+            "overrides": {
+                "project_name": "test-evaluation",
+                "model_deployment": "judge-endpoint",
+            },
             "expect_present": [
+                "agentkit.yaml",
+                "src/app/example_agent.py",
                 "src/app/scorers.py",
                 "src/app/judges.py",
                 "src/app/targets.py",
                 "scripts/sync_dataset.py",
+                "scripts/link_deployment_job.py",
                 "evals/data/answer_sheet.json",
                 "notebooks/01_align_judge.py",
+                "resources/optional/deployment_job.yml",
+                "resources/optional/registered_model.yml",
             ],
-            "expect_absent": [],
+            # Thresholds live in agentkit.yaml now; scorer categorization is
+            # structural (a scorer's kind comes from the shared registry).
+            "expect_absent": ["evals/gate_config.json"],
         },
     ],
     "rag-app": [

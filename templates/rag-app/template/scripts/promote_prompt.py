@@ -4,8 +4,9 @@ The application loads the ``production`` alias in prod environments and
 ``development`` elsewhere (src/app/rag.py). Nothing promotes automatically:
 after the release gate (evals/evaluate.py) passes for a prompt version, a
 human runs this script — first ``--to validation``, then ``--to production``
-once the release is approved. Evaluations should pin exact versions
-(``prompts:/name/version``); aliases are deployment pointers only.
+once the release is approved. The release gate emits a decision run for the
+exact pinned version; this script requires that run and promotion verifies its
+persisted evidence. Aliases remain deployment pointers only.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import argparse
 from pathlib import Path
 
 from aai_core import bootstrap
-from aai_core.prompts import PromptManager
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_NAME = "agent-system"
@@ -35,16 +35,28 @@ def main() -> None:
         dest="alias",
         help="Alias to move to the given version.",
     )
+    parser.add_argument(
+        "--decision-run-id",
+        required=True,
+        help="Finished decision run emitted by evals/evaluate.py.",
+    )
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
-    prompts = PromptManager(
-        context=context.tags,
-        catalog=context.settings.catalog,
-        schema=context.settings.schema,
+    context.prompts.promote(
+        PROMPT_NAME,
+        alias=args.alias,
+        version=args.version,
+        decision_run_id=args.decision_run_id,
     )
-    prompts.set_alias(PROMPT_NAME, alias=args.alias, version=args.version)
-    print({"name": PROMPT_NAME, "alias": args.alias, "version": args.version})
+    print(
+        {
+            "name": PROMPT_NAME,
+            "alias": args.alias,
+            "version": args.version,
+            "decision_run_id": args.decision_run_id,
+        }
+    )
 
 
 if __name__ == "__main__":

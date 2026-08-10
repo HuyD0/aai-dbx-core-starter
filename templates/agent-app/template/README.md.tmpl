@@ -72,12 +72,18 @@ provider integration.
    the same value recorded in `databricks.yml`. The gate covers empty and
    repeated-call trajectories as well as names/arguments, with thresholds in
    `evals/gate_config.json` and baseline regression. After a released run,
-   append `EVALUATE_ARGS=--update-baseline`.
+   append `EVALUATE_ARGS=--update-baseline`. The gate records an adopt or
+   reject decision run and prints its `decision_run_id`.
+   Evaluation and the monitoring notebook use `aai-core`'s strict judge
+   resolver before tracing, loading a prompt, or constructing an agent; a
+   missing, placeholder, non-Databricks, or malformed endpoint fails locally.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset
    by name.
 4. Promote the prompt (`python scripts/promote_prompt.py --version <n>
-   --to validation|production`).
+   --decision-run-id <run-id> --to validation|production`). The script reloads
+   and verifies the persisted decision artifact, tags, gate metrics, and exact
+   prompt binding before moving either alias.
 {{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
 5. Before enabling deployment, have the approved platform process create the
    Databricks App named `{{.application_name}}-dev`. App creation provisions
