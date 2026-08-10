@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import re
+from asyncio import CancelledError
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import aclosing, contextmanager, suppress
 from contextvars import ContextVar, Token
@@ -255,7 +256,7 @@ _TRACE_STATE: ContextVar[TraceState | None] = ContextVar(
     "aai_core_trace_state",
     default=None,
 )
-_PROCESS_TRACE_CONFIGURATION: tuple[Any, ...] | None = None
+_PROCESS_TRACE_CONFIGURATION: dict[str, tuple[Any, ...]] = {}
 
 
 def configure_tracing(
@@ -269,7 +270,7 @@ def configure_tracing(
 ) -> TraceState:
     """Configure one process-wide tracing owner during application startup."""
 
-    global _DEFAULT_TRACE_STATE, _PROCESS_TRACE_CONFIGURATION
+    global _DEFAULT_TRACE_STATE
 
     if not experiment_name.strip():
         raise ValueError("experiment_name must not be blank")
@@ -323,8 +324,9 @@ def configure_tracing(
         selected_policy,
         tuple(sorted(options.items())),
     )
-    if _PROCESS_TRACE_CONFIGURATION is not None:
-        if signature != _PROCESS_TRACE_CONFIGURATION:
+    configured_signature = _PROCESS_TRACE_CONFIGURATION.get("signature")
+    if configured_signature is not None:
+        if signature != configured_signature:
             raise RuntimeError(
                 "Tracing is already configured for this process with a "
                 "different experiment, integration, policy, or resource context. "
@@ -343,7 +345,7 @@ def configure_tracing(
     elif integration is TraceIntegration.MLFLOW_LANGCHAIN:
         mlflow.langchain.autolog(**options)
 
-    _PROCESS_TRACE_CONFIGURATION = signature
+    _PROCESS_TRACE_CONFIGURATION["signature"] = signature
     _DEFAULT_TRACE_STATE = state
     _TRACE_STATE.set(state)
     return state
@@ -355,7 +357,8 @@ def traced(
     *,
     name: str | None = None,
     span_type: str | None = None,
-) -> F: ...
+) -> F:
+    raise NotImplementedError
 
 
 @overload
@@ -364,7 +367,8 @@ def traced(
     *,
     name: str | None = None,
     span_type: str | None = None,
-) -> Callable[[F], F]: ...
+) -> Callable[[F], F]:
+    raise NotImplementedError
 
 
 def traced(
@@ -717,7 +721,13 @@ def provider_span(
             span.set_attribute(key, value)
         try:
             yield span
-        except BaseException as caught_error:
+        except (
+            Exception,
+            CancelledError,
+            GeneratorExit,
+            KeyboardInterrupt,
+            SystemExit,
+        ) as caught_error:
             # MLflow records exception messages and complete chained
             # tracebacks when an exception exits start_span. Those strings can
             # contain prompts, tool inputs, or provider responses. Exit the

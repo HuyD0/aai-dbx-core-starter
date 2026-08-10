@@ -88,7 +88,8 @@ class SecretValue:
 class SecretProvider(Protocol):
     """Protocol implemented by native secret-reference resolvers."""
 
-    def resolve(self, reference: SecretRef) -> str: ...
+    def resolve(self, reference: SecretRef) -> str:
+        raise NotImplementedError
 
 
 class _CachingProvider:

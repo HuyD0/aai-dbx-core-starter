@@ -9,14 +9,13 @@ import pytest
 import app.tools as tools_module
 from app.knowledge import KnowledgeRouter
 from app.provenance import SourceTier
-from app.tools import ProvenanceLog, ToolExecutionError, build_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _registry(model, seed_executor):
-    log = ProvenanceLog()
-    registry = build_registry(
+    log = tools_module.ProvenanceLog()
+    registry = tools_module.build_analytics_registry(
         model, KnowledgeRouter(ROOT / "knowledge"), seed_executor, log
     )
     return registry, log
@@ -131,7 +130,7 @@ def test_query_rows_compiles_allowlisted_fields_and_logs_raw_tier(model, seed_ex
     assert "unknown governed row field" in unknown["error"]
     assert len(log.records) == 1
 
-    with pytest.raises(ToolExecutionError, match="schema validation"):
+    with pytest.raises(tools_module.ToolExecutionError, match="schema validation"):
         asyncio.run(
             registry.execute(
                 "query_rows",
@@ -178,9 +177,9 @@ def test_finalize_attaches_freshness_to_matching_records(model, seed_executor):
 
 def test_unknown_tools_and_bad_arguments_fail_closed(model, seed_executor):
     registry, _ = _registry(model, seed_executor)
-    with pytest.raises(ToolExecutionError, match="unknown tool"):
+    with pytest.raises(tools_module.ToolExecutionError, match="unknown tool"):
         asyncio.run(registry.execute("drop_tables", {}))
-    with pytest.raises(ToolExecutionError, match="schema validation"):
+    with pytest.raises(tools_module.ToolExecutionError, match="schema validation"):
         asyncio.run(registry.execute("lookup_reference", {"topic": 7}))
 
 

@@ -6,7 +6,6 @@ from threading import Barrier, Event, Lock
 
 import pytest
 
-import aai_core.secrets as secrets_module
 from aai_core.logging import RedactingFilter, Redactor
 from aai_core.secrets import (
     AzureKeyVaultSecretProvider,
@@ -15,6 +14,7 @@ from aai_core.secrets import (
     SecretRef,
     SecretResolver,
     SecretValue,
+    _databricks_workspace_close_resource,
 )
 
 
@@ -102,20 +102,15 @@ def test_databricks_fallback_decodes_and_closes_one_workspace(
 
     workspaces = []
 
+    class Secrets:
+        @staticmethod
+        def get_secret(*, scope, key):
+            return type("Response", (), {"value": "cmVzb2x2ZWQ="})()
+
     class Workspace:
         def __init__(self):
             self.close_calls = 0
-            self.secrets = type(
-                "Secrets",
-                (),
-                {
-                    "get_secret": staticmethod(
-                        lambda *, scope, key: type(
-                            "Response", (), {"value": "cmVzb2x2ZWQ="}
-                        )()
-                    )
-                },
-            )()
+            self.secrets = Secrets()
             workspaces.append(self)
 
         def close(self):
@@ -159,7 +154,7 @@ def test_databricks_fallback_closes_certified_sdk_transport_session():
         },
     )()
 
-    resource = secrets_module._databricks_workspace_close_resource(workspace)
+    resource = _databricks_workspace_close_resource(workspace)
     resource.close()
 
     assert session.close_calls == 1
@@ -233,11 +228,7 @@ def test_databricks_fallback_getter_is_lazy_singleton_and_owned(monkeypatch):
         time.sleep(0.01)
         return (lambda scope, key: f"{scope}:{key}"), workspace
 
-    monkeypatch.setattr(
-        secrets_module,
-        "_databricks_secret_getter",
-        fallback_factory,
-    )
+    monkeypatch.setattr("aai_core.secrets._databricks_secret_getter", fallback_factory)
     provider = DatabricksSecretProvider()
     references = [
         SecretRef.parse(f"databricks-secret://application/key-{index}")
@@ -289,7 +280,7 @@ def test_secret_cache_reloads_only_after_ttl(monkeypatch):
         calls += 1
         return f"value-{calls}"
 
-    monkeypatch.setattr(secrets_module.time, "monotonic", monotonic)
+    monkeypatch.setattr("aai_core.secrets.time.monotonic", monotonic)
     provider = DatabricksSecretProvider(getter=getter, ttl_seconds=10)
     reference = SecretRef.parse("databricks-secret://application/key")
 

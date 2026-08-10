@@ -45,7 +45,7 @@ from app.tool_scoring import (
     exact_tool_call_scorer,
     trace_execution_success_scorer,
 )
-from app.tools import build_registry
+from app.tools import build_agent_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "evals" / "baseline.json"
@@ -368,7 +368,7 @@ def _review_tags(record: Mapping) -> dict:
 
 def _tool_schema_digest() -> str:
     limits = DEFAULT_AGENT_LIMITS
-    tools = build_registry(
+    tools = build_agent_registry(
         timeout_seconds=limits.tool_timeout_seconds,
         max_output_chars=limits.max_tool_output_chars,
     ).openai_tools()

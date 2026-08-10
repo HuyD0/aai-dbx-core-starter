@@ -65,8 +65,10 @@ def test_configure_logging_preserves_and_protects_host_handlers(monkeypatch) -> 
     monkeypatch.setattr("aai_core.logging.logging.getLogger", lambda: root)
 
     redactor = Redactor()
-    secret = "host-handler-secret"
-    redactor.register(secret)
+    # This is an intentionally non-sensitive canary for exercising replacement.
+    # A real secret must never be sent to a logging API merely to test redaction.
+    redaction_canary = "host-handler-redaction-canary"
+    redactor.register(redaction_canary)
     configure_logging(_context(), redactor=redactor)
     configure_logging(_context(), redactor=redactor)
 
@@ -74,11 +76,11 @@ def test_configure_logging_preserves_and_protects_host_handlers(monkeypatch) -> 
     assert len(root.handlers) == 2
 
     try:
-        raise RuntimeError(f"provider returned {secret}")
+        raise RuntimeError(f"provider returned {redaction_canary}")
     except RuntimeError:
-        root.exception("request used %s", secret)
+        root.exception("request used %s", redaction_canary)
 
     rendered = host_output.getvalue()
-    assert secret not in rendered
+    assert redaction_canary not in rendered
     assert "request used [REDACTED]" in rendered
     assert "RuntimeError: provider returned [REDACTED]" in rendered

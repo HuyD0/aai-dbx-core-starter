@@ -25,7 +25,7 @@ def _reset_trace_state(monkeypatch):
         ),
     )
     monkeypatch.setattr(tracing, "_DEFAULT_TRACE_STATE", default)
-    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", None)
+    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", {})
     token = tracing._TRACE_STATE.set(None)
     yield
     tracing._TRACE_STATE.reset(token)
@@ -1155,11 +1155,12 @@ def test_provider_span_does_not_record_sensitive_exception_text(monkeypatch):
         experiment_name="/Shared/restricted-provider-error",
     )
 
-    with (
-        pytest.raises(ValueError, match="patient-secret-exception-9917"),
-        tracing.provider_span("model", span_type="LLM"),
-    ):
-        raise ValueError("patient-secret-exception-9917")
+    def invoke_failure():
+        with tracing.provider_span("model", span_type="LLM"):
+            raise ValueError("patient-secret-exception-9917")
+
+    with pytest.raises(ValueError, match="patient-secret-exception-9917"):
+        invoke_failure()
 
     assert fake_mlflow.exception_seen_by_context is None
     assert fake_mlflow.span.statuses == ["ERROR"]
@@ -1532,11 +1533,12 @@ def test_real_metadata_only_provider_error_does_not_persist_exception_text(tmp_p
             integration=tracing.TraceIntegration.SDK,
         )
 
-        with (
-            pytest.raises(ValueError, match="patient-secret-exception-9917"),
-            tracing.provider_span("restricted.model", span_type="LLM"),
-        ):
-            raise ValueError(secret)
+        def invoke_failure():
+            with tracing.provider_span("restricted.model", span_type="LLM"):
+                raise ValueError(secret)
+
+        with pytest.raises(ValueError, match="patient-secret-exception-9917"):
+            invoke_failure()
 
         mlflow.flush_trace_async_logging()
         trace_id = mlflow.get_last_active_trace_id()
@@ -1988,10 +1990,10 @@ def test_agent_server_native_stream_cancellation_closes_without_invented_usage(
             task = asyncio.create_task(invoke_streaming())
             await asyncio.wait_for(first_output.wait(), timeout=5)
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            return await task
 
-        asyncio.run(cancel_after_output())
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(cancel_after_output())
         mlflow.flush_trace_async_logging()
 
         assert body.closed

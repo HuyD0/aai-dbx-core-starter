@@ -125,7 +125,7 @@ def test_eval_predictor_keeps_model_and_tool_spans_in_one_trace(tmp_path, monkey
         policy=tracing.TracePolicy(capture_mode=tracing.TraceCaptureMode.OFF),
     )
     monkeypatch.setattr(tracing, "_DEFAULT_TRACE_STATE", default_state)
-    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", None)
+    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", {})
     token = tracing._TRACE_STATE.set(None)
 
     class FakeAgent:

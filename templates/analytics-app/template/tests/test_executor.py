@@ -402,10 +402,10 @@ def test_close_cancels_active_async_work_and_rejects_semaphore_queue(model):
         release_call.set()
 
         with pytest.raises(WarehouseExecutionError, match="closed"):
-            await first
+            _ = await first
         with pytest.raises(WarehouseExecutionError, match="closed"):
-            await queued
-        await closing
+            _ = await queued
+        _ = await closing
 
         assert len(api.requests) == 1
         assert api.cancellations
@@ -443,7 +443,7 @@ def test_async_adapter_cancels_remote_statement_on_task_cancellation(model):
         await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task
         assert client.statement_execution.cancellations == ["stmt-1"]
         assert client.statement_execution.polls == ["stmt-1"]
         await executor.aclose()

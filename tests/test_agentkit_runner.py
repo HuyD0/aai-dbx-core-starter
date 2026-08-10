@@ -216,7 +216,7 @@ class FakeMlflow:
         self.genai = SimpleNamespace(
             evaluate=self._evaluate,
             scorers=SimpleNamespace(scorer=self._scorer, **_BUILTIN_FAKES),
-            make_judge=lambda **kwargs: SimpleNamespace(**kwargs),
+            make_judge=SimpleNamespace,
         )
 
     # --- experiment plumbing -------------------------------------------
@@ -227,10 +227,10 @@ class FakeMlflow:
         info = SimpleNamespace(run_id=self.run_id, experiment_id=self.experiment_id)
 
         class _Run:
-            def __enter__(inner):
+            def __enter__(self):
                 return SimpleNamespace(info=info)
 
-            def __exit__(inner, *args):
+            def __exit__(self, *args):
                 return False
 
         return _Run()
@@ -251,7 +251,7 @@ class FakeMlflow:
         outer = self
 
         class _Client:
-            def log_artifact(inner, run_id, local_path, artifact_path=None):
+            def log_artifact(self, run_id, local_path, artifact_path=None):
                 outer.run_artifacts.append(
                     (run_id, Path(local_path).name, artifact_path)
                 )

@@ -637,7 +637,7 @@ def test_promotion_approval_requires_a_new_request_when_source_version_changes(
     monkeypatch.setattr(
         service,
         "readiness_for_version",
-        lambda version: _ready_snapshot_for(version),
+        _ready_snapshot_for,
     )
     owner = AuthorizationContext(principal="owner-analyst@example.com")
     promotion = service.request_promotion(

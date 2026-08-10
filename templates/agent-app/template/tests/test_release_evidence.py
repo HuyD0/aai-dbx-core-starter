@@ -9,7 +9,7 @@ import pytest
 from aai_core import __version__
 from aai_core.experiments import record_reproducibility
 from app.controls import DEFAULT_AGENT_LIMITS
-from app.tools import build_registry
+from app.tools import build_agent_registry
 from evals.evaluate import _evaluation_model_identities
 from scripts import create_release
 
@@ -327,7 +327,7 @@ def test_world_version_accepts_bounded_operational_snapshot():
 
 def test_main_writes_v2_world_learning_and_control_evidence(monkeypatch, tmp_path):
     limits = DEFAULT_AGENT_LIMITS
-    tools = build_registry(
+    tools = build_agent_registry(
         timeout_seconds=limits.tool_timeout_seconds,
         max_output_chars=limits.max_tool_output_chars,
     ).openai_tools()

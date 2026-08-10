@@ -486,7 +486,7 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
         policy=tracing.TracePolicy(capture_mode=tracing.TraceCaptureMode.OFF),
     )
     monkeypatch.setattr(tracing, "_DEFAULT_TRACE_STATE", default_trace_state)
-    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", None)
+    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", {})
     trace_state_token = tracing._TRACE_STATE.set(None)
 
     class FakeIndex:

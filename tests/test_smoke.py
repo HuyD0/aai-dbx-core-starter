@@ -694,6 +694,7 @@ def test_offline_example_runs_with_zero_credentials():
     assert completed.returncode == 0, completed.stderr
     output = completed.stdout
     assert "completed with zero credentials" in output
+    assert "'secret_redaction_verified': True" in output
     assert "not-a-real-secret" not in output
 
 

@@ -125,11 +125,13 @@ def _is_missing_scalar(value: Any) -> bool:
         except Exception:  # noqa: BLE001 - an opaque provider object
             pass
     try:
-        if bool(value != value):
-            return True
-    except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
-        pass
-    return False
+        # ``float.hex`` gives NaN a stable representation without invoking an
+        # opaque object's equality operator. Signaling Decimal NaNs and
+        # non-numeric provider objects fail closed into the ordinary text-field
+        # inspection below.
+        return float(str(value)).hex() == "nan"
+    except Exception:  # An opaque provider object may reject conversion.
+        return False
 
 
 def _model_dump_output_text(value: Any, depth: int) -> str | None:
@@ -317,9 +319,9 @@ def registered_keyword_coverage(outputs: object, expectations: object) -> float:
 
     def missing_scalar(value: object) -> bool:
         try:
-            differs_from_self = bool(value != value)
-        except Exception:  # noqa: BLE001 - opaque equality
-            differs_from_self = False
+            numeric_nan = float(str(value)).hex() == "nan"
+        except Exception:  # An opaque provider object may reject conversion.
+            numeric_nan = False
         pandas_null = all(
             (
                 type(value).__module__.startswith("pandas"),
@@ -330,7 +332,7 @@ def registered_keyword_coverage(outputs: object, expectations: object) -> float:
             (
                 pandas_null,
                 safe_call(safe_getattr(value, "is_nan")) is True,
-                differs_from_self,
+                numeric_nan,
             )
         )
 
@@ -460,9 +462,9 @@ def registered_refusal_compliance(outputs: object, expectations: object) -> floa
 
     def missing_scalar(value: object) -> bool:
         try:
-            differs_from_self = bool(value != value)
-        except Exception:  # noqa: BLE001 - opaque equality
-            differs_from_self = False
+            numeric_nan = float(str(value)).hex() == "nan"
+        except Exception:  # An opaque provider object may reject conversion.
+            numeric_nan = False
         pandas_null = all(
             (
                 type(value).__module__.startswith("pandas"),
@@ -473,7 +475,7 @@ def registered_refusal_compliance(outputs: object, expectations: object) -> floa
             (
                 pandas_null,
                 safe_call(safe_getattr(value, "is_nan")) is True,
-                differs_from_self,
+                numeric_nan,
             )
         )
 
@@ -585,9 +587,9 @@ def registered_response_length_ok(outputs: object, expectations: object) -> floa
 
     def missing_scalar(value: object) -> bool:
         try:
-            differs_from_self = bool(value != value)
-        except Exception:  # noqa: BLE001 - opaque equality
-            differs_from_self = False
+            numeric_nan = float(str(value)).hex() == "nan"
+        except Exception:  # An opaque provider object may reject conversion.
+            numeric_nan = False
         pandas_null = all(
             (
                 type(value).__module__.startswith("pandas"),
@@ -598,7 +600,7 @@ def registered_response_length_ok(outputs: object, expectations: object) -> floa
             (
                 pandas_null,
                 safe_call(safe_getattr(value, "is_nan")) is True,
-                differs_from_self,
+                numeric_nan,
             )
         )
 

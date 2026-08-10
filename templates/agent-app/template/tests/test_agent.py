@@ -10,9 +10,10 @@ import pytest
 import app.agent as agent_module
 from aai_core.agents import AgentRequest
 from aai_core.testing import fake_tool_call
-from app.agent import ToolAgent
 from app.config import PROMPT_NAME
 from app.controls import AgentLimits
+
+ToolAgent = agent_module.ToolAgent
 
 
 class FakePrompt:
@@ -455,7 +456,7 @@ def test_stream_cancellation_propagates_and_closes_without_retry():
         await asyncio.sleep(0)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await pending
+            _ = await pending
 
     asyncio.run(cancel_after_first_output())
 

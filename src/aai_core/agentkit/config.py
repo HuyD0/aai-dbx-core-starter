@@ -42,7 +42,8 @@ if TYPE_CHECKING:
 
 
 class _ServingEndpoints(Protocol):
-    def get(self, endpoint: str) -> Any: ...
+    def get(self, endpoint: str) -> Any:
+        raise NotImplementedError
 
 
 class _WorkspaceClient(Protocol):

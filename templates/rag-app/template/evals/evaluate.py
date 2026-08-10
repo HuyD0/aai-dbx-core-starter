@@ -85,6 +85,7 @@ def main() -> None:
     parser.add_argument(
         "--knowledge-version",
         required=True,
+        type=knowledge_version,
         help="Immutable knowledge/chunk/index snapshot identifier.",
     )
     parser.add_argument(
@@ -96,10 +97,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.prompt_version < 1:
         parser.error("--prompt-version must be a positive integer")
-    try:
-        world_version = knowledge_version(args.knowledge_version)
-    except (TypeError, ValueError) as error:
-        parser.error(str(error))
+    world_version = args.knowledge_version
 
     context = bootstrap(ROOT / "aai-platform.yml")
     judge_model = judge_model_uri(context.settings)

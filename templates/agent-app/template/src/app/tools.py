@@ -129,12 +129,12 @@ class AsyncToolRegistry:
             return serialized
 
 
-def build_registry(
+def build_agent_registry(
     *,
     timeout_seconds: float = 10.0,
     max_output_chars: int = 8_000,
 ) -> AsyncToolRegistry:
-    """Build starter tools with one reviewed default timeout.
+    """Build the agent application's tools with reviewed execution bounds.
 
     Applications may still set a different ``ToolSpec.timeout_seconds`` for a
     specific tool when its SLO justifies that exception.

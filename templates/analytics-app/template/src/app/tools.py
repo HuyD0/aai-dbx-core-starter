@@ -245,14 +245,14 @@ class AsyncToolRegistry:
             return serialized
 
 
-def build_registry(
+def build_analytics_registry(
     model: SemanticModel,
     knowledge: KnowledgeRouter,
     executor: WarehouseExecutor,
     log: ProvenanceLog,
     limits: AnalyticsLimits = DEFAULT_ANALYTICS_LIMITS,
 ) -> AsyncToolRegistry:
-    """Bind the runbook tools to this request's model, docs, and executor."""
+    """Bind the analytics tools to this request's model, docs, and executor."""
 
     return AsyncToolRegistry(
         (

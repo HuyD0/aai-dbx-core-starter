@@ -122,7 +122,7 @@ class ChatModel(Protocol):
 
     def create_native_async_client(self) -> Any:
         """Create a provider-native async client owned by the caller."""
-        ...
+        raise NotImplementedError
 
     def generate(
         self,
@@ -133,7 +133,8 @@ class ChatModel(Protocol):
         tools: Sequence[Mapping[str, Any]] | None = None,
         response_format: Mapping[str, Any] | None = None,
         provider_options: Mapping[str, Any] | None = None,
-    ) -> ModelResponse: ...
+    ) -> ModelResponse:
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -145,9 +146,11 @@ class EmbeddingProvider(Protocol):
     dimensions: int | None
     native_client: Any
 
-    def embed_query(self, text: str) -> list[float]: ...
+    def embed_query(self, text: str) -> list[float]:
+        raise NotImplementedError
 
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -167,4 +170,5 @@ class Retriever(Protocol):
         query_vector: Sequence[float] | None = None,
         mode: str = "hybrid",
         provider_options: Mapping[str, Any] | None = None,
-    ) -> list[SearchResult]: ...
+    ) -> list[SearchResult]:
+        raise NotImplementedError

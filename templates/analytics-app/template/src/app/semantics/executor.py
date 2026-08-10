@@ -118,11 +118,11 @@ class WarehouseExecutor(Protocol):
 
     def run_plan(self, model: SemanticModel, query: SemanticQuery) -> QueryResult:
         """Compile and execute a semantic plan (the governed path)."""
-        ...
+        raise NotImplementedError
 
     def query_rows(self, model: SemanticModel, query: RowQuery) -> QueryResult:
         """Compile and execute a governed row-level plan."""
-        ...
+        raise NotImplementedError
 
     def execute(
         self,
@@ -132,11 +132,11 @@ class WarehouseExecutor(Protocol):
         row_limit: int = 1000,
     ) -> QueryResult:
         """Run one application-owned guarded read statement."""
-        ...
+        raise NotImplementedError
 
     def latest_loaded_at(self, model: SemanticModel, source_name: str) -> str | None:
         """Freshness watermark for a source, or None when undeclared."""
-        ...
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -147,17 +147,19 @@ class AsyncWarehouseExecutor(Protocol):
 
     async def arun_plan(
         self, model: SemanticModel, query: SemanticQuery
-    ) -> QueryResult: ...
+    ) -> QueryResult:
+        raise NotImplementedError
 
-    async def aquery_rows(
-        self, model: SemanticModel, query: RowQuery
-    ) -> QueryResult: ...
+    async def aquery_rows(self, model: SemanticModel, query: RowQuery) -> QueryResult:
+        raise NotImplementedError
 
     async def alatest_loaded_at(
         self, model: SemanticModel, source_name: str
-    ) -> str | None: ...
+    ) -> str | None:
+        raise NotImplementedError
 
-    async def aclose(self) -> None: ...
+    async def aclose(self) -> None:
+        raise NotImplementedError
 
 
 class DatabricksWarehouseExecutor:

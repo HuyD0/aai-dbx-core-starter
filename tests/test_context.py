@@ -41,8 +41,10 @@ def test_bootstrap_loads_settings_and_wires_lazy_services(config_file):
     assert context.tags.application == "wiring-test"
     assert context.settings.models["general-chat"]["provider"] == "databricks"
     # Lazy services are memoized single instances.
-    assert context.providers is context.providers
-    assert context.secrets is context.secrets
+    providers = context.providers
+    secrets = context.secrets
+    assert context.providers is providers
+    assert context.secrets is secrets
 
 
 def test_context_secrets_honor_environment_and_identity_mode(config_file):

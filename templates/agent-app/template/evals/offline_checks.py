@@ -29,7 +29,7 @@ PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 
 def main() -> int:  # noqa: C901 - linear, independent contract assertions
     sys.path.insert(0, str(ROOT / "src"))
-    from app.tools import build_registry
+    from app.tools import build_agent_registry
 
     failures: list[str] = []
 
@@ -45,7 +45,9 @@ def main() -> int:  # noqa: C901 - linear, independent contract assertions
     if "system" not in roles or "user" not in roles:
         failures.append("system_prompt.json needs system and user messages")
 
-    registered = {tool["function"]["name"] for tool in build_registry().openai_tools()}
+    registered = {
+        tool["function"]["name"] for tool in build_agent_registry().openai_tools()
+    }
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text("utf-8")
     )

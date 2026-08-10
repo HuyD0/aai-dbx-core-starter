@@ -21,7 +21,7 @@ from aai_core.tracing import provider_span, record_agent_decision, set_trace_ses
 from app.config import PROMPT_NAME
 from app.controls import DEFAULT_AGENT_LIMITS, AgentLimits
 from app.schemas import FinalAnswer
-from app.tools import build_registry
+from app.tools import build_agent_registry
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class ToolAgent:
         self.model = self.context.providers.model("general-chat")
         self._native_model_name = _native_model_name(self.model)
         self.limits = limits
-        self.registry = build_registry(
+        self.registry = build_agent_registry(
             timeout_seconds=limits.tool_timeout_seconds,
             max_output_chars=limits.max_tool_output_chars,
         )
@@ -500,4 +500,4 @@ async def _close_async_resource(resource: Any | None) -> None:
         return
     result = close()
     if inspect.isawaitable(result):
-        await result
+        _ = await result

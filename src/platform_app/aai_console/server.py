@@ -233,7 +233,6 @@ class ContainExceptions:
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _APPLICATION_ID = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
-_METRIC_KEY = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class ProblemError(RuntimeError):

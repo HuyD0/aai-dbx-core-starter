@@ -400,7 +400,7 @@ def test_agent_server_stream_cancellation_closes_application_iterator(monkeypatc
         await first_event.wait()
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await pending
+            _ = await pending
 
     asyncio.run(cancel_after_first_event())
 

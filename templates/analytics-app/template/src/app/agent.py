@@ -36,7 +36,7 @@ from app.reviewer import (
 )
 from app.semantics.executor import WarehouseExecutor
 from app.semantics.models import SemanticModel, load_semantic_model
-from app.tools import ProvenanceLog, build_registry
+from app.tools import ProvenanceLog, build_analytics_registry
 
 
 class FinalAnswer(BaseModel):
@@ -151,7 +151,7 @@ class AnalyticsAgent:
             )
         usage = _UsageAccumulator()
         log = ProvenanceLog()
-        registry = build_registry(
+        registry = build_analytics_registry(
             self.semantic_model,
             self.knowledge,
             self.executor,
@@ -457,4 +457,4 @@ async def _close_async_resource(resource: Any | None) -> None:
         return
     result = close()
     if inspect.isawaitable(result):
-        await result
+        _ = await result

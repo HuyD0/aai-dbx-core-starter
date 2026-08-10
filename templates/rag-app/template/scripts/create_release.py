@@ -65,16 +65,14 @@ def main() -> None:
     parser.add_argument(
         "--knowledge-version",
         required=True,
+        type=knowledge_version,
         help="Immutable knowledge/chunk/index snapshot identifier used by the gate.",
     )
     parser.add_argument("--output", default="release.json")
     arguments = parser.parse_args()
     if arguments.prompt_version < 1:
         parser.error("--prompt-version must be a positive integer")
-    try:
-        world_version = knowledge_version(arguments.knowledge_version)
-    except (TypeError, ValueError) as error:
-        parser.error(str(error))
+    world_version = arguments.knowledge_version
 
     current_source_commit = source_commit()
     current_source_state = source_state()

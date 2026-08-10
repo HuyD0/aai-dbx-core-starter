@@ -20,7 +20,7 @@ from aai_core.deployment import ApplicationRelease
 from aai_core.manifest import build_manifest_envelope
 from app.config import DATASET_NAME, PROMPT_NAME
 from app.controls import DEFAULT_AGENT_LIMITS
-from app.tools import build_registry
+from app.tools import build_agent_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 _GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -96,16 +96,14 @@ def main() -> None:
     parser.add_argument(
         "--world-version",
         required=True,
+        type=_world_version,
         help="Immutable operational data, tool-source, or business-rules version.",
     )
     parser.add_argument("--output", default="release.json")
     arguments = parser.parse_args()
     if arguments.prompt_version < 1:
         parser.error("--prompt-version must be a positive integer")
-    try:
-        world_version = _world_version(arguments.world_version)
-    except ValueError as error:
-        parser.error(str(error))
+    world_version = arguments.world_version
 
     context = bootstrap(ROOT / "aai-platform.yml")
     manifest_document = yaml.safe_load(
@@ -128,7 +126,7 @@ def main() -> None:
     dataset = mlflow.genai.datasets.get_dataset(name=dataset_name)
     run = mlflow.get_run(arguments.evaluation_run)
     limits = DEFAULT_AGENT_LIMITS.model_dump(mode="json")
-    tools = build_registry(
+    tools = build_agent_registry(
         timeout_seconds=limits["tool_timeout_seconds"],
         max_output_chars=limits["max_tool_output_chars"],
     ).openai_tools()

@@ -77,7 +77,7 @@ async def _execute_async_notebook(path: Path) -> dict[str, object]:
         )
         result = eval(code, namespace)
         if inspect.isawaitable(result):
-            await result
+            _ = await result
     return namespace
 
 

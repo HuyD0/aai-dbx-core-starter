@@ -10,7 +10,7 @@ from app.tools import (
     AsyncToolRegistry,
     ToolExecutionError,
     ToolSpec,
-    build_registry,
+    build_agent_registry,
     lookup_order_status,
 )
 
@@ -21,7 +21,7 @@ def test_lookup_returns_status_or_explicit_not_found():
 
 
 def test_registry_exposes_openai_tool_metadata_and_executes():
-    registry = build_registry(timeout_seconds=3.5)
+    registry = build_agent_registry(timeout_seconds=3.5)
 
     tools = registry.openai_tools()
     assert tools[0]["function"]["name"] == "lookup_order_status"
@@ -70,7 +70,7 @@ def test_tool_timeout_is_normalized_and_cancellation_propagates():
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task
 
     asyncio.run(cancel())
 

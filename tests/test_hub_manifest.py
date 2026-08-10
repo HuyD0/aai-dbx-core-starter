@@ -13,7 +13,6 @@ import yaml
 from pydantic import ValidationError
 
 import aai_console.hub.manifest as compatibility_manifest
-import aai_core.manifest as core_manifest
 from aai_core.manifest import (
     AIApplicationManifest,
     ManifestEnvelope,
@@ -40,15 +39,9 @@ COMMON_TEMPLATE_VARIABLES = {
 
 
 def test_console_manifest_module_is_a_compatibility_export_of_the_sdk_contract():
-    assert (
-        compatibility_manifest.AIApplicationManifest
-        is core_manifest.AIApplicationManifest
-    )
-    assert compatibility_manifest.load_manifest is core_manifest.load_manifest
-    assert (
-        compatibility_manifest.manifest_json_schema
-        is core_manifest.manifest_json_schema
-    )
+    assert compatibility_manifest.AIApplicationManifest is AIApplicationManifest
+    assert compatibility_manifest.load_manifest is load_manifest
+    assert compatibility_manifest.manifest_json_schema is manifest_json_schema
 
 
 def valid_document() -> dict:

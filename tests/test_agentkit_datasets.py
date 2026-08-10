@@ -1436,6 +1436,7 @@ def test_missing_recognises_every_null_sentinel():
             np.datetime64("NaT", "ns"),
         ]
     except ImportError:
+        # NumPy is optional; the dependency-free sentinels above still run.
         pass
     try:
         import pandas as pd
@@ -1444,6 +1445,7 @@ def test_missing_recognises_every_null_sentinel():
         # proves the name check, not that the name is the right one.
         absent += [pd.NA, pd.NaT, float("nan")]
     except ImportError:
+        # pandas is optional; its concrete sentinels are additive coverage.
         pass
     for value in absent:
         assert _is_missing(value), value
