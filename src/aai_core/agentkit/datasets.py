@@ -258,10 +258,13 @@ def _span_field(
         candidates.append(attributes.get(attribute))
     for candidate in candidates:
         if isinstance(candidate, (str, bytes)):
-            try:
-                candidate = json.loads(candidate)
-            except (ValueError, TypeError):
+            decoded, candidate = _try_decode_json(candidate)
+            if not decoded:
                 continue
+        try:
+            candidate = _bounded_plain(candidate, subject="trace span field")
+        except ConfigError:
+            continue
         if _is_populated(candidate):
             return candidate
     return None
@@ -539,14 +542,20 @@ def _trace_inputs(trace: Any) -> Mapping[str, Any] | None:
     row is reported rather than passed on to fail obscurely.
     """
 
-    request = _trace_request(trace)
+    try:
+        request = _trace_request(trace)
+    except ConfigError:
+        return None
     if isinstance(request, str):
-        try:
-            request = json.loads(request)
-        except (ValueError, TypeError):
+        decoded, request = _try_decode_json(request)
+        if not decoded:
             return None
+    try:
+        request = _bounded_plain(request, subject="trace request")
+    except ConfigError:
+        return None
     if isinstance(request, Mapping) and request:
-        return _plain(request)
+        return request
     return None
 
 
@@ -579,10 +588,13 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
         for key in ("request", "request_preview"):
             request = info.get(key)
             if isinstance(request, (str, bytes)):
-                try:
-                    request = json.loads(request)
-                except (ValueError, TypeError):
+                decoded, request = _try_decode_json(request)
+                if not decoded:
                     continue
+            try:
+                request = _bounded_plain(request, subject="trace request")
+            except ConfigError:
+                continue
             if isinstance(request, Mapping) and request:
                 info_has_request = True
                 break
@@ -761,7 +773,14 @@ def _complete_trace_envelope(document: Mapping[str, Any]) -> bool:
             )
             for span in spans
         )
-    except (KeyError, TypeError, ValueError, OverflowError):
+    except (
+        ConfigError,
+        KeyError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        RecursionError,
+    ):
         # This is a boundary over untrusted JSON. Shape errors are governed
         # validation failures, never raw Python exceptions.
         return False
@@ -887,6 +906,10 @@ def _complete_expectation(value: Mapping[str, Any]) -> bool:
         return False
     if arms == {"value"}:
         direct = value["value"]
+        try:
+            _bounded_plain(direct, subject="trace expectation")
+        except ConfigError:
+            return False
         return direct is not None and _json_value(direct)
 
     serialized = value["serialized_value"]
@@ -899,9 +922,12 @@ def _complete_expectation(value: Mapping[str, Any]) -> bool:
     encoded = serialized.get("value")
     if not isinstance(encoded, str):
         return False
+    decoded_ok, decoded = _try_decode_json(encoded)
+    if not decoded_ok:
+        return False
     try:
-        decoded = json.loads(encoded)
-    except (TypeError, ValueError):
+        _bounded_plain(decoded, subject="trace expectation")
+    except ConfigError:
         return False
     return decoded is not None and _json_value(decoded)
 
@@ -1026,9 +1052,8 @@ def _request_id_attribute_matches(
     encoded = attributes.get("mlflow.traceRequestId")
     if not isinstance(encoded, str):
         return False
-    try:
-        decoded = json.loads(encoded)
-    except (TypeError, ValueError):
+    decoded_ok, decoded = _try_decode_json(encoded)
+    if not decoded_ok:
         return False
     return isinstance(decoded, str) and decoded == expected_request_id
 
@@ -1217,11 +1242,11 @@ def _expectation_value(expectation: Any, *, name: str) -> Any:
     """
 
     if not isinstance(expectation, Mapping):
-        return _plain(expectation)
+        return _normalized_trace_expectation(expectation, name=name)
 
     direct = expectation.get("value")
     if not _is_missing(direct):
-        return _plain(direct)
+        return _normalized_trace_expectation(direct, name=name)
 
     serialized = expectation.get("serialized_value")
     if not isinstance(serialized, Mapping) or "value" not in serialized:
@@ -1236,8 +1261,10 @@ def _expectation_value(expectation: Any, *, name: str) -> Any:
             "serialized_value.value must be a JSON string",
         )
     try:
-        value = json.loads(encoded)
-    except (TypeError, ValueError) as error:
+        value = _decode_json_evidence(
+            encoded, subject="trace expectation serialized_value.value"
+        )
+    except ConfigError as error:
         raise _malformed_trace_expectation(
             name,
             "serialized_value.value is not valid JSON",
@@ -1247,7 +1274,17 @@ def _expectation_value(expectation: Any, *, name: str) -> Any:
             name,
             "serialized_value.value decoded to a missing value",
         )
-    return _plain(value)
+    return _normalized_trace_expectation(value, name=name)
+
+
+def _normalized_trace_expectation(value: Any, *, name: str) -> Any:
+    try:
+        return _bounded_plain(value, subject="trace expectation")
+    except ConfigError as error:
+        raise _malformed_trace_expectation(
+            name,
+            "value is too deeply nested, complex, or contains invalid Unicode",
+        ) from error
 
 
 def _malformed_trace_expectation(name: str, detail: str) -> ConfigError:
@@ -1665,9 +1702,8 @@ def _trace_document(trace: Any) -> Mapping[str, Any] | None:
     if isinstance(trace, Mapping):
         return trace
     if isinstance(trace, (str, bytes)):
-        try:
-            loaded = json.loads(trace)
-        except (ValueError, TypeError):
+        decoded, loaded = _try_decode_json(trace)
+        if not decoded:
             return None
         return loaded if isinstance(loaded, Mapping) else None
     to_dict = getattr(trace, "to_dict", None)
@@ -1786,19 +1822,29 @@ def _span_outputs(span: Mapping[str, Any]) -> Any | None:
     """
 
     attributes = span.get("attributes")
-    candidates: list[Any] = [span.get("outputs"), span.get("output")]
+    candidates: list[tuple[Any, bool]] = [
+        (span.get("outputs"), False),
+        (span.get("output"), False),
+    ]
     if isinstance(attributes, Mapping):
-        candidates.append(attributes.get("mlflow.spanOutputs"))
+        candidates.append((attributes.get("mlflow.spanOutputs"), True))
     found: list[Any] = []
-    for candidate in candidates:
+    for candidate, serialized in candidates:
         if isinstance(candidate, (str, bytes)):
-            try:
-                candidate = json.loads(candidate)
-            except (ValueError, TypeError):
-                # Not the serialized-JSON form, so it is a plain answer
-                # string. Dropping it here lost the whole response from
-                # the token estimate.
-                pass
+            if serialized:
+                candidate = _decode_json_evidence(
+                    candidate, subject="trace span outputs"
+                )
+            else:
+                decoded, plain_candidate = _try_decode_json(candidate)
+                if decoded:
+                    candidate = plain_candidate
+                else:
+                    # Not the serialized-JSON form, so it is a plain answer
+                    # string. Dropping it here lost the whole response from
+                    # the token estimate.
+                    pass
+        candidate = _bounded_plain(candidate, subject="trace span outputs")
         if (
             isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes))
         ) or _is_populated(candidate):
@@ -1910,11 +1956,26 @@ def _load_jsonl_objects(
 def _load_json_value(text: str, *, subject: str, line_number: int | None = None) -> Any:
     """Parse JSON while keeping decoder-limit failures governed and redacted."""
 
+    location = f" line {line_number}" if line_number is not None else ""
+    return _decode_json_evidence(text, subject=f"{subject}{location}")
+
+
+def _try_decode_json(value: Any) -> tuple[bool, Any]:
+    """Decode untrusted JSON for a validation path without leaking failures."""
+
     try:
-        return json.loads(text)
-    except (ValueError, RecursionError) as error:
-        location = f" line {line_number}" if line_number is not None else ""
-        raise ConfigError(f"{subject}{location} is not valid JSON") from error
+        return True, json.loads(value)
+    except (TypeError, ValueError, RecursionError):
+        return False, None
+
+
+def _decode_json_evidence(value: Any, *, subject: str) -> Any:
+    """Decode JSON whose malformed evidence must refuse the operation."""
+
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ConfigError(f"{subject} is not valid JSON") from error
 
 
 def _looks_like_uc_dataset(reference: str, root: Path) -> bool:

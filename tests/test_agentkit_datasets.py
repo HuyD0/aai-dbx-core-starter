@@ -47,6 +47,10 @@ def _nested_mapping(depth, leaf="value"):
     return value
 
 
+def _recursive_json():
+    return "[" * 10_000 + "0" + "]" * 10_000
+
+
 def _encoded_id(value, width):
     return base64.b64encode(int(value).to_bytes(width, "big")).decode("ascii")
 
@@ -1428,6 +1432,86 @@ def test_the_preview_is_still_used_when_there_are_no_spans(tmp_path):
     assert _trace_request({"info": {"request_preview": "the question"}}) == (
         "the question"
     )
+
+
+def test_trace_validation_decoders_govern_recursive_json():
+    from aai_core.agentkit.datasets import (
+        _request_id_attribute_matches,
+        _span_field,
+        _trace_document,
+        _trace_inputs,
+    )
+
+    encoded = _recursive_json()
+
+    assert _trace_document(encoded) is None
+    assert (
+        _span_field(
+            {"attributes": {"mlflow.spanInputs": encoded}},
+            ("inputs", "input"),
+            "mlflow.spanInputs",
+        )
+        is None
+    )
+    assert _trace_inputs({"info": {"request_preview": encoded}}) is None
+    assert (
+        _request_id_attribute_matches({"mlflow.traceRequestId": encoded}, "tr-expected")
+        is False
+    )
+
+
+def test_recursive_serialized_trace_is_a_governed_structural_failure(tmp_path):
+    _write_dataset(
+        tmp_path,
+        [{"inputs": {"question": "q"}, "trace": _recursive_json()}],
+    )
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
+
+
+def test_serialized_span_outputs_refuse_recursive_json_safely():
+    from aai_core.agentkit.datasets import _chunk_count
+
+    encoded = _recursive_json()
+
+    with pytest.raises(
+        ConfigError, match="trace span outputs is not valid JSON"
+    ) as excinfo:
+        _chunk_count({"attributes": {"mlflow.spanOutputs": encoded}})
+
+    assert encoded[:100] not in str(excinfo.value)
+
+
+def test_serialized_expectation_decoders_govern_recursive_and_deep_json():
+    from aai_core.agentkit.datasets import _complete_expectation, _expectation_value
+
+    recursive = {
+        "serialized_value": {
+            "serialization_format": "JSON_FORMAT",
+            "value": _recursive_json(),
+        }
+    }
+    assert _complete_expectation(recursive) is False
+    with pytest.raises(
+        ConfigError, match="trace expectation 'expected_facts' is malformed"
+    ):
+        _expectation_value(recursive, name="expected_facts")
+
+    deeply_decoded = {
+        "serialized_value": {
+            "serialization_format": "JSON_FORMAT",
+            "value": json.dumps(_nested_mapping(70)),
+        }
+    }
+    assert _complete_expectation(deeply_decoded) is False
+    with pytest.raises(ConfigError, match="too deeply nested"):
+        _expectation_value(deeply_decoded, name="expected_facts")
 
 
 def test_trace_readers_ignore_top_level_spans_like_mlflow_from_dict():
