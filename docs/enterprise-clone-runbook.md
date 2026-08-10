@@ -83,19 +83,10 @@ Prefer a GitHub *clone* over a *fork*: cross-organisation forks are unreliable
 under enterprise SSO/EMU, and a fork relationship advertises a pull-request path
 back upstream that must not exist.
 
-Sync on release tags rather than `main`, so what you merge is a reviewed, tested
-point rather than whatever is mid-flight:
-
-```bash
-git fetch upstream --tags
-git merge v0.4.0
-make sync-templates   # no-op unless upstream changed what is stamped
-make verify
-```
-
-Enable the automatic resolution for the two files that are meant to differ
-forever. Git will not run a merge driver a repository defines for itself, so
-each clone sets this once, locally — `.gitattributes` is already committed:
+Before using either merge path, enable automatic resolution for the two
+clone-owned files that are meant to differ forever. Git will not run a merge
+driver a repository defines for itself, so each clone sets this once, locally
+— `.gitattributes` is already committed:
 
 ```bash
 git config merge.keepours.driver true
@@ -105,6 +96,43 @@ git config merge.keepours.name "always keep this clone's value"
 Merge rather than rebase: rebasing this clone's commits re-applies the same
 identifier resolution on every sync, while a merge settles it once per release.
 
+Sync on release tags rather than `main`, so what you merge is a reviewed, tested
+point rather than whatever is mid-flight. A clone cannot use `sync-upstream`
+until it has synced the release that introduces that target. Bootstrap that
+first release manually, leaving the merge staged for review rather than
+committing it automatically:
+
+```bash
+git fetch upstream --tags
+git merge --no-commit --no-ff vX.Y.Z
+make sync-templates   # no-op unless upstream changed what is stamped
+make verify
+```
+
+If that merge reports conflicts, resolve them as described below before running
+the remaining commands. Review `git diff --cached` and `git log`, then commit and
+open a pull request into `main` only after the credential-free verification is
+green.
+
+Once a clone has synced the release that introduced the target, the whole
+sequence is a single command. Start from a clean worktree:
+
+```bash
+make sync-upstream TAG=vX.Y.Z
+```
+
+It fetches tags, merges the tag with `--no-commit --no-ff`, resolves the
+generated stamped files with `make resolve-upstream`, re-stamps, and runs
+`make verify`. It never commits: on success, review `git diff --cached` and
+`git log`, then commit and open a pull request into `main`. Any non-generated
+conflict — for example, a clone that has locally modified the `Makefile` — is
+left for deliberate hand-resolution, and the target stops before verification
+rather than hiding it. The one-time bootstrap merge can expose the same expected
+manual conflicts.
+
+Personal-account maintainers: see `docs/upstream-release-prompt.md` for the
+release-cutting checklist that keeps each tag mergeable.
+
 ### When a sync does conflict
 
 Ordinary upstream changes — new template properties, SDK work, documentation —
@@ -112,7 +140,7 @@ merge cleanly, because the values this clone changed live in one file that the
 merge driver keeps.
 
 The exception is upstream changing *its own* identifiers. Upstream then edits
-the same stamped lines this clone did, so `databricks.yml` and the five
+the same stamped lines this clone did, so `databricks.yml` and the generated
 `databricks_template_schema.json` files conflict. That resolution is mechanical
 — take upstream's content so its template changes survive, then re-stamp this
 clone's identifiers over it:
