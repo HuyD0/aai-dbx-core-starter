@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -169,6 +170,23 @@ EXAMPLES = {
             local=True,
             interactive=True,
         ),
+        Example(
+            name="decision_promotion_lifecycle",
+            path="examples/13_decision_and_promotion_lifecycle.ipynb",
+            description="Recorded adopt/reject decisions gate prompt promotion",
+            connected=False,
+            local=True,
+            interactive=True,
+        ),
+        Example(
+            name="platform_llm_operations",
+            path="examples/14_platform_llm_operations.ipynb",
+            description="Platform-team judge, gateway-tag, cost, and fleet loop",
+            connected=True,
+            modules=("databricks.sdk", "mlflow"),
+            config_fields=("platform.catalog", "platform.schema"),
+            interactive=True,
+        ),
     )
 }
 
@@ -253,12 +271,38 @@ def _is_placeholder(value: Any) -> bool:
     if value is None:
         return True
     normalized = str(value).strip().lower()
+    # The shared platform placeholder vocabulary; kept literal because this
+    # script stays stdlib-only (SDK homes: aai_core.tags._PLACEHOLDERS and
+    # aai_core.evaluation._QUALIFIER_PLACEHOLDERS).
     return (
-        normalized in {"", "unset"}
+        normalized in {"", "unset", "unknown", "todo", "changeme"}
         or normalized.startswith("replace-with-")
         or "<" in normalized
         or ">" in normalized
     )
+
+
+# Unity Catalog qualifier fields: exactly one level each, so a dotted value
+# is a configuration error the connected SDK helpers will reject.
+def _is_placeholder_path(value: Any) -> bool:
+    """Component-aware placeholder test for slash-separated paths.
+
+    ``_is_placeholder`` matches the bare markers exactly and anchors
+    ``replace-with-`` at the start, so a placeholder inside a path
+    (``/Shared/unset``) looks configured. Mirrors
+    ``aai_core.evaluation._is_placeholder_path``.
+    """
+
+    return _is_placeholder(value) or any(
+        _is_placeholder(part) for part in str(value).split("/") if part
+    )
+
+
+_QUALIFIER_FIELDS = {"platform.catalog", "platform.schema"}
+
+# Governed values that arrive as slash-separated paths, so the placeholder
+# vocabulary has to be applied per component rather than to the whole string.
+_PATH_FIELDS = {"platform.experiment_name"}
 
 
 def _config_issues(example: Example) -> list[str]:
@@ -275,12 +319,94 @@ def _config_issues(example: Example) -> list[str]:
     issues = []
     for dotted_path in example.config_fields:
         value = _nested_value(document, dotted_path)
-        if _is_placeholder(value):
+        if value is not None and not isinstance(value, str):
+            # Every configured identifier is a string. The checks below
+            # stringify, so 123 would read as a configured name and pass
+            # the qualifier regex as "123", leaving strict PlatformSettings
+            # to reject it at bootstrap — after the cloud preflight ran.
+            # A missing key stays None so it still reports as unconfigured.
+            issues.append(
+                f"`{dotted_path}` must be a string in aai-platform.yml "
+                f"(current value: {value!r})."
+            )
+        elif (
+            _is_placeholder_path(value)
+            if dotted_path in _PATH_FIELDS
+            else _is_placeholder(value)
+        ):
             issues.append(
                 f"Configure `{dotted_path}` in aai-platform.yml "
                 f"(current value: {value!r})."
             )
+        elif dotted_path in _QUALIFIER_FIELDS and not re.fullmatch(
+            r"[A-Za-z0-9_-]+", str(value).strip()
+        ):
+            # The SDK's qualifier validation rejects dots and any character
+            # outside the identifier set; fail the preflight instead of
+            # opening cloud checks that will refuse.
+            issues.append(
+                f"`{dotted_path}` must be a single Unity Catalog qualifier "
+                "(letters, digits, underscores, and hyphens; no dots) "
+                f"(current value: {value!r})."
+            )
+    if "platform.experiment_name" not in example.config_fields:
+        issue = _effective_experiment_issue(document)
+        if issue:
+            issues.append(issue)
     return issues
+
+
+def _effective_experiment_issue(document: dict[str, Any]) -> str | None:
+    """Validate the experiment the SDK will actually use.
+
+    An explicit name wins unless it is a placeholder; the 'unset' sentinel
+    derives /Shared/<team>-<project>-<application>, which is only as
+    configured as its components.
+    """
+
+    platform = document.get("platform")
+    platform = platform if isinstance(platform, dict) else {}
+    explicit = platform.get("experiment_name")
+    if explicit not in (None, "", "unset"):
+        # _is_placeholder stringifies, so a number or list would read as a
+        # configured name here and only fail later inside strict
+        # PlatformSettings — after the cloud preflight has already run.
+        if not isinstance(explicit, str):
+            return (
+                "`platform.experiment_name` must be a string experiment path "
+                f"(current value: {explicit!r})."
+            )
+        if _is_placeholder_path(explicit):
+            return (
+                "Configure `platform.experiment_name` in aai-platform.yml "
+                f"(current value: {explicit!r})."
+            )
+        return None
+    # _is_placeholder stringifies, so a numeric component would read as
+    # configured and only fail inside strict PlatformSettings at bootstrap.
+    non_string = [
+        f"platform.{field}"
+        for field in ("team", "project", "application")
+        if platform.get(field) is not None and not isinstance(platform.get(field), str)
+    ]
+    if non_string:
+        return (
+            "`platform.experiment_name` derives from "
+            + ", ".join(non_string)
+            + ", which must be strings in aai-platform.yml."
+        )
+    unset_components = [
+        f"platform.{field}"
+        for field in ("team", "project", "application")
+        if _is_placeholder(platform.get(field))
+    ]
+    if unset_components:
+        return (
+            "`platform.experiment_name` derives from "
+            + ", ".join(unset_components)
+            + "; configure them or set an explicit experiment path."
+        )
+    return None
 
 
 def _run_check(

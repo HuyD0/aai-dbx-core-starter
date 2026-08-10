@@ -1,4 +1,9 @@
-"""Scorer unit tests — pure functions, zero cloud."""
+"""Scorer unit tests — pure functions, zero cloud.
+
+The scorers come from the shared enterprise registry; these tests pin the
+behaviour this project depends on, so a registry change that would move
+your metrics fails here first.
+"""
 
 from app.scorers import (
     keyword_coverage,

@@ -35,6 +35,7 @@ def normalize_runtime_evidence_test_harness(
     """Exclude pytest-only import state from strict application evidence."""
 
     pytest_only_roots = {
+        ROOT,
         ROOT / "tests",
         ROOT / "src" / "platform_app",
     }
