@@ -32,8 +32,8 @@ STORED_TRACE_MODES = frozenset({"traces"})
 SMOKE_SEED = 20260802
 _STRATA_CARDINALITY_LIMIT = 8
 _LISTED_FAILURES = 5
-_MAX_NORMALIZED_INPUT_DEPTH = 64
-_MAX_NORMALIZED_INPUT_NODES = 100_000
+_MAX_NORMALIZED_DEPTH = 64
+_MAX_NORMALIZED_NODES = 100_000
 
 
 @dataclass(frozen=True)
@@ -128,33 +128,42 @@ def dataset_digest(rows: Sequence[Mapping[str, Any]]) -> str:
     differs.
     """
 
-    identities: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
-        if "inputs" in row:
-            _validate_input_normalization(
-                row["inputs"], subject=f"dataset row {index} inputs"
-            )
-        identities.append(_row_identity(row))
+    identities = [
+        _row_identity(row, subject=f"dataset row {index} identity")
+        for index, row in enumerate(rows)
+    ]
+    try:
+        canonical = json.dumps(
+            identities,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=lambda value: _json_default(value, subject="dataset identity"),
+        )
+        encoded = canonical.encode("utf-8")
+    except ConfigError:
+        raise
+    except (
+        RecursionError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        UnicodeError,
+    ) as error:
+        raise ConfigError("dataset identity could not be normalized") from error
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
-    canonical = json.dumps(
-        identities,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        default=str,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
-
-def _row_identity(row: Mapping[str, Any]) -> dict[str, Any]:
-    identity = {
-        key: _plain(value) for key, value in row.items() if key not in _ANSWER_FIELDS
-    }
+def _row_identity(row: Mapping[str, Any], *, subject: str) -> dict[str, Any]:
+    identity = {key: value for key, value in row.items() if key not in _ANSWER_FIELDS}
     if not _is_populated(identity.get("inputs")):
-        request = _trace_request(row.get("trace"))
+        request = _trace_request_value(row.get("trace"))
         if request is not None:
             identity["inputs"] = request
-    return identity
+    normalized = _bounded_plain(identity, subject=subject, envelope=True)
+    if not isinstance(normalized, dict):  # pragma: no cover - local construction
+        raise ConfigError(f"{subject} could not be normalized")
+    return normalized
 
 
 def _trace_request(trace: Any) -> Any:
@@ -170,19 +179,28 @@ def _trace_request(trace: Any) -> Any:
     truncated one beats none.
     """
 
+    request = _trace_request_value(trace)
+    if request is None:
+        return None
+    return _bounded_plain(request, subject="trace request")
+
+
+def _trace_request_value(trace: Any) -> Any:
+    """The trace request before governed plain-value normalization."""
+
     document = _trace_document(trace)
     if document is None:
         return None
     for span in _root_spans(trace):
         inputs = _span_field(span, ("inputs", "input"), "mlflow.spanInputs")
         if inputs is not None:
-            return _plain(inputs)
+            return inputs
     info = document.get("info")
     if isinstance(info, Mapping):
         for key in ("request", "request_preview"):
             value = info.get(key)
             if _is_populated(value):
-                return _plain(value)
+                return value
     return None
 
 
@@ -1931,37 +1949,96 @@ def _load_uc_rows(reference: str, mlflow_module: Any | None) -> list[Mapping[str
 
 
 def _inputs_key(inputs: Any, *, subject: str = "inputs") -> str:
-    _validate_input_normalization(inputs, subject=subject)
+    normalized = _bounded_plain(inputs, subject=subject)
     try:
-        return json.dumps(_plain(inputs), sort_keys=True, default=str)
-    except (RecursionError, TypeError, ValueError, OverflowError) as error:
+        return json.dumps(
+            normalized,
+            sort_keys=True,
+            default=lambda value: _json_default(value, subject=subject),
+        )
+    except ConfigError:
+        raise
+    except (
+        RecursionError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        UnicodeError,
+    ) as error:
         raise ConfigError(
             f"{subject} is too deeply nested or complex to normalize"
         ) from error
 
 
-def _validate_input_normalization(value: Any, *, subject: str) -> None:
-    """Bound recursive canonicalization before it reaches ``_plain``."""
+def _bounded_plain(value: Any, *, subject: str, envelope: bool = False) -> Any:
+    """Apply ``_plain`` semantics within explicit depth and node budgets.
 
-    pending: list[tuple[Any, int]] = [(value, 0)]
+    ``envelope`` excludes a synthetic outer mapping from the budget. Dataset
+    identity fields therefore retain the same 64-level/100k-node allowance as
+    an answer-sheet input while sharing one budget across the complete row.
+    """
+
     nodes = 0
-    while pending:
-        current, depth = pending.pop()
-        nodes += 1
-        if depth > _MAX_NORMALIZED_INPUT_DEPTH or nodes > _MAX_NORMALIZED_INPUT_NODES:
-            raise ConfigError(f"{subject} is too deeply nested or complex to normalize")
-        if isinstance(current, Mapping):
-            children = current.values()
-        elif isinstance(current, (list, tuple)):
-            children = current
-        else:
-            continue
-        for item in children:
-            if nodes + len(pending) >= _MAX_NORMALIZED_INPUT_NODES:
+    active: set[int] = set()
+
+    def visit(current: Any, depth: int, *, count: bool = True) -> Any:
+        nonlocal nodes
+        if count:
+            nodes += 1
+            if depth > _MAX_NORMALIZED_DEPTH or nodes > _MAX_NORMALIZED_NODES:
                 raise ConfigError(
                     f"{subject} is too deeply nested or complex to normalize"
                 )
-            pending.append((item, depth + 1))
+        if isinstance(current, str):
+            _validate_unicode_text(current, subject=subject)
+            return current
+        if not isinstance(current, (Mapping, list, tuple)):
+            return current
+
+        identifier = id(current)
+        if identifier in active:
+            raise ConfigError(f"{subject} is too deeply nested or complex to normalize")
+        active.add(identifier)
+        try:
+            if isinstance(current, Mapping):
+                normalized: dict[str, Any] = {}
+                for key, item in current.items():
+                    normalized_key = str(key)
+                    _validate_unicode_text(normalized_key, subject=subject)
+                    normalized[normalized_key] = visit(item, depth + 1)
+                return normalized
+            return [visit(item, depth + 1) for item in current]
+        finally:
+            active.remove(identifier)
+
+    try:
+        return visit(value, -1 if envelope else 0, count=not envelope)
+    except ConfigError:
+        raise
+    except (
+        RecursionError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        UnicodeError,
+    ) as error:
+        raise ConfigError(
+            f"{subject} is too deeply nested or complex to normalize"
+        ) from error
+
+
+def _validate_unicode_text(value: str, *, subject: str) -> None:
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise ConfigError(f"{subject} contains invalid Unicode text")
+
+
+def _json_default(value: Any, *, subject: str) -> str:
+    try:
+        text = str(value)
+    except (RecursionError, TypeError, ValueError, UnicodeError) as error:
+        raise ConfigError(f"{subject} could not be normalized") from error
+    _validate_unicode_text(text, subject=subject)
+    return text
 
 
 def _plain(value: Any) -> Any:

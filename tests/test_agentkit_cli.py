@@ -289,8 +289,25 @@ def test_cli_governs_overly_nested_dataset_inputs(project_dir, capsys):
 
     assert code == 1
     error = capsys.readouterr().err
-    assert "dataset row 0 inputs is too deeply nested or complex" in error
+    assert "dataset row 0 identity is too deeply nested or complex" in error
     assert "RecursionError" not in error
+
+
+def test_cli_governs_lone_unicode_surrogates(project_dir, capsys):
+    rows = json.loads(
+        (project_dir / "evals" / "data" / "golden_cases.json").read_text()
+    )
+    rows[0]["inputs"]["question"] = "\ud800"
+    (project_dir / "evals" / "data" / "golden_cases.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+
+    code = main(["smoke", "--plan", *_config_flag(project_dir)])
+
+    assert code == 1
+    error = capsys.readouterr().err
+    assert "dataset row 0 identity contains invalid Unicode text" in error
+    assert "UnicodeEncodeError" not in error
 
 
 def test_unknown_scorer_exits_one_and_names_the_registry(project_dir, capsys):
