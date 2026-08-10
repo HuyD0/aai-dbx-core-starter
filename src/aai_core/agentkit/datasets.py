@@ -1601,7 +1601,7 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         # Readable structure is what makes "no retrieval here" a fact
         # rather than a guess; an unparseable trace still gets the
         # assumption, because rounding a budget down is what breaks it.
-        if _spans(trace):
+        if _trace_fanout_is_countable(trace, authored_inputs=row.get("inputs")):
             traced += 1
         row_spans = _retriever_spans(trace)
         if not row_spans:
@@ -1626,6 +1626,21 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         retrieval_sufficiency_input_characters=sufficiency_input_characters,
         retrieved_chunk_input_characters=chunk_input_characters,
     )
+
+
+def _trace_fanout_is_countable(trace: Any, *, authored_inputs: Any) -> bool:
+    """Whether a trace can prove its retrieval fan-out, including zero.
+
+    A populated span collection is the ordinary proof. An empty collection
+    has no truthy value to distinguish a real no-span MLflow trace from an
+    arbitrary ``{"data": {"spans": []}}`` mapping, so defer to the same
+    complete-envelope and usable-request check that admits a trace to a run.
+    Unknown structures must retain the conservative fan-out assumption.
+    """
+
+    if _spans(trace):
+        return True
+    return _has_usable_trace(trace, authored_inputs=authored_inputs)
 
 
 def _retrieval_judge_input_characters(
