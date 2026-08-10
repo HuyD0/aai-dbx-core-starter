@@ -1,5 +1,6 @@
 """Unit tests for the persisted decision vocabulary and evidence run."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +42,7 @@ class FakeMlflow:
         self.metrics: dict = {}
         self.tags: dict = {}
         self.artifacts: list = []
+        self.artifact_payloads: dict = {}
         self.run_names: list = []
 
     def set_experiment(self, name):
@@ -71,6 +73,9 @@ class FakeMlflow:
 
     def log_artifact(self, path, artifact_path=None):
         self.artifacts.append((Path(path).name, artifact_path))
+        self.artifact_payloads[(Path(path).name, artifact_path)] = Path(path).read_text(
+            encoding="utf-8"
+        )
 
 
 class FakeDecisionClient:
@@ -123,7 +128,6 @@ def _persisted_mlflow(tmp_path, record, *, status="FINISHED", tags=None, metrics
     expected_tags = {
         "aai.run_purpose": "decision",
         "aai.change_id": record.change_id,
-        "aai.change_summary": record.change_summary,
         "aai.decision_digest": decision_digest(record),
         **{f"aai.{name}": value for name, value in record.as_tags().items()},
     }
@@ -182,8 +186,8 @@ def test_decision_record_is_a_strict_frozen_serializable_contract():
 
 
 def test_tagged_change_fields_are_bounded():
-    # change_id and change_summary become searchable tags: the id is an
-    # identifier and the summary is bounded prose.
+    # change_id becomes a searchable tag, while the artifact-only summary is
+    # still bounded evidence.
     with pytest.raises(ValidationError):
         _record(change_id="prompt v2 with spaces")
     with pytest.raises(ValidationError):
@@ -194,9 +198,8 @@ def test_tagged_change_fields_are_bounded():
 
 
 def test_free_text_evidence_must_be_substantive():
-    # min_length=1 alone accepts "   ": a whitespace summary would tag
-    # aai.change_summary blank and a whitespace rationale would persist a
-    # decision.json stating no reason at all.
+    # min_length=1 alone accepts "   ": a whitespace summary or rationale
+    # would persist a decision.json stating no reason at all.
     for blank in ("   ", "\t", "\n"):
         with pytest.raises(ValidationError, match="substantive"):
             _record(change_summary=blank)
@@ -204,8 +207,8 @@ def test_free_text_evidence_must_be_substantive():
             _record(rationale=blank)
         with pytest.raises(ValidationError, match="substantive"):
             _record(decided_by=blank)
-    # Surrounding whitespace is trimmed so the stored evidence is exactly
-    # what a reader sees in the tag and the artifact.
+    # Surrounding whitespace is trimmed so the stored artifact is exactly
+    # what a reader sees.
     trimmed = _record(
         change_summary="  Require one exact source citation.  ",
         rationale="\tCitation rate reached 1.0.\n",
@@ -374,12 +377,15 @@ def test_record_decision_emits_governed_searchable_evidence():
     assert fake.tags["aai.decision"] == "adopt"
     assert fake.tags["aai.run_purpose"] == "decision"
     assert fake.tags["aai.change_id"] == "prompt-v2"
+    assert "aai.change_summary" not in fake.tags
     assert fake.tags["aai.baseline_run_id"] == "run-baseline"
     assert fake.tags["aai.change_run_id"] == "run-change"
     assert fake.tags["aai.gate_passed"] == "true"
     assert fake.tags["aai.decision_digest"] == decision_digest(_record())
     assert fake.metrics == {"citation_rate": 1.0}
     assert ("decision.json", "decision") in fake.artifacts
+    persisted = json.loads(fake.artifact_payloads[("decision.json", "decision")])
+    assert persisted["change_summary"] == "Require one exact source citation."
 
 
 def test_load_decision_verifies_the_finished_run_and_artifact(tmp_path):

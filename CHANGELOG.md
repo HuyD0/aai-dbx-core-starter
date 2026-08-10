@@ -19,11 +19,12 @@ All notable changes to `aai-core` are documented here.
   `decided_by` rejects personal emails; `prompt_digest` and
   `release_digest` accept only sha256 hexdigests so raw prompt text, user
   content, or secrets cannot enter persisted tags; run ids and
-  `change_id` are bounded opaque identifiers and `change_summary` is
-  bounded prose because both become searchable tags; the free-text
+  `change_id` are bounded opaque identifiers because they become searchable
+  tags; `change_summary` remains bounded prose but, like `rationale`, is
+  stored only in the decision artifact; the free-text
   `change_summary`, `rationale`, and `decided_by` are trimmed and must
   stay nonblank, so no decision is persisted with a whitespace-only
-  summary tag or an artifact stating no reason; `prompt_name`
+  artifact summary or rationale stating no reason; `prompt_name`
   accepts only the qualified
   `catalog.schema.name` shape with no placeholder components and, with
   `prompt_version`, binds the registry identity the evidence was recorded
@@ -32,8 +33,9 @@ All notable changes to `aai-core` are documented here.
   purpose, searchable tags, gate metrics, or artifact digest disagree, and
   `record_decision()`
   writing the decision as a governed run with searchable `aai.decision` tags
-  and a `decision.json` artifact — the free-form rationale persists only
-  inside that artifact, never as a run description (MLflow stores
+  and a `decision.json` artifact — the free-form change summary and rationale
+  persist only inside that artifact, never as run metadata or a run description
+  (MLflow stores
   descriptions as the `mlflow.note.content` tag), and the run name derives
   exclusively from the bounded `change_id` (MLflow persists run names as
   the `mlflow.runName` tag, so a free-form override would bypass the

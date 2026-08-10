@@ -158,7 +158,6 @@ def _persisted_mlflow(tmp_path, record, *, template=TEMPLATE):
     tags = {
         "aai.run_purpose": "decision",
         "aai.change_id": record.change_id,
-        "aai.change_summary": record.change_summary,
         "aai.decision_digest": decision_digest(record),
         **{f"aai.{name}": value for name, value in record.as_tags().items()},
     }

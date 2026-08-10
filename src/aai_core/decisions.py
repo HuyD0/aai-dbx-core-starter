@@ -31,7 +31,6 @@ from aai_core.evaluation import (
 from aai_core.exceptions import AaiCoreError
 from aai_core.experiments import (
     ExperimentManager,
-    ExperimentRunMetadata,
     RunPurpose,
 )
 
@@ -57,10 +56,10 @@ class DecisionRecord(ContractModel):
     """Immutable decision evidence for one deliberate change."""
 
     decision: Decision
-    # change_id and change_summary become searchable run tags, so the id is
-    # an identifier and the summary is bounded prose: prompts, user
-    # content, and secrets belong in artifacts, never tags. The free-form
-    # rationale is persisted only inside the decision.json artifact.
+    # change_id becomes a searchable run tag, so it is an identifier.
+    # The bounded, free-form summary and rationale persist only inside the
+    # decision.json artifact: prompts, user content, and secrets never belong
+    # in tags.
     change_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     change_summary: str = Field(min_length=1, max_length=200)
     rationale: str = Field(min_length=1)
@@ -99,10 +98,9 @@ class DecisionRecord(ContractModel):
     @field_validator("change_summary", "rationale", "decided_by")
     @classmethod
     def require_substantive_text(cls, value: str | None) -> str | None:
-        # min_length alone accepts "   ", which would tag a blank summary
-        # and persist a decision.json with no stated reasoning. Trim so
-        # the stored evidence is exactly what a reader sees, and refuse a
-        # value that says nothing.
+        # min_length alone accepts "   ", which would persist a decision.json
+        # with no stated reasoning. Trim so the stored evidence is exactly
+        # what a reader sees, and refuse a value that says nothing.
         if value is None:
             return None
         trimmed = value.strip()
@@ -287,15 +285,24 @@ def load_decision(
 
 
 def _persisted_tags(record: DecisionRecord) -> dict[str, str]:
+    return {f"aai.{name}": value for name, value in _decision_run_tags(record).items()}
+
+
+def _decision_run_tags(record: DecisionRecord) -> dict[str, str]:
+    """Safe searchable projection of a decision artifact.
+
+    ``change_summary`` and ``rationale`` are deliberately absent: both are
+    free-form evidence and belong only in ``decision.json``.
+    """
+
     tags = {
-        "aai.run_purpose": RunPurpose.DECISION.value,
-        "aai.change_id": record.change_id,
-        "aai.change_summary": record.change_summary,
-        "aai.decision_digest": decision_digest(record),
-        **{f"aai.{name}": value for name, value in record.as_tags().items()},
+        "run_purpose": RunPurpose.DECISION.value,
+        "change_id": record.change_id,
+        "decision_digest": decision_digest(record),
+        **record.as_tags(),
     }
     if record.baseline_run_id:
-        tags["aai.baseline_run_id"] = record.baseline_run_id
+        tags["baseline_run_id"] = record.baseline_run_id
     return tags
 
 
@@ -352,20 +359,12 @@ def record_decision(
     # contradict each other.
     record = DecisionRecord.model_validate(record.model_dump())
     resolved_name = f"decision-{record.change_id}"
-    metadata = ExperimentRunMetadata(
-        purpose=RunPurpose.DECISION,
-        change_id=record.change_id,
-        change_summary=record.change_summary,
-        baseline_run_id=record.baseline_run_id,
-    )
     mlflow = experiments.native_client
-    # No description: MLflow persists run descriptions as the
-    # mlflow.note.content tag, and the free-form rationale belongs only in
-    # the decision.json artifact.
+    # No description or metadata summary: MLflow persists both as tags, while
+    # the free-form summary and rationale belong only in decision.json.
     with experiments.run(
         run_name=resolved_name,
-        tags={**record.as_tags(), "decision_digest": decision_digest(record)},
-        metadata=metadata,
+        tags=_decision_run_tags(record),
     ) as active_run:
         if record.gate is not None:
             mlflow.log_metrics(dict(record.gate.metrics))
