@@ -8,7 +8,7 @@ from aai_core.agentkit.catalog import PlanEntry, ScorerPlan, get_spec, select_sc
 from aai_core.agentkit.config import AgentkitConfig
 from aai_core.agentkit.cost import enforce_budget, estimate, render
 from aai_core.agentkit.datasets import DatasetShape
-from aai_core.agentkit.errors import BudgetExceededError
+from aai_core.agentkit.errors import BudgetExceededError, ConfigError
 
 
 def _shape():
@@ -151,6 +151,13 @@ def _judge_plan(*names):
         mode="traces",
         judges_enabled=True,
     )
+
+
+def _nested_json(depth):
+    value = {"page_content": "governed context"}
+    for _ in range(depth):
+        value = {"nested": value}
+    return json.dumps(value)
 
 
 def test_retrieval_relevance_costs_one_call_per_chunk():
@@ -394,6 +401,43 @@ def test_unknown_retriever_outputs_keep_one_conservative_relevance_call(span):
     assert dict(cost.calls_by_scorer) == {"retrieval_relevance": 1}
     assert cost.estimated_tokens > 0
     assert cost.fanout_counted is True
+
+
+@pytest.mark.parametrize(
+    ("outputs", "message"),
+    (
+        pytest.param("9" * 5_000, "not valid JSON", id="integer-limit"),
+        pytest.param(
+            "[" * 10_000 + "0" + "]" * 10_000,
+            "not valid JSON",
+            id="decoder-recursion",
+        ),
+        pytest.param(
+            _nested_json(70),
+            "too deeply nested or complex",
+            id="normalization-depth",
+        ),
+    ),
+)
+def test_serialized_retriever_output_limits_fail_as_config_errors(outputs, message):
+    row = {
+        "inputs": {"question": "policy?"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {
+                        "type": "RETRIEVER",
+                        "attributes": {"mlflow.spanOutputs": outputs},
+                    }
+                ]
+            }
+        },
+    }
+
+    with pytest.raises(ConfigError, match=message) as excinfo:
+        estimate([row], _judge_plan("retrieval_relevance"))
+
+    assert outputs[:100] not in str(excinfo.value)
 
 
 def test_retrieval_cost_uses_only_the_spans_and_chunks_it_judges():
