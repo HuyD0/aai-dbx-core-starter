@@ -83,6 +83,18 @@ class GatePolicy(ContractModel):
     scorer_error_metric_suffix: str = Field(default="/error_count", min_length=1)
     allow_missing_regression_baseline: bool = False
 
+    @field_validator("cost_coverage_metric", "scorer_error_metric_suffix")
+    @classmethod
+    def normalize_metric_selector(cls, value: str) -> str:
+        # Both select metrics by exact match: an untrimmed suffix makes
+        # endswith() miss every "<scorer>/error_count", silently dropping
+        # scorer health so a passing quality rule can authorize an adopt,
+        # and an untrimmed coverage metric reports real coverage unknown.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric selectors must name a metric, not whitespace")
+        return trimmed
+
 
 class GateFailure(ContractModel):
     metric: str = Field(min_length=1)

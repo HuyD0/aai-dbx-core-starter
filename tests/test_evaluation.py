@@ -313,6 +313,32 @@ def test_metric_names_are_trimmed_and_must_name_something():
         MetricRule(metric="   ", direction=MetricDirection.HIGHER, required=0.8)
 
 
+def test_gate_policy_metric_selectors_are_trimmed():
+    # Both selectors match metric names exactly. An untrimmed suffix makes
+    # endswith() miss every scorer error count — the dangerous direction,
+    # since a passing quality rule would then authorize an adopt despite
+    # crashed scorers.
+    policy = GatePolicy(
+        cost_coverage_metric=" cost/coverage ",
+        scorer_error_metric_suffix=" /error_count ",
+        minimum_cost_coverage=1.0,
+    )
+
+    assert policy.cost_coverage_metric == "cost/coverage"
+    assert policy.scorer_error_metric_suffix == "/error_count"
+
+    result = apply_gate(
+        {"cost/coverage": 1.0, "correctness/error_count": 2},
+        policy=policy,
+    )
+    assert not result.passed
+    assert "scorer invocation(s) failed" in result.failures[0].reason
+
+    for field in ("cost_coverage_metric", "scorer_error_metric_suffix"):
+        with pytest.raises(ValidationError, match="whitespace"):
+            GatePolicy(**{field: "   "})
+
+
 def test_gate_contracts_are_strict_frozen_and_serializable():
     with pytest.raises(ValidationError):
         GatePolicy(minimum_cost_coverage="1.0")
