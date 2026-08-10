@@ -132,9 +132,10 @@ and [UPSTREAM_ADAPTATION.md](UPSTREAM_ADAPTATION.md) for the clean-room mapping.
   deterministic identifier or query/evidence overlap and abstains when that
   support is uncertain. Only individually supported results reach generation
   and citations.
-- Connected traces distinguish provider candidates on `retriever.search` from
-  the exact post-rerank model evidence on `retriever.final_context`; stale or
-  unsupported candidates never masquerade as the model's context.
+- Connected traces expose the exact post-rerank model evidence on the top-level
+  `retriever.final_context` `RETRIEVER` span used by MLflow scorers. Raw provider
+  candidates stay nested on `retriever.search`; stale or unsupported candidates
+  never masquerade as the model's context.
 - Release eligibility is bound to the exact comparison change and its recorded
   `adopt` decision; an absolute gate cannot release a regression-policy reject.
 - A notebook never moves a prompt alias, deploys an app, or executes an

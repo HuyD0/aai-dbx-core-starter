@@ -88,9 +88,10 @@ deterministic gate verifies each scope dimension independently, including
 same-tenant documents restricted to a different group. The application keeps
 the newest active revision of each runbook code and never interprets an
 arbitrary positive provider score as proof that a result supports the query.
-Its raw `RETRIEVER` span remains candidate evidence; a separate
-`retriever.final_context` `RERANKER` span records exactly the individually
-supported documents supplied to generation and cited in the response.
+Its raw provider-candidate `retriever.search` span is nested beneath a top-level
+`retriever.final_context` `RETRIEVER` span that records exactly the individually
+supported documents supplied to generation, cited in the response, and seen by
+MLflow retrieval scorers.
 
 The stable 2026 API also supports query-time integrated vectorization through a
 configured vectorizer. This SDK currently uses an explicit client-side query

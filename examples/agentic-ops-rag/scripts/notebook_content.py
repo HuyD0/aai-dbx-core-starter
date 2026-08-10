@@ -752,10 +752,11 @@ uses an OData collection security filter, while Databricks standard endpoints
 use an ARRAY filter. Storage-optimized Databricks indexes must expose a
 platform-approved scalar ACL field before this lab can run. This evaluation
 records two truthful evidence stages even when `candidate_k` equals `final_k`:
-the SDK `RETRIEVER` span contains provider candidates, while the application
-`retriever.final_context` `RERANKER` span contains only current, supported
-documents supplied to the answer model after deduplication. The governed
-`predict_fn` span owns the complete invocation. MLflow's evaluation harness can
+the scorer-visible top-level `retriever.final_context` `RETRIEVER` span contains
+only current, supported documents supplied to the answer model after
+deduplication, while the SDK's raw provider-candidate `retriever.search` span is
+nested beneath it. The governed `predict_fn` span owns the complete invocation.
+MLflow's evaluation harness can
 otherwise enable OpenAI autologging temporarily, so this SDK-owned path disables
 that second tracing owner before either evaluation begins.
 """),
@@ -1026,10 +1027,17 @@ state_result = subprocess.run(
     text=True,
     check=False,
 )
-source_commit = (
-    commit_result.stdout.strip() if commit_result.returncode == 0 else "local-dev"
+source_commit = commit_result.stdout.strip()
+git_provenance_available = (
+    commit_result.returncode == 0
+    and state_result.returncode == 0
+    and bool(source_commit)
 )
-source_state = "dirty" if state_result.stdout.strip() else "clean"
+source_state = (
+    "clean"
+    if git_provenance_available and not state_result.stdout.strip()
+    else "dirty"
+)
 
 selected_name = comparison.change_configuration
 selected_gate = absolute_gates[selected_name]

@@ -251,35 +251,35 @@ class OperationsRAGPipeline:
                     else MeasurementSource.CONNECTED_WALL_CLOCK
                 ),
             )
-        results = authorized_search(
-            self.retriever,
-            query,
-            tenant_id=tenant_id,
-            region=region,
-            allowed_groups=allowed_groups,
-            top_k=candidate_k,
-            mode=selected_mode.value,
-            semantic_rerank=semantic_rerank,
-        )
-        ranked = self._application_rerank(query, results)
-        supported = tuple(
-            result
-            for result in ranked
-            if self._result_has_support(
-                query,
-                result,
-                offline_fixture=offline_fixture,
-            )
-        )[:final_k]
         with provider_span(
             "retriever.final_context",
-            span_type="RERANKER",
-            attributes={
-                "aai.evidence_role": "model_context",
-                "aai.candidate_count": len(results),
-                "aai.final_context_count": len(supported),
-            },
+            span_type="RETRIEVER",
+            attributes={"aai.evidence_role": "model_context"},
         ) as final_context_span:
+            # MLflow retrieval judges consume top-level RETRIEVER outputs. Keep
+            # the provider adapter's raw candidate span nested here, then expose
+            # only the exact supported documents supplied to the model on this
+            # scorer-visible span.
+            results = authorized_search(
+                self.retriever,
+                query,
+                tenant_id=tenant_id,
+                region=region,
+                allowed_groups=allowed_groups,
+                top_k=candidate_k,
+                mode=selected_mode.value,
+                semantic_rerank=semantic_rerank,
+            )
+            ranked = self._application_rerank(query, results)
+            supported = tuple(
+                result
+                for result in ranked
+                if self._result_has_support(
+                    query,
+                    result,
+                    offline_fixture=offline_fixture,
+                )
+            )[:final_k]
             if final_context_span is not None:
                 final_context_span.set_inputs(
                     {
@@ -291,6 +291,10 @@ class OperationsRAGPipeline:
                 )
                 final_context_span.set_outputs(
                     [result.as_mlflow_document() for result in supported]
+                )
+                final_context_span.set_attribute("aai.candidate_count", len(results))
+                final_context_span.set_attribute(
+                    "aai.final_context_count", len(supported)
                 )
         answerable = bool(supported)
         proposed_action = None
