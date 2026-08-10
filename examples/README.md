@@ -68,6 +68,25 @@ Wilson-lower-bound gates, worst-stratum rules for high-criticality fields, an
 abstention path, and three-layer provenance. Its statistics are pinned by
 `tests/test_governed_batch_inference.py`.
 
+## Separate agentic operations and RAG workshop
+
+[`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone six-notebook
+workshop on governed RAG pipelines: trusted routing and access filters,
+structure-aware chunking, embedding/index compatibility, Azure AI Search and
+Databricks AI Search retrieval modes, MLflow 3 tracing and evaluation, human
+approval before operational side effects, and an evidence-backed release
+decision.
+
+It is an original adaptation of a public RAG course outline, built for this
+stack with synthetic data, keyless connected paths, generated notebooks, and
+the repository's exact dependency lock. Start with:
+
+```bash
+make ops-rag-install
+make ops-rag-check
+make ops-rag-notebook
+```
+
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or
