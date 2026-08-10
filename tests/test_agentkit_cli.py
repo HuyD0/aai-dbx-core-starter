@@ -273,6 +273,26 @@ def test_invalid_config_exits_one(project_dir, capsys):
     assert "error:" in capsys.readouterr().err
 
 
+def test_cli_governs_overly_nested_dataset_inputs(project_dir, capsys):
+    inputs = "question"
+    for _ in range(70):
+        inputs = {"nested": inputs}
+    rows = json.loads(
+        (project_dir / "evals" / "data" / "golden_cases.json").read_text()
+    )
+    rows[0]["inputs"] = inputs
+    (project_dir / "evals" / "data" / "golden_cases.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+
+    code = main(["smoke", "--plan", *_config_flag(project_dir)])
+
+    assert code == 1
+    error = capsys.readouterr().err
+    assert "dataset row 0 inputs is too deeply nested or complex" in error
+    assert "RecursionError" not in error
+
+
 def test_unknown_scorer_exits_one_and_names_the_registry(project_dir, capsys):
     (project_dir / "agentkit.yaml").write_text(
         "version: 1\n"

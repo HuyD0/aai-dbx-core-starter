@@ -32,6 +32,8 @@ STORED_TRACE_MODES = frozenset({"traces"})
 SMOKE_SEED = 20260802
 _STRATA_CARDINALITY_LIMIT = 8
 _LISTED_FAILURES = 5
+_MAX_NORMALIZED_INPUT_DEPTH = 64
+_MAX_NORMALIZED_INPUT_NODES = 100_000
 
 
 @dataclass(frozen=True)
@@ -126,8 +128,16 @@ def dataset_digest(rows: Sequence[Mapping[str, Any]]) -> str:
     differs.
     """
 
+    identities: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if "inputs" in row:
+            _validate_input_normalization(
+                row["inputs"], subject=f"dataset row {index} inputs"
+            )
+        identities.append(_row_identity(row))
+
     canonical = json.dumps(
-        [_row_identity(row) for row in rows],
+        identities,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -304,13 +314,7 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             )
         located_records = [(record, f"line {line}") for line, record in parsed]
     else:
-        try:
-            records = json.loads(text)
-        except json.JSONDecodeError as error:
-            raise ConfigError(
-                f"answer sheet {sheet_path} is not valid JSON "
-                f"(line {error.lineno}, column {error.colno}: {error.msg})"
-            ) from error
+        records = _load_json_value(text, subject=f"answer sheet {sheet_path}")
         if not isinstance(records, list):
             raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
         located_records = [
@@ -351,7 +355,10 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
                 f"answer sheet {sheet_path} {location} needs populated "
                 f"{output_name}"
             )
-        key = _inputs_key(inputs)
+        key = _inputs_key(
+            inputs,
+            subject=f"answer sheet {sheet_path} {location} inputs",
+        )
         if key in answers:
             raise ConfigError(
                 f"answer sheet {sheet_path} has duplicate inputs at {location} "
@@ -363,8 +370,8 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
 
     rows: list[Mapping[str, Any]] = []
     missing: list[str] = []
-    for row in dataset.rows:
-        key = _inputs_key(row.get("inputs", {}))
+    for index, row in enumerate(dataset.rows):
+        key = _inputs_key(row.get("inputs", {}), subject=f"dataset row {index} inputs")
         if key not in answers:
             missing.append(_row_label(row))
             continue
@@ -1854,10 +1861,7 @@ def _load_file_rows(path: Path) -> tuple[list[Mapping[str, Any]], str]:
         rows_raw = [row for _, row in _load_jsonl_objects(text, subject=str(path))]
         source = "local-jsonl"
     else:
-        try:
-            rows_raw = json.loads(text)
-        except json.JSONDecodeError as error:
-            raise ConfigError(f"{path} is not valid JSON: {error}") from error
+        rows_raw = _load_json_value(text, subject=str(path))
         source = "local-json"
     if not isinstance(rows_raw, list):
         raise ConfigError(f"{path} must contain a JSON list of rows")
@@ -1878,17 +1882,21 @@ def _load_jsonl_objects(
     for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ConfigError(
-                f"{subject} line {line_number} is not valid JSON "
-                f"(column {error.colno}: {error.msg})"
-            ) from error
+        row = _load_json_value(line, subject=subject, line_number=line_number)
         if not isinstance(row, Mapping):
             raise ConfigError(f"{subject} line {line_number} must be a JSON object")
         rows.append((line_number, row))
     return rows
+
+
+def _load_json_value(text: str, *, subject: str, line_number: int | None = None) -> Any:
+    """Parse JSON while keeping decoder-limit failures governed and redacted."""
+
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError) as error:
+        location = f" line {line_number}" if line_number is not None else ""
+        raise ConfigError(f"{subject}{location} is not valid JSON") from error
 
 
 def _looks_like_uc_dataset(reference: str, root: Path) -> bool:
@@ -1922,8 +1930,38 @@ def _load_uc_rows(reference: str, mlflow_module: Any | None) -> list[Mapping[str
     return [row if isinstance(row, Mapping) else {"inputs": row} for row in records]
 
 
-def _inputs_key(inputs: Any) -> str:
-    return json.dumps(_plain(inputs), sort_keys=True, default=str)
+def _inputs_key(inputs: Any, *, subject: str = "inputs") -> str:
+    _validate_input_normalization(inputs, subject=subject)
+    try:
+        return json.dumps(_plain(inputs), sort_keys=True, default=str)
+    except (RecursionError, TypeError, ValueError, OverflowError) as error:
+        raise ConfigError(
+            f"{subject} is too deeply nested or complex to normalize"
+        ) from error
+
+
+def _validate_input_normalization(value: Any, *, subject: str) -> None:
+    """Bound recursive canonicalization before it reaches ``_plain``."""
+
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while pending:
+        current, depth = pending.pop()
+        nodes += 1
+        if depth > _MAX_NORMALIZED_INPUT_DEPTH or nodes > _MAX_NORMALIZED_INPUT_NODES:
+            raise ConfigError(f"{subject} is too deeply nested or complex to normalize")
+        if isinstance(current, Mapping):
+            children = current.values()
+        elif isinstance(current, (list, tuple)):
+            children = current
+        else:
+            continue
+        for item in children:
+            if nodes + len(pending) >= _MAX_NORMALIZED_INPUT_NODES:
+                raise ConfigError(
+                    f"{subject} is too deeply nested or complex to normalize"
+                )
+            pending.append((item, depth + 1))
 
 
 def _plain(value: Any) -> Any:
