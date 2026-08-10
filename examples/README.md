@@ -68,6 +68,20 @@ Wilson-lower-bound gates, worst-stratum rules for high-criticality fields, an
 abstention path, and three-layer provenance. Its statistics are pinned by
 `tests/test_governed_batch_inference.py`.
 
+## Separate offline Apple-silicon fine-tuning study
+
+[`local-finetuning/`](local-finetuning/README.md) is an Apple-silicon,
+offline-first Bitext and MLX-LM study project. It prepares all third-party
+assets before travel, proves local execution with sockets blocked, compares
+deterministic and prompting baselines with a LoRA change, logs local MLflow
+evidence, and includes a deterministic application-readiness capstone. Start
+from the repository root:
+
+```bash
+make study-prepare-flight
+make study-offline-check
+```
+
 ## Separate agentic operations and RAG workshop
 
 [`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone six-notebook

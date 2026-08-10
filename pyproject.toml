@@ -47,6 +47,7 @@ genai = [
 examples = [
   "ipykernel>=6.29,<8",
   "jupyterlab>=4.4,<5",
+  "pandas>=2,<3",
 ]
 all = [
   "aai-core[databricks,foundry,azure-search,keyvault,genai]",
@@ -78,8 +79,12 @@ agentkit = "aai_core.agentkit.cli:main"
 packages = ["src/aai_core"]
 
 [tool.hatch.build.targets.sdist]
-# Standalone study projects own separate environments and are not SDK package data.
+# Standalone study projects own separate environments and are not SDK package
+# data. Excluding them also prevents local data, models, or experiment artifacts
+# from entering a future source release.
 exclude = [
+  "/examples/local-finetuning",
+  "/tests/test_local_finetuning_project.py",
   "/examples/local-classification",
   "/tests/test_local_classification_project.py",
 ]
@@ -89,7 +94,7 @@ addopts = "-ra"
 # src/platform_app is on the path so tests import `aai_console.server` by exactly the
 # name the Apps container uses (its source root is src/platform_app). One import path,
 # no namespace-package trickery, nothing that can diverge between test and container.
-pythonpath = ["src", "src/platform_app"]
+pythonpath = ["src", "src/platform_app", "examples/local-finetuning/src"]
 testpaths = ["tests"]
 
 [tool.ruff]

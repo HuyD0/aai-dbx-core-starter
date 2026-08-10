@@ -28,7 +28,7 @@ src/aai_core/               installable platform SDK
 src/platform_app/           guided onboarding console (a Databricks App)
 templates/                  five AI lifecycle Databricks project templates
 templates/_shared/          canonical scaffold synced into every template
-examples/                   focused learning examples
+examples/                   lifecycle examples and standalone sample projects
 resources/                  this repository's bundle smoke job
 docs/                       developer and platform operating guides
 .github/workflows/          credential-free CI and keyless deployment/release
@@ -136,6 +136,31 @@ List every example and its execution mode with `make examples-list`.
 See the [progressive executable curriculum](examples/README.md) for its
 baseline/change/result/decision/release rubric and the boundary between
 `aai-core` contracts and native MLflow APIs.
+
+### Prepare an offline fine-tuning study pack
+
+The standalone [local fine-tuning sample](examples/local-finetuning/README.md)
+uses a pinned public Kaggle dataset and a small MLX model on Apple silicon. It
+has its own environment and lock so Apple-only training dependencies never
+enter the cross-platform SDK runtime. Prepare it while connected, then prove it
+works with downloads disabled and Python sockets blocked:
+
+```bash
+make study-prepare-flight
+make study-offline-check
+```
+
+Only leave for offline study after the check prints `READY FOR OFFLINE STUDY`.
+The project records source/model hashes, leakage-safe balanced splits, local
+MLflow evidence, deterministic baselines, LoRA evaluation, and a policy-derived
+application-readiness capstone. Kaggle files, model weights, adapters, and local
+experiment stores stay ignored by Git.
+
+Study is notebook-led: `make notebook` registers the exact nested Python kernel
+and opens a numbered 12-notebook course covering provenance, data quality,
+leakage-safe splits, baselines, prompting, LoRA, frozen evaluation, MLflow
+decisions, and the capstone. CLI targets remain optional automation for
+preflight and long runs.
 
 ### Learn classical classification locally
 
@@ -356,6 +381,9 @@ comparable with another's, and what the gate refuses.
 - [12 — Optional agent alignment and optimization](examples/12_agent_alignment_optimization.ipynb)
 - [13 — Decision records and gated promotion](examples/13_decision_and_promotion_lifecycle.ipynb)
 - [14 — Platform LLM operations](examples/14_platform_llm_operations.ipynb)
+- [Local classical-classification course](examples/local-classification/README.md)
+- [Offline Apple-silicon fine-tuning sample](examples/local-finetuning/README.md)
+- [Governed batch inference pattern](examples/governed-batch-inference/README.md)
 - [Developer guide](docs/developer-guide.md)
 - [LLMOps playbook](docs/llmops-playbook.md) — industry LLMOps practice map
   onto this platform, for application teams and the platform team

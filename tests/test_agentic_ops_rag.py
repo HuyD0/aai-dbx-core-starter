@@ -665,12 +665,17 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
     assert root.outputs == answer
     children = [span for span in spans if span.parent_id == root.span_id]
     assert [(span.name, span.span_type) for span in children] == [
-        ("retriever.search", "RETRIEVER"),
-        ("retriever.final_context", "RERANKER"),
+        ("retriever.final_context", "RETRIEVER"),
         ("model.generate", "LLM"),
     ]
-    retriever_span, final_context_span, model_span = children
-    assert [document["id"] for document in retriever_span.outputs] == [
+    final_context_span, model_span = children
+    candidate_spans = [
+        span for span in spans if span.parent_id == final_context_span.span_id
+    ]
+    assert [(span.name, span.span_type) for span in candidate_spans] == [
+        ("retriever.search", "RETRIEVER")
+    ]
+    assert [document["id"] for document in candidate_spans[0].outputs] == [
         "doc-unrelated",
         "doc-stale",
         "doc-current",
@@ -1010,7 +1015,8 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "result = connected_pipeline.invoke(" in evaluation_source
     assert "candidate_k=3" in evaluation_source
     assert "final_k=3" in evaluation_source
-    assert "`retriever.final_context` `RERANKER` span" in evaluation_source
+    assert "top-level `retriever.final_context` `RETRIEVER` span" in evaluation_source
+    assert "`retriever.search` span is\nnested beneath it" in evaluation_source
     assert '"expected_response": reference.answer' in evaluation_source
     assert "if not case.answerable or case.expects_action_proposal" in evaluation_source
 
@@ -1028,6 +1034,11 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "comparison=comparison" in capstone_source
     assert "decision_record=" not in capstone_source
     assert "if release_eligible:" in capstone_source
+    assert "commit_result.returncode == 0" in capstone_source
+    assert "state_result.returncode == 0" in capstone_source
+    assert "and bool(source_commit)" in capstone_source
+    assert 'else "dirty"' in capstone_source
+    assert '"local-dev"' not in capstone_source
     assert '"comparison": comparison.model_dump(mode="json")' in capstone_source
     assert '"failures": [' in capstone_source
 
