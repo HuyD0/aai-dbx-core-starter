@@ -1890,7 +1890,7 @@ import sys
 from types import ModuleType
 from aai_local_finetuning import training
 
-training._install_runtime_extension_finder()
+snapshot = training.capture_execution_snapshot()
 alias_name = "numpy._core._multiarray_umath"
 alias = importlib.import_module(alias_name)
 canonical_name = alias.__spec__.name
@@ -1902,6 +1902,12 @@ origin = training._loaded_module_origin_path(alias.__spec__)
 assert origin is not None
 assert training._completed_load_matches(canonical_name, "native", origin, canonical)
 assert training._completed_load_matches(alias_name, "native-child", origin, alias)
+states = training._RUNTIME_NATIVE_CHILD_MODULES[(alias_name, origin)]
+assert len(states) == 1
+assert states[0].source_origin is not None
+assert states[0].source_origin.path.suffix == ".py"
+training.recheck_execution_snapshot(snapshot)
+training.recheck_execution_snapshot(snapshot)
 
 replacement = ModuleType(alias_name)
 replacement.__spec__ = alias.__spec__
@@ -1912,6 +1918,15 @@ assert not training._completed_load_matches(
     origin,
     replacement,
 )
+sys.modules[alias_name] = replacement
+try:
+    training.recheck_execution_snapshot(snapshot)
+except RuntimeError as error:
+    assert "alias has no canonical binding" in str(error.__cause__)
+else:
+    raise AssertionError("replacement finalized source alias was accepted")
+sys.modules[alias_name] = alias
+training.recheck_execution_snapshot(snapshot)
 
 import pandas
 import mlflow

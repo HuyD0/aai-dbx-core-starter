@@ -648,6 +648,7 @@ class _RuntimeNativeChildState:
     spec: object = field(repr=False, compare=False)
     loader: object = field(repr=False, compare=False)
     parent_module: object = field(repr=False, compare=False)
+    source_origin: _CapturedPhysicalFile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3862,7 +3863,17 @@ def _validate_loaded_module_origins(
         if isinstance(canonical_name, str) and canonical_name != module_name:
             canonical_token = expected.get(canonical_name.partition(".")[0])
             if canonical_token is not None:
-                if sys.modules.get(canonical_name) is not module:
+                canonical_module = sys.modules.get(canonical_name)
+                alias_path = _loaded_module_origin_path(spec)
+                if canonical_module is not module and (
+                    alias_path is None
+                    or not _completed_load_matches(
+                        module_name,
+                        "native-child",
+                        alias_path,
+                        module,
+                    )
+                ):
                     raise RuntimeError(
                         f"loaded module alias has no canonical binding: {module_name}"
                     )
@@ -4430,6 +4441,7 @@ def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> Non
     if not changed:
         return
 
+    initial_names = {item.name for item in state.loaded_modules}
     initial_paths = {item.origin.path for item in state.loaded_modules}
     loaded_paths: set[Path] = set()
     for _name, module in _runtime_loaded_modules():
@@ -4442,6 +4454,22 @@ def _require_bounded_runtime_execution(state: _CapturedImportEnvironment) -> Non
             continue
         if path is not None:
             loaded_paths.add(path)
+
+    with _RUNTIME_PROVENANCE_LOCK:
+        finalized_source_aliases = tuple(
+            states[0]
+            for states in _RUNTIME_NATIVE_CHILD_MODULES.values()
+            if len(states) == 1 and states[0].source_origin is not None
+        )
+    for alias in finalized_source_aliases:
+        source_origin = alias.source_origin
+        assert source_origin is not None
+        if alias.name in initial_names:
+            initial_paths.add(source_origin.path)
+        if sys.modules.get(
+            alias.name
+        ) is alias.module and _native_child_source_execution_matches(alias):
+            loaded_paths.add(source_origin.path)
 
     for path, (before, after) in sorted(
         changed.items(),
@@ -4882,6 +4910,24 @@ def _record_native_finalized_source_alias(
         origin,
         label="native-finalized source alias origin",
     )
+    source_path = Path(source_loader.path)
+    if not source_path.is_absolute():
+        source_path = Path(os.path.abspath(source_path))
+    _require_no_lexical_symlink_components(
+        source_path,
+        label="native-finalized alias source origin",
+    )
+    if source_path.is_symlink():
+        raise ValueError(
+            f"native-finalized alias source origin is a symbolic link: {source_path}"
+        )
+    source_path = source_path.resolve(strict=True)
+    if source_path.suffix != ".py":
+        return False
+    source_origin = _capture_physical_file_identity(
+        source_path,
+        label="native-finalized alias source origin",
+    )
     native_state = _RuntimeNativeChildState(
         name=name,
         origin=captured,
@@ -4891,7 +4937,12 @@ def _record_native_finalized_source_alias(
         spec=spec,
         loader=loader,
         parent_module=canonical,
+        source_origin=source_origin,
     )
+    if not _native_child_source_execution_matches(native_state):
+        raise RuntimeError(
+            f"native-finalized alias lacks matching source execution: {name}"
+        )
     completed_state = _RuntimeCompletedLoadState(
         name=name,
         kind="native-child",
@@ -5627,6 +5678,32 @@ def _runtime_initial_file_module_has_provenance(
     )
 
 
+def _native_child_source_execution_matches(
+    state: _RuntimeNativeChildState,
+) -> bool:
+    source_origin = state.source_origin
+    if source_origin is None:
+        return True
+    source_path = source_origin.path
+    try:
+        current = _capture_physical_file_identity(
+            source_path,
+            label="native-finalized alias source origin",
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+    with _RUNTIME_PROVENANCE_LOCK:
+        overflowed = source_path in _RUNTIME_EXECUTED_MODULE_CODE_OVERFLOW
+        executed = tuple(_RUNTIME_EXECUTED_MODULE_CODE.get(source_path, ()))
+    if overflowed or current != source_origin or not executed:
+        return False
+    try:
+        canonical = _source_module_semantic_code(source_path, current)
+    except (OSError, RuntimeError, SyntaxError, ValueError):
+        return False
+    return {_canonical_code_object(code) for code in executed} == {canonical}
+
+
 def _require_loaded_code_provenance(
     module_name: str,
     module: object,
@@ -5724,6 +5801,7 @@ def _require_loaded_code_provenance(
                     id(item.spec),
                     id(item.loader),
                     id(item.parent_module),
+                    item.source_origin,
                     id(sys.modules.get(item.parent_name)),
                     id(
                         getattr(
@@ -5849,6 +5927,7 @@ def _require_loaded_code_provenance(
                 path,
                 module,
             )
+            or not _native_child_source_execution_matches(state)
         ):
             raise RuntimeError(
                 "loaded native-created module identity lacks completed parent "
