@@ -475,3 +475,39 @@ def is_missing_prompt_error(error: Exception) -> bool:
 def _prompt_tag_key(key: str) -> str:
     normalized = sub(r"[.,\-=/ :]+", "_", str(key)).strip("_")
     return f"aai_{normalized}"
+
+
+def is_missing_prompt_error(error: Exception) -> bool:
+    """True only when a registry error authoritatively means absence.
+
+    Any structured code outside the two provider absence codes returns
+    ``False`` even when its message uses non-disclosure wording such as "does
+    not exist". The one provider-specific exception is MLflow's exact missing
+    alias shape under ``INVALID_PARAMETER_VALUE``, before or after its prompt
+    exception translator runs. Callers may therefore fall back to bundled
+    content only for a genuinely missing prompt or alias.
+    """
+
+    raw_error_code = getattr(error, "error_code", None)
+    error_code = "" if raw_error_code is None else str(raw_error_code).strip().upper()
+    if error_code in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}:
+        return True
+    message = str(error).strip().upper()
+    missing_alias = (
+        fullmatch(
+            r"(?:INVALID_PARAMETER_VALUE: )?"
+            r"(?:REGISTERED MODEL|PROMPT) ALIAS [\w-]+ NOT FOUND\.?",
+            message,
+        )
+        is not None
+    )
+    if missing_alias and error_code in {"", "INVALID_PARAMETER_VALUE"}:
+        return True
+    if error_code:
+        return False
+    if any(
+        marker in message
+        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    ):
+        return True
+    return False
