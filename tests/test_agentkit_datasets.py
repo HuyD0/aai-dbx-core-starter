@@ -415,6 +415,93 @@ def test_digest_is_stable_and_content_sensitive():
     assert len(dataset_digest(rows)) == 16
 
 
+def test_digest_preserves_ordinary_unicode_identity():
+    rows = [
+        {
+            "inputs": {"question": "café ☕ 漢字", "labels": ["naïve", "🙂"]},
+            "expectations": {"expected_response": "résumé"},
+            "metadata": {"locale": "français"},
+        }
+    ]
+
+    assert dataset_digest(rows) == "b4f42a889e69937a"
+
+
+def test_dataset_identity_normalization_allows_exact_limits():
+    assert len(dataset_digest([{"metadata": _nested_mapping(64)}])) == 16
+    assert len(dataset_digest([{"metadata": [0] * 99_999}])) == 16
+
+
+def test_dataset_identity_normalization_rejects_values_over_limits():
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
+        dataset_digest([{"metadata": _nested_mapping(65)}])
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*complex"):
+        dataset_digest([{"metadata": [0] * 100_000}])
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*complex"):
+        dataset_digest(
+            [
+                {
+                    "inputs": {"values": [0] * 50_000},
+                    "metadata": [0] * 50_000,
+                }
+            ]
+        )
+
+
+def test_dataset_identity_normalization_covers_expectations_and_cycles():
+    expectations = {"expected_response": _nested_mapping(65)}
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
+        dataset_digest([{"inputs": {"question": "q"}, "expectations": expectations}])
+
+    cyclic_expectations = {}
+    cyclic_expectations["expected_response"] = cyclic_expectations
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
+        dataset_digest(
+            [
+                {
+                    "inputs": {"question": "q"},
+                    "expectations": cyclic_expectations,
+                }
+            ]
+        )
+
+
+def test_dataset_identity_normalization_covers_trace_request_and_other_fields():
+    trace = _mlflow_trace(spans=[], request_preview=False)
+    trace["info"]["request"] = _nested_mapping(65)
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
+        dataset_digest([{"trace": trace}])
+
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
+        dataset_digest(
+            [
+                {
+                    "inputs": {"question": "q"},
+                    "custom_identity": _nested_mapping(65),
+                }
+            ]
+        )
+
+
+def test_dataset_digest_rejects_lone_unicode_surrogates():
+    with pytest.raises(ConfigError, match="invalid Unicode text") as excinfo:
+        dataset_digest([{"inputs": {"question": "\ud800"}}])
+
+    assert "question" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_load_dataset_rejects_parsed_lone_unicode_surrogates(tmp_path, suffix):
+    record = '{"inputs":{"question":"\\ud800"}}'
+    path = tmp_path / f"surrogate{suffix}"
+    path.write_text(f"[{record}]" if suffix == ".json" else record, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="invalid Unicode text") as excinfo:
+        load_dataset(path.name, root=tmp_path)
+
+    assert "\\ud800" not in str(excinfo.value)
+
+
 def test_smoke_sample_is_deterministic(tmp_path):
     _write_dataset(tmp_path, _rows(30))
     dataset = load_dataset("golden.json", root=tmp_path)
@@ -621,6 +708,20 @@ def test_attach_answer_sheet_rejects_overly_nested_inputs(tmp_path, suffix):
     assert "value" not in str(excinfo.value)
 
 
+def test_attach_answer_sheet_rejects_lone_unicode_surrogate_inputs(tmp_path):
+    _write_dataset(tmp_path, _rows(1))
+    sheet = tmp_path / "answers.jsonl"
+    sheet.write_text(
+        json.dumps({"inputs": {"question": "\ud800"}, "outputs": "recorded answer"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="invalid Unicode text") as excinfo:
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    assert "recorded answer" not in str(excinfo.value)
+
+
 def test_attach_answer_sheet_preserves_ordinary_nested_inputs_and_outputs(tmp_path):
     inputs = _nested_mapping(8, "question")
     output = _nested_mapping(8, "answer")
@@ -638,14 +739,14 @@ def test_attach_answer_sheet_preserves_ordinary_nested_inputs_and_outputs(tmp_pa
 def test_dataset_digest_governs_recursive_input_normalization():
     inputs = _nested_mapping(2_000)
 
-    with pytest.raises(ConfigError, match="dataset row 0 inputs.*too deeply"):
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
         dataset_digest([{"inputs": inputs}])
 
 
 def test_load_dataset_rejects_overly_nested_inputs(tmp_path):
     _write_dataset(tmp_path, [{"inputs": _nested_mapping(70)}])
 
-    with pytest.raises(ConfigError, match="dataset row 0 inputs.*too deeply"):
+    with pytest.raises(ConfigError, match="dataset row 0 identity.*too deeply"):
         load_dataset("golden.json", root=tmp_path)
 
 
