@@ -38,6 +38,7 @@ def normalize_runtime_evidence_test_harness(
         ROOT,
         ROOT / "tests",
         ROOT / "src" / "platform_app",
+        ROOT / "examples" / "agentic-ops-rag" / "src",
     }
 
     def resolved(entry: str) -> Path:
