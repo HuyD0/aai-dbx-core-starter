@@ -1,63 +1,138 @@
 # {{.project_name}}
 
-Standalone evaluation project generated from the AAI platform template
-(`evaluation-project`): curated datasets, reusable scorers, pinned
-baselines, a two-tier CI gate, and published results.
+An evaluation project for an AI agent: a governed dataset, versioned
+scorers, a pinned baseline, a promotion gate, and evidence that lands in
+MLflow and Unity Catalog.
 
-## Local setup
+## The loop
 
-Before generation, complete the platform's developer onboarding checklist.
-Then run the generated preflight and setup:
+New to evaluating LLMs? Read the short version first: **an experiment is a
+comparison, not a log.** Running your agent once and reading the answers
+tells you almost nothing — the answers always look plausible. What tells you
+something is scoring this version against the previous one, on the same
+data, with the same scorers. That is the loop this project is built around,
+and `agentkit compare` is the verb that runs it.
 
 ```bash
-python3.12 scripts/setup_dev.py
-make check
+python3.12 scripts/setup_dev.py     # isolated setup, no credentials
+make install-ci                     # or `make install` with workspace auth
+
+agentkit smoke                      # seconds, free, no cluster
+agentkit compare --establish-baseline
+                                    # scores the current version and records
+                                    # it AS the baseline
+
+# now change something — edit src/app/example_agent.py
+agentkit compare                    # is this better than what we had?
+agentkit gate                       # promotion check (exit 0 pass / 2 fail)
+agentkit evidence                   # the release record for a reviewer
 ```
 
-Run `make help` for individual development, evaluation, and bundle targets.
+`src/app/example_agent.py` is a real, runnable agent — a policy guard plus
+keyword retrieval over a small knowledge base. Edit an entry and rerun
+`agentkit compare` to watch the metrics move. When you are ready to evaluate
+your own agent, point `agent:` in `agentkit.yaml` at it; nothing else in the
+project changes.
 
-Use `python3.12 scripts/setup_dev.py --check-only` to verify tools,
-authentication, SDK volume access, and compute-policy visibility without
-installing anything. The setup never grants permissions or creates cloud
-resources.
+Full background: `docs/agent-evaluation.md` in the platform repository.
 
-## How this project evaluates
+## Configuration
 
-- **Datasets** — `evals/data/golden_cases.json` is the reviewed regression
-  suite (gates releases; grow it toward 150+ cases and convert every
-  production failure into a case). `edge_cases.json` is the capability suite
-  (deliberately hard; report-only). `answer_sheet.json` holds recorded
-  answers so scoring works without calling the application.
-  `scripts/sync_dataset.py` publishes cases to the governed UC dataset
-  `{{.catalog}}.{{.schema}}.{{.dataset_name}}`.
-- **Scorers** — `src/app/scorers.py` holds deterministic code scorers (pure
-  functions, unit-tested, run in both tiers). `src/app/judges.py` routes the
-  Correctness/Safety judges and the executable `domain_policy` MLflow
-  `Guidelines` scorer through the gateway-fronted `judge-model` endpoint.
-  Align judges against explicitly sourced HUMAN labels first; the alignment
-  notebook demonstrates a calibration/validation split and keeps experimental
-  MemAlign disabled unless its extra dependencies and approved models are
-  deliberately provided (`notebooks/01_align_judge.py`).
-- **Gate** — thresholds live in `evals/gate_config.json`. Tier 1
-  (`evals/offline_checks.py`, PR CI) applies the code-scorer thresholds to
-  the answer sheet, verifies every gate category, and prevents report-only
-  judges from becoming thresholds accidentally. Tier 2
-  (`evals/evaluate.py`, credentialed) runs code scorers + judges, enforces
-  every threshold plus regression against `evals/baseline.json`, and publishes
-  a markdown report to the CI step summary. `domain_policy` runs report-only
-  until held-out human calibration justifies moving it into `judge_metrics`
-  with a threshold. Failure triage prints bounded row/scorer identifiers by
-  default. `--show-triage-details` adds rationale/error text only when CI logs
-  are approved for the evaluation data classification; those details can
-  quote source content. After a released run passes: `--update-baseline`.
-- **Targets** — score recorded answers (default) or a live endpoint:
-  `python evals/evaluate.py --mode endpoint` (configure `target-model` in
-  `aai-platform.yml`).
+`agentkit.yaml` is three lines. Everything else is inferred from what the
+dataset rows contain, and every optional key in that file is an escape
+hatch, not the normal path.
 
-Deploy the scheduled suite with `databricks bundle validate -t dev` and
-`databricks bundle deploy -t dev` (uncomment the cron block in
-`resources/evaluation_job.yml` for continuous evaluation).
+```yaml
+version: 1
+agent: src/app/example_agent.py:respond
+dataset: evals/data/golden_cases.json
+```
 
-The platform team must onboard this repository (main-branch federated
-credential, service principal, constrained compute, non-secret repository
-variables) before the deploy workflow is enabled.
+Before every judged run the tool prints the plan it inferred, the scorer
+versions it will use, and what the judge calls will cost — then asks before
+spending anything. `agentkit smoke` costs nothing by construction: it runs
+only the deterministic code scorers.
+
+## Two speeds
+
+| | Where | When | Why |
+|---|---|---|---|
+| `agentkit smoke` | your laptop, PR CI | every commit | Seconds. No cluster, no credentials, no judge spend. |
+| `agentkit eval` | Databricks job | pre-merge, pre-promote | The datasets and production traces already live in Unity Catalog; compute goes to the data and the results land in the record with no upload step. |
+
+Smoke deliberately does not create an MLflow run: it needs nothing from
+MLflow, which is what keeps it credential-free, and it keeps a morning of
+throwaway runs out of your experiment. `compare` and `eval` record.
+
+`agentkit eval --submit` runs the bundle's `release_gate` job. Deploy it
+with `databricks bundle validate -t dev` and `databricks bundle deploy -t
+dev`; uncomment the cron block in `resources/evaluation_job.yml` for
+continuous evaluation.
+
+## Scorers come from the shared registry
+
+```bash
+agentkit scorers ls
+```
+
+Scorer names, judge models, judge prompts, input contracts, and scales are
+versioned platform assets. This project *selects* scorers and sets
+thresholds; it never defines what one means. That is what makes a
+`correctness/mean` of 0.8 comparable between two teams.
+
+Which scorers run is inferred from the dataset: rows with
+`expectations.expected_response` get correctness and the deterministic
+coverage scorers; rows carrying retrieval traces get groundedness. Scorers
+whose contract the data cannot satisfy are listed as excluded, with the
+reason, rather than silently skipped.
+
+Judges are LLMs and need calibrating against human labels before you trust
+them in a gate — see `notebooks/01_align_judge.py`. The
+`pension_domain_policy` judge is report-only until that calibration exists.
+
+## Datasets
+
+- `evals/data/golden_cases.json` — the reviewed regression suite that gates
+  releases. Grow it toward 150+ cases and turn every production failure into
+  a case.
+- `evals/data/edge_cases.json` — the capability suite: deliberately hard,
+  report-only.
+- `evals/data/answer_sheet.json` — recorded answers, so scoring works
+  without calling the application.
+- `scripts/sync_dataset.py` publishes cases to the governed Unity Catalog
+  dataset `{{.catalog}}.{{.schema}}.{{.dataset_name}}`.
+
+## The gate and the record
+
+`agentkit gate` refuses an empty answer to "what did you compare against":
+a run with no named baseline is an incomplete submission, and a threshold
+whose metric never appeared fails closed. Exit codes are the CI contract —
+`0` passed, `2` ran but a threshold failed, `1` a configuration or runtime
+error.
+
+`agentkit evidence` writes `evidence.md` and `evidence.json`: what ran, on
+which dataset version, scored by which scorer and prompt versions, against
+which baseline, with which verdict and whose approval. Attach it to the
+promotion request.
+
+For a run that happened somewhere else — the deployment-job gate runs on a
+job cluster whose filesystem nobody can reach afterwards — use
+`agentkit evidence --run <mlflow run id>`. Every recorded run attaches its
+results record to itself, and the scoring command prints that command when it
+finishes.
+
+`resources/optional/` holds the Unity Catalog registered model and the
+deployment-job gate, which adds a human approval step to every new model
+version. They are opt-in — read the comments in those files before enabling
+them, particularly the note that a deployment job's first run always stops
+at the approval task by design.
+
+## CI
+
+Pull requests run `make check`, which includes `evals/offline_checks.py`
+(`agentkit smoke`) with zero credentials. The credentialed `release_gate`
+job runs after merge. The platform team must onboard this repository
+(main-branch federated credential, service principal, constrained compute,
+non-secret repository variables) before the deploy workflow is enabled.
+
+Run `make help` for every target.

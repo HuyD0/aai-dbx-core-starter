@@ -1,17 +1,28 @@
-"""Small release-gate contracts over native MLflow GenAI evaluation results."""
+"""Small release-gate contracts and thin helpers over native MLflow GenAI
+evaluation results.
+
+The contracts (:class:`GatePolicy`, :class:`GateResult`) apply deterministic
+policy to a native result without wrapping or mutating it. The helpers stay
+equally thin: they resolve the approved judge endpoint, compose the native
+``mlflow.genai.evaluate()`` call with the gate, persist gate evidence on the
+active run, and manage governed evaluation datasets. None of them owns an
+MLflow run or mirrors native parameters.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from math import isfinite
 from numbers import Real
+from re import fullmatch, search
 from typing import Any, Self
 
 from pydantic import Field, field_serializer, field_validator, model_validator
 
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.exceptions import AaiCoreError
+from aai_core.providers.types import ProviderConfigurationError
 
 
 class MetricDirection(StrEnum):
@@ -26,6 +37,18 @@ class MetricRule(ContractModel):
     direction: MetricDirection
     required: float | None = None
     max_regression: float | None = Field(default=None, ge=0.0)
+
+    @field_validator("metric")
+    @classmethod
+    def normalize_metric_name(cls, value: str) -> str:
+        # Metric names are matched exactly against the evaluation result,
+        # so "correctness/mean " would pass validation and only surface as
+        # "metric is missing" after the judge-backed evaluate() call has
+        # already been paid for.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric must name a metric, not whitespace")
+        return trimmed
 
     @field_validator("direction", mode="before")
     @classmethod
@@ -60,6 +83,18 @@ class GatePolicy(ContractModel):
     scorer_error_metric_suffix: str = Field(default="/error_count", min_length=1)
     allow_missing_regression_baseline: bool = False
 
+    @field_validator("cost_coverage_metric", "scorer_error_metric_suffix")
+    @classmethod
+    def normalize_metric_selector(cls, value: str) -> str:
+        # Both select metrics by exact match: an untrimmed suffix makes
+        # endswith() miss every "<scorer>/error_count", silently dropping
+        # scorer health so a passing quality rule can authorize an adopt,
+        # and an untrimmed coverage metric reports real coverage unknown.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric selectors must name a metric, not whitespace")
+        return trimmed
+
 
 class GateFailure(ContractModel):
     metric: str = Field(min_length=1)
@@ -67,19 +102,59 @@ class GateFailure(ContractModel):
 
 
 class GateResult(ContractModel):
-    """Immutable release-gate evidence; native evaluation results stay native."""
+    """Immutable release-gate evidence; native evaluation results stay native.
+
+    ``policy`` and ``baseline_metrics`` record exactly which rules and which
+    comparison baseline produced this result, and a policy-bearing result
+    re-evaluates itself at construction: the stored failures must be exactly
+    what the recorded policy yields for the recorded metrics, so a
+    hand-built or deserialized result cannot claim ``passed`` while its own
+    metrics violate its own policy.
+    """
 
     metrics: Mapping[str, float]
     failures: tuple[GateFailure, ...] = ()
+    policy: GatePolicy | None = None
+    baseline_metrics: Mapping[str, float] | None = None
 
-    @field_validator("metrics", mode="after")
+    @field_validator("metrics", "baseline_metrics", mode="after")
     @classmethod
-    def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
+    def freeze_metrics(
+        cls, value: Mapping[str, float] | None
+    ) -> Mapping[str, float] | None:
+        if value is None:
+            return None
+        for name, metric in value.items():
+            # NaN compares false against every threshold, so a non-finite
+            # value would silently pass policy recomputation.
+            if not isfinite(metric):
+                raise ValueError(
+                    f"gate evidence metric {name!r} must be a finite number"
+                )
         return freeze_value(value)
 
-    @field_serializer("metrics")
-    def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
-        return thaw_value(value)
+    @field_serializer("metrics", "baseline_metrics")
+    def serialize_metrics(
+        self, value: Mapping[str, float] | None
+    ) -> dict[str, float] | None:
+        return None if value is None else thaw_value(value)
+
+    @model_validator(mode="after")
+    def failures_match_the_recorded_policy(self) -> Self:
+        if self.policy is None:
+            return self
+        recomputed = _evaluate_policy(
+            dict(self.metrics),
+            self.policy,
+            dict(self.baseline_metrics or {}),
+        )
+        if tuple(self.failures) != recomputed:
+            raise ValueError(
+                "failures do not match what the recorded policy yields for "
+                "the recorded metrics; produce gate evidence with "
+                "apply_gate()"
+            )
+        return self
 
     @property
     def passed(self) -> bool:
@@ -95,6 +170,26 @@ class GateResult(ContractModel):
         )
 
 
+def gate_enforces_release_rule(gate: GateResult) -> bool:
+    """Whether a passing gate actually constrained a release decision.
+
+    An absolute threshold always applies. A regression-only rule applies only
+    when the gate carried the corresponding baseline metric; when missing
+    baselines are waived, such a rule is deliberately skipped. A zero cost
+    coverage threshold rejects nothing and therefore does not count.
+    """
+
+    policy = gate.policy
+    if policy is None:
+        return False
+    baseline = gate.baseline_metrics or {}
+    return bool(policy.minimum_cost_coverage) or any(
+        rule.required is not None
+        or (rule.max_regression is not None and rule.metric in baseline)
+        for rule in policy.rules
+    )
+
+
 class EvaluationGateError(AaiCoreError):
     code = "aai_core.evaluation.gate_failed"
 
@@ -105,19 +200,79 @@ def apply_gate(
     policy: GatePolicy,
     baseline_metrics: Mapping[str, float] | None = None,
 ) -> GateResult:
-    """Apply deterministic policy to a native MLflow result or metric mapping."""
+    """Apply deterministic policy to a native MLflow result or metric mapping.
+
+    A scorer error-count metric that is not a finite number is corrupt
+    scorer-health evidence: dropping it like other malformed metrics would
+    let the gate pass with scorer health unknown, and gate evidence cannot
+    carry non-finite values. While ``fail_on_scorer_errors`` is enforced,
+    such a result is refused outright instead of becoming evidence.
+
+    Native ``mlflow.genai.evaluate()`` results report scorer failures per
+    row (``<scorer>/error_message`` columns), not as aggregated metrics, so
+    those rows are counted here and persisted as ``<scorer>/error_count``
+    gate evidence — a crashing scorer fails the gate even though the native
+    metric mapping never mentions it.
+    """
 
     metrics = _extract_metrics(evaluation_result)
+    if policy.fail_on_scorer_errors:
+        for name in _metric_source(evaluation_result):
+            key = str(name)
+            if key.endswith(policy.scorer_error_metric_suffix) and key not in metrics:
+                raise ValueError(
+                    f"scorer error metric {key!r} is not a finite number; "
+                    "refusing to produce gate evidence with scorer health "
+                    "unknown"
+                )
+        for name, count in _row_level_error_counts(
+            evaluation_result, policy.scorer_error_metric_suffix
+        ).items():
+            # Observed failing rows are direct evidence. An aggregate that
+            # contradicts them — 0 in the mapping while error_message rows
+            # exist — must not erase the failure, so keep whichever count
+            # is larger rather than always trusting the mapping.
+            metrics[name] = max(metrics.get(name, 0.0), count)
     baseline = dict(baseline_metrics or {})
+    return GateResult(
+        metrics=metrics,
+        failures=_evaluate_policy(metrics, policy, baseline),
+        policy=policy,
+        baseline_metrics=(
+            dict(baseline_metrics) if baseline_metrics is not None else None
+        ),
+    )
+
+
+def _evaluate_policy(
+    metrics: dict[str, float],
+    policy: GatePolicy,
+    baseline: dict[str, float],
+) -> tuple[GateFailure, ...]:
     failures: list[GateFailure] = []
 
     if policy.fail_on_scorer_errors:
         for metric, value in metrics.items():
-            if metric.endswith(policy.scorer_error_metric_suffix) and value > 0:
+            if not metric.endswith(policy.scorer_error_metric_suffix):
+                continue
+            if value > 0:
                 failures.append(
                     GateFailure(
                         metric=metric,
                         reason=f"{value:g} scorer invocation(s) failed",
+                    )
+                )
+            elif value < 0:
+                # A count cannot be negative; this runs inside the
+                # recomputation, so even a hand-built result cannot claim a
+                # pass over corrupt scorer-health evidence.
+                failures.append(
+                    GateFailure(
+                        metric=metric,
+                        reason=(
+                            f"error count {value:g} is negative; scorer "
+                            "health evidence is corrupt"
+                        ),
                     )
                 )
 
@@ -128,6 +283,21 @@ def apply_gate(
                 GateFailure(
                     metric=policy.cost_coverage_metric,
                     reason="cost coverage is unknown",
+                )
+            )
+        elif not 0.0 <= observed <= 1.0:
+            # Coverage is a fraction by definition (the policy bounds its
+            # threshold to [0, 1]); an impossible observed value would
+            # otherwise satisfy any threshold. This runs inside the
+            # recomputation, so a hand-built result cannot claim a pass
+            # over corrupt coverage evidence.
+            failures.append(
+                GateFailure(
+                    metric=policy.cost_coverage_metric,
+                    reason=(
+                        f"coverage {observed:g} is outside the unit "
+                        "interval; cost-coverage evidence is corrupt"
+                    ),
                 )
             )
         elif observed < policy.minimum_cost_coverage:
@@ -190,20 +360,660 @@ def apply_gate(
                 )
             )
 
-    return GateResult(metrics=metrics, failures=tuple(failures))
+    return tuple(failures)
 
 
-def _extract_metrics(result: Any) -> dict[str, float]:
+def _row_level_error_counts(result: Any, suffix: str) -> dict[str, float]:
+    """Count per-row failures a native result never aggregates.
+
+    ``mlflow.genai.evaluate()`` records a failed scorer invocation as a
+    non-null ``<scorer>/error_message`` cell in ``result_df``, and a failed
+    ``predict_fn`` invocation in the bare ``error_message`` column; neither
+    reaches the ``metrics`` mapping. Synthesizing ``*/error_count``
+    evidence here is what lets the gate see scorer and application health
+    at all.
+    """
+
+    frame = getattr(result, "result_df", None)
+    columns = getattr(frame, "columns", None)
+    if columns is None:
+        return {}
+    counts: dict[str, float] = {}
+    for column in columns:
+        name = str(column)
+        if name == "error_message":
+            errored = int(frame[column].notna().sum())
+            if errored:
+                counts[f"predict_fn{suffix}"] = float(errored)
+            continue
+        if not name.endswith("/error_message"):
+            continue
+        errored = int(frame[column].notna().sum())
+        if errored:
+            scorer = name.removesuffix("/error_message")
+            counts[f"{scorer}{suffix}"] = float(errored)
+    return counts
+
+
+def _metric_source(result: Any) -> Mapping[str, Any]:
     source = result if isinstance(result, Mapping) else getattr(result, "metrics", None)
     if not isinstance(source, Mapping):
         raise TypeError(
             "evaluation_result must be a metric mapping or expose a metrics mapping"
         )
+    return source
+
+
+def _extract_metrics(result: Any) -> dict[str, float]:
     metrics: dict[str, float] = {}
-    for name, value in source.items():
+    for name, value in _metric_source(result).items():
         if isinstance(value, bool) or not isinstance(value, Real):
             continue
         numeric = float(value)
         if isfinite(numeric):
             metrics[str(name)] = numeric
     return metrics
+
+
+def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
+    """Resolve an approved logical judge into MLflow's model URI.
+
+    Judges run through a Databricks serving endpoint so authentication,
+    gateway policy, and cost controls stay platform-owned. A Foundry model
+    must first be exposed through a governed Databricks external-model
+    endpoint.
+    """
+
+    models = getattr(settings, "models", {})
+    config = models.get(logical_name) if isinstance(models, Mapping) else None
+    if not isinstance(config, Mapping):
+        raise ProviderConfigurationError(
+            f"aai-platform.yml has no {logical_name!r} model entry",
+            remediation=f"Add providers.models.{logical_name} with the "
+            "gateway-fronted Databricks serving endpoint approved for judges.",
+        )
+    if config.get("provider") != "databricks":
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} must use provider 'databricks'",
+            remediation="Route the judge through a Databricks serving "
+            "endpoint; for Foundry models, use an external-model endpoint.",
+        )
+    deployment = config.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} has no deployment",
+            remediation=f"Set providers.models.{logical_name}.deployment to "
+            "the approved serving endpoint name.",
+        )
+    if _is_placeholder(deployment):
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} deployment {deployment.strip()!r} "
+            "is a setup placeholder",
+            remediation=f"Replace providers.models.{logical_name}.deployment "
+            "with the approved serving endpoint before running evaluation.",
+        )
+    # Databricks serving endpoint names contain only alphanumerics, dashes,
+    # and underscores; anything else builds an endpoints:/ URI that fails
+    # only inside the later evaluation request, after the doctor has
+    # already reported the judge ready.
+    if not fullmatch(_NAME_COMPONENT, deployment.strip()):
+        raise ProviderConfigurationError(
+            f"LLM judge {logical_name!r} deployment {deployment.strip()!r} "
+            "is not a valid serving endpoint name",
+            remediation="Serving endpoint names contain only alphanumeric "
+            f"characters, dashes, and underscores; set providers.models."
+            f"{logical_name}.deployment to the endpoint's exact name, not "
+            "a URI or display label.",
+        )
+    return f"endpoints:/{deployment.strip()}"
+
+
+def log_gate_evidence(
+    gate: GateResult,
+    *,
+    mlflow_module: Any | None = None,
+) -> dict[str, str]:
+    """Persist gate metrics and the ``aai.gate_passed`` tag on the active run.
+
+    Call inside a governed run. Returns the tags it set.
+
+    The gate is reconstructed through validation first. ``GateResult``
+    promises that evidence cannot claim a pass its own metrics contradict,
+    but ``model_copy(update=...)`` skips validators — so a derived result
+    can report ``passed`` while its failures no longer match its policy.
+    This is the boundary release automation reads, so the promise is
+    re-established here rather than assumed.
+    """
+
+    gate = GateResult.model_validate(gate.model_dump())
+    mlflow = _mlflow(mlflow_module)
+    if gate.metrics:
+        mlflow.log_metrics(dict(gate.metrics))
+    tags = {"aai.gate_passed": str(gate.passed).lower()}
+    mlflow.set_tags(tags)
+    return tags
+
+
+def evaluate_with_gate(
+    *,
+    policy: GatePolicy,
+    baseline_metrics: Mapping[str, float] | None = None,
+    mlflow_module: Any | None = None,
+    **evaluate_options: Any,
+) -> tuple[Any, GateResult]:
+    """Run native ``mlflow.genai.evaluate()`` and apply the gate policy.
+
+    Every keyword in ``evaluate_options`` passes through to the native call
+    untouched, and the native result is returned by identity, so new MLflow
+    evaluation arguments never require an SDK change. Run governance stays
+    with :class:`~aai_core.experiments.ExperimentManager`; persisting the
+    evidence stays the explicit :func:`log_gate_evidence` call.
+    """
+
+    mlflow = _mlflow(mlflow_module)
+    native_result = mlflow.genai.evaluate(**evaluate_options)
+    gate = apply_gate(native_result, policy=policy, baseline_metrics=baseline_metrics)
+    return native_result, gate
+
+
+def get_or_create_evaluation_dataset(
+    *,
+    name: str,
+    catalog: str,
+    schema: str,
+    experiment_id: str,
+    records: Sequence[Mapping[str, Any]] | None = None,
+    mlflow_module: Any | None = None,
+) -> Any:
+    """Return the governed evaluation dataset, creating and merging as needed.
+
+    ``name`` is a logical dataset name; the catalog and schema qualify it.
+    The native dataset object is returned unchanged.
+    """
+
+    # Checked before .strip(): a non-string would otherwise raise an
+    # incidental AttributeError instead of the documented contract error,
+    # and an object implementing strip() could return a valid-looking name
+    # and reach the registry.
+    if not isinstance(name, str):
+        raise TypeError(
+            f"name must be a string logical dataset name; got {type(name).__name__}"
+        )
+    logical_name = name.strip()
+    if not fullmatch(_NAME_COMPONENT, logical_name) or _is_placeholder(logical_name):
+        raise ValueError(
+            "name must be a configured logical name without catalog or "
+            "schema (letters, digits, underscores, and hyphens); got "
+            f"{name!r}"
+        )
+    # Normalize before the first request: the raw value is both sent to
+    # create_dataset() and compared against backend ids, which come back
+    # normalized, so untrimmed input would fail in the cloud or falsely
+    # report the dataset as associated with the wrong experiment.
+    # str() would turn None into the plausible-looking id "None"; require
+    # the real type before normalizing.
+    if not isinstance(experiment_id, str):
+        raise TypeError(
+            "experiment_id must be a string MLflow experiment id; got "
+            f"{type(experiment_id).__name__}"
+        )
+    experiment_id = experiment_id.strip()
+    if not experiment_id or _is_placeholder(experiment_id):
+        raise ValueError(
+            "experiment_id must be the real MLflow experiment id the dataset "
+            f"belongs to, not a setup placeholder; got {experiment_id!r}"
+        )
+    catalog = _dataset_qualifier("catalog", catalog)
+    schema = _dataset_qualifier("schema", schema)
+
+    mlflow = _mlflow(mlflow_module)
+    qualified_name = f"{catalog}.{schema}.{logical_name}"
+    try:
+        dataset = mlflow.genai.datasets.get_dataset(name=qualified_name)
+    except Exception as exc:
+        if not _is_missing_dataset(exc):
+            raise
+        # Databricks-managed EvaluationDatasets reject MLflow dataset tags.
+        # Governed context belongs on runs and UC securables instead.
+        dataset = mlflow.genai.datasets.create_dataset(
+            name=qualified_name,
+            experiment_id=experiment_id,
+        )
+
+    experiment_ids = {
+        str(associated).strip() for associated in (dataset.experiment_ids or [])
+    }
+    if experiment_id not in experiment_ids:
+        raise RuntimeError(
+            f"Unity Catalog dataset {qualified_name!r} is not associated with "
+            f"MLflow experiment {experiment_id!r}. Databricks does not "
+            "support adding experiment associations through this API; use a "
+            "new approved dataset name or ask the platform owner to repair it."
+        )
+    if records:
+        dataset.merge_records(list(records))
+    return dataset
+
+
+_QUALIFIER_PLACEHOLDERS = {"unset", "unknown", "todo", "changeme"}
+
+# The identifier shape every registry component must satisfy — shared by
+# the dataset helper, the prompt manager, and the doctor so no surface
+# accepts a name another surface refuses.
+_NAME_COMPONENT = r"[A-Za-z0-9_-]+"
+
+
+def _is_placeholder(value: str) -> bool:
+    """Recognize the setup-placeholder vocabulary shared across the repo:
+    the unconfigured markers, the ``replace-with-*`` values that
+    ``aai-platform.example.yml`` ships, and documentation-style
+    ``<angle-bracket>`` markers (the same set the examples runner
+    recognizes)."""
+
+    lowered = str(value).strip().lower()
+    return (
+        lowered in _QUALIFIER_PLACEHOLDERS
+        or lowered.startswith("replace-with-")
+        or "<" in lowered
+        or ">" in lowered
+    )
+
+
+def _is_placeholder_path(value: str) -> bool:
+    """Placeholder test for slash-separated paths such as experiment names.
+
+    ``_is_placeholder`` matches the bare markers exactly and anchors
+    ``replace-with-`` at the start, so a placeholder sitting inside a path
+    (``/Shared/replace-with-experiment``, ``/Shared/unset``) slips past it
+    while looking configured. Experiment names are the one governed value
+    that arrives as a path, so they are tested component by component.
+    """
+
+    return _is_placeholder(value) or any(
+        _is_placeholder(component) for component in str(value).split("/") if component
+    )
+
+
+def _dataset_qualifier(role: str, value: str) -> str:
+    """Fail locally on unconfigured qualifiers instead of querying the cloud."""
+
+    # str() would make None the qualifier "None" and 123 the qualifier
+    # "123", both of which satisfy _NAME_COMPONENT and would name a real
+    # (wrong) securable in the registry.
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{role} must be a string Unity Catalog qualifier; got "
+            f"{type(value).__name__}"
+        )
+    qualifier = value.strip()
+    if not fullmatch(_NAME_COMPONENT, qualifier) or _is_placeholder(qualifier):
+        raise ValueError(
+            f"{role} must be a configured Unity Catalog qualifier; got "
+            f"{value!r}. Set platform.catalog and platform.schema in "
+            "aai-platform.yml before using governed evaluation datasets."
+        )
+    return qualifier
+
+
+def _is_missing_registry_error(error: Exception) -> bool:
+    """Shared absence test for registry errors (datasets and prompts alike).
+
+    Structured provider codes and HTTP status are authoritative. Type and
+    message signals for authentication, permission, throttling, and transport
+    failures are checked before the code-less missing-message fallback because
+    providers may use ``does not exist`` deliberately to hide a protected
+    resource. The provider-specific exception is MLflow's exact missing-alias
+    shape under ``INVALID_PARAMETER_VALUE``.
+    """
+
+    errors, chain_complete = _registry_exception_chain(error)
+    # A provider wrapper may put the real failure beyond our defensive walk
+    # bound. Never interpret a partially inspected chain as absence.
+    if not chain_complete:
+        return False
+    coded = tuple((item, _registry_error_code(item)) for item in errors)
+    missing_codes = {"404", "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}
+
+    # One non-absence code anywhere in a wrapper chain wins over an outer
+    # "does not exist" message and over a nested absence-looking exception.
+    for item, error_code in coded:
+        if not error_code or error_code in missing_codes:
+            continue
+        if error_code == "INVALID_PARAMETER_VALUE" and _is_missing_alias_shape(item):
+            continue
+        return False
+
+    statuses_by_error = {
+        id(item): frozenset(_http_status_codes(item)) for item in errors
+    }
+    statuses = {
+        status
+        for statuses_for_item in statuses_by_error.values()
+        for status in statuses_for_item
+    }
+    alias_candidates = {
+        id(item)
+        for item, error_code in coded
+        if error_code in {"", "INVALID_PARAMETER_VALUE"}
+        and _is_missing_alias_shape(item)
+    }
+    alias_missing = {
+        id(item)
+        for item in errors
+        if id(item) in alias_candidates
+        and (not statuses_by_error[id(item)] or statuses_by_error[id(item)] == {400})
+    }
+    # A response is structured evidence too. Only 404 denotes general
+    # absence; 401, 403, 429, 5xx, and every other non-404 response must
+    # propagate. MLflow's exact missing-alias exception is the documented
+    # special case: it uses INVALID_PARAMETER_VALUE/HTTP 400 for absence.
+    if any(
+        status != 404 and not (status == 400 and id(item) in alias_missing)
+        for item in errors
+        for status in statuses_by_error[id(item)]
+    ):
+        return False
+    # An explicit absence code/status outranks a generic type on that same
+    # exception. Databricks NotFound is an OSError, and httpx HTTPStatusError
+    # is an HTTPError; neither generic base may erase NOT_FOUND/404. A wrapper
+    # or nested exception without its own explicit absence remains an
+    # independent non-absence signal and wins across the chain.
+    explicitly_missing = {
+        id(item)
+        for item, error_code in coded
+        if error_code in missing_codes
+        or 404 in statuses_by_error[id(item)]
+        or id(item) in alias_missing
+        or _is_explicit_missing_exception_type(item)
+        or isinstance(item, FileNotFoundError)
+    }
+    for item in errors:
+        # Confirmed absence on this node outranks that node's generic base or
+        # incidental wording. A separate wrapper/nested node is still checked
+        # independently and can therefore veto absence for the whole chain.
+        if id(item) in explicitly_missing:
+            continue
+        if _is_authoritative_non_absence_exception(
+            item
+        ) or _has_authoritative_non_absence_message(item):
+            return False
+    if 404 in statuses:
+        return True
+    if any(error_code in missing_codes for _, error_code in coded):
+        return True
+    if any(_is_explicit_missing_exception_type(item) for item in errors):
+        return True
+    if alias_missing:
+        return True
+    if any(isinstance(item, FileNotFoundError) for item in errors):
+        return True
+    return any(
+        marker in _registry_error_message(item).upper()
+        for item in errors
+        for marker in ("NOT_FOUND", "RESOURCE_DOES_NOT_EXIST", "DOES NOT EXIST")
+    )
+
+
+def _registry_exception_chain(
+    error: Exception,
+) -> tuple[tuple[Exception, ...], bool]:
+    """Return the bounded exception walk and whether it visited every child."""
+
+    pending = [error]
+    found: list[Exception] = []
+    seen: set[int] = set()
+    while pending and len(found) < 16:
+        item = pending.pop(0)
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        found.append(item)
+        for attribute in (
+            "__cause__",
+            "__context__",
+            "cause",
+            "context",
+            "error",
+            "exc_value",
+            "inner_exception",
+            "original_error",
+            "original_exception",
+            "exception",
+        ):
+            try:
+                nested = getattr(item, attribute, None)
+            except Exception:  # noqa: BLE001 - opaque provider wrapper
+                continue
+            if isinstance(nested, Exception) and id(nested) not in seen:
+                pending.append(nested)
+    complete = not any(id(item) not in seen for item in pending)
+    return tuple(found), complete
+
+
+def _registry_error_code(error: Exception) -> str:
+    for attribute in ("error_code", "code"):
+        try:
+            raw = getattr(error, attribute, None)
+        except Exception:  # noqa: BLE001 - opaque provider wrapper
+            continue
+        if callable(raw):
+            try:
+                raw = raw()
+            except Exception:  # noqa: BLE001 - opaque provider wrapper
+                continue
+        if raw is None:
+            continue
+        name = getattr(raw, "name", None)
+        code = str(name if isinstance(name, str) else raw).strip().upper()
+        if code.startswith("STATUSCODE."):
+            code = code.removeprefix("STATUSCODE.")
+        if code:
+            return code
+    return ""
+
+
+def _registry_error_message(error: Exception) -> str:
+    try:
+        return str(error).strip()
+    except Exception:  # noqa: BLE001 - opaque provider wrapper
+        return ""
+
+
+def _is_missing_alias_shape(error: Exception) -> bool:
+    return (
+        fullmatch(
+            r"(?:INVALID_PARAMETER_VALUE: )?"
+            r"(?:REGISTERED MODEL|PROMPT) ALIAS [\w-]+ NOT FOUND\.?",
+            _registry_error_message(error).upper(),
+        )
+        is not None
+    )
+
+
+def _is_explicit_missing_exception_type(error: Exception) -> bool:
+    """Recognize provider types whose exact name is itself absence evidence."""
+
+    names = {"notfound", "notfounderror", "resourcedoesnotexist"}
+    return any(
+        error_type.__name__.casefold() in names
+        for error_type in type(error).__mro__
+        if error_type not in {Exception, BaseException, object}
+    )
+
+
+def _http_status_codes(error: Exception) -> tuple[int, ...]:
+    """Read HTTP status without importing any optional HTTP client."""
+
+    values: list[Any] = []
+    for attribute in ("status_code", "http_status_code", "status"):
+        try:
+            values.append(getattr(error, attribute, None))
+        except Exception:  # noqa: BLE001 - opaque provider wrapper
+            pass
+    try:
+        response = getattr(error, "response", None)
+    except Exception:  # noqa: BLE001 - opaque provider wrapper
+        response = None
+    if response is not None:
+        for attribute in ("status_code", "status"):
+            try:
+                values.append(getattr(response, attribute, None))
+            except Exception:  # noqa: BLE001 - opaque provider response
+                pass
+
+    statuses: list[int] = []
+    for value in values:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= status <= 599 and status not in statuses:
+            statuses.append(status)
+    return tuple(statuses)
+
+
+def _is_authoritative_non_absence_exception(error: Exception) -> bool:
+    """Recognize authentication and transport failures by their type.
+
+    These failures often have no provider ``error_code`` and may deliberately
+    use not-found wording to avoid disclosing a protected resource. Their type
+    is still authoritative: callers must propagate them, never create or fall
+    back as if the registry object were absent.
+    """
+
+    # FileNotFoundError is the one OSError subclass whose type itself denotes
+    # absence. Keep allowing its code-less registry-shaped message below.
+    if isinstance(error, OSError) and not isinstance(error, FileNotFoundError):
+        return True
+    markers = (
+        "auth",
+        "permission",
+        "forbidden",
+        "connection",
+        "connecterror",
+        "timeout",
+        "transport",
+        "network",
+        "socket",
+        "sslerror",
+        "tlserror",
+        "proxyerror",
+        "protocolerror",
+        "httperror",
+        "requesterror",
+        "httpresponseerror",
+        "rpcerror",
+        "apierror",
+        "apicallerror",
+        "credential",
+        "quota",
+        "resourceexhausted",
+        "ratelimit",
+        "throttl",
+        "serviceunavailable",
+        "servererror",
+    )
+    return any(
+        any(marker in error_type.__name__.lower() for marker in markers)
+        for error_type in type(error).__mro__
+        if error_type not in {Exception, BaseException, object}
+    )
+
+
+def _has_authoritative_non_absence_message(error: Exception) -> bool:
+    """Recognize unstructured provider failures hidden by generic wrappers."""
+
+    message = _registry_error_message(error).casefold()
+    signals = (
+        "unauthorized",
+        "unauthenticated",
+        "authentication",
+        "authorization",
+        "not authorized",
+        "forbidden",
+        "permission",
+        "access denied",
+        "invalid credential",
+        "invalid api key",
+        "api key invalid",
+        "api key is invalid",
+        "api key rejected",
+        "api key was rejected",
+        "credential rejected",
+        "credentials rejected",
+        "credential invalid",
+        "credentials invalid",
+        "access token expired",
+        "expired access token",
+        "token has expired",
+        "token is expired",
+        "insufficient privilege",
+        "insufficient permission",
+        "connection",
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "transport",
+        "network error",
+        "network failure",
+        "network unreachable",
+        "host unreachable",
+        "no route to host",
+        "socket error",
+        "dns failure",
+        "dns lookup",
+        "dns resolution",
+        "tls error",
+        "tls handshake",
+        "ssl error",
+        "ssl handshake",
+        "proxy error",
+        "rate limit",
+        "quota",
+        "resource exhausted",
+        "too many requests",
+        "throttl",
+        "service unavailable",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+    )
+    strong_patterns = (
+        r"\bapi[ _-]?key\b.{0,24}\b(?:invalid|rejected|revoked|expired)\b",
+        r"\b(?:invalid|rejected|revoked|expired)\b.{0,24}\bapi[ _-]?key\b",
+        r"\bcredentials?\b.{0,24}\b(?:invalid|rejected|revoked|expired)\b",
+        r"\b(?:invalid|rejected|revoked|expired)\b.{0,24}\bcredentials?\b",
+        r"\baccess[ _-]?token\b.{0,24}\b(?:invalid|rejected|revoked|expired)\b",
+        r"\b(?:invalid|rejected|revoked|expired)\b.{0,24}\baccess[ _-]?token\b",
+        r"\b(?:network|host)\b.{0,24}\bunreachable\b",
+        r"\bunreachable\b.{0,24}\b(?:network|host)\b",
+        r"\b(?:tls|ssl)\b.{0,24}\bhandshake\b",
+        r"\bdns\b.{0,24}\b(?:lookup|resolution|failure|error)\b",
+        r"\b(?:connection|connect)\b.{0,24}\b(?:refused|reset|aborted|closed)\b",
+    )
+    return (
+        any(signal in message for signal in signals)
+        or any(search(pattern, message) is not None for pattern in strong_patterns)
+        or search(r"\b(?:401|403|429|5\d\d)\b", message) is not None
+    )
+
+
+def _is_missing_dataset(error: Exception) -> bool:
+    return _is_missing_registry_error(error)
+
+
+def _mlflow(module: Any | None) -> Any:
+    if module is not None:
+        return module
+    try:
+        import mlflow
+    except ImportError as error:
+        raise RuntimeError(
+            "Evaluation support requires the `genai` extra. From an aai-core "
+            "checkout run `make examples-install` and use `.venv/bin/python`; "
+            "in a consuming environment install `aai-core[genai]`."
+        ) from error
+    return mlflow

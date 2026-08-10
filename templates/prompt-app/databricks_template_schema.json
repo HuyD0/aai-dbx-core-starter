@@ -98,7 +98,7 @@
     },
     "aai_core_version": {
       "type": "string",
-      "default": "0.3.0",
+      "default": "0.4.0",
       "description": "Pinned aai-core SDK version",
       "order": 16
     },
@@ -127,5 +127,5 @@
       "order": 20
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py              # preflight + isolated setup\n  3. make check                                   # tests + deterministic gate\n  4. python scripts/register_prompt.py            # registers v1, sets development alias\n  5. make evaluate                                # LLM-judge gate on the pinned version\n  6. python scripts/promote_prompt.py --version 1 --to validation\n\nRun `make help` for every available target."
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py              # preflight + isolated setup\n  3. make check                                   # tests + deterministic gate\n  4. python scripts/register_prompt.py            # registers v1, sets development alias\n  5. make evaluate                                # note the emitted decision_run_id\n  6. python scripts/promote_prompt.py --version 1 --decision-run-id <run-id> --to validation\n\nRun `make help` for every available target."
 }

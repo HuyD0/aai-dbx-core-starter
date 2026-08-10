@@ -56,7 +56,7 @@ def test_learning_artifacts_have_one_contiguous_numbered_order():
     )
 
     assert [path.name[:2] for path in artifacts] == [
-        f"{number:02d}" for number in range(13)
+        f"{number:02d}" for number in range(15)
     ]
     assert all(
         not re.match(r"\d{2}_", helper)
@@ -74,6 +74,8 @@ def test_all_numbered_example_notebooks_are_safe_clean_and_compilable():
         "10_layered_judges.ipynb",
         "11_cost_quality_tradeoff.ipynb",
         "12_agent_alignment_optimization.ipynb",
+        "13_decision_and_promotion_lifecycle.ipynb",
+        "14_platform_llm_operations.ipynb",
     ]
 
     for path in notebooks:
@@ -140,6 +142,37 @@ def test_advanced_notebooks_preserve_release_guardrails():
     assert "max_metric_calls" in optimization
     assert "set_prompt_alias" not in optimization
 
+    operations = sources["14_platform_llm_operations.ipynb"]
+    operations_notebook = json.loads(operations)
+    provenance_source = next(
+        "".join(cell["source"])
+        for cell in operations_notebook["cells"]
+        if "provenance_stamp =" in "".join(cell.get("source", []))
+    )
+    provenance_tree = ast.parse(provenance_source)
+    provenance_assignment = next(
+        node
+        for node in provenance_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "provenance_stamp"
+            for target in node.targets
+        )
+    )
+    provenance_stamp = ast.literal_eval(provenance_assignment.value)
+    generated_stamp = json.loads(
+        (ROOT / "templates/prompt-app/template/.aai-template.json.tmpl").read_text()
+    )
+    generated_stamp["generated_with"] = {
+        "project_name": "fictional-earnings",
+        "application_name": "earnings-summary",
+        "team": "fictional-app-team",
+        "model_provider": "databricks",
+        "prompt_name": "earnings_summary",
+        "aai_core_version": "0.4.0",
+    }
+    assert provenance_stamp == generated_stamp
+
 
 def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
     sources = {
@@ -185,8 +218,9 @@ def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
 
 def test_advanced_notebooks_run_all_on_the_credential_free_default_path():
     pytest.importorskip("pandas")
+    # 14 is connected-guarded like 05/07 and deliberately excluded here.
     for path in sorted((ROOT / "examples").glob("0[89]_*.ipynb")) + sorted(
-        (ROOT / "examples").glob("1[0-2]_*.ipynb")
+        (ROOT / "examples").glob("1[0-3]_*.ipynb")
     ):
         notebook = json.loads(path.read_text(encoding="utf-8"))
         namespace = {"__name__": f"notebook_{path.stem}"}
