@@ -12,6 +12,7 @@ from aai_core.evaluation import (
     apply_gate,
     get_or_create_evaluation_dataset,
     judge_model_uri,
+    log_gate_evidence,
 )
 from aai_core.providers.types import ProviderConfigurationError
 
@@ -311,6 +312,36 @@ def test_metric_names_are_trimmed_and_must_name_something():
     ).passed
     with pytest.raises(ValidationError, match="whitespace"):
         MetricRule(metric="   ", direction=MetricDirection.HIGHER, required=0.8)
+
+
+def test_log_gate_evidence_refuses_a_gate_that_skipped_validation():
+    # model_copy(update=...) bypasses validators, so a derived result can
+    # report passed while its metrics still violate its policy. This is
+    # the boundary release automation reads, so nothing may be written.
+    logged: dict = {}
+    fake = SimpleNamespace(
+        log_metrics=lambda metrics: logged.setdefault("metrics", metrics),
+        set_tags=lambda tags: logged.setdefault("tags", tags),
+    )
+    policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="quality", direction=MetricDirection.HIGHER, required=0.9
+            ),
+        )
+    )
+    failing = apply_gate({"quality": 0.1}, policy=policy)
+    forged = failing.model_copy(update={"failures": ()})
+    assert forged.passed  # the bypass really does produce a false verdict
+
+    with pytest.raises(ValidationError, match="failures do not match"):
+        log_gate_evidence(forged, mlflow_module=fake)
+    assert logged == {}
+
+    # A genuine gate still logs its metrics and verdict.
+    assert log_gate_evidence(failing, mlflow_module=fake) == {
+        "aai.gate_passed": "false"
+    }
 
 
 def test_gate_policy_metric_selectors_are_trimmed():

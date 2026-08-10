@@ -542,6 +542,31 @@ def test_load_decision_validates_run_ids_before_mlflow_access():
             load_decision(invalid, mlflow_module=object())
 
 
+def test_record_decision_refuses_a_record_that_skipped_validation():
+    # model_copy(update=...) bypasses validators, so a rejected decision
+    # can be flipped to adopt without its gate ever being rechecked.
+    # Nothing may reach the run before the contract is re-established.
+    fake = FakeMlflow()
+    manager = ExperimentManager(
+        experiment_name="/Shared/test",
+        context=dev_settings().resource,
+        mlflow_module=fake,
+    )
+    failing = GateResult(
+        metrics={"citation_rate": 0.4},
+        failures=(GateFailure(metric="citation_rate", reason="0.4 below 1"),),
+    )
+    rejected = _record(decision=Decision.REJECT, gate=failing)
+    forged = rejected.model_copy(update={"decision": Decision.ADOPT})
+    assert forged.decision is Decision.ADOPT  # the bypass really works
+
+    with pytest.raises(ValidationError, match="failing gate"):
+        record_decision(forged, experiments=manager)
+    assert fake.run_names == []
+    assert fake.tags == {}
+    assert fake.artifacts == []
+
+
 def test_record_decision_derives_the_run_name_from_the_bounded_change_id():
     # MLflow persists run names as the mlflow.runName tag, so a free-form
     # name override would let prompts, user content, or secrets bypass the

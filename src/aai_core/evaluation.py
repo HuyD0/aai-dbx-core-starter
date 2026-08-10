@@ -456,8 +456,16 @@ def log_gate_evidence(
     """Persist gate metrics and the ``aai.gate_passed`` tag on the active run.
 
     Call inside a governed run. Returns the tags it set.
+
+    The gate is reconstructed through validation first. ``GateResult``
+    promises that evidence cannot claim a pass its own metrics contradict,
+    but ``model_copy(update=...)`` skips validators — so a derived result
+    can report ``passed`` while its failures no longer match its policy.
+    This is the boundary release automation reads, so the promise is
+    re-established here rather than assumed.
     """
 
+    gate = GateResult.model_validate(gate.model_dump())
     mlflow = _mlflow(mlflow_module)
     if gate.metrics:
         mlflow.log_metrics(dict(gate.metrics))
