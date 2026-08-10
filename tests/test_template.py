@@ -36,6 +36,37 @@ REQUIRED_TAGS = {
     "lifecycle",
     "tag_schema_version",
 }
+CURRENT_TEMPLATE_VERSIONS = {
+    "analytics-app": "1.1.0",
+    "experiment-starter": "1.2.0",
+}
+STRICT_JUDGE_CALLS = (
+    pytest.param(
+        "agent-app/template/evals/evaluate.py",
+        "agent = ToolAgent(",
+        id="agent-evaluation",
+    ),
+    pytest.param(
+        "prompt-app/template/evals/evaluate.py",
+        "version = resolve_version(",
+        id="prompt-evaluation",
+    ),
+    pytest.param(
+        "rag-app/template/evals/evaluate.py",
+        "version = resolve_version(",
+        id="rag-evaluation",
+    ),
+    pytest.param(
+        "analytics-app/template/evals/evaluate.py",
+        "warehouse_id = resolve_warehouse_id(",
+        id="analytics-evaluation",
+    ),
+    pytest.param(
+        "agent-app/template/notebooks/02_enable_monitoring.py",
+        "mlflow.set_experiment(",
+        id="agent-monitoring",
+    ),
+)
 
 
 def discover_templates() -> list[Path]:
@@ -246,6 +277,22 @@ def render(template: Path, combo: dict, tmp_path_factory) -> Path:
 # ---------------------------------------------------------------- static tier
 
 
+@pytest.mark.parametrize("relative_path,target_work", STRICT_JUDGE_CALLS)
+def test_generated_llmops_resolves_judges_canonically_before_target_work(
+    relative_path: str, target_work: str
+):
+    source = (TEMPLATES_DIR / relative_path).read_text()
+    resolution = "judge_model = judge_model_uri(context.settings)"
+
+    assert "from aai_core.evaluation import" in source
+    assert source.count(resolution) == 1
+    assert "def _judge_model_uri" not in source
+    assert "def judge_model_uri" not in source
+    assert "ProviderConfigurationError" not in source
+    assert source.index("context = bootstrap") < source.index(resolution)
+    assert source.index(resolution) < source.index(target_work)
+
+
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
 def test_template_source_has_no_secret_references(template: Path):
     offenders = [
@@ -264,6 +311,15 @@ def test_template_prompt_promotion_uses_validation_alias(template: Path):
         assert '"candidate"' not in text
         assert '"validation"' in text
         assert '"production"' in text
+        assert "context.prompts.promote(" in text
+        assert ".set_alias(" not in text
+        assert '"--decision-run-id"' in text
+
+        evaluation = (template / "template" / "evals" / "evaluate.py").read_text()
+        assert "record_decision(" in evaluation
+        assert "change_run_id=evaluation_run_id" in evaluation
+        assert "prompt_version=version" in evaluation
+        assert "prompt_digest=prompt_digest(" in evaluation
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
@@ -316,6 +372,16 @@ def test_template_schema_shared_contract(template: Path):
     assert properties["project_name"]["pattern"] == "^[a-z][a-z0-9-]+$"
     if "model_provider" in properties:
         assert properties["model_provider"]["enum"] == ["databricks", "foundry"]
+    assert properties["aai_core_version"]["default"] == COMPATIBILITY["sdk"]["version"]
+    assert (
+        COMPATIBILITY["templates"][template.name]["aai_core"]
+        == COMPATIBILITY["sdk"]["version"]
+    )
+    if template.name in CURRENT_TEMPLATE_VERSIONS:
+        assert (
+            COMPATIBILITY["templates"][template.name]["version"]
+            == CURRENT_TEMPLATE_VERSIONS[template.name]
+        )
     if template.name == "agent-app":
         application_name = properties["application_name"]
         assert application_name["maxLength"] == 26

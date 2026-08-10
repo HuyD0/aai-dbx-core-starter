@@ -23,6 +23,15 @@ from aai_core.agentkit.catalog import (
 from aai_core.agentkit.config import AgentkitConfig
 from aai_core.agentkit.datasets import DatasetShape
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
+from aai_core.scorers import (
+    keyword_coverage as shared_keyword_coverage,
+)
+from aai_core.scorers import (
+    refusal_compliance as shared_refusal_compliance,
+)
+from aai_core.scorers import (
+    response_length_ok as shared_response_length_ok,
+)
 
 
 def _shape(
@@ -320,7 +329,22 @@ def test_scorer_versions_tag_is_sorted_and_compact():
     )
 
     tag = plan.scorer_versions_tag()
-    assert tag == "keyword_coverage=1,refusal_compliance=1,response_length_ok=1"
+    assert tag == "keyword_coverage=2,refusal_compliance=2,response_length_ok=2"
+
+
+def test_shared_code_scorer_specs_publish_the_new_semantics_as_v2():
+    assert {
+        name: get_spec(name).version
+        for name in (
+            "keyword_coverage",
+            "refusal_compliance",
+            "response_length_ok",
+        )
+    } == {
+        "keyword_coverage": 2,
+        "refusal_compliance": 2,
+        "response_length_ok": 2,
+    }
 
 
 @pytest.mark.parametrize(
@@ -331,7 +355,7 @@ def test_scorer_versions_tag_is_sorted_and_compact():
             {"expected_response": "Paris is the capital of France"},
             1.0,
         ),
-        ("Nothing relevant here", {"expected_response": ""}, 1.0),
+        ("Nothing relevant here", {"expected_response": ""}, 0.0),
         ("Nothing relevant at all", {"expected_response": "quarterly report"}, 0.0),
     ],
 )
@@ -354,22 +378,63 @@ def test_answer_length_values():
     assert response_length_ok("x" * 2001, {}) == 0.0
 
 
+def test_agentkit_uses_the_canonical_shared_code_scorers():
+    assert keyword_coverage is shared_keyword_coverage
+    assert refusal_compliance is shared_refusal_compliance
+    assert response_length_ok is shared_response_length_ok
+
+
 def test_score_all_covers_every_row_level_code_scorer():
     scores = score_all("answer", {"expected_response": "answer"})
     assert set(scores) == set(CODE_SCORER_FUNCTIONS)
 
 
 def test_code_scorers_never_turn_a_missing_output_into_text():
-    missing = [None, Decimal("NaN")]
+    missing = [
+        None,
+        Decimal("NaN"),
+        Decimal("1"),
+        0,
+        False,
+        {},
+        {"status": "ok"},
+        [],
+        (),
+        SimpleNamespace(status="ok"),
+    ]
     try:
         import numpy as np
 
-        missing.append(np.float32("nan"))
+        missing.extend((np.float32("nan"), np.datetime64("NaT", "ns")))
+    except ImportError:
+        pass
+    try:
+        import pandas as pd
+
+        missing.extend((pd.NA, pd.NaT))
     except ImportError:
         pass
     for value in missing:
         with pytest.raises(ConfigError, match="no output to score"):
             score_all(value, {"expected_response": "None"})
+
+
+def test_code_scorers_extract_text_from_provider_shapes():
+    outputs = {"choices": [{"message": {"content": "The answer is Paris."}}]}
+
+    assert score_all(outputs, {"expected_response": "Paris"}) == {
+        "keyword_coverage": 1.0,
+        "refusal_compliance": 1.0,
+        "response_length_ok": 1.0,
+    }
+
+
+def test_blank_recorded_output_reaches_the_gate_as_zero_scores():
+    assert score_all("", {"expected_response": "Paris"}) == {
+        "keyword_coverage": 0.0,
+        "refusal_compliance": 0.0,
+        "response_length_ok": 0.0,
+    }
 
 
 def _fake_mlflow(make_judge=None):

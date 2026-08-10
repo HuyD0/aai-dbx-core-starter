@@ -417,7 +417,9 @@ def test_scorers_ls_live_labels_only_confirmed_prompt_absence(capsys, monkeypatc
             ),
             id="transient",
         ),
-        pytest.param(ConnectionError("connection reset"), id="transport"),
+        pytest.param(ConnectionError("prompt does not exist"), id="transport"),
+        pytest.param(PermissionError("prompt not found"), id="builtin-permission"),
+        pytest.param(TimeoutError("prompt does not exist"), id="builtin-timeout"),
     ),
 )
 def test_scorers_ls_live_propagates_non_absence_registry_failures(

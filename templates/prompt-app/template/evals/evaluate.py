@@ -10,19 +10,20 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import mlflow
 from mlflow.genai.scorers import Correctness, RelevanceToQuery, Safety
 
 from aai_core import bootstrap
+from aai_core.decisions import Decision, DecisionRecord, record_decision
 from aai_core.evaluation import (
     GatePolicy,
     MetricRule,
     apply_gate,
+    judge_model_uri,
 )
-from aai_core.providers.types import ProviderConfigurationError
+from aai_core.prompts import prompt_digest
 from app.assistant import Assistant
 from app.config import DATASET_NAME, PROMPT_NAME
 
@@ -65,8 +66,13 @@ def main() -> None:
     )
     parser.add_argument("--update-baseline", action="store_true")
     args = parser.parse_args()
+    # Registry versions start at 1, so a typo must fail here rather than
+    # during the credentialed load inside Assistant.
+    if args.prompt_version is not None and args.prompt_version < 1:
+        parser.error("--prompt-version must be a positive integer")
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     version = resolve_version(context, args.prompt_version)
     assistant = Assistant(context, prompt_version=version)
     prompt_uri = f"prompts:/{context.prompts.qualify(PROMPT_NAME)}/{version}"
@@ -76,7 +82,6 @@ def main() -> None:
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
-    judge_model = _judge_model_uri(context.settings)
     baseline = load_baseline()
     policy = GatePolicy(
         rules=tuple(load_thresholds()),
@@ -92,7 +97,10 @@ def main() -> None:
             "evaluation_dataset": dataset_name,
             "case_count": len(cases),
         },
-    ):
+    ) as evaluation_run:
+        registered = context.prompts.load(
+            PROMPT_NAME, version=version, cache_ttl_seconds=0
+        )
         native_result = mlflow.genai.evaluate(
             data=cases,
             predict_fn=assistant.ask,
@@ -109,8 +117,33 @@ def main() -> None:
         )
         mlflow.log_metrics(dict(report.metrics))
         mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
-    report.require_passed()
-    if args.update_baseline:
+        evaluation_run_id = str(evaluation_run.info.run_id)
+    template = getattr(registered, "template", None)
+    if not isinstance(template, (str, list)):
+        raise TypeError(
+            "The evaluated prompt version exposes no template for decision evidence."
+        )
+    decision = Decision.ADOPT if report.passed else Decision.REJECT
+    decision_run_id = record_decision(
+        DecisionRecord(
+            decision=decision,
+            change_id=f"prompt-v{version}",
+            change_summary=f"Evaluate pinned prompt version {version} for release.",
+            rationale=(
+                "The release gate passed for the exact registered prompt version."
+                if report.passed
+                else "The release gate failed for the exact registered prompt version."
+            ),
+            change_run_id=evaluation_run_id,
+            gate=report,
+            prompt_name=context.prompts.qualify(PROMPT_NAME),
+            prompt_version=version,
+            prompt_digest=prompt_digest(template),
+            decided_by="code:release-gate",
+        ),
+        experiments=context.experiments,
+    )
+    if report.passed and args.update_baseline:
         BASELINE.write_text(
             json.dumps({"metrics": dict(report.metrics)}, indent=2, sort_keys=True)
             + "\n",
@@ -122,20 +155,11 @@ def main() -> None:
             "prompt_version": version,
             "metrics": report.metrics,
             "baseline_updated": args.update_baseline,
+            "decision": decision.value,
+            "decision_run_id": decision_run_id,
         }
     )
-
-
-def _judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
-    deployment = config.get("deployment")
-    if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError("judge-model requires a deployment")
-    return f"endpoints:/{deployment.strip()}"
+    report.require_passed()
 
 
 if __name__ == "__main__":

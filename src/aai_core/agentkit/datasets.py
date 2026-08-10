@@ -240,11 +240,7 @@ def _root_spans(trace: Any) -> list[Mapping[str, Any]]:
 def _is_root_span(span: Mapping[str, Any]) -> bool:
     """Whether a span has no populated parent identifier."""
 
-    parent = span.get(
-        "parent_span_id",
-        span.get("parentSpanId", span.get("parent_id")),
-    )
-    return not _is_populated(parent)
+    return not _is_populated(_span_parent_identifier(span))
 
 
 def _span_field(
@@ -582,6 +578,8 @@ def _has_usable_trace(trace: Any, *, authored_inputs: Any) -> bool:
     # info plus data.spans. A top-level `spans` key is ignored by MLflow and
     # must never rescue an empty or malformed data section locally.
     spans = _spans(document)
+    if not _span_graph_is_resolved(spans):
+        return False
 
     # Read the trace-info request directly. Going through `_trace_inputs`
     # would let the inputs on an id-less mapping masquerading as a root span
@@ -1209,6 +1207,61 @@ def _span_identifier(span: Mapping[str, Any]) -> Any:
     return span.get("span_id", span.get("spanId"))
 
 
+def _span_parent_identifier(span: Mapping[str, Any]) -> Any:
+    """The parent id from the same v2/v3 layout as the span id."""
+
+    if isinstance(span.get("context"), Mapping):
+        return span.get("parent_id")
+    return span.get("parent_span_id", span.get("parentSpanId", span.get("parent_id")))
+
+
+def _span_graph_is_resolved(spans: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every populated parent chain resolves to an unambiguous root.
+
+    ``Trace.from_dict`` validates individual spans but does not validate their
+    graph. MLflow's retrieval reader skips a span when its parent is absent;
+    a cycle can keep that same walk from terminating. Reject both locally,
+    along with duplicate ids that make parent resolution order-dependent.
+
+    Hand-written cost fixtures may omit ids on independent root spans. They
+    remain countable; an id becomes mandatory only when another span declares
+    a parent relationship. Canonical MLflow envelopes require every span id
+    separately in ``_complete_span``.
+    """
+
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for span in spans:
+        identifier = _span_identifier(span)
+        parent_id = _span_parent_identifier(span)
+        if _is_populated(identifier):
+            if not isinstance(identifier, str) or not identifier or identifier in by_id:
+                return False
+            by_id[identifier] = span
+        elif _is_populated(parent_id):
+            # A child without its own id cannot participate in a resolvable
+            # graph even when its parent happens to exist.
+            return False
+        if _is_populated(parent_id) and not isinstance(parent_id, str):
+            return False
+
+    resolved: set[str] = set()
+    for identifier in by_id:
+        current = identifier
+        path: set[str] = set()
+        while current not in resolved:
+            if current in path:
+                return False
+            path.add(current)
+            parent_id = _span_parent_identifier(by_id[current])
+            if not _is_populated(parent_id):
+                break
+            if not isinstance(parent_id, str) or parent_id not in by_id:
+                return False
+            current = parent_id
+        resolved.update(path)
+    return True
+
+
 def _trace_expectations(trace: Any) -> dict[str, Any]:
     return dict(_trace_expectation_items(trace))
 
@@ -1601,7 +1654,7 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         # Readable structure is what makes "no retrieval here" a fact
         # rather than a guess; an unparseable trace still gets the
         # assumption, because rounding a budget down is what breaks it.
-        if _spans(trace):
+        if _trace_fanout_is_countable(trace, authored_inputs=row.get("inputs")):
             traced += 1
         row_spans = _retriever_spans(trace)
         if not row_spans:
@@ -1626,6 +1679,21 @@ def retrieval_fanout(rows: Sequence[Mapping[str, Any]]) -> RetrievalFanout:
         retrieval_sufficiency_input_characters=sufficiency_input_characters,
         retrieved_chunk_input_characters=chunk_input_characters,
     )
+
+
+def _trace_fanout_is_countable(trace: Any, *, authored_inputs: Any) -> bool:
+    """Whether a trace can prove its retrieval fan-out, including zero.
+
+    A populated span collection is the ordinary proof. An empty collection
+    has no truthy value to distinguish a real no-span MLflow trace from an
+    arbitrary ``{"data": {"spans": []}}`` mapping, so defer to the same
+    complete-envelope and usable-request check that admits a trace to a run.
+    Unknown structures must retain the conservative fan-out assumption.
+    """
+
+    if spans := _spans(trace):
+        return _span_graph_is_resolved(spans)
+    return _has_usable_trace(trace, authored_inputs=authored_inputs)
 
 
 def _retrieval_judge_input_characters(
@@ -1781,10 +1849,12 @@ def _retriever_spans(trace: Any) -> list[Mapping[str, Any]]:
     """
 
     spans = _spans(trace)
+    if not _span_graph_is_resolved(spans):
+        return []
     by_id: dict[Any, Mapping[str, Any]] = {}
     for span in spans:
         identifier = _span_identifier(span)
-        if identifier is not None:
+        if isinstance(identifier, str) and identifier:
             by_id[identifier] = span
     return [span for span in spans if _is_retriever(span) and not _nested(span, by_id)]
 
@@ -1793,21 +1863,15 @@ def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> 
     """True when an ancestor of ``span`` is itself a retriever span."""
 
     seen: set[Any] = set()
-    parent_id = span.get(
-        "parent_span_id",
-        span.get("parentSpanId", span.get("parent_id")),
-    )
-    while parent_id is not None and parent_id not in seen:
+    parent_id = _span_parent_identifier(span)
+    while _is_populated(parent_id) and parent_id not in seen:
         seen.add(parent_id)
         parent = by_id.get(parent_id)
         if parent is None:
             return False
         if _is_retriever(parent):
             return True
-        parent_id = parent.get(
-            "parent_span_id",
-            parent.get("parentSpanId", parent.get("parent_id")),
-        )
+        parent_id = _span_parent_identifier(parent)
     return False
 
 

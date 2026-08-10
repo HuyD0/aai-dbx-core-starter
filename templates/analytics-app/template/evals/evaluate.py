@@ -17,16 +17,14 @@ import argparse
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import mlflow
 from mlflow.genai.scorers import Correctness, Safety, scorer
 
 from aai_core import bootstrap
-from aai_core.evaluation import GatePolicy, MetricRule, apply_gate
+from aai_core.evaluation import GatePolicy, MetricRule, apply_gate, judge_model_uri
 from aai_core.experiments import record_reproducibility
-from aai_core.providers.types import ProviderConfigurationError
 from aai_core.tracing import TraceIntegration
 from app.agent import AnalyticsAgent
 from app.config import DEMO_CATALOG, DEMO_SCHEMA, resolve_warehouse_id
@@ -84,6 +82,7 @@ def main() -> None:
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     context.configure_tracing(integration=TraceIntegration.SDK)
     warehouse_id = resolve_warehouse_id(args.warehouse_id)
     cases = json.loads(
@@ -92,7 +91,6 @@ def main() -> None:
 
     thresholds = load_thresholds()
     baseline = load_baseline()
-    judge_model = _judge_model_uri(context.settings)
     policy = GatePolicy(
         rules=tuple(thresholds),
         # Tokenomics is part of the gate: answers must carry token accounting
@@ -207,18 +205,6 @@ def _semantic_model_version() -> str:
     )
     info = payload.get("semantic_model", {})
     return f"{info.get('name', 'unknown')}-v{info.get('version', 0)}"
-
-
-def _judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
-    deployment = config.get("deployment")
-    if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError("judge-model requires a deployment")
-    return f"endpoints:/{deployment.strip()}"
 
 
 if __name__ == "__main__":
