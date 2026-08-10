@@ -94,12 +94,11 @@ Configure these as GitHub **repository variables**, not secrets:
 - `AZURE_SUBSCRIPTION_ID`
 - `DATABRICKS_HOST`
 - `SDK_ARTIFACT_VOLUME`
-- `COST_CENTER`
-- `TEAM`
-- `OWNER_GROUP`
 
-Use a non-personal group for `OWNER_GROUP`. Keep prompts, user content, and
-secret material out of tags and variables.
+The team, non-personal owner group, cost center, and constrained compute policy
+are rendered, non-overridable project contract values. Update them through a
+reviewed template/project change rather than repository variables. Keep prompts,
+user content, and secret material out of tags and variables.
 
 ## 4. Integrate enterprise model access
 

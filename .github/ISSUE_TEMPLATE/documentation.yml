@@ -1,0 +1,28 @@
+name: Documentation gap
+description: Report unclear, stale, or missing guidance.
+title: "[docs] "
+labels: [documentation]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Page or section
+      placeholder: docs/developer-guide.md — provider setup
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: What were you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: What was unclear, stale, or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested correction

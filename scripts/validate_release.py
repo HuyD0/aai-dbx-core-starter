@@ -146,7 +146,9 @@ def requirement_specs(requirements: list[str]) -> dict[str, str]:
     return specs
 
 
-def validate_repository() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def validate_repository() -> (  # noqa: C901 - linear, independent release assertions
+    tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
+):
     failures: list[str] = []
     project = load_toml(ROOT / "pyproject.toml")["project"]
     policy = load_toml(ROOT / "dependency-policy.toml")
@@ -502,11 +504,13 @@ def write_manifest(
     wheel: dict[str, str],
     compatibility: dict[str, Any],
 ) -> None:
+    identifiers = load_json(ROOT / "platform-identifiers.json")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "package": "aai-core",
         "version": version,
         "source_commit": commit,
+        "sdk_artifact_volume": identifiers["sdk_artifact_volume"],
         "wheel": wheel,
         "compatibility_sha256": hashlib.sha256(
             (ROOT / "compatibility.json").read_bytes()
@@ -516,6 +520,9 @@ def write_manifest(
         ).hexdigest(),
         "toolchain_sha256": hashlib.sha256(
             (ROOT / "toolchain.json").read_bytes()
+        ).hexdigest(),
+        "dependency_lock_sha256": hashlib.sha256(
+            (ROOT / "uv.lock").read_bytes()
         ).hexdigest(),
         "templates": {
             name: details["version"]

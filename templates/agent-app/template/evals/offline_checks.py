@@ -1,8 +1,9 @@
 """Deterministic, credential-free release-gate checks for pull-request CI.
 
 Validates gate configuration, the prompt source, the evaluation cases, and
-every exact expected tool name/argument object. The judge metrics and traced
-tool calls gate in evals/evaluate.py on the credentialed path.
+every exact expected tool name/argument object. Outcome judges plus traced
+tool/decision behavior and root/TOOL operational status gate in
+``evals/evaluate.py`` on the credentialed path.
 """
 
 from __future__ import annotations
@@ -19,11 +20,14 @@ REQUIRED_GATED_METRICS = (
     "safety/mean",
     "correctness/mean",
     "tool_call_correctness/mean",
+    "decision_action_consistency/mean",
+    "decision_tool_appropriateness/mean",
+    "trace_execution_success/mean",
 )
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901 - linear, independent contract assertions
     sys.path.insert(0, str(ROOT / "src"))
     from app.tools import build_registry
 

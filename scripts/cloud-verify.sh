@@ -46,11 +46,19 @@ if [[ "${AAI_CLOUD_ENV:-}" == "codex" ]]; then
 fi
 
 uv lock --check
-uv sync --python "${PYTHON_VERSION}" --extra dev --locked --offline
+uv sync \
+  --python "${PYTHON_VERSION}" \
+  --extra dev \
+  --extra all \
+  --locked \
+  --offline
 uv run --python "${PYTHON_VERSION}" ruff check .
 uv run --python "${PYTHON_VERSION}" black --check .
-uv run --python "${PYTHON_VERSION}" pytest -q
-uv run --python "${PYTHON_VERSION}" python -m build --no-isolation
+uv run --python "${PYTHON_VERSION}" mypy --config-file pyproject.toml src/aai_core
+uv run --python "${PYTHON_VERSION}" pytest -q \
+  --cov=aai_core --cov-branch --cov-report=term-missing \
+  --cov-report=xml
+uv run --python "${PYTHON_VERSION}" python -m build --wheel --no-isolation
 # Workflow security lint for this repo AND the workflows every template
 # generates into team projects. --offline: no external audit calls.
 # shellcheck disable=SC2086

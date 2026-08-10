@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,14 +30,12 @@ jobs:
 
       - name: Test before build (credential-free)
         run: |
-          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-dev.lock
           python -m pip install -r requirements.lock
-          python -m pip install -e '.[dev]'
+          python -m pip install --no-deps -r requirements-ci.txt
+          python -m pip install --no-deps -e .
           python -m pip check
-          ruff check .
-          black --check .
-          pytest -q
-          python evals/offline_checks.py
+          make PYTHON=python check
 
       - name: Build application before cloud login
         run: python scripts/build_application.py
@@ -62,6 +60,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify source checkout provenance
+        run: |
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+
       - name: Download prebuilt application
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -78,25 +81,16 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
-      - name: Verify externally provisioned Databricks App
-        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
-        env:
-          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-          DATABRICKS_AUTH_TYPE: azure-cli
-        run: |
-          APP_NAME=$(python -c 'import json; stamp = json.load(open(".aai-template.json")); print(stamp["generated_with"]["application_name"] + "-dev")')
-          databricks apps get "$APP_NAME" >/dev/null
-
       - name: Validate and deploy
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
-          BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER }}
-          BUNDLE_VAR_team: ${{ vars.TEAM }}
-          BUNDLE_VAR_owner_group: ${{ vars.OWNER_GROUP }}
+          BUNDLE_VAR_source_commit: ${{ github.sha }}
+          # Safe only because the checkout provenance step above fails on drift.
+          BUNDLE_VAR_source_state: "false"
           AAI_USE_PREBUILT_APPLICATION: "1"
         run: |
-          databricks bundle validate -t dev
+          databricks bundle validate -t dev --strict
           databricks bundle deploy -t dev
 
       - name: Run the release gate
@@ -109,11 +103,6 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
+          BUNDLE_VAR_source_commit: ${{ github.sha }}
+          BUNDLE_VAR_source_state: "false"
         run: databricks bundle run release_gate -t dev
-
-      - name: Start or update the Databricks App
-        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
-        env:
-          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-          DATABRICKS_AUTH_TYPE: azure-cli
-        run: databricks bundle run agent_app -t dev

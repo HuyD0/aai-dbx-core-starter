@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from threading import RLock
+from typing import TYPE_CHECKING, Any, cast
 
 from aai_core.providers.openai_compatible import (
     OpenAICompatibleChatModel,
@@ -13,14 +14,24 @@ from aai_core.providers.search import (
     AzureAISearchRetriever,
     DatabricksAISearchRetriever,
 )
-from aai_core.providers.types import ModelCapabilities, ProviderConfigurationError
+from aai_core.providers.types import (
+    ChatModel,
+    EmbeddingProvider,
+    ModelCapabilities,
+    ProviderConfigurationError,
+    Retriever,
+)
 from aai_core.tags import databricks_ai_gateway_request_headers
 
 if TYPE_CHECKING:
     from aai_core.context import PlatformContext
 
+__all__ = ["ProviderResolver"]
+
 
 class ProviderResolver:
+    """Resolve and own native clients created from governed configuration."""
+
     def __init__(self, context: PlatformContext) -> None:
         self.context = context
         self._models: dict[str, Any] = {}
@@ -35,46 +46,80 @@ class ProviderResolver:
             "azure_ai_search": self._azure_search,
             "databricks_ai_search": self._databricks_search,
         }
+        self._owned_resources: list[Any] = []
+        self._lock = RLock()
+        self._closed = False
 
-    def register_model(self, logical_name: str, model: Any) -> None:
-        self._models[logical_name] = model
+    def register_model(self, logical_name: str, model: ChatModel) -> None:
+        """Register a caller-owned model that the resolver will not close."""
 
-    def register_embedding(self, logical_name: str, embedding: Any) -> None:
-        self._embeddings[logical_name] = embedding
+        with self._lock:
+            self._ensure_open()
+            self._models[logical_name] = model
 
-    def register_retriever(self, logical_name: str, retriever: Any) -> None:
-        self._retrievers[logical_name] = retriever
+    def register_embedding(
+        self,
+        logical_name: str,
+        embedding: EmbeddingProvider,
+    ) -> None:
+        """Register a caller-owned embedding provider."""
 
-    def model(self, logical_name: str):
-        return self._resolve(
-            logical_name,
-            self.context.settings.models,
-            self._models,
-            self._model_factories,
+        with self._lock:
+            self._ensure_open()
+            self._embeddings[logical_name] = embedding
+
+    def register_retriever(self, logical_name: str, retriever: Retriever) -> None:
+        """Register a caller-owned retriever."""
+
+        with self._lock:
+            self._ensure_open()
+            self._retrievers[logical_name] = retriever
+
+    def model(self, logical_name: str) -> ChatModel:
+        """Resolve a configured model once per logical name."""
+
+        return cast(
+            ChatModel,
+            self._resolve(
+                logical_name,
+                self.context.settings.models,
+                self._models,
+                self._model_factories,
+            ),
         )
 
-    def embedding(self, logical_name: str):
-        if logical_name in self._embeddings:
-            return self._embeddings[logical_name]
-        config = self._config(logical_name, self.context.settings.embeddings)
-        provider = self._provider(config)
-        client, model, _ = self._openai_clients(provider, config)
-        adapter = OpenAICompatibleEmbeddingProvider(
-            logical_name=logical_name,
-            provider=provider,
-            model=model,
-            client=client,
-            dimensions=_optional_int(config.get("dimensions")),
-        )
-        self._embeddings[logical_name] = adapter
-        return adapter
+    def embedding(self, logical_name: str) -> EmbeddingProvider:
+        """Resolve a configured embedding provider once per logical name."""
 
-    def retriever(self, logical_name: str):
-        return self._resolve(
-            logical_name,
-            self.context.settings.retrievers,
-            self._retrievers,
-            self._retriever_factories,
+        with self._lock:
+            self._ensure_open()
+            if logical_name in self._embeddings:
+                return cast(EmbeddingProvider, self._embeddings[logical_name])
+            config = self._config(logical_name, self.context.settings.embeddings)
+            provider = self._provider(config)
+            client, model, _ = self._openai_clients(provider, config)
+            adapter = OpenAICompatibleEmbeddingProvider(
+                logical_name=logical_name,
+                provider=provider,
+                model=model,
+                client=client,
+                dimensions=_optional_int(config.get("dimensions")),
+            )
+            self._embeddings[logical_name] = adapter
+            self._remember_owned(adapter)
+            return adapter
+
+    def retriever(self, logical_name: str) -> Retriever:
+        """Resolve a configured retriever once per logical name."""
+
+        return cast(
+            Retriever,
+            self._resolve(
+                logical_name,
+                self.context.settings.retrievers,
+                self._retrievers,
+                self._retriever_factories,
+            ),
         )
 
     def _resolve(
@@ -83,21 +128,29 @@ class ProviderResolver:
         configurations: dict[str, dict[str, Any]],
         cache: dict[str, Any],
         factories: dict[str, Callable[[str, dict[str, Any]], Any]],
-    ):
-        if logical_name in cache:
-            return cache[logical_name]
-        config = self._config(logical_name, configurations)
-        provider = self._provider(config)
-        try:
-            factory = factories[provider]
-        except KeyError as error:
-            raise ProviderConfigurationError(
-                f"Unsupported provider {provider!r} for {logical_name!r}"
-            ) from error
-        cache[logical_name] = factory(logical_name, config)
-        return cache[logical_name]
+    ) -> Any:
+        with self._lock:
+            self._ensure_open()
+            if logical_name in cache:
+                return cache[logical_name]
+            config = self._config(logical_name, configurations)
+            provider = self._provider(config)
+            try:
+                factory = factories[provider]
+            except KeyError as error:
+                raise ProviderConfigurationError(
+                    f"Unsupported provider {provider!r} for {logical_name!r}"
+                ) from error
+            resolved = factory(logical_name, config)
+            cache[logical_name] = resolved
+            self._remember_owned(resolved)
+            return resolved
 
-    def _openai_compatible_model(self, logical_name: str, config: dict[str, Any]):
+    def _openai_compatible_model(
+        self,
+        logical_name: str,
+        config: dict[str, Any],
+    ) -> OpenAICompatibleChatModel:
         provider = self._provider(config)
         client, model, async_client_factory = self._openai_clients(provider, config)
         return OpenAICompatibleChatModel(
@@ -152,15 +205,15 @@ class ProviderResolver:
                 or config.get("scope")
                 or "https://ai.azure.com/.default"
             )
-            client_options = {
+            foundry_options = {
                 **native_options,
                 "base_url": f"{endpoint}/openai/v1/",
                 "api_key": token_provider,
             }
             return (
-                OpenAI(**client_options),
+                OpenAI(**foundry_options),
                 model,
-                lambda: AsyncOpenAI(**client_options),
+                lambda: AsyncOpenAI(**foundry_options),
             )
         if provider == "azure_apim":
             from openai import AsyncOpenAI, OpenAI
@@ -174,31 +227,32 @@ class ProviderResolver:
             token_provider = self._bearer_token_provider(
                 _required(config, "token_scope")
             )
-            client_options: dict[str, Any] = {
+            apim_options: dict[str, Any] = {
                 **native_options,
                 "base_url": base_url,
                 "api_key": token_provider,
             }
             headers = self._subscription_key_headers(config)
             if headers:
-                client_options["default_headers"] = headers
+                apim_options["default_headers"] = headers
             api_version = config.get("api_version")
             if api_version:
-                client_options["default_query"] = {"api-version": str(api_version)}
+                apim_options["default_query"] = {"api-version": str(api_version)}
             return (
-                OpenAI(**client_options),
+                OpenAI(**apim_options),
                 model,
-                lambda: AsyncOpenAI(**client_options),
+                lambda: AsyncOpenAI(**apim_options),
             )
         raise ProviderConfigurationError(f"Unsupported model provider: {provider}")
 
-    def _bearer_token_provider(self, scope: str):
+    def _bearer_token_provider(self, scope: str) -> Callable[[], str]:
         from azure.identity import get_bearer_token_provider
 
         from aai_core.identity import azure_credential
 
         credential = azure_credential(self.context.settings.azure_identity)
-        return get_bearer_token_provider(credential, scope)
+        self._remember_owned(credential)
+        return get_bearer_token_provider(cast(Any, credential), scope)
 
     def _subscription_key_headers(
         self, config: dict[str, Any]
@@ -221,15 +275,21 @@ class ProviderResolver:
         header = str(config.get("subscription_key_header", "api-key"))
         return {header: secret.reveal()}
 
-    def _azure_search(self, logical_name: str, config: dict[str, Any]):
+    def _azure_search(
+        self,
+        logical_name: str,
+        config: dict[str, Any],
+    ) -> AzureAISearchRetriever:
         from azure.search.documents import SearchClient
 
         from aai_core.identity import azure_credential
 
+        credential = azure_credential(self.context.settings.azure_identity)
+        self._remember_owned(credential)
         client = SearchClient(
             endpoint=_required(config, "endpoint"),
             index_name=_required(config, "index"),
-            credential=azure_credential(self.context.settings.azure_identity),
+            credential=cast(Any, credential),
         )
         return AzureAISearchRetriever(
             logical_name=logical_name,
@@ -242,10 +302,15 @@ class ProviderResolver:
             embedding_provider=self._retriever_embedding(config),
         )
 
-    def _databricks_search(self, logical_name: str, config: dict[str, Any]):
+    def _databricks_search(
+        self,
+        logical_name: str,
+        config: dict[str, Any],
+    ) -> DatabricksAISearchRetriever:
         from databricks.ai_search.client import AISearchClient
 
         client = AISearchClient()
+        self._remember_owned(client)
         index = client.get_index(
             endpoint_name=_required(config, "endpoint"),
             index_name=_required(config, "index"),
@@ -261,7 +326,10 @@ class ProviderResolver:
             embedding_provider=self._retriever_embedding(config),
         )
 
-    def _retriever_embedding(self, config: dict[str, Any]):
+    def _retriever_embedding(
+        self,
+        config: dict[str, Any],
+    ) -> EmbeddingProvider | None:
         """Resolve the optional `embedding` logical name a retriever uses to
         embed queries when the caller supplies no vector."""
 
@@ -282,6 +350,27 @@ class ProviderResolver:
     @staticmethod
     def _provider(config: dict[str, Any]) -> str:
         return str(_required(config, "provider")).lower()
+
+    def close(self) -> None:
+        """Close only resources constructed by this resolver, exactly once."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            resources = list(self._owned_resources)
+            self._owned_resources.clear()
+            self._models.clear()
+            self._embeddings.clear()
+            self._retrievers.clear()
+        _close_owned_resources(resources)
+
+    def _remember_owned(self, resource: Any) -> None:
+        self._owned_resources.append(resource)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("ProviderResolver is closed")
 
 
 def _required(config: dict[str, Any], key: str) -> str:
@@ -321,3 +410,24 @@ def _capabilities(config: dict[str, Any]) -> ModelCapabilities:
             "Unknown model capabilities: " + ", ".join(sorted(unknown))
         )
     return ModelCapabilities(**supplied)
+
+
+def _close_owned_resources(resources: list[Any]) -> None:
+    failures = 0
+    seen: set[int] = set()
+    for resource in reversed(resources):
+        native = getattr(resource, "native_client", resource)
+        if id(native) in seen:
+            continue
+        seen.add(id(native))
+        close = getattr(native, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception:
+            failures += 1
+    if failures:
+        raise RuntimeError(
+            f"Failed to close {failures} SDK-owned provider resource(s)"
+        ) from None

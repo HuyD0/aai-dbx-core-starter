@@ -39,19 +39,22 @@ and `AGENTS.md`.
 Use read-only commands from an authenticated administrative shell:
 
 ```bash
+: "${CI_CLIENT_ID:?Set CI_CLIENT_ID to the application ID issued by the identity owner}"
+: "${FIC_NAME:?Set FIC_NAME to the issued federated-credential name}"
+
 az ad app federated-credential list \
-  --id a7e40167-d3f6-48a9-acd9-7998230cce34 \
+  --id "$CI_CLIENT_ID" \
   --query "[].{name:name, subject:subject}" -o table
 
 source scripts/platform-env.sh
 
 databricks service-principals list \
-  --filter "applicationId eq a7e40167-d3f6-48a9-acd9-7998230cce34"
+  --filter "applicationId eq $CI_CLIENT_ID"
 ```
 
-The federated credential should be named
-`gh-aai-dbx-core-starter-main`. The Databricks principal must not be a
-workspace admin and must not have unrestricted cluster creation.
+Confirm the returned credential name equals `$FIC_NAME`. The Databricks
+principal must not be a workspace admin and must not have unrestricted cluster
+creation.
 
 ## 3. Configure GitHub repository variables
 
@@ -62,25 +65,27 @@ that file is, with no editing here:
 
 ```bash
 source scripts/platform-env.sh
+: "${CI_CLIENT_ID:?Set CI_CLIENT_ID to the application ID issued by the identity owner}"
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 VOLUME=$(python3 -c \
   'import json;print(json.load(open("platform-identifiers.json"))["sdk_artifact_volume"])')
 
 # Identity of the CI service principal (from your platform identity owner).
-gh variable set AZURE_CLIENT_ID       -R "$REPO" -b a7e40167-d3f6-48a9-acd9-7998230cce34
+gh variable set AZURE_CLIENT_ID       -R "$REPO" -b "$CI_CLIENT_ID"
 
 gh variable set AZURE_TENANT_ID       -R "$REPO" -b "$AZURE_TENANT_ID"
 gh variable set AZURE_SUBSCRIPTION_ID -R "$REPO" -b "$AZURE_SUBSCRIPTION_ID"
 gh variable set DATABRICKS_HOST       -R "$REPO" -b "$DATABRICKS_HOST"
 gh variable set SDK_ARTIFACT_VOLUME   -R "$REPO" -b "$VOLUME"
 
-# Cost attribution — set these to the owning team's real values.
-gh variable set COST_CENTER           -R "$REPO" -b CC-1234
-gh variable set TEAM                  -R "$REPO" -b data-platform
-gh variable set OWNER_GROUP           -R "$REPO" -b group:data-platform-owners
-
 gh variable list -R "$REPO"
 ```
+
+Ownership, team, cost-center, and approved compute-policy values are rendered
+into the generated project and cross-checked before deployment. They are not
+mutable GitHub or Databricks bundle variables; change them through a reviewed
+project/template update so the manifest, runtime context, and resource tags
+move together.
 
 `AZURE_CLIENT_ID` is the one value not in the fixture: it identifies an
 externally provisioned Entra application, and a clone is issued a different one
@@ -118,7 +123,7 @@ Remove the repository variables separately:
 
 ```bash
 for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DATABRICKS_HOST \
-  COST_CENTER TEAM OWNER_GROUP SDK_ARTIFACT_VOLUME; do
+  SDK_ARTIFACT_VOLUME; do
   gh variable delete "$v"
 done
 ```
@@ -126,9 +131,12 @@ done
 The SDK volume and its grants are also external platform resources and must be
 revoked through the approved platform workflow.
 
-## 6. Add another deployment target
+## 6. Add another deployment environment
 
-Before adding a protected GitHub environment or another Databricks target:
+The starter deliberately permits only the generated development target. Ask the
+platform team to generate or approve a separate environment contract before
+adding staging or production; the project validator rejects undeclared bundle
+targets and compute overrides. For the approved environment:
 
 1. Ask the platform identity owner for a federated credential whose subject
    matches that environment.

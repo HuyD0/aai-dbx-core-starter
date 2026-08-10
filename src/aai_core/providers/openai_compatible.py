@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 from aai_core.providers.types import (
     ModelCapabilities,
@@ -15,6 +15,13 @@ from aai_core.providers.types import (
     UnsupportedCapabilityError,
 )
 from aai_core.tracing import provider_span
+
+__all__ = [
+    "DEFAULT_MAX_RETRIES",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "OpenAICompatibleChatModel",
+    "OpenAICompatibleEmbeddingProvider",
+]
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_RETRIES = 2
@@ -53,7 +60,7 @@ _REMEDIATIONS = {
 
 def _status_code(error: BaseException) -> int | None:
     status = getattr(error, "status_code", None)
-    return status if isinstance(status, int) else None
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 def _call_provider(
@@ -67,12 +74,35 @@ def _call_provider(
 
     try:
         return operation()
-    except Exception as error:
-        status = _status_code(error)
-        raise ProviderRequestError(
-            f"{description} failed for {logical_name!r} via {provider}: {error}",
+    except Exception as native_error:
+        status = _status_code(native_error)
+        safe_provider = _safe_diagnostic_identifier(provider)
+        safe_logical_name = _safe_diagnostic_identifier(logical_name)
+        safe_operation = _safe_diagnostic_identifier(description.replace(" ", "_"))
+        status_detail = f", status={status}" if status is not None else ""
+        failure = ProviderRequestError(
+            "Provider request failed "
+            f"(provider={safe_provider}, operation={safe_operation}, "
+            f"resource={safe_logical_name}{status_detail})",
+            provider=safe_provider,
+            operation=safe_operation,
+            logical_name=safe_logical_name,
+            status_code=status,
             remediation=_REMEDIATIONS.get(status) if status else None,
-        ) from error
+        )
+    # Raise outside the native exception handler so no credential-bearing
+    # native exception remains reachable through __context__.
+    raise failure from None
+
+
+def _safe_diagnostic_identifier(value: str) -> str:
+    if 0 < len(value) <= 128 and all(
+        character.isascii()
+        and (character.isalnum() or character in {"-", "_", ".", ":", "/"})
+        for character in value
+    ):
+        return value
+    return "[invalid]"
 
 
 def _reject_running_event_loop(logical_name: str) -> None:
@@ -89,6 +119,8 @@ def _reject_running_event_loop(logical_name: str) -> None:
 
 
 class OpenAICompatibleChatModel:
+    """Stable synchronous chat adapter over a caller-inspectable native client."""
+
     def __init__(
         self,
         *,
@@ -128,46 +160,14 @@ class OpenAICompatibleChatModel:
         provider_options: Mapping[str, Any] | None = None,
     ) -> ModelResponse:
         _reject_running_event_loop(self.logical_name)
-        if tools and not self.capabilities.tool_calling:
-            raise UnsupportedCapabilityError(
-                f"{self.logical_name} does not support tool calling"
-            )
-        if response_format and not self.capabilities.structured_output:
-            raise UnsupportedCapabilityError(
-                f"{self.logical_name} does not support structured output"
-            )
-
-        request: dict[str, Any] = {
-            "model": self.model,
-            "messages": list(messages),
-        }
-        if temperature is not None:
-            request["temperature"] = temperature
-        if max_tokens is not None:
-            request["max_tokens"] = max_tokens
-        if tools:
-            request["tools"] = list(tools)
-        if response_format:
-            request["response_format"] = dict(response_format)
-        if provider_options:
-            collisions = set(provider_options) & _CONTROLLED_CHAT_OPTIONS
-            if collisions:
-                raise ProviderConfigurationError(
-                    "provider_options cannot override controlled chat fields: "
-                    f"{', '.join(sorted(collisions))}",
-                    remediation="Use the corresponding generate() argument; "
-                    "streaming remains available only through native_client.",
-                )
-            forbidden = set(provider_options) & _FORBIDDEN_PER_CALL_OPTIONS
-            if forbidden:
-                raise ProviderConfigurationError(
-                    "Per-call provider headers and raw request bodies are not allowed",
-                    remediation="Configure keyless authentication or a governed "
-                    "secret reference on the provider client. Use explicit "
-                    "generate() arguments for request fields; never pass "
-                    "credentials or extra_body through provider_options.",
-                )
-            request.update(provider_options)
+        request = self._build_request(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            response_format=response_format,
+            provider_options=provider_options,
+        )
         started = monotonic()
         with provider_span(
             "model.generate",
@@ -197,18 +197,7 @@ class OpenAICompatibleChatModel:
                 provider=self.provider,
                 logical_name=self.logical_name,
             )
-
-            choice = response.choices[0]
-            message = choice.message
-            content = message.content or ""
-            if not isinstance(content, str):
-                content = str(content)
-            usage = _as_mapping(getattr(response, "usage", None))
-            normalized_usage = {
-                str(key): int(value)
-                for key, value in usage.items()
-                if isinstance(value, (int, float))
-            }
+            content, normalized_usage, message = _normalize_chat_response(response)
             if span is not None:
                 span.set_outputs({"content": content})
                 if canonical_usage := _canonical_token_usage(normalized_usage):
@@ -226,8 +215,70 @@ class OpenAICompatibleChatModel:
             raw=response,
         )
 
+    def _build_request(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        temperature: float | None,
+        max_tokens: int | None,
+        tools: Sequence[Mapping[str, Any]] | None,
+        response_format: Mapping[str, Any] | None,
+        provider_options: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if tools and not self.capabilities.tool_calling:
+            raise UnsupportedCapabilityError(
+                f"{self.logical_name} does not support tool calling"
+            )
+        if response_format and not self.capabilities.structured_output:
+            raise UnsupportedCapabilityError(
+                f"{self.logical_name} does not support structured output"
+            )
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": list(messages),
+        }
+        optional_fields = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "tools": list(tools) if tools else None,
+            "response_format": dict(response_format) if response_format else None,
+        }
+        request.update(
+            {key: value for key, value in optional_fields.items() if value is not None}
+        )
+        self._add_provider_options(request, provider_options)
+        return request
+
+    @staticmethod
+    def _add_provider_options(
+        request: dict[str, Any],
+        provider_options: Mapping[str, Any] | None,
+    ) -> None:
+        if not provider_options:
+            return
+        collisions = set(provider_options) & _CONTROLLED_CHAT_OPTIONS
+        if collisions:
+            raise ProviderConfigurationError(
+                "provider_options cannot override controlled chat fields: "
+                f"{', '.join(sorted(collisions))}",
+                remediation="Use the corresponding generate() argument; "
+                "streaming remains available only through native_client.",
+            )
+        forbidden = set(provider_options) & _FORBIDDEN_PER_CALL_OPTIONS
+        if forbidden:
+            raise ProviderConfigurationError(
+                "Per-call provider headers and raw request bodies are not allowed",
+                remediation="Configure keyless authentication or a governed "
+                "secret reference on the provider client. Use explicit "
+                "generate() arguments for request fields; never pass "
+                "credentials or extra_body through provider_options.",
+            )
+        request.update(provider_options)
+
 
 class OpenAICompatibleEmbeddingProvider:
+    """Stable embedding adapter over an OpenAI-compatible native client."""
+
     def __init__(
         self,
         *,
@@ -276,12 +327,26 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
     if hasattr(value, "model_dump"):
-        return value.model_dump()
+        return cast(Mapping[str, Any], value.model_dump())
     return {
         key: getattr(value, key)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
         if hasattr(value, key)
     }
+
+
+def _normalize_chat_response(response: Any) -> tuple[str, dict[str, int], Any]:
+    message = response.choices[0].message
+    content = message.content or ""
+    if not isinstance(content, str):
+        content = str(content)
+    usage = _as_mapping(getattr(response, "usage", None))
+    normalized_usage = {
+        str(key): int(value)
+        for key, value in usage.items()
+        if isinstance(value, (int, float))
+    }
+    return content, normalized_usage, message
 
 
 def _canonical_token_usage(usage: Mapping[str, int]) -> dict[str, int]:

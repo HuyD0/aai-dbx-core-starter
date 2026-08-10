@@ -7,6 +7,7 @@ render matrix and generated-project quality tier are skipped when it is
 absent. All of it is credential-free.
 """
 
+import configparser
 import json
 import os
 import re
@@ -275,6 +276,10 @@ def test_template_deploy_workflow_is_pinned_and_environment_free(template: Path)
     assert "environment:" not in text
     release_gate = "databricks bundle run release_gate -t dev"
     app_deploy = "databricks bundle run agent_app -t dev"
+    if app_deploy not in text:
+        assert template.name == "rag-app"
+        assert not (template / "template" / "resources" / "agent_app.yml.tmpl").exists()
+        return
     assert text.index(release_gate) < text.index(app_deploy)
     assert "hashFiles('resources/agent_app.yml')" in text
     app_preflight = 'databricks apps get "$APP_NAME"'
@@ -285,6 +290,17 @@ def test_template_deploy_workflow_is_pinned_and_environment_free(template: Path)
 def test_template_makefile_uses_generated_virtual_environment(template: Path):
     makefile = template / "template" / "Makefile"
     assert "PYTHON ?= .venv/bin/python" in makefile.read_text()
+
+
+@pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
+def test_template_coverage_ratchet_is_branch_aware(template: Path):
+    policy = configparser.ConfigParser()
+    loaded = policy.read(template / "template" / ".coveragerc")
+
+    assert loaded
+    assert policy.getboolean("run", "branch")
+    assert policy.get("run", "source") == "app"
+    assert 80 <= policy.getint("report", "fail_under") <= 100
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
@@ -334,6 +350,9 @@ def test_template_schema_shared_contract(template: Path):
             "azure_ai_search",
             "databricks_ai_search",
         ]
+    if template.name == "rag-app":
+        assert properties["prompt_version"]["pattern"] == "^[1-9][0-9]*$"
+        assert properties["knowledge_version"]["maxLength"] == 128
 
 
 # ---------------------------------------------------------------- render tier
@@ -343,6 +362,8 @@ def test_template_schema_shared_contract(template: Path):
 @pytest.mark.parametrize("template,combo", all_combo_params())
 def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
     output = render(template, combo, tmp_path_factory)
+
+    assert (output / ".coveragerc").is_file()
 
     # T1: no unrendered template markers anywhere.
     for path in output.rglob("*"):
@@ -365,6 +386,17 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
         assert not re.search(
             r"(?:^|[-_/])(first|test-\d+|experiment-\d+)(?:$|[-_/])",
             experiment_name.lower(),
+        )
+        validation_environment = dict(os.environ)
+        validation_environment["PYTHONPATH"] = str(ROOT / "src")
+        subprocess.run(
+            [sys.executable, str(output / "scripts" / "validate_project.py")],
+            check=True,
+            cwd=output,
+            env=validation_environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
 
     # T3: generated CI stays credential-free; deploy keeps GitHub expressions.
@@ -424,8 +456,21 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
 
     if template.name == "agent-app":
         readme = (output / "README.md").read_text()
+        makefile = (output / "Makefile").read_text()
         assert bundle["variables"]["prompt_version"]["default"] == "1"
+        assert bundle["variables"]["source_commit"]["default"] == "local-dev"
+        assert bundle["variables"]["source_state"]["default"] == "unknown"
         assert stamp["generated_with"]["prompt_version"] == "1"
+        assert "PROMPT_VERSION ?=" in makefile
+        assert '--prompt-version "$(PROMPT_VERSION)"' in makefile
+        help_result = subprocess.run(
+            ["make", "-s", "help"],
+            cwd=output,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "PROMPT_VERSION=<version>" in help_result.stdout
         release_gate = yaml.safe_load(
             (output / "resources" / "agent_job.yml").read_text()
         )["resources"]["jobs"]["release_gate"]
@@ -433,6 +478,19 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
             "--prompt-version",
             "${var.prompt_version}",
         ]
+        assert release_gate["job_clusters"][0]["new_cluster"]["spark_env_vars"] == {
+            "GIT_COMMIT": "${var.source_commit}",
+            "GIT_DIRTY": "${var.source_state}",
+        }
+        deploy_workflow = (output / ".github/workflows/deploy.yml").read_text()
+        assert "Verify source checkout provenance" in deploy_workflow
+        assert "git status --porcelain --untracked-files=normal" in deploy_workflow
+        assert "BUNDLE_VAR_source_commit: ${{ github.sha }}" in deploy_workflow
+        assert 'BUNDLE_VAR_source_state: "false"' in deploy_workflow
+        assert (
+            "${bundle.git.commit}"
+            not in (output / "resources" / "agent_job.yml").read_text()
+        )
         app_resource = output / "resources" / "agent_app.yml"
         if app_resource.is_file():
             application = yaml.safe_load(app_resource.read_text())["resources"]["apps"][
@@ -455,32 +513,109 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
             assert "databricks bundle run agent_app -t dev" not in readme
             assert "Serving resources were intentionally omitted" in readme
 
+    _assert_rag_release_contract(template, output, bundle, stamp)
+
+
+def _assert_rag_release_contract(
+    template: Path, output: Path, bundle: dict, stamp: dict
+) -> None:
+    if template.name != "rag-app":
+        return
+    readme = (output / "README.md").read_text()
+    makefile = (output / "Makefile").read_text()
+    assert bundle["variables"]["prompt_version"]["default"] == "1"
+    assert bundle["variables"]["knowledge_version"]["default"] == (
+        "replace-with-knowledge-version"
+    )
+    assert bundle["variables"]["source_commit"]["default"] == "local-dev"
+    assert bundle["variables"]["source_state"]["default"] == "unknown"
+    assert stamp["generated_with"]["prompt_version"] == "1"
+    assert stamp["generated_with"]["knowledge_version"] == (
+        "replace-with-knowledge-version"
+    )
+    assert "PROMPT_VERSION ?=" in makefile
+    assert "KNOWLEDGE_VERSION ?=" in makefile
+    help_result = subprocess.run(
+        ["make", "-s", "help"],
+        cwd=output,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "PROMPT_VERSION=<n>" in help_result.stdout
+    assert "KNOWLEDGE_VERSION=<id>" in help_result.stdout
+    release_gate = yaml.safe_load((output / "resources" / "rag_job.yml").read_text())[
+        "resources"
+    ]["jobs"]["release_gate"]
+    evaluate_task = next(
+        task for task in release_gate["tasks"] if task["task_key"] == "evaluate"
+    )
+    assert evaluate_task["spark_python_task"]["parameters"] == [
+        "--prompt-version",
+        "${var.prompt_version}",
+        "--knowledge-version",
+        "${var.knowledge_version}",
+    ]
+    assert release_gate["job_clusters"][0]["new_cluster"]["spark_env_vars"] == {
+        "GIT_COMMIT": "${var.source_commit}",
+        "GIT_DIRTY": "${var.source_state}",
+    }
+    deploy_workflow = (output / ".github/workflows/deploy.yml").read_text()
+    assert "Verify source checkout provenance" in deploy_workflow
+    assert "git status --porcelain --untracked-files=normal" in deploy_workflow
+    assert "BUNDLE_VAR_source_commit: ${{ github.sha }}" in deploy_workflow
+    assert 'BUNDLE_VAR_source_state: "false"' in deploy_workflow
+    assert "--knowledge-version <knowledge-version>" in readme
+    assert "--evaluation-run <run-id>" in readme
+
 
 @requires_cli
-@pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
+@pytest.mark.generated_project
+@pytest.mark.parametrize("template,combo", all_combo_params())
 def test_generated_project_quality(
-    template: Path, tmp_path_factory, packaged_sdk_python: Path
+    template: Path,
+    combo: dict,
+    tmp_path_factory,
+    packaged_sdk_python: Path,
 ):
-    """Deep tier on each template's first combo: lint, unit tests, and the
-    offline release-gate checks of the generated project."""
+    """Run the deep credential-free quality tier on every semantic render."""
 
-    combo = combos_for(template)[0]
     output = render(template, combo, tmp_path_factory)
     environment = dict(os.environ)
     # Only application source is added. aai-core must come from the candidate
     # wheel installed by packaged_sdk_python, never ROOT/src.
     environment["PYTHONPATH"] = str(output / "src")
     for command in (
+        [str(packaged_sdk_python), str(output / "scripts" / "validate_project.py")],
         [str(packaged_sdk_python), "-m", "ruff", "check", "."],
         [str(packaged_sdk_python), "-m", "black", "--check", "."],
         [
             str(packaged_sdk_python),
             "-m",
+            "mypy",
+            "--ignore-missing-imports",
+            "--check-untyped-defs",
+            "--disallow-incomplete-defs",
+            "--disallow-untyped-defs",
+            "src/app",
+        ],
+        [
+            str(packaged_sdk_python),
+            "-m",
             "pytest",
             "-q",
+            "--cov=app",
+            "--cov-report=term-missing",
             str(output / "tests"),
         ],
         [str(packaged_sdk_python), str(output / "evals" / "offline_checks.py")],
+        [
+            str(packaged_sdk_python),
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+        ],
     ):
         subprocess.run(command, check=True, cwd=output, env=environment)
 

@@ -1,12 +1,12 @@
 """Credential-free regression tests for the platform's security boundaries."""
 
-import ast
 import asyncio
 import importlib.util
 import json
 import os
 import re
 import runpy
+import socket
 import subprocess
 import sys
 from ast import PyCF_ALLOW_TOP_LEVEL_AWAIT
@@ -18,6 +18,45 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+ADVANCED_SUPPORT_BY_NOTEBOOK = {
+    "07_first_llm_call.ipynb": ("connected_llm.py",),
+    "08_tool_trajectory_evaluation.ipynb": ("agent_assurance.py",),
+    "09_multi_turn_session_evaluation.ipynb": ("agent_assurance.py",),
+    "10_layered_judges.ipynb": ("agent_assurance.py",),
+    "11_cost_quality_tradeoff.ipynb": ("cost_quality.py",),
+    "12_agent_alignment_optimization.ipynb": ("optimization.py",),
+    "13_compare_and_select_llms.ipynb": ("model_selection.py",),
+}
+
+
+def advanced_implementation_source(notebook_name):
+    """Return a thin lesson together with the mechanics it invokes."""
+
+    sources = [(ROOT / "examples" / notebook_name).read_text(encoding="utf-8")]
+    sources.extend(
+        (ROOT / "examples" / "support" / helper).read_text(encoding="utf-8")
+        for helper in ADVANCED_SUPPORT_BY_NOTEBOOK[notebook_name]
+    )
+    return "\n".join(sources)
+
+
+def deny_example_credentials_and_network(monkeypatch):
+    for name in (
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
+        "DATABRICKS_CLIENT_SECRET",
+        "DATABRICKS_HOST",
+        "DATABRICKS_TOKEN",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def unexpected_network(*args, **kwargs):
+        raise AssertionError(f"credential-free example attempted network I/O: {args}")
+
+    monkeypatch.setattr(socket, "create_connection", unexpected_network)
+
 
 # The identifier-stamping map lives in the sync script; loading it here keeps the
 # check and the writer from drifting apart.
@@ -56,7 +95,7 @@ def test_learning_artifacts_have_one_contiguous_numbered_order():
     )
 
     assert [path.name[:2] for path in artifacts] == [
-        f"{number:02d}" for number in range(13)
+        f"{number:02d}" for number in range(14)
     ]
     assert all(
         not re.match(r"\d{2}_", helper)
@@ -74,6 +113,7 @@ def test_all_numbered_example_notebooks_are_safe_clean_and_compilable():
         "10_layered_judges.ipynb",
         "11_cost_quality_tradeoff.ipynb",
         "12_agent_alignment_optimization.ipynb",
+        "13_compare_and_select_llms.ipynb",
     ]
 
     for path in notebooks:
@@ -102,15 +142,200 @@ def test_all_numbered_example_notebooks_are_safe_clean_and_compilable():
             )
 
 
+def test_advanced_notebook_cells_keep_one_teaching_step_visible():
+    required_metadata = {
+        "id",
+        "audience",
+        "level",
+        "prerequisites",
+        "duration_minutes",
+        "execution_modes",
+        "objectives",
+        "evidence",
+        "cleanup",
+        "next_lesson",
+    }
+    for number in range(7, 14):
+        path = next((ROOT / "examples").glob(f"{number:02d}_*.ipynb"))
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        assert required_metadata <= notebook["metadata"]["aai_lesson"].keys()
+        for cell in notebook["cells"]:
+            if cell["cell_type"] != "code":
+                continue
+            nonblank_lines = sum(
+                bool(line.strip()) for line in "".join(cell["source"]).splitlines()
+            )
+            tags = cell.get("metadata", {}).get("tags", [])
+            maximum = 40 if "setup" in tags or cell["id"] == "setup-code" else 25
+            assert nonblank_lines <= maximum, (
+                f"{path.name}:{cell['id']} has {nonblank_lines} nonblank lines; "
+                f"maximum is {maximum}"
+            )
+
+
+def test_model_selection_workshop_has_the_required_interactive_pattern():
+    notebook = json.loads(
+        (ROOT / "examples" / "13_compare_and_select_llms.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    markdown_source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "markdown"
+    )
+
+    assert markdown_source.startswith(
+        "# Comparing and Selecting LLMs for Enterprise Processes"
+    )
+    assert "Estimated duration:" in markdown_source
+    assert "## Module Guide" in markdown_source
+    assert "## Learning Objectives" in markdown_source
+    assert "%pip install" in source
+    assert "get_ipython().run_line_magic" in source
+    assert "configured keyless identity" in source
+    assert "keyvault://" in source
+    assert "databricks-secret://" in source
+    assert "simulated_offline_fixture" in source
+    assert markdown_source.count("**Practical Application.**") == 4
+
+    required_headings = (
+        "Routing 2 Models through a Golden Dataset",
+        "Automating Side-by-Side Scoring with LLM-as-a-Judge",
+        "Evaluating TCO & Token Economics",
+        "Enterprise Governance & Liability Checks",
+    )
+    assert all(heading in markdown_source for heading in required_headings)
+
+    concept_indexes = []
+    for index, cell in enumerate(notebook["cells"]):
+        tags = cell.get("metadata", {}).get("tags", [])
+        if "concept" in tags:
+            concept_indexes.append(index)
+            concept_source = "".join(cell.get("source", []))
+            assert "| Strategy | Best use case | Weak point |" in concept_source
+    assert len(concept_indexes) == 4
+
+    expected_sequence = (
+        "concept",
+        "working-example",
+        "exercise",
+        "reference-solution",
+        "verification",
+    )
+    for concept_index in concept_indexes:
+        cells = notebook["cells"][concept_index : concept_index + 5]
+        assert len(cells) == len(expected_sequence)
+        for cell, expected_tag in zip(cells, expected_sequence, strict=True):
+            assert expected_tag in cell.get("metadata", {}).get("tags", [])
+
+    solutions = [
+        cell
+        for cell in notebook["cells"]
+        if "reference-solution" in cell.get("metadata", {}).get("tags", [])
+    ]
+    verifications = [
+        cell
+        for cell in notebook["cells"]
+        if "verification" in cell.get("metadata", {}).get("tags", [])
+    ]
+    assert len(solutions) == len(verifications) == 4
+    assert "TODO" not in source
+    assert "NotImplementedError" not in source
+    assert all(
+        "".join(cell.get("source", [])).startswith("# Verification -- do not modify")
+        and "assert " in "".join(cell.get("source", []))
+        for cell in verifications
+    )
+
+    workshop = json.loads(
+        (
+            ROOT
+            / "examples"
+            / "workshops"
+            / "13_compare_and_select_llms_exercises.ipynb"
+        ).read_text(encoding="utf-8")
+    )
+    workshop_stubs = [
+        cell
+        for cell in workshop["cells"]
+        if "exercise-stub" in cell.get("metadata", {}).get("tags", [])
+    ]
+    assert len(workshop_stubs) == 4
+    assert all(
+        "TODO" in "".join(cell.get("source", []))
+        and "NotImplementedError" in "".join(cell.get("source", []))
+        for cell in workshop_stubs
+    )
+
+
+def test_model_selection_working_examples_execute_without_credentials(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT))
+    deny_example_credentials_and_network(monkeypatch)
+    notebook = json.loads(
+        (ROOT / "examples" / "13_compare_and_select_llms.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    working_cells = [
+        cell
+        for cell in notebook["cells"]
+        if "working-example" in cell.get("metadata", {}).get("tags", [])
+    ]
+    assert len(working_cells) == 4
+    for repeat in range(2):
+        for cell in working_cells:
+            namespace = {"__name__": f"notebook_{cell['id']}_{repeat}"}
+            exec(
+                compile(
+                    "".join(cell.get("source", [])),
+                    f"13_compare_and_select_llms.ipynb:{cell['id']}",
+                    "exec",
+                ),
+                namespace,
+            )
+
+    solution_indexes = [
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if "reference-solution" in cell.get("metadata", {}).get("tags", [])
+    ]
+    assert len(solution_indexes) == 4
+    for index in solution_indexes:
+        namespace = {"__name__": f"notebook_{notebook['cells'][index]['id']}"}
+        for cell in notebook["cells"][index : index + 2]:
+            exec(
+                compile(
+                    "".join(cell.get("source", [])),
+                    f"13_compare_and_select_llms.ipynb:{cell['id']}",
+                    "exec",
+                ),
+                namespace,
+            )
+
+
 def test_advanced_notebooks_preserve_release_guardrails():
     sources = {
-        path.name: path.read_text(encoding="utf-8")
+        path.name: advanced_implementation_source(path.name)
         for path in (ROOT / "examples").glob("*.ipynb")
+        if path.name in ADVANCED_SUPPORT_BY_NOTEBOOK
     }
 
     trajectory = sources["08_tool_trajectory_evaluation.ipynb"]
     assert "right-answer-wrong-trajectory" in trajectory
+    assert "correct-tool-failed-safe-fallback" in trajectory
     assert "tool_trajectory_exact" in trajectory
+    assert "decision_action_consistency" in trajectory
+    assert "decision_tool_appropriateness" in trajectory
+    assert "safe_fallback_observed" in trajectory
+    assert "assurance_report" in trajectory
+    assert "operations_evidence" in trajectory
+    assert "not a fabricated MLflow trace" in trajectory
+    assert "does not claim" in trajectory
+    assert "default recovery" in trajectory
+    assert "mlflow.start_span(" not in trajectory
+    assert "@mlflow.trace" not in trajectory
     assert "TraceIntegration.MLFLOW_LANGCHAIN" in trajectory
 
     multi_turn = sources["09_multi_turn_session_evaluation.ipynb"]
@@ -120,9 +345,9 @@ def test_advanced_notebooks_preserve_release_guardrails():
     assert "predict_fn=" not in multi_turn
 
     judges = sources["10_layered_judges.ipynb"]
-    assert 'source_id=\\"group:domain-reviewers\\"' in judges
+    assert 'source_id="group:domain-reviewers"' in judges
     assert "MINIMUM_TOTAL_LABELS = 50" in judges
-    assert '\\"report_only\\"' in judges
+    assert '"report_only"' in judges
 
     cost = sources["11_cost_quality_tradeoff.ipynb"]
     assert "target_inference_cost_usd" in cost
@@ -133,18 +358,216 @@ def test_advanced_notebooks_preserve_release_guardrails():
     optimization = sources["12_agent_alignment_optimization.ipynb"]
     assert "RUN_EXPERIMENTAL_OPTIMIZATION = False" in optimization
     assert "active_prompt = mlflow.genai.load_prompt(prompt_uri)" in optimization
-    assert 'train_data=datasets[\\"optimizer_training\\"]' in optimization
-    assert 'data=datasets[\\"held_out_release\\"]' in optimization
+    assert 'train_data=datasets["optimizer_training"]' in optimization
+    assert 'dataset=datasets["held_out_release"]' in optimization
+    assert "data=dataset" in optimization
     assert "optimization_result.optimized_prompts[0]" in optimization
     assert "link_prompt_versions_to_trace(" in optimization
     assert "max_metric_calls" in optimization
     assert "set_prompt_alias" not in optimization
 
 
+def test_tool_trajectory_fixture_separates_decisions_execution_and_assessment():
+    pytest.importorskip("pandas")
+    notebook = json.loads(
+        (ROOT / "examples" / "08_tool_trajectory_evaluation.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    namespace = {"__name__": "notebook_tool_trajectory_assurance"}
+    for index, cell in enumerate(notebook["cells"]):
+        if cell["cell_type"] != "code":
+            continue
+        exec(
+            compile(
+                "".join(cell.get("source", [])),
+                f"08_tool_trajectory_evaluation.ipynb:code-cell-{index}",
+                "exec",
+            ),
+            namespace,
+        )
+
+    report = namespace["trajectory_report"].set_index("case_id")
+    assurance_report = namespace["assurance_report"].set_index("case_id")
+    wrong_path = report.loc["right-answer-wrong-trajectory"]
+    safe_fallback = report.loc["correct-tool-failed-safe-fallback"]
+
+    assert len(namespace["EVAL_CASES"]) == 3
+    assert report["final_answer_correct"].tolist() == [True, True, True]
+    assert report["decision_action_consistency"].tolist() == [True, True, True]
+    assert report["decision_tool_appropriateness"].tolist() == [True, False, True]
+    assert report["tool_trajectory_exact"].tolist() == [True, False, True]
+    assert report["tool_execution_succeeded"].tolist() == [True, True, False]
+    assert report["safe_fallback_observed"].tolist() == [True, True, True]
+    assert report["operations_evidence"].tolist() == [
+        "partial",
+        "partial",
+        "partial",
+    ]
+    assert assurance_report["outcome_assessment"].tolist() == [
+        "PASS",
+        "PASS",
+        "PASS",
+    ]
+    assert assurance_report["behavior_assessment"].tolist() == [
+        "PASS",
+        "FAIL",
+        "PASS",
+    ]
+    assert assurance_report["operations_assessment"].tolist() == [
+        "PASS",
+        "PASS",
+        "FAIL",
+    ]
+    assert bool(wrong_path["final_answer_correct"])
+    assert bool(wrong_path["decision_action_consistency"])
+    assert not bool(wrong_path["decision_tool_appropriateness"])
+    assert not bool(wrong_path["tool_trajectory_exact"])
+    assert not bool(safe_fallback["tool_execution_succeeded"])
+    assert bool(safe_fallback["decision_tool_appropriateness"])
+    assert bool(safe_fallback["safe_fallback_observed"])
+
+    reordered_fallback_case = json.loads(json.dumps(namespace["EVAL_CASES"][2]))
+    reordered_events = reordered_fallback_case["observed"]["trajectory_events"]
+    reordered_events[2], reordered_events[3] = reordered_events[3], reordered_events[2]
+    reordered_score = namespace["score_case"](reordered_fallback_case)
+    assert not reordered_score["safe_fallback_observed"]
+    assert reordered_score["behavior_assessment"] == "FAIL"
+
+    no_operations_case = json.loads(json.dumps(namespace["EVAL_CASES"][0]))
+    no_operations_case["observed"]["tool_results"] = []
+    no_operations_score = namespace["score_case"](no_operations_case)
+    assert no_operations_score["operations_evidence"] == "unknown"
+    assert no_operations_score["operations_assessment"] == "UNKNOWN"
+    assert not no_operations_score["tool_execution_succeeded"]
+
+    for case in namespace["EVAL_CASES"]:
+        decision_types = [
+            decision["decision_type"] for decision in case["agent_decisions"]
+        ]
+        if case["case_id"] == "correct-tool-failed-safe-fallback":
+            assert decision_types == ["tool_selection", "fallback", "answer_readiness"]
+            assert case["observed"]["tool_results"] == [
+                {
+                    "name": "lookup_earnings_source",
+                    "status": "error",
+                    "error_type": "SourceUnavailable",
+                }
+            ]
+            fallback_reason = case["agent_decisions"][1]["reason"]
+            assert "SourceUnavailable" in fallback_reason
+            assert "succeed" not in fallback_reason.lower()
+        else:
+            assert decision_types == ["tool_selection", "evidence_sufficiency"]
+        assert all(value is None for value in case["observed"]["operations"].values())
+
+
+def test_agent_behavior_assurance_teaching_keeps_evidence_layers_separate():
+    sources = (
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "examples" / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "examples" / "08_tool_trajectory_evaluation.ipynb").read_text(
+            encoding="utf-8"
+        ),
+    )
+
+    for source in sources:
+        assert "Outcome" in source
+        assert "Behavior" in source
+        assert "Operations" in source
+        assert "Optional internal diagnostics" in source
+        assert "Assessment" in source
+        assert "chain-of-thought" in source
+
+    for source in sources[:2]:
+        assert "Code tells us what could happen" in source
+        assert re.search(r"runtime\s+agent decision", source)
+        assert "lifecycle" in source
+
+
+def test_assurance_docs_keep_mlflow_authoritative_and_production_cases_reviewed():
+    sources = (
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "docs" / "developer-guide.md").read_text(encoding="utf-8"),
+        (ROOT / "examples" / "README.md").read_text(encoding="utf-8"),
+    )
+
+    for source in sources:
+        assert "authoritative assurance" in source
+        assert "Application Insights" in source
+        assert "EvaluationDataset" in source
+        assert "Feedback" in source
+        assert "unreviewed" in source or "human review" in source
+
+    developer_guide = sources[1]
+    assert "invoke_agent" in developer_guide
+    assert re.search(r"direct\s+sibling children", developer_guide)
+    assert "execute_tool" in developer_guide
+    assert "renewable" in developer_guide
+
+
+def test_agent_monitoring_fails_closed_before_managed_preflight():
+    notebook = (
+        ROOT
+        / "templates"
+        / "agent-app"
+        / "template"
+        / "notebooks"
+        / "02_enable_monitoring.py"
+    ).read_text(encoding="utf-8")
+    readme = (
+        ROOT / "templates" / "agent-app" / "template" / "README.md.tmpl"
+    ).read_text(encoding="utf-8")
+
+    for source in (notebook, readme):
+        assert "Production Monitoring (Beta)" in source
+        assert "serverless budget policy" in source
+        assert re.search(r"SQL\s+warehouse", source)
+        assert "Unity Catalog" in source
+        assert re.search(r"trace-table\s+permissions", source)
+
+    assert "MANAGED_MONITORING_PREFLIGHT_COMPLETE = False" in notebook
+    preflight_call = notebook.index(
+        "require_managed_monitoring_preflight(MANAGED_MONITORING_PREFLIGHT_COMPLETE)"
+    )
+    assert preflight_call < notebook.rindex(".register(")
+    assert preflight_call < notebook.rindex(".start(")
+    assert "does not enable Beta" in readme
+    assert "does not provision them" in notebook
+    for source in (notebook, readme):
+        assert re.search(r"receives (?:the )?(?:sampled )?trace", source)
+        assert "benchmark" in source
+        assert "expectations" in source
+        assert "decision_action_consistency" in source
+        assert "self-contained" in source
+        assert "@scorer" in source
+        assert "decision_tool_appropriateness" in source
+        assert "cannot be registered unchanged" in source
+    assert "from app.tool_scoring import" not in notebook
+
+
+def test_trace_to_dataset_teaching_uses_reviewed_native_mlflow_boundary():
+    template_readme = (
+        ROOT / "templates" / "agent-app" / "template" / "README.md.tmpl"
+    ).read_text(encoding="utf-8")
+    lifecycle = (ROOT / "docs" / "genai-lifecycle.md").read_text(encoding="utf-8")
+
+    for source in (template_readme, lifecycle):
+        assert "no public `promote_trace`" in source
+        assert "dataset.merge_records(reviewed_traces)" in source
+        assert re.search(r"root\s+inputs/outputs", source)
+        assert re.search(r"expectation\s+Assessments", source)
+        assert re.search(r"source\s+trace/session lineage", source)
+        assert re.search(r"full\s+span tree", source)
+        assert "expected_tool_calls" in source
+        assert "live-validate" in source
+
+
 def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
     sources = {
-        path.name: path.read_text(encoding="utf-8")
+        path.name: advanced_implementation_source(path.name)
         for path in (ROOT / "examples").glob("*.ipynb")
+        if path.name in ADVANCED_SUPPORT_BY_NOTEBOOK
     }
 
     for notebook_name in (
@@ -157,7 +580,7 @@ def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
     ):
         source = sources[notebook_name]
         assert "get_or_create_uc_evaluation_dataset(" in source
-        assert "mlflow.log_input(" in source
+        assert re.search(r"mlflow(?:_module)?\.log_input\(", source)
         assert "description=(" in source
 
     assert (
@@ -178,27 +601,29 @@ def test_advanced_notebooks_offer_governed_dataset_and_run_evidence():
         in sources["11_cost_quality_tradeoff.ipynb"]
     )
     optimization = sources["12_agent_alignment_optimization.ipynb"]
-    assert 'dataset_name=f\\"fictional_{split}_v1\\"' in optimization
+    assert 'dataset_name=f"fictional_{split}_v1"' in optimization
     for split in ("judge_calibration", "optimizer_training", "held_out_release"):
-        assert f'\\"{split}\\"' in optimization
+        assert f'"{split}"' in optimization
 
 
-def test_advanced_notebooks_run_all_on_the_credential_free_default_path():
+def test_advanced_notebooks_run_all_on_the_credential_free_default_path(monkeypatch):
     pytest.importorskip("pandas")
+    deny_example_credentials_and_network(monkeypatch)
     for path in sorted((ROOT / "examples").glob("0[89]_*.ipynb")) + sorted(
         (ROOT / "examples").glob("1[0-2]_*.ipynb")
     ):
         notebook = json.loads(path.read_text(encoding="utf-8"))
-        namespace = {"__name__": f"notebook_{path.stem}"}
-        for index, cell in enumerate(notebook["cells"]):
-            if cell["cell_type"] != "code":
-                continue
-            code = compile(
-                "".join(cell.get("source", [])),
-                f"{path.name}:code-cell-{index}",
-                "exec",
-            )
-            exec(code, namespace)
+        for repeat in range(2):
+            namespace = {"__name__": f"notebook_{path.stem}_{repeat}"}
+            for index, cell in enumerate(notebook["cells"]):
+                if cell["cell_type"] != "code":
+                    continue
+                code = compile(
+                    "".join(cell.get("source", [])),
+                    f"{path.name}:code-cell-{index}",
+                    "exec",
+                )
+                exec(code, namespace)
 
 
 def test_offline_example_runs_with_zero_credentials():
@@ -243,6 +668,7 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     markdown_source = "\n".join(markdown_cells)
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
     code_source = "\n".join("".join(cell.get("source", [])) for cell in code_cells)
+    implementation_source = advanced_implementation_source("07_first_llm_call.ipynb")
     cell_ids = [cell.get("id") for cell in notebook["cells"]]
     assert all(cell_ids)
     assert len(cell_ids) == len(set(cell_ids))
@@ -255,27 +681,33 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert 'context.providers.model("general-chat")' in setup_helper_source
     assert "subprocess.run(" not in code_source
     assert "workspace.serving_endpoints.list()" not in code_source
-    assert "integration=TraceIntegration.MLFLOW_OPENAI" in source
-    assert "capture_mode=TraceCaptureMode.FULL" in source
-    assert "model.create_native_async_client()" in source
-    assert "native_async_client.chat.completions.create(" in source
-    assert 'stream_options={"include_usage": True}' in code_source
-    assert "await stream.close()" in code_source
-    assert "link_prompt_versions_to_trace(" in source
+    assert "integration=TraceIntegration.MLFLOW_OPENAI" in implementation_source
+    assert "capture_mode=TraceCaptureMode.FULL" in implementation_source
+    assert "model.create_native_async_client()" in implementation_source
+    assert "native_async_client.chat.completions.create(" in implementation_source
+    assert 'stream_options={"include_usage": True}' in implementation_source
+    assert "await stream.close()" in implementation_source
+    assert "link_prompt_versions_to_trace(" in implementation_source
     assert 'application_span.set_attribute("mlflow.message.format", "openai")' in (
-        source
+        implementation_source
     )
-    assert 'application_span.set_outputs({"content": content})' in source
-    assert "mlflow.update_current_trace(request_preview=rendered_prompt)" in source
-    assert "mlflow.update_current_trace(response_preview=content)" in source
-    assert '@traced(name=\\"earnings_summary.prompt_evaluation' not in source
-    assert "mlflow.log_input(registered_dataset" in source
-    assert 'trace_metadata.get("mlflow.sourceRun")' in code_source
-    assert "client.search_traces(" in code_source
-    assert "include_spans=False" in code_source
-    assert 'trace_metadata.get("mlflow.trace.sizeStats"' in code_source
-    assert 'lineage_tags.get("mlflow.linkedPrompts"' in code_source
-    assert 'client.get_run(record["run_id"])' in code_source
+    assert 'application_span.set_outputs({"content": content})' in implementation_source
+    assert "mlflow_module.update_current_trace(request_preview=rendered_prompt)" in (
+        implementation_source
+    )
+    assert "mlflow_module.update_current_trace(response_preview=content)" in (
+        implementation_source
+    )
+    assert (
+        '@traced(name="earnings_summary.prompt_evaluation' not in implementation_source
+    )
+    assert "mlflow_module.log_input(registered_dataset" in implementation_source
+    assert 'trace_metadata.get("mlflow.sourceRun")' in implementation_source
+    assert "client.search_traces(" in implementation_source
+    assert "include_spans=False" in implementation_source
+    assert 'get("mlflow.trace.sizeStats", "{}")' in implementation_source
+    assert 'lineage_tags.get("mlflow.linkedPrompts"' in implementation_source
+    assert 'client.get_run(record["run_id"])' in implementation_source
 
     mermaid_blocks = re.findall(
         r"```mermaid\n(.*?)```",
@@ -338,19 +770,19 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert "baseline-earnings-summary-prompt-v1" in source
     assert "change-cited-earnings-summary-prompt-v2" in source
     assert "fictional-earnings-summary-regression-v1" in source
-    assert "earnings_excerpt" in code_source
-    assert "source_id" in code_source
+    assert "earnings_excerpt" in implementation_source
+    assert "source_id" in implementation_source
     assert "len(CASES) * 2" in code_source
-    assert "fact_coverage" in code_source
-    assert "citation" in code_source
-    assert "recommendation_policy" in code_source
-    assert "latency" in code_source
-    assert "input_tokens" in code_source
-    assert "output_tokens" in code_source
-    assert "cost_coverage" in code_source
+    assert "fact_coverage" in implementation_source
+    assert "citation" in implementation_source
+    assert "recommendation_policy" in implementation_source
+    assert "latency" in implementation_source
+    assert "input_tokens" in implementation_source
+    assert "output_tokens" in implementation_source
+    assert "cost_coverage" in implementation_source
 
-    assert code_source.count(".load(") >= 2
-    assert code_source.count("version=int(") >= 2
+    assert implementation_source.count(".load(") >= 1
+    assert implementation_source.count("version=int(") >= 1
     assert "loaded_baseline" in code_source
     assert "loaded_change" in code_source
     assert "PUBLISH_PROMPTS_TO_DATABRICKS = False" in code_source
@@ -374,7 +806,7 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
     assert "workspace.current_user.me()" in setup_helper_source
     assert "workspace.serving_endpoints.get(deployment)" in setup_helper_source
     assert "_ready_chat_endpoints(workspace)" in setup_helper_source
-    assert "CAN_QUERY" in source
+    assert "CAN_QUERY" in implementation_source
     assert "DATABRICKS_TOKEN" not in source
     assert "AZURE_CLIENT_SECRET" not in source
 
@@ -386,7 +818,7 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
         "cannot authorize release",
         "Only prompt storage changes here",
     ):
-        assert intent_comment in code_source
+        assert intent_comment in implementation_source
     assert all(cell["execution_count"] is None for cell in code_cells)
     assert all(cell["outputs"] == [] for cell in code_cells)
     for index, cell in enumerate(code_cells):
@@ -398,115 +830,102 @@ def test_first_llm_notebook_is_valid_safe_and_output_free():
         )
 
 
-def test_first_llm_trace_displays_content_without_losing_telemetry():
-    notebook = json.loads(
-        (ROOT / "examples" / "07_first_llm_call.ipynb").read_text(encoding="utf-8")
-    )
-    source = next(
-        "".join(cell["source"])
-        for cell in notebook["cells"]
-        if cell.get("id") == "ab-code"
-    )
-    tree = ast.parse(source)
-    functions = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"response_text", "invoke_prompt"}
-    ]
+class _TraceNotebookSpan:
+    def __init__(self):
+        self.attributes = {}
+        self.inputs = None
+        self.outputs = None
 
-    class FakeSpan:
-        def __init__(self):
-            self.attributes = {}
-            self.inputs = None
-            self.outputs = None
+    def set_attribute(self, name, value):
+        self.attributes[name] = value
 
-        def set_attribute(self, name, value):
-            self.attributes[name] = value
+    def set_inputs(self, value):
+        self.inputs = value
 
-        def set_inputs(self, value):
-            self.inputs = value
+    def set_outputs(self, value):
+        self.outputs = value
 
-        def set_outputs(self, value):
-            self.outputs = value
 
-    class FakeMlflow:
-        def __init__(self):
-            self.span = FakeSpan()
-            self.trace_updates = []
+class _TraceNotebookMlflow:
+    def __init__(self):
+        self.span = _TraceNotebookSpan()
+        self.trace_updates = []
 
-        @contextmanager
-        def start_span(self, **kwargs):
-            assert kwargs == {
-                "name": "earnings_summary.prompt_evaluation",
-                "span_type": "CHAIN",
-            }
-            yield self.span
+    @contextmanager
+    def start_span(self, **kwargs):
+        assert kwargs == {
+            "name": "earnings_summary.prompt_evaluation",
+            "span_type": "CHAIN",
+        }
+        yield self.span
 
-        def update_current_trace(self, **kwargs):
-            self.trace_updates.append(kwargs)
+    def update_current_trace(self, **kwargs):
+        self.trace_updates.append(kwargs)
 
-    class FakeStream:
-        def __init__(self):
-            self.closed = False
-            self.events = iter(
-                [
-                    SimpleNamespace(
-                        model="served-model",
-                        usage=SimpleNamespace(
-                            model_dump=lambda: {
-                                "prompt_tokens": 8,
-                                "completion_tokens": 3,
-                            }
-                        ),
-                        choices=[
-                            SimpleNamespace(
-                                delta=SimpleNamespace(content="assistant answer")
-                            )
-                        ],
-                    )
-                ]
-            )
 
-        def __aiter__(self):
-            return self
+class _TraceNotebookStream:
+    def __init__(self):
+        self.closed = False
+        self.events = iter(
+            [
+                SimpleNamespace(
+                    model="served-model",
+                    usage=SimpleNamespace(
+                        model_dump=lambda: {
+                            "prompt_tokens": 8,
+                            "completion_tokens": 3,
+                        }
+                    ),
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="assistant answer")
+                        )
+                    ],
+                )
+            ]
+        )
 
-        async def __anext__(self):
-            try:
-                return next(self.events)
-            except StopIteration as error:
-                raise StopAsyncIteration from error
+    def __aiter__(self):
+        return self
 
-        async def close(self):
-            self.closed = True
+    async def __anext__(self):
+        try:
+            return next(self.events)
+        except StopIteration as error:
+            raise StopAsyncIteration from error
 
-    stream = FakeStream()
+    async def close(self):
+        self.closed = True
+
+
+class _FailingTraceNotebookStream(_TraceNotebookStream):
+    async def __anext__(self):
+        raise RuntimeError("synthetic stream failure")
+
+
+def test_first_llm_trace_displays_content_without_losing_telemetry(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT))
+    from examples.support import connected_llm
+
+    stream = _TraceNotebookStream()
     native_client = SimpleNamespace(
         chat=SimpleNamespace(
             completions=SimpleNamespace(create=lambda **kwargs: _async_value(stream))
         )
     )
-    fake_mlflow = FakeMlflow()
-    namespace = {
-        "mlflow": fake_mlflow,
-        "model": SimpleNamespace(model="configured-model"),
-        "ctx": SimpleNamespace(tags=SimpleNamespace()),
-        "monotonic": __import__("time").monotonic,
-        "set_trace_resource_context": lambda context: None,
-    }
-    exec(
-        compile(
-            ast.Module(body=functions, type_ignores=[]),
-            "07_first_llm_call.ipynb:trace-functions",
-            "exec",
-        ),
-        namespace,
+    fake_mlflow = _TraceNotebookMlflow()
+    monkeypatch.setattr(
+        connected_llm,
+        "set_trace_resource_context",
+        lambda context: None,
     )
-
     result = asyncio.run(
-        namespace["invoke_prompt"](
+        connected_llm.invoke_prompt(
             native_async_client=native_client,
             rendered_prompt="synthetic user request",
+            mlflow_module=fake_mlflow,
+            model=SimpleNamespace(model="configured-model"),
+            resource_context=SimpleNamespace(),
         )
     )
 
@@ -523,6 +942,36 @@ def test_first_llm_trace_displays_content_without_losing_telemetry():
     assert result["usage"] == {"prompt_tokens": 8, "completion_tokens": 3}
     assert result["model"] == "served-model"
     assert result["latency_ms"] >= 0
+    assert stream.closed
+
+
+def test_first_llm_trace_closes_stream_after_iteration_failure(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT))
+    from examples.support import connected_llm
+
+    stream = _FailingTraceNotebookStream()
+    native_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **kwargs: _async_value(stream))
+        )
+    )
+    monkeypatch.setattr(
+        connected_llm,
+        "set_trace_resource_context",
+        lambda context: None,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic stream failure"):
+        asyncio.run(
+            connected_llm.invoke_prompt(
+                native_async_client=native_client,
+                rendered_prompt="synthetic user request",
+                mlflow_module=_TraceNotebookMlflow(),
+                model=SimpleNamespace(model="configured-model"),
+                resource_context=SimpleNamespace(),
+            )
+        )
+
     assert stream.closed
 
 
@@ -662,6 +1111,7 @@ def test_identifier_fixture_is_the_single_source_of_truth():
 #: This list is the guard: it travels with the merge, so the clone fails loudly
 #: on the next test run instead of rendering an empty default into a command.
 REQUIRED_IDENTIFIER_KEYS = {
+    "app_usage_policy_id",
     "azure_tenant_id",
     "azure_subscription_id",
     "databricks_host",
@@ -766,6 +1216,8 @@ def test_bundle_and_compute_use_required_platform_tags():
     }
     assert required.issubset(bundle_tags)
     assert required.issubset(compute_tags)
+    assert bundle_tags["tag_schema_version"] == "2"
+    assert compute_tags["tag_schema_version"] == "2"
 
 
 def test_all_github_actions_are_commit_pinned():

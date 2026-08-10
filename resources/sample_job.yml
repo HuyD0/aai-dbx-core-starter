@@ -43,4 +43,4 @@ resources:
               environment: ${bundle.target}
               data_classification: internal
               lifecycle: experimental
-              tag_schema_version: "1"
+              tag_schema_version: "2"

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
@@ -233,6 +236,20 @@ def find_curriculum_root(start: str | Path | None = None) -> Path:
         "Could not find examples/foundry-curriculum. Open the repository as the "
         "notebook workspace and restart the kernel."
     )
+
+
+def load_offline_labs(curriculum_root: str | Path | None = None) -> ModuleType:
+    """Load the typed offline lab support without making a provider request."""
+
+    root = find_curriculum_root(curriculum_root)
+    module_name = "foundry_curriculum_offline_labs"
+    spec = importlib.util.spec_from_file_location(module_name, root / "offline_labs.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("Could not load the Foundry offline lab support module.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def resolve_config_path(

@@ -43,7 +43,7 @@ def load_gate() -> tuple[list[MetricRule], set[str], set[str], set[str]]:
     )
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901 - linear, independent contract assertions
     sys.path.insert(0, str(ROOT / "src"))
     from app.knowledge import KnowledgeRouter
     from app.scorers import score_all

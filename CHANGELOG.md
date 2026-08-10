@@ -4,6 +4,82 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+## 0.4.0
+
+Migration notes:
+
+- `ResourceContext.data_classification` is now the closed
+  `DataClassification` enum: `public`, `internal`, `confidential`, or
+  `restricted`. Replace custom values before upgrading. The default trace
+  policy is now bounded for public/internal data and metadata-only for
+  confidential/restricted data. Explicit policies may make capture stricter;
+  application code cannot enable payload capture for sensitive classes.
+  Metadata-only spans retain only typed, allowlisted operational identifiers,
+  lineage, and token/cost counters. Arbitrary SDK attributes are dropped,
+  framework-owned values are reduced to shapes, payload shapes do not retain
+  mapping keys, and caller session IDs are hashed. MLflow Agent Server root
+  inputs and post-handler outputs now pass through the same export policy;
+  tracing-off disables its native tracing. Agent Server payloads are sanitized
+  once at export, payload replacement fails closed, arbitrary sensitive-mode
+  request metadata is dropped except hashed request/correlation IDs, and
+  provider/tool exception messages never enter governed spans. The AAI export
+  policy now composes after existing MLflow span processors rather than
+  replacing them, and traced async generators keep one parent trace/context
+  for their complete streaming lifetime.
+- Runtime configuration now fails safe for environment names. Only `dev`,
+  `development`, `local`, and `sandbox` receive relaxed checks; every other
+  name, including misspellings, must provide production-grade catalog,
+  schema, experiment, identity, ownership, and lifecycle values.
+- `GateResult` now records the required canonical `policy_digest` and the
+  optional `baseline_digest`. Prefer `apply_gate()`, which supplies both;
+  callers constructing `GateResult` directly must now provide a 64-character
+  SHA-256 `policy_digest`.
+- `ApplicationRelease` now defaults to schema version `2`, adds `world`,
+  `tools`, and `control` evidence, and writes World/Learning/Control clock
+  digests. Consumers that require the original document shape and digest must
+  explicitly set `schema_version="1"` and omit the new evidence fields.
+  Both schema versions now reject credential-bearing keys and values before
+  release evidence can be persisted.
+- `ai-platform/v1` manifests may declare the external
+  `spec.costControls.budgetPolicy` reference. It remains optional in the v1
+  SDK contract so existing manifests retain their canonical JSON and hashes;
+  new generated projects declare `platform_standard_v1`. Keep prices,
+  credentials, and enforcement state outside the manifest.
+- Every generated project now runs a credential-free
+  `scripts/validate_project.py` from `make check` and pull-request CI. It
+  requires the budget-policy reference and rejects drift between
+  `ai-app.yaml`, `aai-platform.yml`, and Databricks bundle job resources for
+  application, environment, owner, team, cost center, classification,
+  lifecycle, repository, preset/job/task-cluster tags, approved compute policy,
+  and the evaluation job. Governed values are rendered rather than mutable
+  bundle variables; persisted overrides, undeclared targets, existing or
+  serverless compute bypasses, and target/resource override sections fail the
+  generated contract check.
+- Generated GenAI evaluation paths now consume the native Unity Catalog
+  EvaluationDataset named in each application's Hub manifest, verify it against
+  the reviewed repository suite, record dataset ID/digest and distinct
+  target/judge identities, and associate dataset creation with the governed
+  experiment rather than applying unsupported dataset tags. The non-LLM
+  experiment starter follows the same dataset identity, association, drift,
+  and lineage contract without inventing target/judge metadata. The agent
+  starter also returns native MLflow assessments for feedback/curation and
+  centralizes request, tool, output-token, and trace-capture bounds. Existing
+  UC datasets associated with a different experiment fail closed; use a new
+  governed, versioned dataset name instead of silently reusing them. Agent
+  release evidence joins a full clean source commit, prompt, dataset, target/judge,
+  tool schema, execution limits, gate policy/baseline, manifest, budget, and
+  service-level contract; CI supplies the attested remote Git provenance. RAG
+  releases now use the same fail-closed v2 pattern for exact prompt and
+  knowledge versions, model/embedding/retrieval/index configuration digests,
+  bounded RAG limits, SDK/source provenance, dataset identity and association,
+  target/judge identities, and gate policy/baseline evidence.
+- Added the strict, provider-neutral `AgentDecision` evidence contract and
+  best-effort `record_agent_decision()` helper. Meaningful application
+  decisions are native MLflow `AGENT` spans that complement, but never replace,
+  authoritative TOOL/RETRIEVER/LLM execution spans. Metadata-only capture keeps
+  only the validated decision type, selected action, and optional confidence;
+  it suppresses goals, reasons, references, alternatives, and expected results.
+
 - Added the `analytics-app` template: a self-service analytics agent
   implementing the published four-layer architecture (canonical data,
   semantic layer first, knowledge + runbook skills, offline-pinned

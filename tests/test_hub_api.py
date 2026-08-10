@@ -129,6 +129,7 @@ def _manifest(
                 },
             },
             "readiness": {"profile": "medium_risk_production_v1"},
+            "costControls": {"budgetPolicy": "platform_standard_v1"},
             "serviceLevels": {
                 "maximumErrorRate": 0.02,
                 "p95LatencyMs": 8000,

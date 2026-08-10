@@ -8,6 +8,8 @@ message is the platform's first support channel.
 
 from __future__ import annotations
 
+__all__ = ["AaiCoreError"]
+
 
 class AaiCoreError(RuntimeError):
     """Base class for every error raised by aai-core."""

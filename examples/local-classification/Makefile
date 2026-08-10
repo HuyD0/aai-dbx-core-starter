@@ -66,7 +66,8 @@ pipeline: check-uv ## Run baseline, candidate selection, frozen test gate, and r
 check: format-check test notebook-check ## Run the complete local quality gate.
 
 test: check-uv ## Run fast unit and workflow tests.
-	$(UV) run --frozen --no-sync pytest -q
+	$(UV) run --frozen --no-sync pytest -q \
+		--cov=aai_local_classification --cov-branch --cov-report=term-missing
 
 format: check-uv ## Apply project formatting.
 	$(UV) run --frozen --no-sync ruff check --fix .

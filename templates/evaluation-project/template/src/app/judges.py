@@ -9,7 +9,9 @@ notebooks/01_align_judge.py.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
+from aai_core import PlatformSettings
 from aai_core.providers.types import ProviderConfigurationError
 
 DOMAIN_POLICY_GUIDELINES = [
@@ -28,7 +30,7 @@ DOMAIN_POLICY_GUIDELINES = [
 ]
 
 
-def judge_scorers(settings) -> list:
+def judge_scorers(settings: PlatformSettings) -> list[Any]:
     """Return every LLM judge pinned to the approved judge endpoint.
 
     ``domain_policy`` is an executable native MLflow ``Guidelines`` scorer,
@@ -51,7 +53,7 @@ def judge_scorers(settings) -> list:
     ]
 
 
-def judge_model_uri(settings) -> str:
+def judge_model_uri(settings: PlatformSettings) -> str:
     config = settings.models.get("judge-model")
     if not isinstance(config, Mapping) or config.get("provider") != "databricks":
         raise ProviderConfigurationError(

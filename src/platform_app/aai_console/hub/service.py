@@ -17,17 +17,18 @@ from uuid import uuid4
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
+from aai_core.manifest import (
+    AIApplicationManifest,
+    build_manifest_envelope,
+    load_manifest,
+)
+
 from .jobs import (
     JobExecutionError,
     JobLaunchRequest,
     JobRunner,
     UnavailableJobRunner,
     contains_credential_material,
-)
-from .manifest import (
-    AIApplicationManifest,
-    build_manifest_envelope,
-    load_manifest,
 )
 from .models import (
     ApplicationRecord,
@@ -49,6 +50,7 @@ from .models import (
 from .readiness import (
     AdministratorEvidence,
     AuthenticationEvidence,
+    CostEvidence,
     EvaluationEvidence,
     JobEvidence,
     ManifestEvidence,
@@ -66,7 +68,7 @@ from .repository import HubConflictError, HubNotFoundError, HubRepository
 _TAG_KEY = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _ENVIRONMENT = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _SAFE_FILTER_VALUE = re.compile(r"^[^,\r\n|]{1,256}$")
-_LIFECYCLES = frozenset({"experimental", "production", "retired"})
+_LIFECYCLES = frozenset({"experimental", "candidate", "production", "retired"})
 _HEALTH_STATES = frozenset({"HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"})
 _OWNERSHIP = frozenset({"visible", "owned", "teams"})
 _SORTS = frozenset(
@@ -301,7 +303,9 @@ class HubService:
         self._readiness_profiles = {
             "development_v1": ReadinessProfile(
                 profile_id="development_v1",
-                version="1",
+                # Evaluator v2 records the new cost-control rules as explicit
+                # non-applicable evidence for development snapshots.
+                version="2",
                 minimum_evaluation_cases=1,
                 require_ai_gateway=False,
                 require_request_tags=False,
@@ -309,7 +313,12 @@ class HubService:
             ),
             "medium_risk_production_v1": ReadinessProfile(
                 profile_id="medium_risk_production_v1",
-                version="1",
+                # Evaluator v2 adds mandatory rate-limit, budget-policy, and
+                # cost-attribution evidence without changing the manifest's
+                # long-lived profile identifier.
+                version="2",
+                require_rate_limit=True,
+                require_budget_policy=True,
             ),
         }
         if readiness_profile is not None:
@@ -515,6 +524,14 @@ class HubService:
                 mode_declared=bool(manifest.spec.authorization.mode),
                 approved_ai_gateway=None,
                 rate_limit_configured=None,
+            ),
+            cost=CostEvidence(
+                # A manifest reference declares intent. Only platform discovery
+                # can prove that the external budget and billing controls exist.
+                budget_policy_configured=(
+                    False if manifest.spec.cost_controls is None else None
+                ),
+                attribution_verified=None,
             ),
             tracing=TracingEvidence(
                 # A declared experiment ID is not proof that tracing is configured

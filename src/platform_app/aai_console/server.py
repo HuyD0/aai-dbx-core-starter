@@ -30,6 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
+from aai_core.manifest import load_manifest, manifest_json_schema
+
 from . import __version__
 from .checks import (
     PLATFORM_STATE_HEADING,
@@ -73,7 +75,6 @@ from .hub.jobs import (
     RecordingJobRunner,
     UnavailableJobRunner,
 )
-from .hub.manifest import load_manifest, manifest_json_schema
 from .hub.models import (
     AuthorizationContext,
     EvaluationRunRecord,

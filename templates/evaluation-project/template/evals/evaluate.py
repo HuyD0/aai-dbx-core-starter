@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 
 import mlflow
@@ -24,6 +26,7 @@ from aai_core.evaluation import (
     MetricRule,
     apply_gate,
 )
+from aai_core.providers.types import ProviderConfigurationError
 from app import judges, targets
 from app.config import DATASET_NAME
 from app.scorers import CODE_SCORERS
@@ -83,16 +86,18 @@ def main() -> None:
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    cases = targets.load_evaluation_cases(ROOT / "evals" / "data" / "golden_cases.json")
     if args.mode == "endpoint":
+        target_identity, judge_identity = _evaluation_model_identities(context.settings)
         predict_fn = targets.endpoint_predict_fn(context)
     else:
+        judge_identity = _model_identity(context.settings, "judge-model")
+        target_identity = "answer-sheet:evals/data/answer_sheet.json"
         predict_fn = targets.answer_sheet_predict_fn(
-            ROOT / "evals" / "data" / "answer_sheet.json"
+            ROOT / "evals" / "data" / "answer_sheet.json",
+            expected_cases=cases,
         )
 
-    cases = json.loads(
-        (ROOT / "evals" / "data" / "golden_cases.json").read_text(encoding="utf-8")
-    )
     baseline = load_baseline()
     policy = GatePolicy(
         rules=tuple(load_thresholds()),
@@ -101,6 +106,7 @@ def main() -> None:
     dataset_name = (
         f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
     )
+    dataset = _load_release_dataset(dataset_name, cases)
     # A governed MLflow run: aai.* tags, the registered dataset identity,
     # gate metrics, verdict tag, and evaluation traces attached.
     with context.experiments.run(
@@ -108,11 +114,15 @@ def main() -> None:
         parameters={
             "mode": args.mode,
             "evaluation_dataset": dataset_name,
+            "evaluation_dataset_id": dataset.dataset_id,
+            "evaluation_dataset_digest": dataset.digest,
             "case_count": len(cases),
+            "target_model": target_identity,
+            "judge_model": judge_identity,
         },
     ):
         native_result = mlflow.genai.evaluate(
-            data=cases,
+            data=dataset,
             predict_fn=predict_fn,
             scorers=[*wrapped_code_scorers(), *judges.judge_scorers(context.settings)],
         )
@@ -122,7 +132,19 @@ def main() -> None:
             baseline_metrics=baseline,
         )
         mlflow.log_metrics(dict(report.metrics))
-        mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
+        mlflow.log_params(
+            {
+                "gate_policy_digest": report.policy_digest,
+                "gate_baseline_digest": report.baseline_digest or "none",
+            }
+        )
+        mlflow.set_tags(
+            {
+                "aai.gate_passed": str(report.passed).lower(),
+                "aai.target_model": target_identity,
+                "aai.judge_model": judge_identity,
+            }
+        )
     print_failure_triage(
         native_result,
         include_details=args.show_triage_details,
@@ -141,6 +163,90 @@ def main() -> None:
             "baseline_updated": args.update_baseline,
         }
     )
+
+
+def _evaluation_model_identities(settings) -> tuple[str, str]:
+    target = _model_config(settings, "target-model")
+    judge = _model_config(settings, "judge-model")
+    if judge["provider"] != "databricks":
+        raise ProviderConfigurationError(
+            "judge-model must resolve to a governed Databricks serving endpoint"
+        )
+    if (
+        judge["provider"].casefold() == target["provider"].casefold()
+        and judge["deployment"].casefold() == target["deployment"].casefold()
+    ):
+        raise ProviderConfigurationError(
+            "judge-model must use a deployment distinct from target-model; "
+            "a release gate cannot rely on the target judging itself"
+        )
+    return (
+        f"{target['provider']}:{target['deployment']}",
+        f"{judge['provider']}:{judge['deployment']}",
+    )
+
+
+def _model_identity(settings, logical_name: str) -> str:
+    config = _model_config(settings, logical_name)
+    return f"{config['provider']}:{config['deployment']}"
+
+
+def _model_config(settings, logical_name: str) -> dict[str, str]:
+    config = settings.models.get(logical_name)
+    if not isinstance(config, Mapping):
+        raise ProviderConfigurationError(f"{logical_name} must be configured")
+    provider = config.get("provider")
+    deployment = config.get("deployment")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ProviderConfigurationError(f"{logical_name} requires a provider")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ProviderConfigurationError(f"{logical_name} requires a deployment")
+    return {
+        "provider": provider.strip(),
+        "deployment": deployment.strip(),
+    }
+
+
+def _load_release_dataset(name: str, reviewed_cases: list[dict]):
+    dataset = mlflow.genai.datasets.get_dataset(name=name)
+    registered_cases = dataset.to_df().to_dict(orient="records")
+    expected = Counter(_case_key(record) for record in reviewed_cases)
+    actual = Counter(_case_key(record) for record in registered_cases)
+    if actual != expected:
+        missing = sum((expected - actual).values())
+        extra = sum((actual - expected).values())
+        raise RuntimeError(
+            f"Unity Catalog dataset {name!r} differs from the reviewed release "
+            f"suite (missing={missing}, extra={extra}). Run "
+            "scripts/sync_dataset.py; if stale records remain, use a new "
+            "versioned DATASET_NAME rather than evaluating unreviewed rows."
+        )
+    return dataset
+
+
+def _case_key(record: Mapping) -> str:
+    return json.dumps(
+        {
+            "inputs": record.get("inputs"),
+            "expectations": record.get("expectations"),
+            "tags": _review_tags(record),
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _review_tags(record: Mapping) -> dict:
+    tags = record.get("tags") or {}
+    if not isinstance(tags, Mapping):
+        raise TypeError("Evaluation case tags must be an object")
+    return {
+        str(key): value
+        for key, value in tags.items()
+        if not str(key).casefold().startswith("mlflow.")
+    }
 
 
 if __name__ == "__main__":

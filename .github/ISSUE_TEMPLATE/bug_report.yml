@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible SDK, template, or example defect.
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Use synthetic data only. Never include credentials, prompts, customer
+        content, raw traces, or environment dumps. Report security concerns
+        through the private process in SECURITY.md.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - aai-core SDK
+        - Generated template
+        - Example or Foundry curriculum
+        - CI, release, or documentation
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: SDK/template version, Python version, and provider if applicable.
+      placeholder: aai-core 0.4.0; Python 3.12; Databricks
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Sanitized commands or code and the smallest deterministic input.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification attempted
+      description: Include doctor/make check results and the sanitized exception type.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping
@@ -14,19 +15,19 @@ from typing import Any
 
 from pydantic import Field
 
+from aai_core._sensitive import is_sensitive_name
 from aai_core.contracts import ContractModel
 from aai_core.secrets import SecretRef, SecretValue
 from aai_core.tags import ResourceContext
 
-_SENSITIVE_NAMES = {
-    "api_key",
-    "client_secret",
-    "password",
-    "secret",
-    "token",
-    "access_token",
-    "refresh_token",
-}
+__all__ = [
+    "ExperimentManager",
+    "ExperimentRunMetadata",
+    "RunPurpose",
+    "record_reproducibility",
+]
+
+_SOURCE_COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$", re.IGNORECASE)
 
 
 class RunPurpose(StrEnum):
@@ -66,6 +67,8 @@ class ExperimentRunMetadata(ContractModel):
 
 
 class ExperimentManager:
+    """Create governed MLflow runs with consistent attribution and lineage."""
+
     def __init__(
         self,
         *,
@@ -135,9 +138,8 @@ class ExperimentManager:
         else:
             # MLflow's native ActiveModel context restores the previous model.
             # Returning it unchanged avoids an SDK mirror of LoggedModel.
-            with active_model:
-                with governed_run() as active_run:
-                    yield active_run
+            with active_model, governed_run() as active_run:
+                yield active_run
 
     @property
     def native_client(self) -> Any:
@@ -145,7 +147,7 @@ class ExperimentManager:
 
         return self._client()
 
-    def _client(self):
+    def _client(self) -> Any:
         if self._mlflow is not None:
             return self._mlflow
         try:
@@ -173,8 +175,11 @@ def record_reproducibility(
     else ``"local-dev"``.
     """
 
-    if mlflow_module is None:
-        import mlflow as mlflow_module  # type: ignore[no-redef]
+    active_mlflow = mlflow_module
+    if active_mlflow is None:
+        import mlflow
+
+        active_mlflow = mlflow
 
     from aai_core import __version__
 
@@ -187,22 +192,26 @@ def record_reproducibility(
         record["seed"] = str(seed)
     for key, value in (extra or {}).items():
         record[str(key)] = str(value)
-    mlflow_module.log_params(_safe_parameters(record))
+    active_mlflow.log_params(_safe_parameters(record))
 
     freeze = _package_freeze()
     with tempfile.TemporaryDirectory() as scratch:
         freeze_file = Path(scratch) / "requirements-frozen.txt"
         freeze_file.write_text(freeze, encoding="utf-8")
-        mlflow_module.log_artifact(str(freeze_file), artifact_path="reproducibility")
+        active_mlflow.log_artifact(str(freeze_file), artifact_path="reproducibility")
     record["environment_digest"] = hashlib.sha256(freeze.encode()).hexdigest()[:16]
-    mlflow_module.set_tags({"aai.environment_digest": record["environment_digest"]})
+    active_mlflow.set_tags({"aai.environment_digest": record["environment_digest"]})
     return record
 
 
 def _source_commit() -> str:
     from_env = os.getenv("GIT_COMMIT")
     if from_env:
-        return from_env
+        return _validated_source_commit(
+            from_env,
+            source="GIT_COMMIT",
+            allow_local_dev=True,
+        )
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -211,9 +220,25 @@ def _source_commit() -> str:
             check=True,
             timeout=5,
         )
-        return result.stdout.strip()
+        return _validated_source_commit(result.stdout, source="git rev-parse HEAD")
     except Exception:
         return "local-dev"
+
+
+def _validated_source_commit(
+    value: str,
+    *,
+    source: str,
+    allow_local_dev: bool = False,
+) -> str:
+    normalized = value.strip().lower()
+    if allow_local_dev and normalized == "local-dev":
+        return normalized
+    if not _SOURCE_COMMIT.fullmatch(normalized):
+        raise ValueError(
+            f"{source} must be a full 40- or 64-character hexadecimal object ID"
+        )
+    return normalized
 
 
 def _source_state() -> str:
@@ -221,14 +246,15 @@ def _source_state() -> str:
 
     from_environment = os.getenv("GIT_DIRTY")
     if from_environment is not None:
-        return (
-            "dirty"
-            if from_environment.strip().lower() in {"1", "true", "yes"}
-            else "clean"
-        )
+        normalized = from_environment.strip().lower()
+        if normalized in {"1", "true", "yes"}:
+            return "dirty"
+        if normalized in {"0", "false", "no"}:
+            return "clean"
+        return "unknown"
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
             capture_output=True,
             text=True,
             check=True,
@@ -253,12 +279,7 @@ def _package_freeze() -> str:
 def _safe_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in parameters.items():
-        normalized = key.lower().replace("-", "_").replace(".", "_").replace("/", "_")
-        sensitive_name = any(
-            normalized == name or normalized.endswith(f"_{name}")
-            for name in _SENSITIVE_NAMES
-        )
-        if sensitive_name or isinstance(value, (SecretValue, SecretRef)):
+        if is_sensitive_name(key) or isinstance(value, (SecretValue, SecretRef)):
             raise ValueError(f"Refusing to log sensitive MLflow parameter: {key}")
         safe[str(key)] = value
     return safe

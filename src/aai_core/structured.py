@@ -21,8 +21,12 @@ if TYPE_CHECKING:
 
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
 
+__all__ = ["StructuredOutputError", "generate_structured", "generate_typed"]
+
 
 class StructuredOutputError(AaiCoreError):
+    """A sanitized parse or schema-validation failure from structured output."""
+
     code = "aai_core.structured.invalid"
 
 

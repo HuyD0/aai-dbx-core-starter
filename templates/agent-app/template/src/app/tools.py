@@ -53,6 +53,7 @@ class ToolSpec:
     input_model: type[BaseModel]
     handler: Callable[..., Awaitable[Any]]
     timeout_seconds: float = 10.0
+    max_output_chars: int = 8_000
 
     def as_openai_tool(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,10 @@ class AsyncToolRegistry:
         if len(self._specs) != len(specs):
             raise ValueError("Tool names must be unique")
         for spec in specs:
+            if spec.timeout_seconds <= 0:
+                raise ValueError(f"Tool {spec.name!r} timeout must be positive")
+            if spec.max_output_chars < 1:
+                raise ValueError(f"Tool {spec.name!r} output bound must be positive")
             if spec.input_model.model_config.get("extra") != "forbid":
                 raise ValueError(
                     f"Tool input model {spec.input_model.__name__!r} must forbid extras"
@@ -114,12 +119,27 @@ class AsyncToolRegistry:
             except Exception as error:
                 raise ToolExecutionError(f"Tool {name!r} failed") from error
             serialized = result if isinstance(result, str) else json.dumps(result)
+            if len(serialized) > spec.max_output_chars:
+                raise ToolExecutionError(
+                    f"Tool {name!r} output exceeded its "
+                    f"{spec.max_output_chars}-character bound"
+                )
             if span is not None:
                 span.set_outputs(serialized)
             return serialized
 
 
-def build_registry() -> AsyncToolRegistry:
+def build_registry(
+    *,
+    timeout_seconds: float = 10.0,
+    max_output_chars: int = 8_000,
+) -> AsyncToolRegistry:
+    """Build starter tools with one reviewed default timeout.
+
+    Applications may still set a different ``ToolSpec.timeout_seconds`` for a
+    specific tool when its SLO justifies that exception.
+    """
+
     return AsyncToolRegistry(
         (
             ToolSpec(
@@ -127,6 +147,8 @@ def build_registry() -> AsyncToolRegistry:
                 description="Look up an order's fulfillment status by order id.",
                 input_model=OrderStatusInput,
                 handler=lookup_order_status,
+                timeout_seconds=timeout_seconds,
+                max_output_chars=max_output_chars,
             ),
         )
     )

@@ -23,14 +23,17 @@ resources:
             spark_version: ${var.spark_version}
             node_type_id: ${var.node_type_id}
             num_workers: 1
-            policy_id: ${var.compute_policy_id}
+            policy_id: {{.compute_policy_id}}
+            spark_env_vars:
+              GIT_COMMIT: ${var.source_commit}
+              GIT_DIRTY: ${var.source_state}
             custom_tags:
               application: {{.application_name}}
               project: {{.project_name}}
               environment: ${bundle.target}
-              team: ${var.team}
-              owner_group: ${var.owner_group}
-              cost_center: ${var.cost_center}
+              team: {{.team}}
+              owner_group: {{.owner_group}}
+              cost_center: {{.cost_center}}
               data_classification: internal
               lifecycle: experimental
-              tag_schema_version: "1"
+              tag_schema_version: "2"

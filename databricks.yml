@@ -97,7 +97,6 @@ artifacts:
 
 include:
   - resources/*.yml
-  - resources/optional/platform_console.yml
 
 # Only a `dev` target for now (per project decision). To add prod later, map it
 # to dbx-uat and add a matching federated credential — see docs/cloud-setup.md
@@ -125,7 +124,7 @@ targets:
         environment: ${bundle.target}
         data_classification: internal
         lifecycle: experimental
-        tag_schema_version: "1"
+        tag_schema_version: "2"
 
   # prod:
   #   mode: production

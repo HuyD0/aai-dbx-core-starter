@@ -169,6 +169,17 @@ EXAMPLES = {
             local=True,
             interactive=True,
         ),
+        Example(
+            name="compare_and_select_llms",
+            path="examples/13_compare_and_select_llms.ipynb",
+            description=(
+                "Enterprise two-model accuracy, judge, TCO, and governance workshop"
+            ),
+            connected=False,
+            local=True,
+            modules=(),
+            interactive=True,
+        ),
     )
 }
 

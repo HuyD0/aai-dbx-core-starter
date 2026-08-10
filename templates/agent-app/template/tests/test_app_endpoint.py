@@ -2,14 +2,19 @@
 
 import asyncio
 import importlib
+import subprocess
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from mlflow.types.responses import ResponsesAgentRequest
 
+from aai_core import tracing
 from aai_core.agents import AgentResponse
+from aai_core.tracing import TraceCaptureMode, TracePolicy
 from app import endpoint
 
 start_server = importlib.import_module("start_server")
@@ -50,6 +55,7 @@ def test_app_loads_the_exact_configured_prompt_version(monkeypatch):
         assert endpoint._application() is sentinel
         assert captured[0][0] == "tracing"
         assert captured[0][1]["integration"].value == "mlflow_agent_server"
+        assert "policy" not in captured[0][1]
         assert captured[1] == ("agent", context, 7)
     finally:
         endpoint._application.cache_clear()
@@ -120,6 +126,11 @@ def test_agent_server_endpoint_uses_bounded_conversation_context(monkeypatch):
     monkeypatch.setattr(endpoint.mlflow, "get_current_active_span", lambda: None)
     monkeypatch.setattr(endpoint, "set_trace_resource_context", lambda context: None)
     monkeypatch.setattr(endpoint, "set_trace_session", lambda session_id: None)
+    monkeypatch.setattr(
+        endpoint,
+        "current_trace_state",
+        lambda: SimpleNamespace(policy=TracePolicy()),
+    )
     request = ResponsesAgentRequest(
         input=[{"role": "user", "content": "Hello"}],
         context={
@@ -189,6 +200,11 @@ def test_agent_server_http_invocations_contract(monkeypatch):
         lambda context: None,
     )
     monkeypatch.setattr(endpoint, "set_trace_session", lambda session_id: None)
+    monkeypatch.setattr(
+        endpoint,
+        "current_trace_state",
+        lambda: SimpleNamespace(policy=TracePolicy()),
+    )
 
     async def invoke_over_http():
         transport = httpx.ASGITransport(app=agent_server_app)
@@ -220,6 +236,81 @@ def test_agent_server_http_invocations_contract(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("mode", ["restricted", "off"])
+def test_real_agent_server_http_trace_export_respects_privacy(mode, tmp_path):
+    """Cover raw root outputs written by AgentServer after app code returns."""
+
+    probe = Path(__file__).with_name("_endpoint_trace_probe.py")
+    result = subprocess.run(
+        [sys.executable, str(probe), mode, str(tmp_path / f"{mode}.db")],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_root_inputs_follow_internal_and_restricted_capture_policy(monkeypatch):
+    class FakeSpan:
+        def __init__(self):
+            self.inputs = None
+
+        def set_inputs(self, value):
+            self.inputs = value
+
+    span = FakeSpan()
+    monkeypatch.setattr(endpoint.mlflow, "get_current_active_span", lambda: span)
+
+    monkeypatch.setattr(
+        endpoint,
+        "current_trace_state",
+        lambda: SimpleNamespace(
+            policy=TracePolicy(capture_mode=TraceCaptureMode.BOUNDED)
+        ),
+    )
+    endpoint._set_bounded_root_inputs(
+        [{"role": "user", "content": "internal prompt"}],
+        "conversation-1",
+    )
+    assert span.inputs["input"][0]["content"] == "internal prompt"
+
+    monkeypatch.setattr(
+        endpoint,
+        "current_trace_state",
+        lambda: SimpleNamespace(
+            policy=TracePolicy(capture_mode=TraceCaptureMode.METADATA_ONLY)
+        ),
+    )
+    endpoint._set_bounded_root_inputs(
+        [{"role": "user", "content": "restricted prompt"}],
+        "conversation-1",
+    )
+    tracing._native_span_policy_processor(
+        TracePolicy(capture_mode=TraceCaptureMode.METADATA_ONLY)
+    )(span)
+    assert span.inputs == {
+        "type": "mapping",
+        "size": 2,
+        "truncated": False,
+    }
+    assert "restricted prompt" not in str(span.inputs)
+
+    span.inputs = {"input": "broad native request"}
+    monkeypatch.setattr(
+        endpoint,
+        "current_trace_state",
+        lambda: SimpleNamespace(policy=TracePolicy(capture_mode=TraceCaptureMode.OFF)),
+    )
+    endpoint._set_bounded_root_inputs(
+        [{"role": "user", "content": "never capture"}],
+        "conversation-1",
+    )
+    assert span.inputs is None
+
+
 def test_agent_server_streaming_contract(monkeypatch):
     class FakeSpan:
         def __init__(self):
@@ -243,6 +334,11 @@ def test_agent_server_streaming_contract(monkeypatch):
     monkeypatch.setattr(endpoint.mlflow, "get_current_active_span", lambda: span)
     monkeypatch.setattr(endpoint, "set_trace_resource_context", lambda context: None)
     monkeypatch.setattr(endpoint, "set_trace_session", lambda session_id: None)
+    monkeypatch.setattr(
+        endpoint,
+        "current_trace_state",
+        lambda: SimpleNamespace(policy=TracePolicy()),
+    )
     request = ResponsesAgentRequest(
         input=[{"role": "user", "content": "Hello"}],
         context={"conversation_id": "opaque-conversation-1"},

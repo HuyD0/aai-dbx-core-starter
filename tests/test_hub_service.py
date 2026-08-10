@@ -125,6 +125,7 @@ def _manifest(
                 },
             },
             "readiness": {"profile": "medium_risk_production_v1"},
+            "costControls": {"budgetPolicy": "platform_standard_v1"},
             "serviceLevels": {
                 "maximumErrorRate": 0.02,
                 "p95LatencyMs": 8000,
@@ -384,6 +385,10 @@ def test_portfolio_query_rejects_non_allowlisted_filters_and_sorts(field, value)
         PortfolioQuery(**{field: value})
 
 
+def test_portfolio_query_accepts_candidate_lifecycle():
+    assert PortfolioQuery(lifecycle="candidate").lifecycle == "candidate"
+
+
 def test_portfolio_pagination_is_stable_and_reports_total_pages():
     _, service = _service()
     for application_id, name in (
@@ -430,16 +435,38 @@ def test_readiness_is_unknown_and_fail_closed_without_serving_evidence():
 
     assert snapshot.ready is False
     assert snapshot.evaluated_at == NOW
+    assert snapshot.profile_version == "2"
     for rule_id in (
         "production_monitoring",
         "service_levels",
         "approved_ai_gateway",
         "observed_request_tags",
+        "rate_limiting",
+        "budget_policy",
+        "cost_attribution",
     ):
         assert results[rule_id].status is ReadinessStatus.UNKNOWN
         assert results[rule_id].severity is ReadinessSeverity.BLOCKING
     assert results["manifest_schema"].status is ReadinessStatus.PASS
     assert results["workflow_jobs"].status is ReadinessStatus.PASS
+
+
+def test_legacy_manifest_without_budget_policy_fails_production_readiness():
+    _, service = _service()
+    manifest = _manifest(
+        promotion_job_id="456",
+        environments=("dev", "prod"),
+    )
+    del manifest["spec"]["costControls"]
+    registered = _register(service, manifest)
+
+    snapshot = service.readiness_for_version(registered.version)
+    budget = next(
+        result for result in snapshot.results if result.rule_id == "budget_policy"
+    )
+
+    assert budget.status is ReadinessStatus.FAIL
+    assert snapshot.ready is False
 
 
 def test_evaluation_launch_records_a_governed_job_and_rejects_an_active_duplicate():

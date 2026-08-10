@@ -1,11 +1,13 @@
 """Unit tests for the thin experiment and reproducibility boundary."""
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from aai_core import experiments
 from aai_core.experiments import (
     ExperimentManager,
     ExperimentRunMetadata,
@@ -85,31 +87,36 @@ def test_manager_governs_run_context_and_exposes_native_mlflow():
 
 
 def test_manager_refuses_blank_run_description():
-    with pytest.raises(ValueError, match="description"):
-        with _manager(FakeMlflow()).run(
+    with (
+        pytest.raises(ValueError, match="description"),
+        _manager(FakeMlflow()).run(
             run_name="blank-description",
             description=" ",
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_manager_refuses_sensitive_parameters():
-    with pytest.raises(ValueError, match="sensitive"):
-        with _manager(FakeMlflow()).run(
+    with (
+        pytest.raises(ValueError, match="sensitive"),
+        _manager(FakeMlflow()).run(
             run_name="unsafe-credential-logging",
             parameters={"vendor_api_key": "do-not-log"},
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_record_reproducibility_logs_commit_seed_and_freeze(monkeypatch):
-    monkeypatch.setenv("GIT_COMMIT", "abc123")
+    commit = "A" * 40
+    monkeypatch.setenv("GIT_COMMIT", commit)
     monkeypatch.setenv("GIT_DIRTY", "false")
     fake = FakeMlflow()
 
     record = record_reproducibility(seed=7, mlflow_module=fake)
 
-    assert record["source_commit"] == "abc123"
+    assert record["source_commit"] == commit.lower()
     assert record["source_state"] == "clean"
     assert record["seed"] == "7"
     assert fake.params["seed"] == "7"
@@ -120,6 +127,34 @@ def test_record_reproducibility_logs_commit_seed_and_freeze(monkeypatch):
 def test_record_reproducibility_refuses_sensitive_extras():
     with pytest.raises(ValueError, match="sensitive"):
         record_reproducibility(extra={"api_key": "value"}, mlflow_module=FakeMlflow())
+
+
+def test_source_state_treats_untracked_files_as_dirty(monkeypatch, tmp_path):
+    monkeypatch.delenv("GIT_DIRTY", raising=False)
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    (tmp_path / "untracked-evaluation.py").write_text("CASES = []\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert experiments._source_state() == "dirty"
+
+
+def test_source_state_fails_safe_for_unknown_ci_dirty_value(monkeypatch):
+    monkeypatch.setenv("GIT_DIRTY", "tru")
+
+    assert experiments._source_state() == "unknown"
+
+
+def test_source_commit_rejects_ref_names_and_short_hashes(monkeypatch):
+    for value in ("main", "abc123"):
+        monkeypatch.setenv("GIT_COMMIT", value)
+        with pytest.raises(ValueError, match="full 40- or 64-character"):
+            experiments._source_commit()
+
+
+def test_source_commit_allows_explicit_local_development_marker(monkeypatch):
+    monkeypatch.setenv("GIT_COMMIT", "local-dev")
+
+    assert experiments._source_commit() == "local-dev"
 
 
 def test_run_metadata_records_change_intent_and_baseline_lineage():

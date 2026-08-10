@@ -9,22 +9,12 @@ import pytest
 import app.tools as tools_module
 from app.knowledge import KnowledgeRouter
 from app.provenance import SourceTier
-from app.semantics.executor import QueryResult
 from app.tools import ProvenanceLog, ToolExecutionError, build_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 
-RAW_SQL = "SELECT `order_id` FROM `demo`.`sales`.`analytics_orders` LIMIT 3"
 
-
-def _registry(model, seed_executor, canned=None):
-    if canned:
-        from app.semantics.executor import FakeWarehouseExecutor
-
-        seed_executor = FakeWarehouseExecutor(
-            json.loads((ROOT / "evals" / "data" / "seed_data.json").read_text("utf-8")),
-            canned=canned,
-        )
+def _registry(model, seed_executor):
     log = ProvenanceLog()
     registry = build_registry(
         model, KnowledgeRouter(ROOT / "knowledge"), seed_executor, log
@@ -101,42 +91,67 @@ def test_lookup_reference_caps_doc_size_and_logs_tier(
     assert log.records[0].sources == ("knowledge/orders.md",)
 
 
-def test_execute_sql_requires_read_only_and_logs_raw_tier(model, seed_executor):
-    canned = {
-        RAW_SQL: QueryResult(columns=("order_id",), rows=(("O-1004",),), sql=RAW_SQL)
-    }
-    registry, log = _registry(model, seed_executor, canned=canned)
+def test_query_rows_compiles_allowlisted_fields_and_logs_raw_tier(model, seed_executor):
+    registry, log = _registry(model, seed_executor)
     payload = json.loads(
         asyncio.run(
             registry.execute(
-                "execute_sql", {"sql": RAW_SQL, "reason": "row-level detail"}
+                "query_rows",
+                {
+                    "source": "orders",
+                    "fields": ["order_id", "order_amount"],
+                    "filters": [
+                        {"field": "order_status", "operator": "eq", "value": "C"}
+                    ],
+                    "order_by": [{"field": "order_amount", "direction": "desc"}],
+                    "limit": 3,
+                    "reason": "show cancelled row details",
+                },
             )
         )
     )
-    assert payload["rows"] == [["O-1004"]]
+    assert payload["rows"] == [["O-1004", "999.99"], ["O-1010", "75.00"]]
+    assert ":r0" in payload["sql"]
     assert log.records[0].tier is SourceTier.RAW_TABLE
     assert log.records[0].sources == ("demo.sales.analytics_orders",)
+    assert log.records[0].owner == "group:test-owners"
 
-    blocked = json.loads(
+    unknown = json.loads(
         asyncio.run(
             registry.execute(
-                "execute_sql", {"sql": "DROP TABLE t", "reason": "cleanup"}
+                "query_rows",
+                {
+                    "source": "orders",
+                    "fields": ["password_hash"],
+                    "reason": "attempt undeclared data",
+                },
             )
         )
     )
-    assert "must start with" in blocked["error"]
+    assert "unknown governed row field" in unknown["error"]
     assert len(log.records) == 1
 
-    hidden_write = json.loads(
+    with pytest.raises(ToolExecutionError, match="schema validation"):
         asyncio.run(
             registry.execute(
-                "execute_sql",
-                {"sql": "SELECT 1 UNION ALL DELETE FROM t", "reason": "sneaky"},
+                "query_rows",
+                {
+                    "source": "orders",
+                    "fields": ["order_id"],
+                    "sql": "DROP TABLE orders",
+                    "reason": "attempt SQL injection",
+                },
             )
         )
-    )
-    assert "not allowed" in hidden_write["error"]
     assert len(log.records) == 1
+
+
+def test_registry_never_exposes_a_model_facing_sql_tool(model, seed_executor):
+    registry, _ = _registry(model, seed_executor)
+    names = [item["function"]["name"] for item in registry.openai_tools()]
+
+    assert "query_rows" in names
+    assert "execute_sql" not in names
 
 
 def test_check_freshness_notes_and_records_the_watermark(model, seed_executor):

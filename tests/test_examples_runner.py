@@ -223,6 +223,7 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
         "layered_judges",
         "cost_quality_tradeoff",
         "agent_alignment_optimization",
+        "compare_and_select_llms",
     ):
         assert runner.EXAMPLES[name].connected is False
         assert runner.EXAMPLES[name].local is True
@@ -230,7 +231,7 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
 
     numbered_paths = [example.path for example in runner.EXAMPLES.values()]
     assert [Path(path).name[:2] for path in numbered_paths] == [
-        f"{number:02d}" for number in range(13)
+        f"{number:02d}" for number in range(14)
     ]
 
 
@@ -451,7 +452,9 @@ def test_local_run_never_checks_cloud_and_reports_workspace_path(
     assert "make workspace-connect" in output
 
 
-def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, runner):
+def test_progressive_examples_execute_offline_with_connected_lineage(
+    tmp_path, runner, request
+):
     mlflow = pytest.importorskip("mlflow")
     local_dir = tmp_path / "local"
     tracking_uri = f"sqlite:///{local_dir / 'mlflow.db'}"
@@ -555,11 +558,20 @@ def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, r
         == payloads["first_prompt"]["change"]["prompt_uri"]
     )
 
+    original_tracking_uri = mlflow.get_tracking_uri()
+    original_registry_uri = mlflow.get_registry_uri()
+
+    def restore_mlflow_uris():
+        mlflow.set_tracking_uri(original_tracking_uri)
+        mlflow.set_registry_uri(original_registry_uri)
+
+    request.addfinalizer(restore_mlflow_uris)
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_registry_uri(tracking_uri)
     client = mlflow.MlflowClient(
         tracking_uri=tracking_uri,
         registry_uri=tracking_uri,
     )
-    mlflow.set_registry_uri(tracking_uri)
     production_prompt = mlflow.genai.load_prompt(
         "prompts:/main.example_ai.earnings_summary@production"
     )

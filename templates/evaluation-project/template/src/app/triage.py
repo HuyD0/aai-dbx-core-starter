@@ -12,7 +12,7 @@ _MAX_TRIAGE_DETAIL_CHARS = 240
 
 
 def print_failure_triage(
-    report,
+    report: Any,
     *,
     max_items: int = _MAX_TRIAGE_ITEMS,
     include_details: bool = False,
@@ -88,7 +88,9 @@ def _is_explicit_failure(value: Any) -> bool:
 def _has_value(value: Any) -> bool:
     if value is None:
         return False
-    if isinstance(value, Real) and not isinstance(value, bool):
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, Real):
         return not math.isnan(float(value))
     text = str(value).strip().lower()
     return text not in {"", "nan", "nat", "none", "<na>"}

@@ -9,9 +9,13 @@ from typing import Any
 
 from aai_core.tags import ResourceContext
 
+__all__ = ["PromptManager", "PromptReference"]
+
 
 @dataclass(frozen=True)
 class PromptReference:
+    """Immutable version-or-alias reference to an MLflow registered prompt."""
+
     name: str
     version: int | None = None
     alias: str | None = None
@@ -26,6 +30,8 @@ class PromptReference:
 
 
 class PromptManager:
+    """Govern prompt naming, tagging, registration, loading, and aliases."""
+
     def __init__(
         self,
         *,
@@ -46,7 +52,9 @@ class PromptManager:
         *,
         commit_message: str,
         tags: dict[str, str] | None = None,
-    ):
+    ) -> Any:
+        """Register a new immutable prompt version through native MLflow."""
+
         qualified = self.qualify(name)
         metadata = self.context.merged(tags)
         return self._client().genai.register_prompt(
@@ -65,7 +73,9 @@ class PromptManager:
         version: int | None = None,
         alias: str | None = None,
         cache_ttl_seconds: float | None = None,
-    ):
+    ) -> Any:
+        """Load a prompt by exact version or governed alias."""
+
         reference = PromptReference(self.qualify(name), version=version, alias=alias)
         kwargs = (
             {"cache_ttl_seconds": cache_ttl_seconds}
@@ -75,6 +85,8 @@ class PromptManager:
         return self._client().genai.load_prompt(reference.uri, **kwargs)
 
     def set_alias(self, name: str, *, alias: str, version: int) -> None:
+        """Point a governed lifecycle alias at an immutable prompt version."""
+
         if alias == "candidate":
             warnings.warn(
                 "The 'candidate' prompt alias is deprecated; use the more "
@@ -92,6 +104,8 @@ class PromptManager:
         )
 
     def qualify(self, name: str) -> str:
+        """Return a three-part Unity Catalog prompt name."""
+
         parts = name.split(".")
         if len(parts) == 1:
             return f"{self.catalog}.{self.schema}.{name}"
@@ -99,7 +113,7 @@ class PromptManager:
             return name
         raise ValueError("Prompt names must be unqualified or catalog.schema.name")
 
-    def _client(self):
+    def _client(self) -> Any:
         if self._mlflow is not None:
             return self._mlflow
         try:

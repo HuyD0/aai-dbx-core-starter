@@ -48,6 +48,7 @@ jobs:
             --python "$PYTHON_VERSION" \
             --extra dev \
             --extra all \
+            --extra foundry-labs \
             --locked
           uv pip install \
             --python .venv/bin/python \
@@ -56,6 +57,10 @@ jobs:
             "langchain>=1.3,<1.4" \
             "langgraph>=1.2,<1.3"
           uv pip check --python .venv/bin/python
+          .venv/bin/python \
+            templates/_shared/files/scripts/audit_dependencies.py \
+            --policy templates/_shared/files/security-audit.toml \
+            --installed-python .venv/bin/python
 
       - name: Exercise behavioral compatibility canaries
         env:
@@ -67,8 +72,12 @@ jobs:
           .venv/bin/python -m pytest -q \
             templates/agent-app/template/recipes/langgraph/test_graph.py
           .venv/bin/python - <<'PY'
+          import a2a
+          import agent_framework
+          import azure.ai.projects
           import azure.identity
           import azure.keyvault.secrets
+          import azure.monitor.opentelemetry
           import azure.search.documents
           import databricks.ai_search.client
           import databricks.sdk
@@ -77,6 +86,7 @@ jobs:
           import langchain_core
           import mlflow
           import openai
+          import opentelemetry.sdk
           import pydantic
 
           print("provider, tracing, validation, and framework boundaries passed")

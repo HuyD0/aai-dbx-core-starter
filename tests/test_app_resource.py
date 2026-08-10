@@ -187,7 +187,11 @@ def test_only_the_wheel_is_published_to_the_artifact_volume():
     sdist would put a web server into the SDK artifact volume.
     """
     workflow = (WORKFLOWS / "publish-sdk.yml").read_text(encoding="utf-8")
-    assert "python -m build --wheel" in workflow, "the release build must be wheel-only"
+    cloud_verify = (ROOT / "scripts" / "cloud-verify.sh").read_text(encoding="utf-8")
+    assert "./scripts/cloud-verify.sh" in workflow
+    assert (
+        "python -m build --wheel --no-isolation" in cloud_verify
+    ), "the acceptance gate must produce the wheel that publication stages"
     assert "dist/*.tar.gz" not in workflow, "the sdist must not be published"
 
 

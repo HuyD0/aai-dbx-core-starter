@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "sdk": {
-    "version": "0.3.0",
+    "version": "0.4.0",
     "python": [
       "3.11",
       "3.12"
@@ -15,33 +15,33 @@
   },
   "templates": {
     "agent-app": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.2.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "analytics-app": {
-      "version": "1.0.0",
-      "aai_core": "0.3.0",
+      "version": "1.1.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "evaluation-project": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.2.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "experiment-starter": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.2.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "prompt-app": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.2.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "rag-app": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.2.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     }
   },
@@ -53,6 +53,11 @@
     "mlflow_tracing": {
       "support": "stable",
       "owner": "aai-core"
+    },
+    "agent_decision_observability": {
+      "support": "preview",
+      "owner": "mlflow-native-with-application-records",
+      "note": "Strict provider-neutral decision records use privacy-governed MLflow AGENT spans; observed execution spans remain authoritative and provider reasoning signals remain optional diagnostics."
     },
     "framework_autologging": {
       "support": "preview",

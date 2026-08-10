@@ -18,7 +18,7 @@
     "repository_url": {
       "type": "string",
       "description": "Required absolute HTTPS URL of this project's real Git repository; Hub registration rejects example and placeholder URLs",
-      "order": 22,
+      "order": 24,
       "pattern": "^https://[^\\s@/?#]+(?:/[^\\s?#]*)?$",
       "pattern_match_failure_message": "Use an absolute HTTPS repository URL without credentials, spaces, a query string, or a fragment."
     },
@@ -117,39 +117,56 @@
     },
     "aai_core_version": {
       "type": "string",
-      "default": "0.3.0",
+      "default": "0.4.0",
       "description": "Pinned aai-core SDK version",
-      "order": 17
+      "order": 19
     },
     "aai_core_volume": {
       "type": "string",
       "default": "/Volumes/dbx_dev/dbx_platform/python_packages",
       "description": "Unity Catalog volume holding aai-core wheels",
-      "order": 18
+      "order": 20
     },
     "workspace_host": {
       "type": "string",
       "default": "https://adb-7405609799238491.11.azuredatabricks.net",
       "description": "Development Azure Databricks workspace",
-      "order": 19
+      "order": 21
     },
     "compute_policy_id": {
       "type": "string",
       "default": "0005F2031B6D2319",
       "description": "Constrained Job Compute policy",
-      "order": 20
+      "order": 22
     },
     "aai_core_pip_source": {
       "type": "string",
       "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
       "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
-      "order": 21
+      "order": 23
     },
     "source_table": {
       "type": "string",
       "default": "{{.catalog}}.{{.schema}}.documents",
       "description": "Governed source table of documents (columns: id, content, source_uri). The chunk pipeline writes <source_table>_chunks with Change Data Feed enabled (Databricks retrieval only)",
       "order": 16
+    },
+    "prompt_version": {
+      "type": "string",
+      "default": "1",
+      "description": "Exact immutable Prompt Registry version evaluated by the release job; update this after registering a new prompt",
+      "order": 17,
+      "pattern": "^[1-9][0-9]*$",
+      "pattern_match_failure_message": "Use a positive integer Prompt Registry version."
+    },
+    "knowledge_version": {
+      "type": "string",
+      "default": "replace-with-knowledge-version",
+      "description": "Bounded non-secret immutable identifier for the externally managed knowledge/chunk/index snapshot evaluated by the release gate",
+      "order": 18,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+      "pattern_match_failure_message": "Use 1-128 letters, numbers, dots, underscores, colons, slashes, plus signs, or hyphens."
     }
   },
   "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",

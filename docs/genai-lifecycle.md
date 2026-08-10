@@ -80,8 +80,9 @@ observing or registering behavior is not enough to authorize a release.
 11. Attach user/expert feedback and turn reviewed failures into regression cases.
 
 This is an evaluation-driven loop, not a one-way release pipeline. Reviewed
-production failures become evaluation records, and the same scorer definitions
-are reused for change regression tests and production monitoring.
+production failures become evaluation records. Reuse the same scorer intent—and
+the same implementation only when the runtime inputs match—across change
+regression tests and production monitoring.
 
 ## Experiment identity and run lineage
 
@@ -179,8 +180,14 @@ explicitly permits it. Prefer stable identifiers and controlled excerpts.
 - Human/domain review.
 - Production sampled evaluation.
 
-The same scorers should be reused before and after deployment so quality does
-not mean something different in production.
+Use the same scorer semantics before and after deployment so quality does not
+mean something different in production, but respect their input contracts. A
+registered production scorer receives a trace without benchmark expectations.
+Trace-only decision/action consistency can be reproduced as self-contained
+notebook-defined `@scorer` code; registration serializes notebook code, not an
+imported scorer factory and its helpers. Expectation-dependent decision/tool
+appropriateness cannot be registered unchanged and remains a reviewed,
+dataset-backed development/release assessment.
 
 ## Offline and automatic evaluation
 
@@ -195,6 +202,16 @@ evaluation to the intended environment and trace status. Route every LLM
 scorer through the explicit approved `judge-model`; never rely on a provider's
 ambient default. Any row-level error from a gated scorer fails the release
 because MLflow aggregates otherwise omit failed rows.
+
+There is no public `promote_trace` API in the certified MLflow 3.15.1 surface.
+After minimization and human review, use the MLflow UI Add/Export flow or call
+native `dataset.merge_records(reviewed_traces)`. Trace
+conversion carries root inputs/outputs, expectation Assessments, and source
+trace/session lineage; it does not copy the full span tree into the dataset row.
+Normalize reviewed behavior contracts such as `expected_tool_calls` before
+using them as gate expectations. `aai-core` deliberately adds no stable wrapper
+for this native boundary, so live-validate managed UI and conversion behavior
+in the target workspace before automating it.
 
 The application team owns evaluation cases, scorer intent, and acceptance
 thresholds. The platform team owns approved judge deployments, scorer
@@ -271,10 +288,11 @@ Prompt versions are immutable. Mutable aliases such as `development` and
 `production` are controlled deployment pointers, never release evidence.
 Some upstream tools and older project versions call a pre-release alias
 `candidate`; that prompt alias is deprecated here in favor of `validation`.
-It is distinct from the application maturity tag
-`ResourceContext.lifecycle="candidate"`. Evaluation and release evidence
-always bind the exact prompt URI, version, and content digest even when runtime
-configuration loads an alias.
+It is distinct from the schema-v2 application maturity tag
+`ResourceContext.lifecycle="validation"`. Historical schema-v1 evidence with
+the `candidate` lifecycle remains readable with a deprecation warning.
+Evaluation and release evidence always bind the exact prompt URI, version, and
+content digest even when runtime configuration loads an alias.
 
 ## Reproducibility manifest
 
@@ -331,6 +349,11 @@ The repository examples implement this contract in order:
 13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
     training, and final held-out release evidence separate; it is disabled by
     default and cannot move a production alias.
+14. `13_compare_and_select_llms.ipynb` is a credential-free interactive
+    workshop that compares baseline/change logical models through a golden
+    dataset, blinded pairwise judging, session-level TCO, and a fail-closed
+    governance evidence preflight. Its learner stubs are intentionally
+    incomplete, and its simulated measurements cannot authorize a release.
 
 The executable lifecycle scripts emit hypothesis, baseline, change, result,
 decision, and release. The advanced notebooks preserve that vocabulary while

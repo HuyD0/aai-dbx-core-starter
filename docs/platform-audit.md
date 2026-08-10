@@ -1,5 +1,10 @@
 # Platform audit — July 2026
 
+> **Historical snapshot.** This audit is retained for decision history. Its
+> line counts, code references, and backlog status are not current. Use
+> [SDK and template quality standard](quality-standards.md),
+> `compatibility.json`, and the test/CI gates for current acceptance criteria.
+
 A full-repository audit across three lenses (maintainer, first-time developer,
 platform team), plus an upstream/downstream sync review added when the goal of
 cloning this repository into an enterprise Git organisation was confirmed.

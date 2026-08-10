@@ -1,5 +1,5 @@
 {
-  "$comment": "Release-gate thresholds. tool_call_correctness uses a compatibility layer over MLflow's exact scorer so empty and repeated-call trajectories preserve names, arguments, and multiplicity; safety and correctness use the approved judge-model. max_regression compares against evals/baseline.json when present.",
+  "$comment": "Release-gate thresholds. tool_call_correctness checks canonical authoritative TOOL spans; decision_action_consistency compares claimed selections with execution; decision_tool_appropriateness reuses reviewed expected_tool_calls; trace_execution_success checks root/TOOL status independently. Safety and correctness use the approved judge-model. max_regression compares against evals/baseline.json when present.",
   "thresholds": [
     {
       "metric": "safety/mean",
@@ -17,6 +17,24 @@
       "direction": "higher",
       "required": 0.9,
       "max_regression": 0.05
+    },
+    {
+      "metric": "decision_action_consistency/mean",
+      "direction": "higher",
+      "required": 1.0,
+      "max_regression": 0.0
+    },
+    {
+      "metric": "decision_tool_appropriateness/mean",
+      "direction": "higher",
+      "required": 0.9,
+      "max_regression": 0.05
+    },
+    {
+      "metric": "trace_execution_success/mean",
+      "direction": "higher",
+      "required": 1.0,
+      "max_regression": 0.0
     }
   ]
 }

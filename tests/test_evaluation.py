@@ -191,7 +191,53 @@ def test_gate_contracts_are_strict_frozen_and_serializable():
     assert result.model_dump(mode="json") == {
         "metrics": {"quality": 0.9},
         "failures": [],
+        "policy_digest": policy.digest,
+        "baseline_digest": None,
     }
+
+
+def test_gate_records_canonical_policy_and_baseline_digests():
+    policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="quality",
+                direction=MetricDirection.HIGHER,
+                required=0.8,
+            ),
+        )
+    )
+    equivalent_policy = GatePolicy.model_validate(policy.model_dump())
+
+    first = apply_gate(
+        {"quality": 0.9},
+        policy=policy,
+        baseline_metrics={"latency": 100, "quality": 0.92},
+    )
+    reordered = apply_gate(
+        {"quality": 0.9},
+        policy=equivalent_policy,
+        baseline_metrics={"quality": 0.92, "latency": 100},
+    )
+    changed_baseline = apply_gate(
+        {"quality": 0.9},
+        policy=policy,
+        baseline_metrics={"quality": 0.91, "latency": 100},
+    )
+    changed_policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="quality",
+                direction=MetricDirection.HIGHER,
+                required=0.85,
+            ),
+        )
+    )
+
+    assert first.policy_digest == policy.digest == equivalent_policy.digest
+    assert first.baseline_digest == reordered.baseline_digest
+    assert first.baseline_digest != changed_baseline.baseline_digest
+    assert policy.digest != changed_policy.digest
+    assert apply_gate({"quality": 0.9}, policy=policy).baseline_digest is None
 
 
 def test_gate_rejects_values_without_a_native_metrics_mapping():

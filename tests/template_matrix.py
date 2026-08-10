@@ -6,14 +6,15 @@ overrides + the combo's `overrides`, then asserts `expect_present` /
 toggled by a template's __preamble must be asserted present in one combo and
 absent in a sibling — that is the dead-skip-glob guard.
 
-The first combo of each template is also the deep-tier combo (ruff, black,
-generated pytest, offline checks), so it must render a fully working project.
+Every combo runs the deep generated-project tier (validation, Ruff, Black,
+mypy, branch coverage, offline checks, and a wheel build), so each branch must
+render a fully working project.
 """
 
 COMBOS = {
     "analytics-app": [
         {
-            "name": "databricks",
+            "name": "databricks-review-off",
             "overrides": {
                 "project_name": "test-analytics",
                 "model_provider": "databricks",
@@ -51,7 +52,18 @@ COMBOS = {
             "expect_absent": ["app.yaml", "start_server.py", "resources/agent_app.yml"],
         },
         {
-            "name": "foundry",
+            "name": "databricks-review-on",
+            "overrides": {
+                "project_name": "test-analytics",
+                "model_provider": "databricks",
+                "model_deployment": "chat",
+                "adversarial_review": "yes",
+            },
+            "expect_present": ["src/app/agent.py", "src/app/reviewer.py"],
+            "expect_absent": [],
+        },
+        {
+            "name": "foundry-review-off",
             "overrides": {
                 "project_name": "test-analytics",
                 "model_provider": "foundry",
@@ -59,6 +71,18 @@ COMBOS = {
                 "model_deployment": "chat",
             },
             "expect_present": ["src/app/agent.py"],
+            "expect_absent": [],
+        },
+        {
+            "name": "foundry-review-on",
+            "overrides": {
+                "project_name": "test-analytics",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "model_deployment": "chat",
+                "adversarial_review": "yes",
+            },
+            "expect_present": ["src/app/agent.py", "src/app/reviewer.py"],
             "expect_absent": [],
         },
     ],
@@ -139,8 +163,10 @@ COMBOS = {
             },
             "expect_present": [
                 "src/app/rag.py",
+                "src/app/release_evidence.py",
                 "jobs/build_chunks.py",
                 "tests/test_chunks.py",
+                "tests/test_release_evidence.py",
                 "scripts/promote_prompt.py",
             ],
             "expect_absent": [],
@@ -178,6 +204,25 @@ COMBOS = {
             "expect_present": ["src/app/rag.py"],
             "expect_absent": ["jobs/build_chunks.py"],
         },
+        {
+            "name": "foundry-dbx-search",
+            "overrides": {
+                "project_name": "test-rag",
+                "model_provider": "foundry",
+                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
+                "model_deployment": "chat",
+                "retrieval_provider": "databricks_ai_search",
+                "search_endpoint": "https://unused",
+                "search_index": "knowledge",
+                "embedding_deployment": "embedding",
+            },
+            "expect_present": [
+                "src/app/rag.py",
+                "jobs/build_chunks.py",
+                "tests/test_chunks.py",
+            ],
+            "expect_absent": [],
+        },
     ],
     "agent-app": [
         {
@@ -197,8 +242,14 @@ COMBOS = {
                 "app.yaml",
                 "requirements.txt",
                 "resources/agent_app.yml",
+                "tests/_endpoint_trace_probe.py",
                 "tests/test_app_endpoint.py",
                 "notebooks/02_enable_monitoring.py",
+                "scripts/create_release.py",
+                "tests/test_evaluation_config.py",
+                "tests/test_feedback.py",
+                "tests/test_release_evidence.py",
+                "tests/test_sync_dataset.py",
             ],
             "expect_absent": ["src/app/scoring.py"],
         },
@@ -218,6 +269,7 @@ COMBOS = {
                 "app.yaml",
                 "requirements.txt",
                 "resources/agent_app.yml",
+                "tests/_endpoint_trace_probe.py",
                 "tests/test_app_endpoint.py",
             ],
         },
@@ -238,6 +290,7 @@ COMBOS = {
                 "app.yaml",
                 "requirements.txt",
                 "resources/agent_app.yml",
+                "tests/_endpoint_trace_probe.py",
                 "tests/test_app_endpoint.py",
             ],
         },
