@@ -740,6 +740,109 @@ def test_attach_answer_sheet_preserves_ordinary_nested_inputs_and_outputs(tmp_pa
     assert replayed.rows[0]["outputs"] == output
 
 
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize("record_shape", ["answer", "outputs"])
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("depth", "too deeply nested or complex"),
+        ("nodes", "too deeply nested or complex"),
+        ("surrogate", "invalid Unicode text"),
+    ],
+)
+def test_attach_answer_sheet_bounds_every_output_shape(
+    tmp_path, suffix, record_shape, case, message
+):
+    rows = _rows(1)
+    _write_dataset(tmp_path, rows)
+    if case == "depth":
+        output = _nested_mapping(70, "private-output")
+    elif case == "nodes":
+        output = [0] * 100_000
+    else:
+        output = "\ud800"
+    record = (
+        {"question": "question 0", "answer": output}
+        if record_shape == "answer"
+        else {"inputs": rows[0]["inputs"], "outputs": output}
+    )
+    sheet = tmp_path / f"answers{suffix}"
+    sheet.write_text(
+        json.dumps([record]) if suffix == ".json" else json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=message) as excinfo:
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    assert "private-output" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize(
+    "output",
+    ["ordinary scalar", False, {"content": ["structured", {"ok": True}]}],
+    ids=("scalar", "false", "structured"),
+)
+def test_attach_answer_sheet_preserves_supported_outputs(tmp_path, suffix, output):
+    rows = _rows(1)
+    _write_dataset(tmp_path, rows)
+    record = {"inputs": rows[0]["inputs"], "outputs": output}
+    sheet = tmp_path / f"answers{suffix}"
+    sheet.write_text(
+        json.dumps([record]) if suffix == ".json" else json.dumps(record),
+        encoding="utf-8",
+    )
+
+    replayed = attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    assert replayed.rows[0]["outputs"] == output
+
+
+def test_attach_answer_sheet_rejects_cyclic_in_memory_output(tmp_path, monkeypatch):
+    from aai_core.agentkit import datasets as datasets_module
+
+    rows = _rows(1)
+    _write_dataset(tmp_path, rows)
+    sheet = tmp_path / "answers.json"
+    sheet.write_text("[]", encoding="utf-8")
+    cyclic = {}
+    cyclic["self"] = cyclic
+    monkeypatch.setattr(
+        datasets_module,
+        "_load_json_value",
+        lambda *args, **kwargs: [{"inputs": rows[0]["inputs"], "outputs": cyclic}],
+    )
+
+    with pytest.raises(ConfigError, match="too deeply nested or complex"):
+        attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+
+def test_attach_answer_sheet_persists_normalized_in_memory_output(
+    tmp_path, monkeypatch
+):
+    from aai_core.agentkit import datasets as datasets_module
+
+    rows = _rows(1)
+    _write_dataset(tmp_path, rows)
+    sheet = tmp_path / "answers.json"
+    sheet.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(
+        datasets_module,
+        "_load_json_value",
+        lambda *args, **kwargs: [
+            {
+                "inputs": rows[0]["inputs"],
+                "outputs": {"parts": ("answer", False)},
+            }
+        ],
+    )
+
+    replayed = attach_answer_sheet(load_dataset("golden.json", root=tmp_path), sheet)
+
+    assert replayed.rows[0]["outputs"] == {"parts": ["answer", False]}
+
+
 def test_dataset_digest_governs_recursive_input_normalization():
     inputs = _nested_mapping(2_000)
 
