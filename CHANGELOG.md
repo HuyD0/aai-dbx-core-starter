@@ -6,6 +6,201 @@ All notable changes to `aai-core` are documented here.
 
 ## 0.4.0
 
+- Added `docs/llmops-playbook.md`, mapping industry LLMOps practice areas onto
+  the platform's AI application lifecycle for application teams and the
+  platform team, with a maturity checklist and an honest gap roadmap.
+- Added `aai_core.decisions`: the `adopt`/`reject`/`inconclusive` `Decision`
+  vocabulary, the strict `DecisionRecord` contract (an adopt must cite a
+  passing, metrics-bearing gate whose recorded policy actually enforced at
+  least one substantive release rule — a zero cost-coverage threshold
+  gates nothing, and neither do regression-only rules whose baseline
+  values were absent under a waived-baseline policy, since
+  `_evaluate_policy` skips those checks entirely;
+  `decided_by` rejects personal emails; `prompt_digest` and
+  `release_digest` accept only sha256 hexdigests so raw prompt text, user
+  content, or secrets cannot enter persisted tags; run ids and
+  `change_id` are bounded opaque identifiers because they become searchable
+  tags; `change_summary` remains bounded prose but, like `rationale`, is
+  stored only in the decision artifact; the free-text
+  `change_summary`, `rationale`, and `decided_by` are trimmed and must
+  stay nonblank, so no decision is persisted with a whitespace-only
+  artifact summary or rationale stating no reason; `prompt_name`
+  accepts only the qualified
+  `catalog.schema.name` shape with no placeholder components and, with
+  `prompt_version`, binds the registry identity the evidence was recorded
+  for), `decision_digest()` binding the strict artifact to its governed run,
+  `load_decision()` refusing unfinished runs or evidence whose identity,
+  purpose, searchable tags, gate metrics, or artifact digest disagree, and
+  `record_decision()`
+  writing the decision as a governed run with searchable `aai.decision` tags
+  and a `decision.json` artifact — the free-form change summary and rationale
+  persist only inside that artifact, never as run metadata or a run description
+  (MLflow stores
+  descriptions as the `mlflow.note.content` tag), and the run name derives
+  exclusively from the bounded `change_id` (MLflow persists run names as
+  the `mlflow.runName` tag, so a free-form override would bypass the
+  record's bounded fields).
+- Added thin evaluation helpers. `judge_model_uri` is restored from 0.2.0 as
+  the single resolver for the approved judge endpoint (it had been duplicated
+  across five template sites); the agent, prompt, RAG, and analytics evaluation
+  entry points and the agent monitoring notebook now call it before prompt,
+  warehouse, tracing, agent, or judge work. It rejects setup-placeholder
+  deployments
+  (`replace-with-*`, `unset`, `<angle-bracket>` markers, …) as well as
+  values outside the serving-endpoint name character set (alphanumerics,
+  dashes, underscores — a pasted URI or display label would otherwise fail
+  only inside the later evaluation request) so the doctor
+  never reports an unusable judge as ready; `log_gate_evidence` standardizes the gate
+  metrics and `aai.gate_passed` tag templates were hand-writing;
+  `evaluate_with_gate` composes native `mlflow.genai.evaluate()` with
+  `apply_gate()` through kwargs passthrough and returns the native result by
+  identity — unlike the removed 0.2.0 `EvaluationSuite.run_tracked`, it owns
+  no run and mirrors no native parameters; `GateResult` records the applied
+  `GatePolicy` and regression baseline and re-validates its failures against
+  them at construction, so gate evidence is self-describing and cannot claim
+  a pass its own metrics contradict; while scorer-error enforcement is on,
+  `apply_gate` refuses to produce evidence from a non-finite scorer
+  error-count metric instead of silently discarding scorer health, a
+  negative error count fails the gate as corrupt inside the recomputation
+  (as does an observed cost coverage outside the `[0, 1]` unit interval,
+  which would otherwise satisfy any threshold),
+  and per-row failures in a native `mlflow.genai.evaluate()` result —
+  `<scorer>/error_message` scorer failures and bare `error_message`
+  `predict_fn` failures alike — are counted into persisted
+  `*/error_count` evidence (native results never aggregate them), with
+  the larger of the aggregate and observed row counts kept so a mapping
+  reporting zero cannot erase failing rows;
+  `get_or_create_evaluation_dataset` promotes the governed dataset helper
+  from `examples/notebook_setup.py` (which keeps its copy until the
+  notebooks migrate) and fails locally on placeholder, dotted, or
+  invalid-character catalog/schema qualifiers and logical dataset names
+  instead of querying the registry. Every identifier crossing into the
+  registry — dataset name, catalog and schema qualifiers (in the dataset
+  helper and the prompt registry alike), prompt names, and the experiment
+  id — must be an actual string, since `str()` coercion turns `None` and
+  `123` into the valid-looking names `"None"` and `"123"` that would
+  address a real but unintended resource; the experiment id is also
+  normalized and placeholder-checked before the first request, so it
+  cannot misreport an association the backend reports normalized.
+- Added `aai_core.scorers` with the deterministic code scorers shared by
+  gates and monitoring, plus a lazy `as_mlflow_scorers()` adapter that wraps
+  dependency-free `registered_*` bodies (logic inlined, equivalence
+  test-enforced) so registered monitoring scorers survive MLflow's
+  body-only serialization in a scoring service without aai-core installed.
+  `MONITORING_SCORERS` is the reference-free subset for sampled trace
+  monitoring; reference-based scorers stay with offline evaluation where
+  ground-truth expectations exist. `refusal_compliance` derives the
+  expectation direction from the same refusal-marker vocabulary applied
+  to outputs, so a refusal case worded without the word "refuse" still
+  gates an unsafe compliant answer, and both reference-based scorers fail
+  a missing, blank, null, or non-string expected response — or an
+  entirely absent expectations mapping — outright in pure and registered
+  forms alike. Pure, AgentKit, and registered forms extract legitimate
+  strings and common provider response shapes, while missing or non-text
+  outputs — Python/Decimal/NumPy/pandas null and NaN/NA/NaT sentinels,
+  numeric scalars, and empty mappings or sequences — fail closed instead of
+  being stringified. An absent answer exhibits no refusal behavior to verify
+  and covers no keywords, while `str(None)` would otherwise read as a
+  compliant non-refusal, take the nothing-to-cover branch, or even match an
+  expected keyword "none". A dataset defect or absent answer must never inflate
+  a release gate. Template copies are unchanged until each template's next
+  version. AgentKit publishes `keyword_coverage`, `refusal_compliance`, and
+  `response_length_ok` as scorer version 2 because these output semantics
+  materially changed; a baseline carrying their version-1 scores is now
+  correctly incomparable and must be re-established rather than mixed into a
+  delta.
+- Added `aai_core.monitoring`: `log_feedback()` forwarding to native MLflow
+  with a required assessment `source_id` namespaced by source kind
+  (`group:` for human review, `judge:`/`code:` for automated scorers) so
+  no governed feedback lands without provenance and no personal identity —
+  username, employee id, or email — can pass as provenance; the trace id,
+  assessment name, and span id must be strings and are normalized before
+  the native request, so neither a coerced `str(None)` nor an untrimmed
+  id can address the wrong trace and no untrimmed name can record
+  feedback under a label later lookups miss. Plus `traces_with_feedback()`
+  for curating reviewed production traces into the governed regression
+  dataset, counting only valid feedback assessments — expectations,
+  invalidated (overridden) entries, and errored scorer feedback never
+  select a trace; convert selected
+  traces to record dictionaries and merge only rows whose expectations
+  carry a nonblank string expected response (managed datasets reject
+  native traces, and the reference-based scorers fail anything else as a
+  dataset defect). Sampled-scorer registration remains a documented
+  notebook step.
+- Added evidence-gated prompt promotion: `prompt_digest()`,
+  `PromptManager.ensure_version()` registering idempotently by content
+  digest across every registry page (promoted from the lifecycle examples),
+  and `PromptManager.promote()` moving a governed alias only after loading a
+  finished persisted decision run and verifying an adopt decision whose
+  `prompt_digest`, qualified `prompt_name`, and immutable `prompt_version`
+  were recorded at decision time and match the registry version's actual
+  template and the prompt and version being promoted
+  (`aai_core.prompts.promotion_blocked` otherwise) — gate evidence alone
+  carries no template identity, content identity is not registry identity,
+  and two versions can share a template, so evidence gathered for one
+  prompt, template, or version can never promote another. `set_alias()`
+  is unchanged. `PromptManager`
+  fails locally on unconfigured or placeholder catalog/schema qualifiers
+  instead of querying the registry for names like `unset.unset.<name>`,
+  and refuses blank or malformed names (`main.app.`, spaces, punctuation
+  outside the recordable `catalog.schema.name` shape) before any registry
+  call, so every name it accepts can also receive promotion evidence;
+  well-formed explicit `catalog.schema.name` qualification remains
+  untouched.
+  `is_missing_prompt_error()` is public so callers seeding a first version
+  or first promotion can distinguish an absent prompt or alias from
+  authentication, permission, and transient registry failures instead of
+  catching broadly; structured non-missing codes override "does not
+  exist" message wording, the common non-disclosure phrasing. Built-in and
+  provider authentication, permission, connection, timeout, transport, and
+  non-file OSError types are likewise authoritative even when their message
+  deliberately says a protected prompt was not found. The classifier also
+  inspects wrapped exceptions and HTTP response status: a genuine 404 remains
+  absence, while 401, 403, 429, every 5xx, and other non-404 responses
+  propagate. Precedence is evaluated over the bounded, cycle-safe exception
+  chain: an explicit `NOT_FOUND`, `RESOURCE_DOES_NOT_EXIST`, 404, exact
+  provider `NotFound`, or MLflow missing-alias shape is not erased merely
+  because its own class also inherits `OSError`/`HTTPError`, while any nested
+  authentication, credentials, quota, HTTP/request, RPC/API, or transport
+  failure still propagates. An exact MLflow alias shape accepts only its
+  expected HTTP 400 (or no status); 401, 403, 429, and 5xx responses still
+  propagate. The bounded walk fails closed when an unseen exception remains,
+  and code-less API-key, credential, token, network, host, TLS, DNS, and
+  connection failures are recognized from their strong message signals. The
+  same shared predicate guards the dataset helper's create path.
+  `promote()` verifies the target version through `get_prompt_version()`,
+  the only fetch with no lineage side effects — every `load_prompt`
+  flavor, the client-level one included, links the loaded version to
+  active lineage — so a rejected change is never attached to an active
+  experiment, run, model, or trace. Every fetch on that path — the
+  decision run, its artifact, and the prompt version — converts absence
+  into the guarded refusal with remediation, so invalid promotion input
+  never escapes as a raw registry error, while permission and transport
+  failures still propagate as themselves.
+  The prompt, agent, and RAG templates now persist the exact release-gate
+  decision, print its run id, and require that id when their promotion scripts
+  call the guarded `promote()` path; their template versions are 1.2.0.
+- Added lifecycle-readiness checks to `aai-core doctor` (experiment name,
+  prompt-registry catalog/schema, judge-model resolution); optional
+  configuration reports skip with remediation, never fail. The
+  prompt-registry preflight applies the same qualifier validation as the
+  SDK helpers (placeholder vocabulary, dotted values, and invalid
+  identifier characters alike), and an
+  experiment name that is a placeholder — explicit, derived from
+  placeholder team/project/application components, or carrying a
+  placeholder path component such as `/Shared/replace-with-experiment`
+  (the bare markers match exactly and `replace-with-` is anchored, so a
+  whole-string test misses them mid-path) — reports skip instead
+  of passing the literal through to the registry.
+- Aligned the executable examples' release decision with the documented
+  vocabulary: `aai.decision` and `LIFECYCLE_RESULT` now record
+  `adopt`/`reject` instead of `release_change`/`keep_baseline`.
+- Extended the curriculum to 00–14 with two teaching notebooks:
+  `13_decision_and_promotion_lifecycle.ipynb` (score → gate → decision →
+  evidence-gated promotion on the credential-free default path) and
+  `14_platform_llm_operations.ipynb` (the platform team's operating loop:
+  judge governance, gateway request tags, cost by tag, fleet provenance,
+  monitoring adoption, and rollback levers).
 - Added `agentkit`, the agent-evaluation paved road: a second console script
   in the same wheel (`aai_core.agentkit`) built around one idea — an
   experiment is a comparison, not a log. `agentkit compare` scores this
@@ -266,7 +461,10 @@ All notable changes to `aai-core` are documented here.
   against the live warehouse with cost-coverage enforcement. The platform
   console offers the template, and `docs/analytics-lifecycle.md` documents
   the lifecycle, eval-set design, tokenomics, and context engineering.
-  `aai-core` itself is unchanged.
+  Its 1.1.0 template release uses the SDK's canonical, strict judge resolver
+  before constructing the live warehouse target. The `experiment-starter`
+  template advances to 1.2.0 so its provenance and certified SDK projection
+  record the 0.4.0 contract consistently.
 - Made `platform-identifiers.json` the only file a clone edits for environment
   identifiers. `scripts/sync_template_shared.py` now stamps the four
   platform-controlled defaults in every template schema and the identifier

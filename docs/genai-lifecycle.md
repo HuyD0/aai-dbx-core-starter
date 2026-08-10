@@ -278,7 +278,9 @@ Some upstream tools and older project versions call a pre-release alias
 It is distinct from the application maturity tag
 `ResourceContext.lifecycle="candidate"`. Evaluation and release evidence
 always bind the exact prompt URI, version, and content digest even when runtime
-configuration loads an alias.
+configuration loads an alias. Promotion also cites the finished MLflow decision
+run: the SDK reloads `decision/decision.json` and verifies its digest, lifecycle
+tags, gate metrics, run purpose, identity, and status before moving the alias.
 
 ## Reproducibility manifest
 
@@ -335,6 +337,12 @@ The repository examples implement this contract in order:
 13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
     training, and final held-out release evidence separate; it is disabled by
     default and cannot move a production alias.
+14. `13_decision_and_promotion_lifecycle.ipynb` ends the comparison in a
+    recorded adopt/reject decision bound to its gate evidence and shows the
+    production alias refusing to move without adopt-grade evidence.
+15. `14_platform_llm_operations.ipynb` walks the platform team's operating
+    loop: judge governance, gateway request tags, cost by tag, fleet
+    provenance, monitoring adoption, and rollback levers.
 
 The executable lifecycle scripts emit hypothesis, baseline, change, result,
 decision, and release. The advanced notebooks preserve that vocabulary while
@@ -343,6 +351,7 @@ remaining exploration and teaching artifacts. See
 
 ## Current references
 
+- [LLMOps playbook](llmops-playbook.md)
 - [Cookbook relevance assessment](mlflow-cookbook-assessment.md)
 - [MLflow GenAI evaluation and monitoring](https://mlflow.org/docs/latest/genai/eval-monitor/)
 - [MLflow automatic evaluation](https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/)

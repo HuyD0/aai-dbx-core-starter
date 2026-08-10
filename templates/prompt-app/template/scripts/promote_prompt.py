@@ -1,8 +1,9 @@
 """Promote an evaluated prompt version to the validation or production alias.
 
 Production deploys load the `production` alias (src/app/assistant.py), so a
-version must be promoted before the first prod deploy. Run this only after
-the release gate (evals/evaluate.py) passed for exactly this version.
+version must be promoted before the first prod deploy. The release gate
+(evals/evaluate.py) records a decision run for the exact version; this script
+requires that run and promotion verifies its persisted evidence.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ import argparse
 from pathlib import Path
 
 from aai_core import bootstrap
-from aai_core.prompts import PromptManager
 from app.config import PROMPT_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,16 +23,28 @@ def main() -> None:
     parser.add_argument(
         "--to", required=True, choices=["validation", "production"], dest="alias"
     )
+    parser.add_argument(
+        "--decision-run-id",
+        required=True,
+        help="Finished decision run emitted by evals/evaluate.py.",
+    )
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
-    prompts = PromptManager(
-        context=context.tags,
-        catalog=context.settings.catalog,
-        schema=context.settings.schema,
+    context.prompts.promote(
+        PROMPT_NAME,
+        alias=args.alias,
+        version=args.version,
+        decision_run_id=args.decision_run_id,
     )
-    prompts.set_alias(PROMPT_NAME, alias=args.alias, version=args.version)
-    print({"name": PROMPT_NAME, "alias": args.alias, "version": args.version})
+    print(
+        {
+            "name": PROMPT_NAME,
+            "alias": args.alias,
+            "version": args.version,
+            "decision_run_id": args.decision_run_id,
+        }
+    )
 
 
 if __name__ == "__main__":

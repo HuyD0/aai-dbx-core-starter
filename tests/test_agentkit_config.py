@@ -13,6 +13,7 @@ from aai_core.agentkit.config import (
 )
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
 from aai_core.evaluation import MetricDirection
+from aai_core.providers.types import ProviderConfigurationError
 from aai_core.testing import dev_settings
 
 MINIMAL = """\
@@ -204,11 +205,39 @@ def test_judge_model_uri_requires_a_databricks_deployment(tmp_path):
 
     with pytest.raises(ConfigError) as excinfo:
         project.judge_model_uri()
-    assert "governed Databricks serving" in str(excinfo.value)
+    assert "provider 'databricks'" in str(excinfo.value)
 
     missing = ProjectContext(config=_config(), settings=dev_settings(), root=tmp_path)
     with pytest.raises(ConfigError):
         missing.judge_model_uri()
+
+
+@pytest.mark.parametrize(
+    ("deployment", "match"),
+    (
+        ("replace-with-judge-endpoint", "placeholder"),
+        ("endpoints:/judge-endpoint", "endpoint name"),
+        ("judge endpoint", "endpoint name"),
+    ),
+)
+def test_agentkit_judge_uses_the_canonical_strict_resolver(tmp_path, deployment, match):
+    project = ProjectContext(
+        config=_config(),
+        settings=dev_settings(
+            models={
+                "judge-model": {
+                    "provider": "databricks",
+                    "deployment": deployment,
+                }
+            }
+        ),
+        root=tmp_path,
+    )
+
+    with pytest.raises(ConfigError, match=match) as excinfo:
+        project.judge_model_uri()
+
+    assert isinstance(excinfo.value.__cause__, ProviderConfigurationError)
 
 
 def test_experiment_manager_uses_platform_naming(tmp_path):

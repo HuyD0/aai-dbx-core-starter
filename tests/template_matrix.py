@@ -113,7 +113,10 @@ COMBOS = {
     "evaluation-project": [
         {
             "name": "databricks-judge",
-            "overrides": {"project_name": "test-evaluation"},
+            "overrides": {
+                "project_name": "test-evaluation",
+                "model_deployment": "judge-endpoint",
+            },
             "expect_present": [
                 "agentkit.yaml",
                 "src/app/example_agent.py",

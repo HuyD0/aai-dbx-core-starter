@@ -43,7 +43,7 @@ def _results(**overrides):
         "metrics": {"keyword_coverage/mean": 0.8, "response_length_ok/mean": 1.0},
         "versions": BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1, "response_length_ok": 1},
+            scorers={"keyword_coverage": 2, "response_length_ok": 2},
             judge_model="endpoints:/judge",
             judge_prompts={"pension_domain_policy": "prompts:/main.eval.p/4"},
             aai_core="0.4.0",
@@ -86,7 +86,7 @@ def test_evidence_names_versions_baseline_and_decision(tmp_path):
 
     assert document["agent"] == "src/app/example_agent.py:respond"
     assert document["dataset"]["digest"] == "abc123"
-    assert document["versions"]["scorers"]["keyword_coverage"] == 1
+    assert document["versions"]["scorers"]["keyword_coverage"] == 2
     assert document["versions"]["judge_model"] == "endpoints:/judge"
     assert document["comparison"]["baseline_run_id"] == "run-0"
     assert document["decision"] == "adopt"
@@ -407,7 +407,7 @@ def test_evidence_reads_baseline_lineage_from_the_record(tmp_path):
         metrics={"keyword_coverage/mean": 0.1},
         versions=BaselineVersions(
             agent="src/app/example_agent.py:respond",
-            scorers={"keyword_coverage": 1},
+            scorers={"keyword_coverage": 2},
             aai_core="0.4.0",
         ),
         recorded_by="agentkit compare --establish-baseline",

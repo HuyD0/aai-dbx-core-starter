@@ -437,7 +437,7 @@ def release_decision(
     }
     passed = all(checks.values())
     return {
-        "decision": "release_change" if passed else "keep_baseline",
+        "decision": "adopt" if passed else "reject",
         "release": RELEASE_NAME if passed else "blocked",
         "checks": checks,
     }

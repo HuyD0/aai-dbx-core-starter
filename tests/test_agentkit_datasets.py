@@ -87,6 +87,18 @@ def _mlflow_span(
     }
 
 
+def _mlflow_span_node(identifier, *, span_type, parent=None, question=None):
+    """A complete v3 span with a distinct id in trace zero's graph."""
+
+    span = _mlflow_span(
+        question=question,
+        span_type=span_type,
+        parent_span_id=_encoded_id(parent, 8) if parent is not None else None,
+    )
+    span["span_id"] = _encoded_id(identifier, 8)
+    return span
+
+
 def _mlflow_expectation(index, name, expectation):
     return {
         "assessment_id": f"a-{index:032x}",
@@ -1794,6 +1806,64 @@ def test_trace_info_request_does_not_hide_malformed_spans(tmp_path, trace):
     assert failures == [
         "row 0 trace must be decodable and contain a usable request or root span"
     ]
+
+
+def test_valid_root_does_not_hide_a_dangling_child_span(tmp_path):
+    trace = _mlflow_trace(
+        spans=[
+            _mlflow_span_node(1, span_type="LLM", question="q"),
+            _mlflow_span_node(2, span_type="RETRIEVER", parent=999),
+        ]
+    )
+    _write_dataset(tmp_path, [{"inputs": {"question": "q"}, "trace": trace}])
+
+    failures = validate_dataset(
+        load_dataset("golden.json", root=tmp_path), minimum_rows=1
+    )
+
+    assert failures == [
+        "row 0 trace must be decodable and contain a usable request or root span"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected_top_level", "admitted"),
+    (
+        pytest.param("dangling-parent", 0, False, id="dangling-parent"),
+        pytest.param("retriever-root", 1, True, id="retriever-root"),
+        pytest.param("llm-root-child", 1, True, id="llm-root-child"),
+        pytest.param("nested-retriever", 1, True, id="nested-retriever"),
+    ),
+)
+def test_retriever_parent_graph_matches_locked_mlflow(
+    layout, expected_top_level, admitted
+):
+    pytest.importorskip("mlflow")
+    from mlflow.entities import Trace
+    from mlflow.genai.utils.trace_utils import _get_top_level_retrieval_spans
+
+    from aai_core.agentkit.datasets import _has_usable_trace, _retriever_spans
+
+    root = _mlflow_span_node(1, span_type="LLM", question="q")
+    if layout == "dangling-parent":
+        spans = [root, _mlflow_span_node(2, span_type="RETRIEVER", parent=999)]
+    elif layout == "retriever-root":
+        spans = [_mlflow_span_node(1, span_type="RETRIEVER", question="q")]
+    elif layout == "llm-root-child":
+        spans = [root, _mlflow_span_node(2, span_type="RETRIEVER", parent=1)]
+    else:
+        spans = [
+            root,
+            _mlflow_span_node(2, span_type="RETRIEVER", parent=1),
+            _mlflow_span_node(3, span_type="RETRIEVER", parent=2),
+        ]
+    trace = _mlflow_trace(spans=spans)
+
+    locked = _get_top_level_retrieval_spans(Trace.from_dict(trace))
+    local = _retriever_spans(trace)
+
+    assert len(locked) == len(local) == expected_top_level
+    assert _has_usable_trace(trace, authored_inputs={"question": "q"}) is admitted
 
 
 @pytest.mark.parametrize(

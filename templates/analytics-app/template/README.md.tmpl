@@ -51,6 +51,8 @@ against the live warehouse, adds Correctness/Safety judges, enforces the
 regression baseline (`--update-baseline` records it) and cost coverage,
 and logs telemetry per run: semantic-model version, knowledge digest,
 model + judge identity, git provenance, token usage, verdict.
+The SDK's strict judge resolver runs before warehouse resolution or agent
+construction, so invalid judge configuration fails before live target work.
 
 ## External prerequisites (platform-owned, one-time)
 

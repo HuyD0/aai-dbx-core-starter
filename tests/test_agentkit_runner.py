@@ -34,10 +34,13 @@ from aai_core.agentkit.runner import (
     SCORER_WORKERS_ENV,
     WORKERS_ENV,
     Decision,
+    _decision_value,
     run_scoring,
     set_concurrency_env,
     submit_job,
 )
+from aai_core.decisions import Decision as LifecycleDecision
+from aai_core.evaluation import GateFailure, GatePolicy, GateResult
 
 AGENT_SOURCE = """\
 KNOWLEDGE = {
@@ -333,9 +336,9 @@ def test_establish_baseline_records_the_first_version(tmp_path):
     assert record.scope.mode == "full"
     assert dict(record.versions.scorers) == {
         "correctness": 1,
-        "keyword_coverage": 1,
-        "refusal_compliance": 1,
-        "response_length_ok": 1,
+        "keyword_coverage": 2,
+        "refusal_compliance": 2,
+        "response_length_ok": 2,
         "safety": 1,
     }
     assert record.recorded_by == "agentkit compare --establish-baseline"
@@ -367,8 +370,8 @@ def test_governed_run_carries_the_full_tag_map(tmp_path):
     assert fake.tags["aai.dataset_rows"] == "12"
     assert fake.tags["aai.agent_target"] == "src/app/example_agent.py:respond"
     assert fake.tags["aai.scorer_versions"] == (
-        "correctness=1,keyword_coverage=1,refusal_compliance=1,"
-        "response_length_ok=1,safety=1"
+        "correctness=1,keyword_coverage=2,refusal_compliance=2,"
+        "response_length_ok=2,safety=1"
     )
     assert fake.tags["aai.gate_passed"] == "true"
     assert fake.tags["aai.decision"] == "inconclusive"
@@ -1005,6 +1008,23 @@ def test_explicit_decision_is_recorded(tmp_path):
 
     assert outcome.results.decision == "adopt"
     assert fake.tags["aai.decision"] == "adopt"
+
+
+def test_agentkit_uses_the_shared_lifecycle_decision_vocabulary():
+    assert Decision is LifecycleDecision
+
+
+def test_adopt_refuses_a_failing_or_rule_free_gate():
+    failing = GateResult(
+        metrics={"quality": 0.2},
+        failures=(GateFailure(metric="quality", reason="below threshold"),),
+    )
+    with pytest.raises(ConfigError, match="passing release gate"):
+        _decision_value("adopt", failing)
+
+    rule_free = GateResult(metrics={"quality": 1.0}, policy=GatePolicy())
+    with pytest.raises(ConfigError, match="substantive release rule"):
+        _decision_value("adopt", rule_free)
 
 
 def _edit_an_expectation(project):
@@ -1935,7 +1955,9 @@ def _prompt_lookup_failures():
             ),
             id="invalid-parameter-alias-near-miss",
         ),
-        pytest.param(ConnectionError("connection reset"), id="transport"),
+        pytest.param(ConnectionError("prompt does not exist"), id="transport"),
+        pytest.param(PermissionError("prompt not found"), id="builtin-permission"),
+        pytest.param(TimeoutError("prompt does not exist"), id="builtin-timeout"),
     )
 
 

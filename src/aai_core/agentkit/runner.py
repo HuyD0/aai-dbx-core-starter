@@ -15,7 +15,6 @@ import subprocess
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +77,8 @@ from aai_core.agentkit.targets import (
     preflight_target,
     resolve_target,
 )
-from aai_core.evaluation import GateResult, apply_gate
+from aai_core.decisions import Decision
+from aai_core.evaluation import GateResult, apply_gate, gate_enforces_release_rule
 from aai_core.experiments import ExperimentRunMetadata, RunPurpose
 from aai_core.prompts import is_missing_prompt_error
 
@@ -90,14 +90,6 @@ _SMOKE_JUDGE_NOTE = (
     "credential-free; use `agentkit smoke --live` or `agentkit compare` to "
     "run judges"
 )
-
-
-class Decision(StrEnum):
-    """What the comparison concluded. Never 'candidate' (deprecated)."""
-
-    ADOPT = "adopt"
-    REJECT = "reject"
-    INCONCLUSIVE = "inconclusive"
 
 
 @dataclass(frozen=True)
@@ -450,7 +442,7 @@ def run_scoring(
             policy=policy,
             baseline_metrics=baseline_metrics,
         )
-        recorded_decision = _decision_value(decision, gate, establish_baseline)
+        recorded_decision = _decision_value(decision, gate)
     else:
         predict_fn = (
             build_predict_fn(
@@ -514,7 +506,7 @@ def run_scoring(
                 policy=policy,
                 baseline_metrics=baseline_metrics,
             )
-            recorded_decision = _decision_value(decision, gate, establish_baseline)
+            recorded_decision = _decision_value(decision, gate)
             tags["aai.gate_passed"] = str(gate.passed).lower()
             tags["aai.decision"] = recorded_decision
             mlflow.log_metrics(dict(gate.metrics))
@@ -893,12 +885,29 @@ def _answer_sheet_path(project: ProjectContext, target: Any) -> Path:
     return project.root / DEFAULT_ANSWER_SHEET
 
 
-def _decision_value(
-    decision: str | None, gate: GateResult, establish_baseline: bool
-) -> str:
-    if decision:
-        return Decision(decision).value
-    return Decision.INCONCLUSIVE.value
+def _decision_value(decision: str | None, gate: GateResult) -> str:
+    if not decision:
+        return Decision.INCONCLUSIVE.value
+    parsed = Decision(decision)
+    if parsed is Decision.ADOPT:
+        if not gate.passed:
+            raise ConfigError(
+                "an adopt decision requires a passing release gate",
+                remediation=(
+                    "Fix the gate failures, or record reject/inconclusive for "
+                    "this comparison."
+                ),
+            )
+        if not gate_enforces_release_rule(gate):
+            raise ConfigError(
+                "an adopt decision requires a gate that enforced at least "
+                "one substantive release rule",
+                remediation=(
+                    "Configure an absolute threshold, a positive cost-coverage "
+                    "minimum, or a regression rule with its baseline metric."
+                ),
+            )
+    return parsed.value
 
 
 def _comparison_rows(

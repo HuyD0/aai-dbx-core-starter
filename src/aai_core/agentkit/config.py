@@ -26,7 +26,14 @@ from pydantic import Field, ValidationError, field_serializer, field_validator
 from aai_core.agentkit.cost import DEFAULT_CHUNKS_PER_ROW
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
-from aai_core.evaluation import MetricDirection, MetricRule
+from aai_core.evaluation import (
+    MetricDirection,
+    MetricRule,
+)
+from aai_core.evaluation import (
+    judge_model_uri as resolve_judge_model_uri,
+)
+from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings, find_platform_config
 
 CONFIG_FILENAME = "agentkit.yaml"
@@ -340,29 +347,13 @@ class ProjectContext:
         """Resolve the logical judge name to a governed serving endpoint."""
 
         name = logical_name or self.config.scorers.judge_model
-        model_config = self.settings.models.get(name)
-        if (
-            not isinstance(model_config, Mapping)
-            or model_config.get("provider") != "databricks"
-        ):
+        try:
+            return resolve_judge_model_uri(self.settings, name)
+        except ProviderConfigurationError as error:
             raise ConfigError(
-                f"{name} must resolve to a governed Databricks serving " "endpoint",
-                remediation=(
-                    f"Configure providers.models.{name} in aai-platform.yml "
-                    "with provider: databricks and deployment: "
-                    "<serving-endpoint>."
-                ),
-            )
-        deployment = model_config.get("deployment")
-        if not isinstance(deployment, str) or not deployment.strip():
-            raise ConfigError(
-                f"{name} requires a deployment",
-                remediation=(
-                    f"Set providers.models.{name}.deployment in "
-                    "aai-platform.yml to the judge serving endpoint name."
-                ),
-            )
-        return f"endpoints:/{deployment.strip()}"
+                error.args[0] if error.args else str(error),
+                remediation=error.remediation,
+            ) from error
 
     def judge_model_identity(
         self, logical_name: str | None = None, *, client: Any | None = None

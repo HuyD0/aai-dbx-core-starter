@@ -322,6 +322,49 @@ def test_a_traced_row_that_retrieved_nothing_costs_nothing():
     assert cost.fanout_counted is True
 
 
+@pytest.mark.parametrize("serialized", (False, True), ids=("mapping", "serialized"))
+def test_valid_empty_span_trace_does_not_add_phantom_retrieval_calls(serialized):
+    """A complete no-span MLflow trace proves a zero retrieval fan-out."""
+
+    retrieving = _rag_rows(count=1, chunks=2)[0]
+    empty_span_trace = {
+        "info": {
+            "trace_id": "tr-00000000000000000000000000000000",
+            "trace_location": {
+                "type": "MLFLOW_EXPERIMENT",
+                "mlflow_experiment": {"experiment_id": "0"},
+            },
+            "request_time": "2026-08-09T00:00:00Z",
+            "state": "OK",
+            "request_preview": json.dumps({"question": "hello"}),
+            "response_preview": json.dumps("hello"),
+            "trace_metadata": {},
+            "tags": {},
+            "assessments": [],
+        },
+        "data": {"spans": []},
+    }
+    conversational = {
+        "inputs": {"question": "hello"},
+        "trace": json.dumps(empty_span_trace) if serialized else empty_span_trace,
+    }
+
+    cost = estimate(
+        [retrieving, conversational],
+        _judge_plan("retrieval_groundedness", "retrieval_relevance"),
+        chunks_per_row=10,
+    )
+
+    assert dict(cost.calls_by_scorer) == {
+        "retrieval_groundedness": 1,
+        "retrieval_relevance": 2,
+    }
+    assert cost.fanout_counted is True
+    enforce_budget(cost, max_judge_calls=3)
+    with pytest.raises(BudgetExceededError, match="3 judge calls"):
+        enforce_budget(cost, max_judge_calls=2)
+
+
 @pytest.mark.parametrize(
     "outputs",
     (
@@ -545,4 +588,40 @@ def test_an_unreadable_trace_still_gets_the_assumption():
     cost = estimate([opaque] * 3, plan, chunks_per_row=10)
 
     assert dict(cost.calls_by_scorer)["retrieval_relevance"] == 30
+    assert cost.fanout_counted is False
+
+
+def test_a_dangling_retriever_parent_keeps_the_conservative_assumption():
+    """An unresolved span graph cannot supply an exact budget multiplier."""
+
+    row = {
+        "inputs": {"question": "q"},
+        "trace": {
+            "data": {
+                "spans": [
+                    {"span_id": "root", "type": "LLM"},
+                    {
+                        "span_id": "search",
+                        "parent_span_id": "absent",
+                        "type": "RETRIEVER",
+                        "outputs": [
+                            {"page_content": "one"},
+                            {"page_content": "two"},
+                        ],
+                    },
+                ]
+            }
+        },
+    }
+
+    cost = estimate(
+        [row],
+        _judge_plan("retrieval_groundedness", "retrieval_relevance"),
+        chunks_per_row=10,
+    )
+
+    assert dict(cost.calls_by_scorer) == {
+        "retrieval_groundedness": 1,
+        "retrieval_relevance": 10,
+    }
     assert cost.fanout_counted is False
