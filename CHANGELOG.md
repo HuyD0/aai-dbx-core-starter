@@ -4,6 +4,25 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added an existing-resource-only Lakebase Autoscaling repository for the Hub,
+  including checksumed schema migrations, OAuth connection pooling, bounded
+  transient-connect retries, optimistic concurrency, and fail-closed hosted
+  configuration. No Lakebase, App, or identity resource is provisioned.
+- Added an explicit dev-to-UAT delivery contract with immutable wheel evidence,
+  manual enablement, lifecycle `validation`, and no production target. UAT keeps
+  the protected-main branch-ref OIDC subject and requires external workspace and
+  existing-Lakebase onboarding before deployment.
+- Added report-only statistical confidence evidence to AgentKit, with optional
+  conservative confidence-bound and paired minimum-effect enforcement.
+- Added typed retrieval modes plus Azure AI Search semantic ranking and
+  Databricks AI Search hybrid reranking controls; provider-specific options stay
+  explicit and validated.
+- Separated the SDK under development from the SDK default offered to generated
+  projects. Release candidates now use a reviewed full Git commit and content
+  digest for credential-free CI; only a completed immutable publication may
+  transition the default to the annotated version tag. Runtime/UAT remains
+  blocked until the volume wheel, checksum, and release manifest exist.
+
 ## 0.4.0
 
 - Hardened SDK-owned logging, secret resolution, provider caching, and resource

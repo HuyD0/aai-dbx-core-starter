@@ -104,7 +104,7 @@
         <span>Lifecycle</span>
         <select name="lifecycle">
           <option value="">All visible</option>
-          {% for value in ["experimental", "production", "retired"] %}
+          {% for value in ["experimental", "validation", "production", "retired"] %}
             <option value="{{ value }}" {% if filters.lifecycle == value %}selected{% endif %}>
               {{ value | title }}
             </option>

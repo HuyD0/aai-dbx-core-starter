@@ -12,6 +12,7 @@ environment.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -50,6 +51,7 @@ def config_for(template: Path) -> dict:
             f"https://github.com/aai-template-validation/{template.name}"
         ),
         "workspace_host": IDENTIFIERS["databricks_host"],
+        "uat_workspace_host": IDENTIFIERS["databricks_uat_host"],
         "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
         "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],
     }
@@ -67,6 +69,9 @@ def validation_runs() -> list[tuple[Path, str, dict[str, str]]]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", choices=("dev", "uat"), default="dev")
+    arguments = parser.parse_args()
     # Fail before cloud calls when template provenance, SDK compatibility, or
     # certified dependency declarations have drifted.
     validate_repository()
@@ -94,7 +99,14 @@ def main() -> int:
                     cwd=scratch,
                 )
                 subprocess.run(
-                    ["databricks", "bundle", "validate", "-t", "dev"],
+                    [
+                        "databricks",
+                        "bundle",
+                        "validate",
+                        "--strict",
+                        "-t",
+                        arguments.target,
+                    ],
                     check=True,
                     cwd=output,
                 )

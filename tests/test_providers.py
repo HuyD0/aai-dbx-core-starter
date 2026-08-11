@@ -6,6 +6,8 @@ import pytest
 from aai_core import tracing
 from aai_core.providers import (
     AzureAISearchRetriever,
+    AzureSemanticRankOptions,
+    DatabricksRerankOptions,
     ModelCapabilities,
     OpenAICompatibleChatModel,
     UnsupportedCapabilityError,
@@ -377,6 +379,54 @@ def test_azure_search_forwards_additive_provider_options():
     assert calls[0]["include_total_count"] is True
 
 
+def test_azure_semantic_ranking_uses_typed_query_controls():
+    calls = []
+    client = SimpleNamespace(search=lambda **options: calls.append(options) or [])
+    retriever = AzureAISearchRetriever(
+        logical_name="knowledge",
+        client=client,
+        content_field="content",
+        id_field="id",
+    )
+
+    retriever.search(
+        "base query",
+        mode="text",
+        ranking=AzureSemanticRankOptions(
+            semantic_configuration_name="knowledge-semantic",
+            semantic_query="ranking query",
+            error_mode="partial",
+            max_wait_milliseconds=750,
+        ),
+    )
+
+    assert calls[0]["search_text"] == "base query"
+    assert calls[0]["semantic_query"] == "ranking query"
+    assert calls[0]["semantic_configuration_name"] == "knowledge-semantic"
+    assert calls[0]["semantic_error_mode"] == "partial"
+    assert calls[0]["semantic_max_wait_in_milliseconds"] == 750
+
+
+def test_azure_search_rejects_the_other_providers_ranking_before_call():
+    calls = []
+    client = SimpleNamespace(search=lambda **options: calls.append(options) or [])
+    retriever = AzureAISearchRetriever(
+        logical_name="knowledge",
+        client=client,
+        content_field="content",
+        id_field="id",
+    )
+
+    with pytest.raises(UnsupportedCapabilityError, match="AzureSemanticRankOptions"):
+        retriever.search(
+            "question",
+            mode="text",
+            ranking=DatabricksRerankOptions(columns_to_rerank=("content",)),
+        )
+
+    assert calls == []
+
+
 class _ProviderFailure(Exception):
     def __init__(self, status_code):
         super().__init__(f"status {status_code}; credential=native-secret")
@@ -521,6 +571,80 @@ def test_databricks_search_hybrid_sends_text_and_optional_vector():
     assert index.options["query_text"] == "question"
     assert index.options["query_vector"] == [0.1, 0.2]
     assert results[0].document_id == "doc-1"
+
+
+def test_databricks_text_search_uses_full_text_without_embedding():
+    index = FakeDatabricksIndex()
+    embedding = FakeEmbedding()
+    retriever = DatabricksAISearchRetriever(
+        logical_name="knowledge",
+        index=index,
+        columns=["id", "content"],
+        content_field="content",
+        id_field="id",
+        embedding_provider=embedding,
+    )
+
+    retriever.search("exact product identifier", mode="text")
+
+    assert index.options["query_type"] == "FULL_TEXT"
+    assert index.options["query_text"] == "exact product identifier"
+    assert "query_vector" not in index.options
+    assert embedding.queries == []
+
+
+def test_databricks_hybrid_reranker_uses_governed_columns(monkeypatch):
+    from conftest import install_fake_module
+
+    class NativeReranker:
+        def __init__(self, columns_to_rerank):
+            self.columns_to_rerank = columns_to_rerank
+
+    install_fake_module(
+        monkeypatch,
+        "databricks.ai_search.reranker",
+        DatabricksReranker=NativeReranker,
+    )
+    index = FakeDatabricksIndex()
+    retriever = DatabricksAISearchRetriever(
+        logical_name="knowledge",
+        index=index,
+        columns=["id", "content", "summary"],
+        content_field="content",
+        id_field="id",
+    )
+
+    retriever.search(
+        "question",
+        ranking=DatabricksRerankOptions(columns_to_rerank=("content", "summary")),
+    )
+
+    assert index.options["reranker"].columns_to_rerank == ["content", "summary"]
+
+
+def test_databricks_reranker_rejects_non_hybrid_and_unreviewed_columns():
+    index = FakeDatabricksIndex()
+    retriever = DatabricksAISearchRetriever(
+        logical_name="knowledge",
+        index=index,
+        columns=["id", "content"],
+        content_field="content",
+        id_field="id",
+    )
+
+    with pytest.raises(UnsupportedCapabilityError, match="only with hybrid"):
+        retriever.search(
+            "question",
+            mode="text",
+            ranking=DatabricksRerankOptions(columns_to_rerank=("content",)),
+        )
+    with pytest.raises(ProviderConfigurationError, match="governed columns"):
+        retriever.search(
+            "question",
+            ranking=DatabricksRerankOptions(columns_to_rerank=("private",)),
+        )
+
+    assert index.options is None
 
 
 @pytest.mark.parametrize(

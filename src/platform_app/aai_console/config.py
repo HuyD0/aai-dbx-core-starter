@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from .hub.lakebase import (
+    LakebaseConfigurationError,
+    LakebaseRuntimeSettings,
+)
+
 # Identifier keys the content may reference as ${identifier:<key>}. Keeping this list
 # closed means a typo in the content YAML fails a test instead of rendering an empty
 # string into a command a developer would then paste.
@@ -45,12 +50,13 @@ class HubStateMode(StrEnum):
     ``memory`` exists only for credential-free local development and tests. A hosted
     app must never accept it: Databricks App filesystems are ephemeral, and presenting
     process memory as a durable registry would make workflow state disappear on every
-    restart. A Lakebase or SQL implementation can be added behind the repository
-    interface once the corresponding resource and least-privilege grants are approved.
+    restart. ``lakebase`` requires the current Autoscaling ``postgres`` app resource
+    binding and a schema owned by the app service principal.
     """
 
     UNAVAILABLE = "unavailable"
     MEMORY = "memory"
+    LAKEBASE = "lakebase"
 
 
 class HubJobMode(StrEnum):
@@ -70,6 +76,7 @@ class ConsoleConfig:
     #: form", which keeps a clone working before its own repository URL is configured.
     template_repo: str | None = None
     hub_state_mode: HubStateMode = HubStateMode.UNAVAILABLE
+    hub_lakebase: LakebaseRuntimeSettings | None = None
     hub_job_mode: HubJobMode = HubJobMode.UNAVAILABLE
     hub_registration_principals: frozenset[str] = frozenset()
     hub_platform_viewer_group: str | None = None
@@ -159,6 +166,22 @@ def load_config(
             "durable store before enabling hosted Hub writes"
         )
 
+    lakebase = None
+    if state_mode is HubStateMode.LAKEBASE:
+        schema = environ.get("AAI_HUB_LAKEBASE_SCHEMA", "").strip()
+        if not schema:
+            raise ConfigError(
+                "AAI_HUB_LAKEBASE_SCHEMA is required when "
+                "AAI_HUB_STATE_MODE=lakebase"
+            )
+        try:
+            lakebase = LakebaseRuntimeSettings.from_environment(
+                environ,
+                schema=schema,
+            )
+        except LakebaseConfigurationError as error:
+            raise ConfigError(str(error)) from error
+
     requested_job_mode = environ.get("AAI_HUB_JOB_MODE", "").strip().lower()
     if requested_job_mode:
         try:
@@ -180,6 +203,7 @@ def load_config(
         app_name=app_name,
         template_repo=environ.get(f"{_ENV_PREFIX}TEMPLATE_REPO", "").strip() or None,
         hub_state_mode=state_mode,
+        hub_lakebase=lakebase,
         hub_job_mode=job_mode,
         hub_registration_principals=_csv_set(
             environ.get("AAI_HUB_REGISTRATION_PRINCIPALS", "")

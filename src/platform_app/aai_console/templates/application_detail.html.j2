@@ -55,7 +55,7 @@
           data-target="{{ application.promotion_target or '' }}"
           {% if not application.can_request_promotion %}disabled aria-describedby="promotion-disabled-reason"{% endif %}
         >
-          Request production promotion
+          Request UAT promotion
         </button>
       </div>
     </section>
@@ -159,7 +159,7 @@
     <section class="tab-panel" id="panel-readiness" role="tabpanel" aria-labelledby="tab-readiness" hidden>
       <article class="panel">
         <div class="panel__head">
-          <div><h3>Production readiness</h3><p>{{ application.readiness_profile }} · evaluated {{ application.readiness_evaluated_at }}</p></div>
+          <div><h3>Release readiness</h3><p>{{ application.readiness_profile }} · evaluated {{ application.readiness_evaluated_at }}</p></div>
         </div>
         <div class="readiness-list">
           {% for rule in readiness %}

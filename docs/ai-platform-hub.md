@@ -42,21 +42,21 @@ portfolio, detail, readiness, action, and optimization views without that cost o
 
 ## Capability matrix
 
-| Capability | Status in this delivery | Production gate |
+| Capability | Status in this delivery | Enablement gate |
 |---|---|---|
 | Guided onboarding, generated commands, and app-service-principal platform-state checks | **Available** | Existing App resource and its current read bindings |
 | AI Platform Hub navigation, portfolio/detail/readiness/action/optimization presentation | **Available** | Real data remains visibly unavailable until the corresponding adapter is enabled |
 | Strict `ai-platform/v1` manifest validation, normalization, credential-value rejection, and deterministic hashing | **Available** | Golden-path CI must submit manifests through an authenticated registration principal |
-| Immutable application/version records, audit events, optimistic concurrency, evaluation and promotion state machines, four-eyes checks | **Local preview** | A durable Lakebase or Delta repository adapter and migrations |
+| Immutable application/version records, audit events, optimistic concurrency, evaluation and promotion state machines, four-eyes checks | **Available with the Lakebase binding** | Select `lakebase`, bind the approved existing branch/database, and let the app SP own the configured schema |
 | In-memory repository | **Local preview only** | Never permitted for a hosted App; all state disappears on process restart |
-| Deterministic health and production-readiness evaluation | **Available as a domain contract** | Governed evidence feeds, versioned profiles, and durable snapshots |
+| Deterministic health and release-readiness evaluation | **Available as a domain contract** | Governed evidence feeds, versioned profiles, and durable snapshots |
 | Databricks AI request tags from `aai-core` | **Available** | Applications must use the SDK bootstrap/provider path and valid platform tags |
-| Durable registration and portfolio data | **Gated** | Lakebase preferred, or the documented Delta fallback |
+| Durable registration and portfolio data | **Opt-in for UAT** | Existing Lakebase Autoscaling `postgres` resource binding, schema migration, and registration allowlist |
 | Application visibility and contribution roles | **Gated in hosted mode** | Authoritative `application_principal` mappings; manifest owner/support metadata never grants access |
 | Group-derived visibility, platform roles, and direct-user cost | **Gated** | A trusted group/identity integration compatible with the repository's no-OBO policy |
 | Application cost, AI Gateway usage, health, trace summaries, and optimization findings | **Gated** | Scheduled materialization, secure serving views, freshness monitoring, and grants |
 | Run evaluation | **Gated** | Registered evaluation job, narrow run permission, result reconciler, and durable idempotency |
-| Request/review/execute production promotion | **Gated** | Production target, four-eyes administrator mapping, promotion job, deployment identity, and audit reconciliation |
+| Request/review/execute UAT promotion | **Gated** | UAT target, four-eyes administrator mapping, promotion job, deployment identity, and audit reconciliation |
 
 “Available as a domain contract” means the rule can be tested deterministically with
 supplied evidence. It does not mean the hosted App currently has that evidence.
@@ -81,19 +81,18 @@ and `200` for an idempotent replay.
 
 ## Regional and existing-resource decisions
 
-### East US 2 and Lakebase
+### Existing Lakebase Autoscaling resource
 
-Workspace discovery for this delivery confirmed that Lakebase Autoscaling is available
-in East US 2. It also found an existing `learn-app-sync-dev-1` project with small,
-auto-suspending compute. That project belongs to another application and is **not** a
-shared platform database. Reusing it would couple lifecycle, grants, data retention, and
-failure domains without an approved ownership contract.
+This delivery reuses the existing Lakebase resource selected by the platform owner. The
+repository deliberately carries no guessed project, branch, database, or endpoint: full
+branch and database resource paths are required bundle variables, and the App's current
+`postgres` binding supplies `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGSSLMODE`, and
+`LAKEBASE_ENDPOINT` at runtime.
 
-The cost-effective production choice is a dedicated Hub database or branch in a
-platform-owned Lakebase project, using the smallest suitable compute and aggressive
-auto-suspend. The platform owner must revalidate regional availability and supported App
-resource bindings at enablement time. No repository code provisions or adopts the
-learn-app project.
+Repository code never provisions, adopts, resets, or deletes a Lakebase project, branch,
+database, endpoint, or role. The selected branch/database needs an explicit owner,
+retention decision, backup/recovery procedure, cost attribution, and UAT isolation
+contract before the optional App resource is enabled.
 
 ### Legacy `dbx_platform` assets
 
@@ -121,28 +120,43 @@ operations use the `HubRepository` boundary. An implementation must preserve:
 - idempotent registration and job requests;
 - one active equivalent evaluation or promotion request;
 - append-only privileged action events; and
-- four-eyes production approval.
+- four-eyes environment-promotion approval.
 
 The in-memory implementation is a deterministic test double for `make app-run` and unit
 tests. It is process-local, resets on restart, and must never be selected when the App is
 hosted. If no durable adapter is configured, the hosted application fails closed: reads
 show an unavailable capability and mutations stay disabled.
 
-### Preferred: Lakebase Autoscaling
+### Preferred: existing Lakebase Autoscaling
 
-Provision externally:
+Connect the externally managed resource as follows:
 
-1. A dedicated Hub project or approved platform-owned project, branch, database, schema,
-   runtime role, and migration role in East US 2. Do not use `learn-app-sync-dev-1`.
-2. The smallest suitable compute with auto-suspend and explicit spend ownership.
-3. An App database resource binding with the narrowest supported connection permission.
-   The runtime role receives only CRUD privileges on Hub tables; DDL belongs to the
-   migration role.
-4. Versioned PostgreSQL migrations executed out of band from request handling.
-5. A bounded connection pool that uses Databricks OAuth credentials and rotates them
-   before expiry. No PAT, password, or connection secret belongs in Git or `app.yaml`.
-6. Non-secret resource identifiers supplied through bundle configuration and App
-   `valueFrom` bindings.
+1. Record the exact full paths `projects/<project>/branches/<branch>` and
+   `projects/<project>/branches/<branch>/databases/<database>` in the required bundle
+   variables. Confirm the selected resource is approved for Hub UAT state; do not infer
+   or silently default to the `production` branch.
+2. Bind it to the existing App with the current `postgres` resource shape (`branch` plus
+   `database`) and `CAN_CONNECT_AND_CREATE`. The retired `database`/`instance_name`
+   resource shape is not supported.
+3. Set `AAI_HUB_STATE_MODE=lakebase` and choose a dedicated lowercase
+   `AAI_HUB_LAKEBASE_SCHEMA`. Deploy the App before any local database client touches
+   that schema. The App service principal creates it and must remain its owner; an
+   existing schema owned by another principal makes startup fail closed.
+4. At startup, the adapter takes a PostgreSQL advisory lock and applies forward-only,
+   transactional, checksum-protected migrations. It refuses migration gaps, modified
+   history, and a database schema newer than the running App. Migrations never run from
+   an HTTP request.
+5. New PostgreSQL connections use a Databricks-generated OAuth database credential.
+   Tokens are cached only in process memory, refreshed before expiry, and injected by a
+   SQLAlchemy creator callback rather than placed in a URL. The bounded pool uses
+   pre-ping, bounded transient-connect retries, and recycling before the one-hour
+   credential lifetime. Each session defaults to a 30-second statement timeout and a
+   5-second lock timeout; strictly validated `AAI_HUB_LAKEBASE_STATEMENT_TIMEOUT_MS` and
+   `AAI_HUB_LAKEBASE_LOCK_TIMEOUT_MS` settings may narrow or extend those bounds within
+   the adapter's fixed limits.
+6. No PAT, native database password, connection URL, or OAuth value belongs in Git,
+   bundle variables, `app.yaml`, logs, or errors. A connection/driver failure is reduced
+   to a stable `repository unavailable` category at the API boundary.
 
 ### Fallback: Delta through SQL
 
@@ -242,7 +256,7 @@ a promotion job. Provision externally:
   evaluates the registered immutable version;
 - the App service principal's minimum supported run permission on those exact jobs only;
 - a reconciler that records Databricks job-run state and sanitized result summaries;
-- a production bundle target and promotion job that runs as a dedicated deployment
+- a UAT bundle target with lifecycle `validation` and a promotion job that runs as a dedicated deployment
   service principal;
 - an idempotency token accepted and recorded by both job and repository; and
 - a trusted platform-administrator mapping for review, with requester/approver
@@ -285,9 +299,11 @@ only for explicit local testing and is rejected when the App is hosted.
 1. Confirm the UI reports **unavailable** and all mutations are disabled.
 2. Check the App resource binding, database/warehouse state, runtime grants, OAuth
    rotation, and latest migration version.
-3. Do not switch a hosted App to memory mode and do not create schema from a request.
-4. Restore the external dependency, run approved migrations, restart the App, and verify
-   a read plus an idempotent test registration before reopening writes.
+3. Do not switch a hosted App to memory mode, change the branch/database to bypass the
+   incident, or create schema from a request.
+4. Restore the external dependency and grants, restart the App so its checksum-protected
+   migrations complete, and verify a read plus an idempotent test registration before
+   reopening writes.
 
 ### Telemetry stale
 
@@ -317,7 +333,7 @@ only for explicit local testing and is rejected when the App is hosted.
    deployment identity, and bundle validation output.
 3. Preserve the failed terminal state and audit trail. Correct the external cause.
 4. Retry only through an approved, idempotent promotion request when the job proves the
-   prior attempt did not complete. Never repair production by granting the App broader
+   prior attempt did not complete. Never repair UAT by granting the App broader
    rights.
 
 ### Identity-attribution gap
@@ -334,9 +350,10 @@ only for explicit local testing and is rejected when the App is hosted.
 
 - [ ] Confirm the existing App is bound to bundle state, uses the approved usage policy,
   remains `MEDIUM`, and is stopped.
-- [ ] Choose Lakebase or the Delta fallback and obtain a named platform owner.
-- [ ] Provision the dedicated store, runtime/migration roles, App binding, migrations,
-  pooling/rotation, auto-suspend, backup, and retention.
+- [ ] Confirm the existing Lakebase project/branch/database and obtain a named platform
+  owner; do not provision or silently select another resource.
+- [ ] Configure the `postgres` App binding, app-SP-owned schema, migration checksums,
+  OAuth pool rotation, auto-suspend, backup, and retention.
 - [ ] Provision bounded telemetry materialization, approved compute, serving views,
   freshness monitoring, and App `SELECT` grants.
 - [ ] Approve account-level role groups and a trusted, revocable identity/group mapping
@@ -344,11 +361,14 @@ only for explicit local testing and is rejected when the App is hosted.
 - [ ] Allowlist the dedicated CI registration principal; do not reuse the legacy shared
   application.
 - [ ] Register evaluation and promotion jobs, narrow run permissions, reconciler,
-  idempotency, production target, and dedicated deployment identity.
+  idempotency, UAT target, and dedicated deployment identity.
 - [ ] Configure each golden-path manifest with real resource bindings and verify the
   immutable manifest hash in CI.
 - [ ] Run credential-free repository checks, generated-template tests, and authenticated
-  `databricks bundle validate -t dev`.
+  `databricks bundle validate -t dev`. Before UAT, point `AAI_TEST_POSTGRES_DSN` at an
+  explicitly approved disposable PostgreSQL database and run
+  `pytest -q tests/test_hub_lakebase.py`; the test creates and drops only its unique
+  `aai_hub_test_*` schema and otherwise skips when the variable is absent.
 - [ ] Start the App for a bounded non-production smoke test. Verify fail-closed
   authorization, store durability, freshness labels, unattributed cost, evaluation
   deduplication, four-eyes promotion, and audit events; then stop it.

@@ -40,6 +40,7 @@ from pydantic import (
 
 from aai_core.agentkit.baseline import BaselineDataset, BaselineScope, BaselineVersions
 from aai_core.agentkit.errors import ConfigError
+from aai_core.agentkit.statistics import StatisticalEvidence
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.evaluation import MetricRule
 
@@ -99,6 +100,10 @@ class ResultsRecord(ContractModel):
     scope: BaselineScope
     mode: str = Field(min_length=1)
     metrics: Mapping[str, float] = Field(default_factory=dict)
+    # Per-row numeric scorer values in dataset order. Content never travels
+    # with them; they exist solely to make paired uncertainty reproducible.
+    metric_samples: Mapping[str, tuple[float | None, ...]] = Field(default_factory=dict)
+    statistics: StatisticalEvidence | None = None
     versions: BaselineVersions
     baseline_run_id: str | None = None
     baseline_metrics: Mapping[str, float] = Field(default_factory=dict)
@@ -141,6 +146,16 @@ class ResultsRecord(ContractModel):
             }
         return value
 
+    @field_validator("metric_samples", mode="before")
+    @classmethod
+    def coerce_metric_samples(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        return {
+            str(name): tuple(samples) if isinstance(samples, list | tuple) else samples
+            for name, samples in value.items()
+        }
+
     @field_validator("metrics", "baseline_metrics", mode="after")
     @classmethod
     def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
@@ -153,6 +168,18 @@ class ResultsRecord(ContractModel):
             )
         return cast(Mapping[str, float], freeze_value(value))
 
+    @field_validator("metric_samples", mode="after")
+    @classmethod
+    def freeze_metric_samples(
+        cls, value: Mapping[str, tuple[float | None, ...]]
+    ) -> Mapping[str, tuple[float | None, ...]]:
+        for name, samples in value.items():
+            if not name.strip():
+                raise ValueError("metric sample keys must name a metric")
+            if any(item is not None and not math.isfinite(item) for item in samples):
+                raise ValueError(f"metric samples for {name!r} must be finite")
+        return cast(Mapping[str, tuple[float | None, ...]], freeze_value(value))
+
     @field_validator("gate_failures", mode="after")
     @classmethod
     def freeze_failures(cls, value: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -161,6 +188,12 @@ class ResultsRecord(ContractModel):
     @field_serializer("metrics", "baseline_metrics")
     def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
         return cast(dict[str, float], thaw_value(value))
+
+    @field_serializer("metric_samples")
+    def serialize_metric_samples(
+        self, value: Mapping[str, tuple[float | None, ...]]
+    ) -> dict[str, list[float | None]]:
+        return cast(dict[str, list[float | None]], thaw_value(value))
 
     @field_serializer("gate_failures")
     def serialize_failures(self, value: tuple[Any, ...]) -> list[dict[str, str]]:

@@ -84,6 +84,9 @@ class BaselineRecord(ContractModel):
     dataset: BaselineDataset
     scope: BaselineScope
     metrics: Mapping[str, float]
+    # Nullable per-row numeric scores, kept in dataset order. They enable a
+    # paired confidence comparison without persisting prompts or responses.
+    metric_samples: Mapping[str, tuple[float | None, ...]] = Field(default_factory=dict)
     versions: BaselineVersions
     recorded_by: str = Field(min_length=1)
     change_id: str = Field(min_length=1)
@@ -111,9 +114,37 @@ class BaselineRecord(ContractModel):
             )
         return cast(Mapping[str, float], freeze_value(value))
 
+    @field_validator("metric_samples", mode="before")
+    @classmethod
+    def coerce_metric_samples(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        return {
+            str(name): tuple(samples) if isinstance(samples, list | tuple) else samples
+            for name, samples in value.items()
+        }
+
+    @field_validator("metric_samples", mode="after")
+    @classmethod
+    def validate_metric_samples(
+        cls, value: Mapping[str, tuple[float | None, ...]]
+    ) -> Mapping[str, tuple[float | None, ...]]:
+        for name, samples in value.items():
+            if not name.strip():
+                raise ValueError("metric sample keys must name a metric")
+            if any(item is not None and not math.isfinite(item) for item in samples):
+                raise ValueError(f"metric samples for {name!r} must be finite")
+        return cast(Mapping[str, tuple[float | None, ...]], freeze_value(value))
+
     @field_serializer("metrics")
     def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
         return cast(dict[str, float], thaw_value(value))
+
+    @field_serializer("metric_samples")
+    def serialize_metric_samples(
+        self, value: Mapping[str, tuple[float | None, ...]]
+    ) -> dict[str, list[float | None]]:
+        return cast(dict[str, list[float | None]], thaw_value(value))
 
 
 def load_baseline(path: Path) -> tuple[BaselineRecord | None, list[str]]:

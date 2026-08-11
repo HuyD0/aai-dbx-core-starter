@@ -1,5 +1,8 @@
 # {{.project_name}}
 
+The supported delivery path is dev to UAT; follow
+[`docs/uat-promotion.md`](docs/uat-promotion.md) after the dev release gate passes.
+
 Tool-using agent application generated from the AAI platform template
 (`agent-app`, successor of `agentic-rag`'s agent half): governed prompt,
 application-owned async tool loop, structured outputs, tracing,
@@ -208,11 +211,12 @@ live-validate the managed UI and conversion behavior in the target workspace.
      `{{.aai_core_volume}}`.
 
    The deploy identity also needs the externally approved rights required to
-   update this App. A platform owner then performs the one-time binding:
+   update this App. Bundle state is identity-scoped, so perform the one-time binding
+   inside the CI identity's manual workflow run:
 
    ```bash
-   databricks bundle deployment bind \
-     agent_app {{.application_name}}-dev -t dev
+   gh workflow run deploy.yml --ref main -f target=dev \
+     -f bind_app={{.application_name}}-dev
    ```
 
    `resources/agent_app.yml` deliberately contains no permission-bearing App

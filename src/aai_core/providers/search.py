@@ -13,18 +13,41 @@ from typing import Any, cast
 
 from aai_core._sensitive import is_sensitive_name, normalize_sensitive_name
 from aai_core.providers.types import (
+    AzureSemanticRankOptions,
+    DatabricksRerankOptions,
     ProviderConfigurationError,
+    RetrievalMode,
+    SearchRankingOptions,
     SearchResult,
     UnsupportedCapabilityError,
 )
 from aai_core.tracing import provider_span
 
-_MODES = {"text", "vector", "hybrid"}
 _AZURE_CONTROLLED_SEARCH_OPTIONS = frozenset(
-    {"filter", "search_text", "select", "top", "vector_queries"}
+    {
+        "filter",
+        "query_type",
+        "search_text",
+        "select",
+        "semantic_configuration_name",
+        "semantic_error_mode",
+        "semantic_max_wait_in_milliseconds",
+        "semantic_query",
+        "top",
+        "vector_queries",
+    }
 )
 _DATABRICKS_CONTROLLED_SEARCH_OPTIONS = frozenset(
-    {"columns", "filters", "num_results", "query_text", "query_type", "query_vector"}
+    {
+        "columns",
+        "columns_to_rerank",
+        "filters",
+        "num_results",
+        "query_text",
+        "query_type",
+        "query_vector",
+        "reranker",
+    }
 )
 _FORBIDDEN_PER_CALL_SEARCH_OPTIONS = frozenset(
     {
@@ -56,14 +79,20 @@ _FORBIDDEN_PER_CALL_SEARCH_OPTIONS = frozenset(
     }
 )
 
-__all__ = ["AzureAISearchRetriever", "DatabricksAISearchRetriever"]
+__all__ = [
+    "AzureAISearchRetriever",
+    "AzureSemanticRankOptions",
+    "DatabricksAISearchRetriever",
+    "DatabricksRerankOptions",
+    "RetrievalMode",
+]
 
 
-def _validated_mode(mode: str) -> str:
-    normalized = mode.lower()
-    if normalized not in _MODES:
-        raise ValueError(f"Unsupported retrieval mode: {mode}")
-    return normalized
+def _validated_mode(mode: str | RetrievalMode) -> RetrievalMode:
+    try:
+        return RetrievalMode(str(mode).lower())
+    except ValueError:
+        raise ValueError(f"Unsupported retrieval mode: {mode}") from None
 
 
 def _validated_provider_options(
@@ -134,12 +163,12 @@ def _resolve_query_vector(
     retriever: Any,
     query: str,
     query_vector: Sequence[float] | None,
-    mode: str,
+    mode: RetrievalMode,
     required: bool,
 ) -> Sequence[float] | None:
     """Return the vector for a vector-consuming mode, embedding on demand."""
 
-    if query_vector is not None or mode == "text":
+    if query_vector is not None or mode is RetrievalMode.TEXT:
         return query_vector
     embedding = getattr(retriever, "embedding_provider", None)
     if embedding is not None:
@@ -187,7 +216,8 @@ class AzureAISearchRetriever:
         top_k: int = 10,
         filters: Mapping[str, Any] | None = None,
         query_vector: Sequence[float] | None = None,
-        mode: str = "hybrid",
+        mode: str | RetrievalMode = RetrievalMode.HYBRID,
+        ranking: SearchRankingOptions | None = None,
         provider_options: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
         mode = _validated_mode(mode)
@@ -195,6 +225,7 @@ class AzureAISearchRetriever:
             provider_options,
             controlled_fields=_AZURE_CONTROLLED_SEARCH_OPTIONS,
         )
+        ranking_options = self._ranking_options(query, ranking)
         # Azure AI Search always needs a client-side vector for vector/hybrid.
         query_vector = _resolve_query_vector(
             retriever=self,
@@ -209,7 +240,9 @@ class AzureAISearchRetriever:
             )
 
         options: dict[str, Any] = {
-            "search_text": query if mode in {"text", "hybrid"} else None,
+            "search_text": (
+                query if mode in {RetrievalMode.TEXT, RetrievalMode.HYBRID} else None
+            ),
             "top": top_k,
             "filter": _odata_filter(filters),
         }
@@ -223,6 +256,7 @@ class AzureAISearchRetriever:
                     fields=",".join(self.vector_fields),
                 )
             ]
+        options.update(ranking_options)
         options.update(additional_options)
         options = {key: value for key, value in options.items() if value is not None}
 
@@ -239,6 +273,28 @@ class AzureAISearchRetriever:
             results = [self._normalize(item) for item in response]
             _record_retriever_span(span, query, results)
             return results
+
+    def _ranking_options(
+        self,
+        query: str,
+        ranking: SearchRankingOptions | None,
+    ) -> dict[str, Any]:
+        if ranking is None:
+            return {}
+        if not isinstance(ranking, AzureSemanticRankOptions):
+            raise UnsupportedCapabilityError(
+                "Azure AI Search requires AzureSemanticRankOptions"
+            )
+        options: dict[str, Any] = {
+            # semantic_query enables semantic reranking without changing the
+            # base text/vector query syntax, including pure-vector requests.
+            "semantic_query": ranking.semantic_query or query,
+            "semantic_configuration_name": ranking.semantic_configuration_name,
+            "semantic_error_mode": ranking.error_mode,
+        }
+        if ranking.max_wait_milliseconds is not None:
+            options["semantic_max_wait_in_milliseconds"] = ranking.max_wait_milliseconds
+        return options
 
     def _normalize(self, item: Mapping[str, Any]) -> SearchResult:
         reserved = {
@@ -296,7 +352,8 @@ class DatabricksAISearchRetriever:
         top_k: int = 10,
         filters: Mapping[str, Any] | None = None,
         query_vector: Sequence[float] | None = None,
-        mode: str = "hybrid",
+        mode: str | RetrievalMode = RetrievalMode.HYBRID,
+        ranking: SearchRankingOptions | None = None,
         provider_options: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
         mode = _validated_mode(mode)
@@ -304,6 +361,7 @@ class DatabricksAISearchRetriever:
             provider_options,
             controlled_fields=_DATABRICKS_CONTROLLED_SEARCH_OPTIONS,
         )
+        ranking_options = self._ranking_options(mode, ranking)
         # Databricks can embed hybrid/text queries server-side, so a vector is
         # only mandatory for pure vector mode (never a silent fallback).
         query_vector = _resolve_query_vector(
@@ -311,18 +369,24 @@ class DatabricksAISearchRetriever:
             query=query,
             query_vector=query_vector,
             mode=mode,
-            required=(mode == "vector"),
+            required=(mode is RetrievalMode.VECTOR),
         )
+        query_type = {
+            RetrievalMode.TEXT: "FULL_TEXT",
+            RetrievalMode.VECTOR: "ANN",
+            RetrievalMode.HYBRID: "HYBRID",
+        }[mode]
         options: dict[str, Any] = {
             "columns": list(self.columns),
             "num_results": top_k,
             "filters": dict(filters or {}),
-            "query_type": "HYBRID" if mode == "hybrid" else "ANN",
+            "query_type": query_type,
         }
-        if mode != "vector":
+        if mode is not RetrievalMode.VECTOR:
             options["query_text"] = query
         if query_vector is not None:
             options["query_vector"] = list(query_vector)
+        options.update(ranking_options)
         options.update(additional_options)
 
         with provider_span(
@@ -338,6 +402,37 @@ class DatabricksAISearchRetriever:
             results = self._normalize_response(response)
             _record_retriever_span(span, query, results)
             return results
+
+    def _ranking_options(
+        self,
+        mode: RetrievalMode,
+        ranking: SearchRankingOptions | None,
+    ) -> dict[str, Any]:
+        if ranking is None:
+            return {}
+        if not isinstance(ranking, DatabricksRerankOptions):
+            raise UnsupportedCapabilityError(
+                "Databricks AI Search requires DatabricksRerankOptions"
+            )
+        if mode is not RetrievalMode.HYBRID:
+            raise UnsupportedCapabilityError(
+                "Databricks reranking is supported only with hybrid retrieval"
+            )
+        unknown = sorted(set(ranking.columns_to_rerank).difference(self.columns))
+        if unknown:
+            raise ProviderConfigurationError(
+                "reranker columns are not in the retriever's governed columns: "
+                + ", ".join(unknown),
+                remediation="Add the reviewed columns to the retriever configuration "
+                "or remove them from DatabricksRerankOptions.",
+            )
+        from databricks.ai_search.reranker import DatabricksReranker
+
+        return {
+            "reranker": DatabricksReranker(
+                columns_to_rerank=list(ranking.columns_to_rerank)
+            )
+        }
 
     def _normalize_response(self, response: Mapping[str, Any]) -> list[SearchResult]:
         manifest_columns = response.get("manifest", {}).get("columns", [])

@@ -3,6 +3,7 @@
   "azure_tenant_id": "7f6a2cf9-5e4e-46ae-95d4-74016c1df1a6",
   "azure_subscription_id": "ea936670-dda1-4884-8467-49c225bf3e83",
   "databricks_host": "https://adb-7405609799238491.11.azuredatabricks.net",
+  "databricks_uat_host": "https://adb-7405613180844632.12.azuredatabricks.net",
   "job_compute_policy_id": "0005F2031B6D2319",
   "sdk_artifact_volume": "/Volumes/dbx_dev/dbx_platform/python_packages",
   "app_usage_policy_id": "4c3c39a5-ffb8-4c18-a5e0-7ddb3bb809b8",

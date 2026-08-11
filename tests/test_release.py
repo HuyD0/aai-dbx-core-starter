@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from aai_core.deployment import ApplicationRelease
@@ -285,6 +286,107 @@ def test_current_sdk_version_has_a_changelog_release_section():
     commit = release_validation.validate_release_version(version, require_tag=False)
 
     assert commit == release_validation.git_output("rev-parse", "HEAD")
+
+
+def test_generated_project_sdk_default_is_an_offline_verified_candidate():
+    compatibility = json.loads((ROOT / "compatibility.json").read_text())
+    generated = compatibility["sdk"]["generated_project_default"]
+
+    issues = release_validation.generated_sdk_default_issues(
+        compatibility,
+        current_sdk_version=compatibility["sdk"]["version"],
+        pinned_content_sha256=release_validation.sdk_content_sha256_at_commit(
+            generated["source"]["ref"]
+        ),
+        pinned_sdk_version=release_validation.sdk_version_at_commit(
+            generated["source"]["ref"]
+        ),
+    )
+
+    assert not issues
+    assert generated["status"] == "release-candidate"
+    assert generated["source"]["kind"] == "git-commit"
+
+
+def test_sdk_content_digest_command_uses_the_local_candidate_commit(capsys):
+    compatibility = json.loads((ROOT / "compatibility.json").read_text())
+    source = compatibility["sdk"]["generated_project_default"]["source"]
+
+    result = release_validation.main(["--print-sdk-content-sha256", source["ref"]])
+
+    assert result == 0
+    assert capsys.readouterr().out.strip() == source["content_sha256"]
+
+
+def test_release_validation_jobs_fetch_candidate_commit_history():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+
+    for job_name in ("lint-test", "python-311"):
+        checkout = workflow["jobs"][job_name]["steps"][0]
+        assert checkout["with"]["fetch-depth"] == 0
+
+
+def test_dependency_canary_workflow_matches_release_acceptance_metadata():
+    compatibility = json.loads((ROOT / "compatibility.json").read_text())
+    canary = compatibility["release_acceptance"]["dependency_canary"]
+    workflow = ROOT / ".github" / "workflows" / "dependency-canary.yml"
+
+    assert release_validation.workflow_matrix_values(workflow, "python") == set(
+        canary["python"]
+    )
+    assert release_validation.workflow_matrix_values(workflow, "resolution") == set(
+        canary["resolutions"]
+    )
+
+
+def test_generated_project_candidate_requires_a_full_commit_and_matching_digest():
+    compatibility = json.loads((ROOT / "compatibility.json").read_text())
+    generated = compatibility["sdk"]["generated_project_default"]
+    generated["source"]["ref"] = "main"
+    generated["source"]["content_sha256"] = "0" * 64
+
+    issues = release_validation.generated_sdk_default_issues(
+        compatibility,
+        current_sdk_version=compatibility["sdk"]["version"],
+        pinned_content_sha256="1" * 64,
+        pinned_sdk_version="9.9.9",
+    )
+
+    assert "release-candidate SDK ref must be a full commit SHA" in issues
+    assert (
+        "generated-project SDK content digest does not describe its pinned commit"
+        in issues
+    )
+    assert (
+        "generated-project SDK version does not match its pinned commit metadata"
+        in issues
+    )
+
+
+def test_published_default_requires_the_exact_annotated_version_tag():
+    compatibility = json.loads((ROOT / "compatibility.json").read_text())
+    generated = compatibility["sdk"]["generated_project_default"]
+    generated["status"] = "published"
+    generated["source"] = {
+        "kind": "git-tag",
+        "ref": "v9.9.9",
+        "content_sha256": "0" * 64,
+        "annotated": False,
+    }
+
+    issues = release_validation.generated_sdk_default_issues(
+        compatibility,
+        current_sdk_version=compatibility["sdk"]["version"],
+        pinned_content_sha256=None,
+        pinned_sdk_version=None,
+    )
+
+    assert "published SDK ref must be the exact v<version> tag" in issues
+    assert "published SDK source must declare an annotated tag" in issues
+    assert (
+        "the checkout cannot mark its own SDK version both unreleased and published"
+        in issues
+    )
 
 
 def test_release_requires_an_annotated_tag(monkeypatch):

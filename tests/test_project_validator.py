@@ -41,7 +41,15 @@ def valid_project(tmp_path: Path) -> Path:
         "spec": {
             "repository": {"url": "https://github.com/aai-test/claims-agent"},
             "authorization": {"mode": "user"},
-            "environments": {"dev": {"tags": {"environment": "dev"}}},
+            "environments": {
+                "dev": {"tags": {"environment": "dev"}},
+                "uat": {
+                    "tags": {
+                        "environment": "uat",
+                        "lifecycle": "validation",
+                    }
+                },
+            },
             "resources": {
                 "evaluationJobKey": "release_gate",
                 "aiSearchIndexes": [],
@@ -51,11 +59,11 @@ def valid_project(tmp_path: Path) -> Path:
             "evaluation": {
                 "profile": "golden_path_release_gate_v1",
                 "dataset": "main.claims.evaluation_cases",
-                "minimumCases": 1,
+                "minimumCases": 30,
                 "maximumAgeHours": 168,
                 "thresholds": {"gate_pass_rate": 1.0},
             },
-            "readiness": {"profile": "development_v1"},
+            "readiness": {"profile": "medium_risk_production_v1"},
             "costControls": {"budgetPolicy": "platform_standard_v1"},
             "serviceLevels": {"maximumErrorRate": 0.02, "p95LatencyMs": 8000},
         },
@@ -80,11 +88,24 @@ def valid_project(tmp_path: Path) -> Path:
     }
     bundle = {
         "bundle": {"name": "claims-agent"},
-        "variables": {},
+        "variables": {
+            "deployment_environment": {
+                "description": "Platform-owned runtime environment."
+            },
+            "deployment_lifecycle": {
+                "description": "Platform-owned runtime lifecycle."
+            },
+            "deployment_release": {"description": "CI-attested source commit."},
+        },
         "include": ["resources/*.yml"],
         "targets": {
             "dev": {
-                "variables": {},
+                "mode": "development",
+                "variables": {
+                    "deployment_environment": "dev",
+                    "deployment_lifecycle": "experimental",
+                    "deployment_release": "local-dev",
+                },
                 "presets": {
                     "tags": {
                         "application": "claims-agent",
@@ -94,11 +115,31 @@ def valid_project(tmp_path: Path) -> Path:
                         "owner_group": "group:claims-owners",
                         "cost_center": "CC-123",
                         "data_classification": "internal",
-                        "lifecycle": "experimental",
+                        "lifecycle": "${var.deployment_lifecycle}",
                         "tag_schema_version": "2",
                     }
                 },
-            }
+            },
+            "uat": {
+                "mode": "production",
+                "variables": {
+                    "deployment_environment": "uat",
+                    "deployment_lifecycle": "validation",
+                },
+                "presets": {
+                    "tags": {
+                        "application": "claims-agent",
+                        "project": "claims",
+                        "environment": "${bundle.target}",
+                        "team": "claims-ai",
+                        "owner_group": "group:claims-owners",
+                        "cost_center": "CC-123",
+                        "data_classification": "internal",
+                        "lifecycle": "${var.deployment_lifecycle}",
+                        "tag_schema_version": "2",
+                    }
+                },
+            },
         },
     }
     jobs = {
@@ -112,6 +153,11 @@ def valid_project(tmp_path: Path) -> Path:
                             "job_cluster_key": "default",
                             "new_cluster": {
                                 "policy_id": "policy-123",
+                                "spark_env_vars": {
+                                    "AAI_ENVIRONMENT": "${var.deployment_environment}",
+                                    "AAI_LIFECYCLE": "${var.deployment_lifecycle}",
+                                    "AAI_RELEASE": "${var.deployment_release}",
+                                },
                                 "custom_tags": dict(
                                     bundle["targets"]["dev"]["presets"]["tags"]
                                 ),

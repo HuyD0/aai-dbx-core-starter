@@ -28,6 +28,7 @@ from aai_core.agentkit.catalog import (
 from aai_core.agentkit.config import ProjectContext, parse_threshold
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
 from aai_core.agentkit.results import ResultsRecord, load_gate_results
+from aai_core.agentkit.statistics import extend_rules_with_statistics
 from aai_core.evaluation import (
     GateFailure,
     GatePolicy,
@@ -125,8 +126,30 @@ def build_policy(
                 direction=MetricDirection(registry_direction(metric)),
                 max_regression=float(allowance),
             )
+    minimum_effect = {
+        _metric_for(name): value
+        for name, value in config.statistics.minimum_effect.items()
+    }
+    unknown_effects = sorted(set(minimum_effect).difference(rules))
+    if unknown_effects:
+        raise ConfigError(
+            "statistics.minimum_effect names metrics without a governed "
+            "threshold or regression rule: " + ", ".join(unknown_effects),
+            remediation=(
+                "Add a threshold or regression_budget entry for each metric, "
+                "or remove its minimum_effect requirement."
+            ),
+        )
+    statistical_config = config.statistics.model_copy(
+        update={"minimum_effect": minimum_effect}
+    )
+    governed_rules = extend_rules_with_statistics(
+        tuple(rules[name] for name in sorted(rules)),
+        statistical_config,
+        allow_missing_regression_baseline=allow_missing_regression_baseline,
+    )
     return GatePolicy(
-        rules=tuple(rules[name] for name in sorted(rules)),
+        rules=governed_rules,
         allow_missing_regression_baseline=allow_missing_regression_baseline,
     )
 

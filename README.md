@@ -349,9 +349,13 @@ Compatibility is maintained as code: `compatibility.json` declares the SDK,
 template, Python, runtime, and feature-support matrix;
 `dependency-policy.toml` declares supported and certified library versions;
 `uv.lock` records the exact certified SDK development stack; generated
-projects carry exact universal transitive runtime locks. PRs test those locks,
-and the scheduled credential-free canary tests minimum and latest supported
-dependency resolutions on every supported Python version.
+projects carry exact universal transitive runtime locks. The checkout SDK and
+the SDK default offered to new projects are separate release channels: a
+candidate default uses a reviewed full commit for credential-free CI, while UAT
+and runtime deployment require the separately published immutable wheel and
+completion manifest. PRs test the certified locks, and the credential-free
+dependency canary tests minimum and latest supported resolutions on every
+supported Python version.
 
 ## Publish the private SDK
 

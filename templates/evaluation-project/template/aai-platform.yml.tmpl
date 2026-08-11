@@ -8,7 +8,8 @@ platform:
   data_classification: internal
   lifecycle: experimental
   repository: {{.repository_url}}
-  release: dev
+  # Bundle jobs override this with the CI-attested source commit.
+  release: local-dev
   tag_schema_version: "2"
   catalog: {{.catalog}}
   schema: {{.schema}}

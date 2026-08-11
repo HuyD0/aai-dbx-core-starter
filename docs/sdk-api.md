@@ -28,7 +28,7 @@ the [versioning policy](versioning.md).
 |---|---|---|
 | `aai_core.context`, `aai_core.runtime` | Configuration and the process composition root | `bootstrap`, `PlatformContext`, `PlatformSettings` |
 | `aai_core.tags` | Validated ownership, cost, environment, lifecycle, and request-tag context | `ResourceContext`, `LifecycleStage`, `DataClassification` |
-| `aai_core.providers` | Logical model, embedding, and retrieval capabilities with native-client access | `ProviderResolver`, `ChatModel`, `EmbeddingProvider`, `Retriever`, `SearchResult` |
+| `aai_core.providers` | Logical model, embedding, and retrieval capabilities with native-client access | `ProviderResolver`, `ChatModel`, `EmbeddingProvider`, `Retriever`, `RetrievalMode`, `AzureSemanticRankOptions`, `DatabricksRerankOptions`, `SearchResult` |
 | `aai_core.structured` | Strict structured generation over the stable chat contract | `generate_structured`, `generate_typed` |
 | `aai_core.secrets`, `aai_core.identity` | Non-secret references and provider-native keyless identity | `SecretResolver`, `SecretRef`, `SecretValue`, `azure_credential` |
 | `aai_core.tracing`, `aai_core.logging` | Governed MLflow tracing, resource projection, structured logging, and redaction | `configure_tracing`, `TracePolicy`, `traced`, `configure_logging` |
@@ -51,6 +51,32 @@ tools, and controls. It is not a deployment engine.
 Provider response objects stay native rather than being mirrored throughout the
 SDK. Stable normalized results retain the original object through `raw`, and
 provider adapters expose `native_client` for provider-specific functionality.
+
+## Retrieval and ranking
+
+`Retriever.search()` supports the portable `text`, `vector`, and `hybrid`
+algorithms. Databricks text retrieval maps to its `FULL_TEXT` query type;
+hybrid remains the general-purpose default. Query-time second-stage ranking is
+explicit and provider-native:
+
+```python
+from aai_core.providers import DatabricksRerankOptions, RetrievalMode
+
+documents = retriever.search(
+    question,
+    mode=RetrievalMode.HYBRID,
+    ranking=DatabricksRerankOptions(
+        columns_to_rerank=("content", "parent_summary"),
+    ),
+)
+```
+
+Use `AzureSemanticRankOptions` to select an externally provisioned Azure AI
+Search semantic configuration. The adapters reject a ranking option for the
+wrong provider, and Databricks reranker columns must already be present in the
+retriever's governed column list. Ranking configuration, candidate count,
+latency, and retrieval-quality evidence should be benchmarked together before
+adoption; changing any of them is an application release.
 
 ## Ownership, async, and streaming
 

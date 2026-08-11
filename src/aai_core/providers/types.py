@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from enum import StrEnum
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
+from pydantic import Field, field_validator
+
+from aai_core.contracts import ContractModel
 from aai_core.exceptions import AaiCoreError
 
 __all__ = [
@@ -13,13 +17,72 @@ __all__ = [
     "EmbeddingProvider",
     "ModelCapabilities",
     "ModelResponse",
+    "AzureSemanticRankOptions",
+    "DatabricksRerankOptions",
     "ProviderConfigurationError",
     "ProviderError",
     "ProviderRequestError",
     "Retriever",
+    "RetrievalMode",
+    "SearchRankingOptions",
     "SearchResult",
     "UnsupportedCapabilityError",
 ]
+
+
+class RetrievalMode(StrEnum):
+    """Portable retrieval algorithms exposed by both search adapters."""
+
+    TEXT = "text"
+    VECTOR = "vector"
+    HYBRID = "hybrid"
+
+
+class AzureSemanticRankOptions(ContractModel):
+    """Typed query-time Azure AI Search semantic-ranking controls.
+
+    The semantic configuration is provisioned with the index outside the SDK;
+    this object only selects it for one governed query.  Captions and extractive
+    answers deliberately remain available through ``native_client`` because the
+    stable retriever contract returns documents, not an alternate answer shape.
+    """
+
+    provider: Literal["azure_ai_search"] = "azure_ai_search"
+    semantic_configuration_name: str = Field(min_length=1, max_length=128)
+    semantic_query: str | None = Field(default=None, min_length=1)
+    error_mode: Literal["fail", "partial"] = "fail"
+    max_wait_milliseconds: int | None = Field(default=None, gt=0, le=120_000)
+
+    @field_validator("semantic_configuration_name", "semantic_query")
+    @classmethod
+    def reject_surrounding_whitespace(cls, value: str | None) -> str | None:
+        if value is not None and value != value.strip():
+            raise ValueError("semantic ranking names and queries must be trimmed")
+        return value
+
+
+class DatabricksRerankOptions(ContractModel):
+    """Typed query-time controls for the Databricks cross-encoder reranker."""
+
+    provider: Literal["databricks_ai_search"] = "databricks_ai_search"
+    columns_to_rerank: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("columns_to_rerank", mode="before")
+    @classmethod
+    def coerce_columns(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @field_validator("columns_to_rerank")
+    @classmethod
+    def validate_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not column.strip() or column != column.strip() for column in value):
+            raise ValueError("reranker columns must be non-empty trimmed names")
+        if len(set(value)) != len(value):
+            raise ValueError("reranker columns must be unique")
+        return value
+
+
+SearchRankingOptions: TypeAlias = AzureSemanticRankOptions | DatabricksRerankOptions
 
 
 class ProviderError(AaiCoreError):
@@ -168,7 +231,8 @@ class Retriever(Protocol):
         top_k: int = 10,
         filters: Mapping[str, Any] | None = None,
         query_vector: Sequence[float] | None = None,
-        mode: str = "hybrid",
+        mode: str | RetrievalMode = RetrievalMode.HYBRID,
+        ranking: SearchRankingOptions | None = None,
         provider_options: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
         raise NotImplementedError

@@ -39,8 +39,14 @@ MANIFEST_API_VERSION = "ai-platform/v1"
 MANIFEST_KIND = "AIApplication"
 SUPPORTED_READINESS_PROFILES = (
     "development_v1",
+    "uat_validation_v1",
     "medium_risk_production_v1",
 )
+ReadinessProfileId = Literal[
+    "development_v1",
+    "uat_validation_v1",
+    "medium_risk_production_v1",
+]
 
 _CONTROLLED_TAGS = frozenset(
     {"team", "domain", "cost_center", "environment", "application_id"}
@@ -594,14 +600,72 @@ class EvaluationSpec(_ManifestModel):
 
 
 class ReadinessSpec(_ManifestModel):
-    """Named platform readiness profile applied to the application."""
+    """Default and environment-specific platform readiness profiles."""
 
-    profile: Literal["development_v1", "medium_risk_production_v1"]
+    profile: ReadinessProfileId
+    environment_profiles: Mapping[str, ReadinessProfileId] | None = Field(
+        default=None,
+        alias="environmentProfiles",
+    )
 
     @field_validator("profile", mode="before")
     @classmethod
     def normalize_profile(cls, value: Any) -> str:
         return _snake_identifier(value, field="readiness.profile")
+
+    @field_validator("environment_profiles", mode="before")
+    @classmethod
+    def normalize_environment_profiles(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("readiness.environmentProfiles must be an object")
+        if len(value) > 32:
+            raise ValueError(
+                "readiness.environmentProfiles may contain at most 32 environments"
+            )
+        normalized: dict[str, str] = {}
+        originals: dict[str, str] = {}
+        for raw_environment, raw_profile in value.items():
+            environment = _snake_identifier(
+                raw_environment,
+                field="readiness environment",
+                maximum=63,
+            )
+            if environment in normalized:
+                raise ValueError(
+                    "readiness environment names "
+                    f"{originals[environment]!r} and {raw_environment!r} both "
+                    f"normalize to {environment!r}"
+                )
+            normalized[environment] = _snake_identifier(
+                raw_profile,
+                field=f"readiness.environmentProfiles.{environment}",
+            )
+            originals[environment] = str(raw_environment)
+        return normalized
+
+    @field_validator("environment_profiles")
+    @classmethod
+    def freeze_environment_profiles(
+        cls,
+        value: Mapping[str, ReadinessProfileId] | None,
+    ) -> Mapping[str, ReadinessProfileId] | None:
+        return None if value is None else _freeze_mapping(value)
+
+    @field_serializer("environment_profiles")
+    def serialize_environment_profiles(
+        self,
+        value: Mapping[str, ReadinessProfileId] | None,
+    ) -> dict[str, ReadinessProfileId] | None:
+        return None if value is None else dict(value)
+
+    def profile_for(self, environment: str) -> ReadinessProfileId:
+        """Return the policy selected for one normalized environment."""
+
+        if self.environment_profiles is None:
+            return self.profile
+        return self.environment_profiles.get(environment, self.profile)
 
 
 class CostControlsSpec(_ManifestModel):
@@ -671,6 +735,19 @@ class ApplicationSpec(_ManifestModel):
         self, value: Mapping[str, EnvironmentSpec]
     ) -> dict[str, EnvironmentSpec]:
         return dict(value)
+
+    @model_validator(mode="after")
+    def readiness_overrides_name_declared_environments(self) -> Self:
+        configured = self.readiness.environment_profiles
+        if configured is None:
+            return self
+        unknown = sorted(set(configured).difference(self.environments))
+        if unknown:
+            raise ValueError(
+                "readiness.environmentProfiles names undeclared environments: "
+                + ", ".join(unknown)
+            )
+        return self
 
 
 class AIApplicationManifest(_ManifestModel):
@@ -748,16 +825,31 @@ class AIApplicationManifest(_ManifestModel):
 
     @model_validator(mode="after")
     def prevent_readiness_profile_downgrades(self) -> Self:
-        if self.spec.readiness.profile != "development_v1":
-            return self
-        production_declared = bool(
-            {"prod", "production"}.intersection(self.spec.environments)
+        readiness = self.spec.readiness
+        profiles = {
+            environment: readiness.profile_for(environment)
+            for environment in self.spec.environments
+        }
+        development_environments = sorted(
+            environment
+            for environment, profile in profiles.items()
+            if profile == "development_v1"
         )
-        if self.metadata.risk_tier in {"high", "critical"} or production_declared:
+        if self.metadata.risk_tier in {"high", "critical"} and development_environments:
             raise ValueError(
                 "development_v1 is not permitted for high-risk or "
                 "production-declared applications"
             )
+        for environment in sorted({"uat"}.intersection(profiles)):
+            if profiles[environment] == "development_v1":
+                raise ValueError(
+                    "UAT requires uat_validation_v1 or a stricter readiness profile"
+                )
+        for environment in sorted({"prod", "production"}.intersection(profiles)):
+            if profiles[environment] != "medium_risk_production_v1":
+                raise ValueError(
+                    "production environments require medium_risk_production_v1"
+                )
         return self
 
 

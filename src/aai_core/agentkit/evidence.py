@@ -17,6 +17,7 @@ from aai_core.agentkit.baseline import BaselineRecord
 from aai_core.agentkit.config import ProjectContext
 from aai_core.agentkit.gate import GateReport
 from aai_core.agentkit.results import ResultsRecord
+from aai_core.agentkit.statistics import is_statistics_metric
 
 EVIDENCE_JSON = "evidence.json"
 EVIDENCE_MARKDOWN = "evidence.md"
@@ -93,6 +94,11 @@ def build_evidence(
             or (baseline.dataset.digest if baseline else None),
             "metrics": _metric_rows(results),
         },
+        "statistics": (
+            results.statistics.model_dump(mode="json")
+            if results.statistics is not None
+            else None
+        ),
         "gate": {
             "passed": passed,
             "failures": [
@@ -158,6 +164,7 @@ def render_markdown(document: Mapping[str, Any]) -> str:
         "",
     ]
     _render_comparison(lines, comparison)
+    _render_statistics(lines, document.get("statistics"))
     _render_scoring(lines, versions)
     _render_gate(lines, gate)
     _render_approval(lines, document["approver"])
@@ -212,6 +219,50 @@ def _render_scoring(lines: list[str], versions: Mapping[str, Any]) -> None:
         lines.append(f"- judge model served: `{versions['judge_model_identity']}`")
     for name, prompt in sorted(dict(versions["judge_prompts"]).items()):
         lines.append(f"- judge prompt `{name}`: `{prompt}`")
+
+
+def _render_statistics(lines: list[str], statistics: Mapping[str, Any] | None) -> None:
+    if not statistics or not statistics.get("estimates"):
+        return
+    level = float(statistics["confidence_level"]) * 100
+    enforcement = "enabled" if statistics["enforced"] else "report-only"
+    lines.extend(
+        [
+            "",
+            "## Statistical confidence",
+            "",
+            f"Intervals use the recorded {level:g}% normal-mean policy. "
+            f"The minimum enforceable sample is {statistics['minimum_cases']}; "
+            f"confidence enforcement was {enforcement}.",
+            "",
+            "| metric | n | mean | lower | upper |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for estimate in statistics["estimates"]:
+        lines.append(
+            f"| {estimate['metric']} | {estimate['sample_size']} | "
+            f"{_format(estimate['mean'])} | {_format(estimate['lower'])} | "
+            f"{_format(estimate['upper'])} |"
+        )
+    paired = statistics.get("paired") or []
+    if paired:
+        lines.extend(
+            [
+                "",
+                "Paired improvement is direction-normalized: positive is better.",
+                "",
+                "| metric | pairs | mean improvement | lower | upper |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for estimate in paired:
+            lines.append(
+                f"| {estimate['metric']} | {estimate['pair_count']} | "
+                f"{_format(estimate['mean_improvement'])} | "
+                f"{_format(estimate['lower_improvement'])} | "
+                f"{_format(estimate['upper_improvement'])} |"
+            )
 
 
 def _render_gate(lines: list[str], gate: Mapping[str, Any]) -> None:
@@ -418,7 +469,9 @@ def evaluated_model_version(agent: str, model_name: str) -> str | None:
 def _metric_rows(results: ResultsRecord) -> list[dict[str, Any]]:
     baseline = dict(results.baseline_metrics)
     rows = []
-    for metric in sorted(results.metrics):
+    for metric in sorted(
+        metric for metric in results.metrics if not is_statistics_metric(metric)
+    ):
         current = results.metrics[metric]
         reference = baseline.get(metric)
         rows.append(

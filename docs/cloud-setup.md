@@ -131,21 +131,19 @@ done
 The SDK volume and its grants are also external platform resources and must be
 revoked through the approved platform workflow.
 
-## 6. Add another deployment environment
+## 6. UAT promotion
 
-The starter deliberately permits only the generated development target. Ask the
-platform team to generate or approve a separate environment contract before
-adding staging or production; the project validator rejects undeclared bundle
-targets and compute overrides. For the approved environment:
+The supported delivery path now ends at UAT; production remains deliberately
+absent. UAT uses the existing protected-`main` branch-ref OIDC subject, lifecycle
+`validation`, a manual dispatch, and the same immutable artifact that passed the
+dev gate. Complete the external workspace registration and least-privilege
+authorization before enabling it. The exact checklist and dispatch command are in
+[`docs/uat-promotion.md`](uat-promotion.md).
 
-1. Ask the platform identity owner for a federated credential whose subject
-   matches that environment.
-2. Register the principal in the target workspace with least privilege.
-3. Add the GitHub protected environment and repository variables.
-4. Add the target and deployment job to this repository.
-
-The external identity must exist first because adding `environment:` changes
-the GitHub OIDC subject.
+Credentialed jobs intentionally have no GitHub `environment:`. Add such a gate
+only after the identity owner provisions and verifies its different
+environment-subject federated credential; do not copy the UAT job and rename it
+ad hoc.
 
 ## 7. Security boundary
 

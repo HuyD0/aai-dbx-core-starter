@@ -86,7 +86,26 @@ class HubAuthorizationError(HubRepositoryError):
 
 
 class FourEyesViolationError(HubAuthorizationError):
-    """The requester attempted to approve their own production promotion."""
+    """The requester attempted to approve their own environment promotion."""
+
+
+def _merge_registered_application(
+    application: ApplicationRecord,
+    existing: ApplicationRecord,
+    version: ApplicationVersionRecord,
+) -> ApplicationRecord:
+    """Merge mutable registry metadata without allowing time to move backwards."""
+
+    replacement = application.model_copy(
+        update={
+            "created_at": existing.created_at,
+            "updated_at": max(existing.updated_at, version.registered_at),
+            "row_version": existing.row_version + 1,
+        }
+    )
+    # model_copy deliberately skips validation. Reconstruct before any mutation/write
+    # so delayed registrations cannot produce an impossible timestamp ordering.
+    return ApplicationRecord.model_validate(replacement.model_dump(mode="python"))
 
 
 @runtime_checkable
@@ -390,11 +409,10 @@ class InMemoryHubRepository:
                         f"application ID {application.application_id!r} is "
                         "already bound to another Git repository"
                     )
-                stored_application = application.model_copy(
-                    update={
-                        "created_at": existing_application.created_at,
-                        "row_version": existing_application.row_version + 1,
-                    }
+                stored_application = _merge_registered_application(
+                    application,
+                    existing_application,
+                    version,
                 )
 
             pointer = (version.application_id, version.environment)
@@ -850,7 +868,7 @@ class InMemoryHubRepository:
             raise HubConflictError("new promotions must have row_version 1")
         if not request.readiness_snapshot.ready:
             raise HubConflictError(
-                "a blocked version cannot request production promotion"
+                "a blocked version cannot request environment promotion"
             )
         with self._lock:
             if request.promotion_request_id in self._promotions:
@@ -947,7 +965,7 @@ class InMemoryHubRepository:
                 )
             if current.requested_by.casefold() == actor.principal.casefold():
                 raise FourEyesViolationError(
-                    "a requester cannot approve their own production promotion"
+                    "a requester cannot approve their own environment promotion"
                 )
             current_readiness = readiness_snapshot or current.readiness_snapshot
             self._validate_readiness_for_promotion(current, current_readiness)

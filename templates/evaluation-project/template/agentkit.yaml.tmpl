@@ -47,6 +47,17 @@ regression_budget:
 # regression_budget:
 #   correctness/mean: 0.05
 
+# Numeric scorer means always carry report-only confidence evidence. Turn on
+# enforcement for UAT after the governed suite reaches the minimum size. The
+# gate then uses conservative confidence bounds and paired baseline deltas,
+# rather than treating a small aggregate movement as certain.
+# statistics:
+#   confidence_level: 0.95
+#   minimum_cases: 30
+#   enforce_confidence: true
+#   minimum_effect:
+#     correctness: 0.02
+
 # Select scorers from the shared registry. A project chooses and sets
 # thresholds; it never redefines what a scorer means.
 # scorers:

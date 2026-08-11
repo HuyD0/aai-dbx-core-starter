@@ -39,8 +39,12 @@ REQUIRED_TAGS = {
     "tag_schema_version",
 }
 CURRENT_TEMPLATE_VERSIONS = {
-    "analytics-app": "1.1.0",
-    "experiment-starter": "1.2.0",
+    "agent-app": "1.3.0",
+    "analytics-app": "1.2.0",
+    "evaluation-project": "2.1.0",
+    "experiment-starter": "1.3.0",
+    "prompt-app": "1.3.0",
+    "rag-app": "1.3.0",
 }
 STRICT_JUDGE_CALLS = (
     pytest.param(
@@ -87,7 +91,7 @@ requires_cli = pytest.mark.skipif(
 
 @pytest.fixture(scope="session")
 def packaged_sdk_python(tmp_path_factory) -> Path:
-    """Build and install the candidate wheel so template tests cannot silently
+    """Build and install the reviewed wheel so template tests cannot silently
     import the SDK checkout through the repository's pytest pythonpath."""
 
     scratch = tmp_path_factory.mktemp("packaged-sdk")
@@ -223,10 +227,10 @@ def build_config(template: Path, overrides: dict) -> dict:
             "workspace_host": IDENTIFIERS["databricks_host"],
             "compute_policy_id": IDENTIFIERS["job_compute_policy_id"],
             "aai_core_volume": IDENTIFIERS["sdk_artifact_volume"],
-            # `aai_core_pip_source` is deliberately NOT supplied: its default
-            # embeds `{{.aai_core_version}}`, which the CLI expands only for a
-            # schema default, never for an answer passed in. Leaving it out both
-            # honours the docstring above and exercises the stamped default.
+            # The SDK source fields are deliberately NOT supplied: the pip-source
+            # default embeds `{{.aai_core_source_ref}}`, which the CLI expands only
+            # for a schema default, never for an answer passed in. Leaving both out
+            # exercises the release-metadata-stamped defaults.
         }.items()
         if key in schema_properties
     }
@@ -325,19 +329,29 @@ def test_template_prompt_promotion_uses_validation_alias(template: Path):
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
-def test_template_deploy_workflow_is_pinned_and_environment_free(template: Path):
+def test_template_deploy_workflow_is_pinned_and_has_manual_branch_ref_uat(
+    template: Path,
+):
     deploy = template / "template" / ".github" / "workflows" / "deploy.yml"
     text = deploy.read_text()
+    workflow = yaml.safe_load(text)
     assert len(ACTION_REF.findall(text)) == len(ACTION_PIN.findall(text))
     assert "id-token: write" in text
-    assert "environment:" not in text
+    assert workflow[True]["workflow_dispatch"]["inputs"]["target"]["options"] == [
+        "dev",
+        "uat",
+    ]
+    assert all("environment" not in job for job in workflow["jobs"].values())
+    assert "UAT_DEPLOYMENT_ENABLED" in text
+    assert "DATABRICKS_UAT_HOST" in text
+    assert "refs/heads/main" in text
+    assert "scripts/release_artifact.py verify" in text
+    assert "BUNDLE_VAR_deployment_release=$GITHUB_SHA" in text
     release_gate = "databricks bundle run release_gate -t dev"
     app_deploy = "databricks bundle run agent_app -t dev"
-    if app_deploy not in text:
-        assert template.name == "rag-app"
-        assert not (template / "template" / "resources" / "agent_app.yml.tmpl").exists()
-        return
     assert text.index(release_gate) < text.index(app_deploy)
+    assert "databricks bundle run release_gate -t uat" in text
+    assert "databricks bundle run agent_app -t uat" in text
     assert "hashFiles('resources/agent_app.yml')" in text
     app_preflight = 'databricks apps get "$APP_NAME"'
     assert text.index(app_preflight) < text.index("databricks bundle deploy -t dev")
@@ -374,8 +388,10 @@ def test_template_schema_shared_contract(template: Path):
         "catalog",
         "schema",
         "aai_core_version",
+        "aai_core_source_ref",
         "aai_core_volume",
         "workspace_host",
+        "uat_workspace_host",
         "compute_policy_id",
         "aai_core_pip_source",
     ):
@@ -386,13 +402,21 @@ def test_template_schema_shared_contract(template: Path):
         if name != "repository_url":
             assert "default" in prop, f"{template.name}.{name} needs a default"
         assert "description" in prop, f"{template.name}.{name} needs a description"
+    orders = [prop["order"] for prop in properties.values()]
+    assert len(orders) == len(
+        set(orders)
+    ), f"{template.name} has duplicate prompt orders"
     assert properties["project_name"]["pattern"] == "^[a-z][a-z0-9-]+$"
     if "model_provider" in properties:
         assert properties["model_provider"]["enum"] == ["databricks", "foundry"]
-    assert properties["aai_core_version"]["default"] == COMPATIBILITY["sdk"]["version"]
+    generated_sdk = COMPATIBILITY["sdk"]["generated_project_default"]
+    assert properties["aai_core_version"]["default"] == generated_sdk["version"]
+    assert (
+        properties["aai_core_source_ref"]["default"] == generated_sdk["source"]["ref"]
+    )
     assert (
         COMPATIBILITY["templates"][template.name]["aai_core"]
-        == COMPATIBILITY["sdk"]["version"]
+        == generated_sdk["version"]
     )
     if template.name in CURRENT_TEMPLATE_VERSIONS:
         assert (
@@ -425,6 +449,25 @@ def test_template_schema_shared_contract(template: Path):
 # ---------------------------------------------------------------- render tier
 
 
+def _assert_delivery_contract(bundle: dict) -> None:
+    assert set(bundle["targets"]) == {"dev", "uat"}
+    assert bundle["targets"]["dev"]["mode"] == "development"
+    assert bundle["targets"]["uat"]["mode"] == "production"
+    assert (
+        bundle["targets"]["uat"]["workspace"]["host"]
+        == IDENTIFIERS["databricks_uat_host"]
+    )
+    assert bundle["targets"]["uat"]["variables"] == {
+        "deployment_environment": "uat",
+        "deployment_lifecycle": "validation",
+    }
+    for target_name in ("dev", "uat"):
+        preset_tags = bundle["targets"][target_name]["presets"]["tags"]
+        assert REQUIRED_TAGS.issubset(preset_tags)
+        assert preset_tags["environment"] == "${bundle.target}"
+        assert preset_tags["lifecycle"] == "${var.deployment_lifecycle}"
+
+
 @requires_cli
 @pytest.mark.parametrize("template,combo", all_combo_params())
 def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
@@ -439,6 +482,12 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
 
     # T2: bundle configuration parses.
     bundle = yaml.safe_load((output / "databricks.yml").read_text())
+    _assert_delivery_contract(bundle)
+    manifest = yaml.safe_load((output / "ai-app.yaml").read_text())
+    assert manifest["spec"]["environments"]["uat"]["tags"] == {
+        "environment": "uat",
+        "lifecycle": "validation",
+    }
     for resource_file in sorted((output / "resources").glob("*.yml")):
         yaml.safe_load(resource_file.read_text())
     if (output / "aai-platform.yml").is_file():
@@ -479,8 +528,6 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
     assert "${{ vars.AZURE_CLIENT_ID }}" in generated_deploy
 
     # T4: mandatory cost tags on the bundle preset AND every job cluster.
-    preset_tags = bundle["targets"]["dev"]["presets"]["tags"]
-    assert REQUIRED_TAGS.issubset(preset_tags)
     for resource_file in sorted((output / "resources").glob("*.yml")):
         resources = yaml.safe_load(resource_file.read_text())
         for job in resources.get("resources", {}).get("jobs", {}).values():
@@ -498,6 +545,14 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
     assert (
         stamp["generated_with"]["aai_core_version"]
         == COMPATIBILITY["templates"][template.name]["aai_core"]
+    )
+    assert (
+        stamp["generated_with"]["aai_core_source_ref"]
+        == COMPATIBILITY["sdk"]["generated_project_default"]["source"]["ref"]
+    )
+    assert (
+        stamp["generated_with"]["uat_workspace_host"]
+        == IDENTIFIERS["databricks_uat_host"]
     )
 
     # T6: generated setup is rendered, parseable, and exposes safe preflight.
@@ -548,12 +603,15 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
         assert release_gate["job_clusters"][0]["new_cluster"]["spark_env_vars"] == {
             "GIT_COMMIT": "${var.source_commit}",
             "GIT_DIRTY": "${var.source_state}",
+            "AAI_ENVIRONMENT": "${var.deployment_environment}",
+            "AAI_LIFECYCLE": "${var.deployment_lifecycle}",
+            "AAI_RELEASE": "${var.deployment_release}",
         }
         deploy_workflow = (output / ".github/workflows/deploy.yml").read_text()
-        assert "Verify source checkout provenance" in deploy_workflow
+        assert "Verify immutable release evidence" in deploy_workflow
         assert "git status --porcelain --untracked-files=normal" in deploy_workflow
-        assert "BUNDLE_VAR_source_commit: ${{ github.sha }}" in deploy_workflow
-        assert 'BUNDLE_VAR_source_state: "false"' in deploy_workflow
+        assert "BUNDLE_VAR_source_commit=$GITHUB_SHA" in deploy_workflow
+        assert "BUNDLE_VAR_source_state=false" in deploy_workflow
         assert (
             "${bundle.git.commit}"
             not in (output / "resources" / "agent_job.yml").read_text()
@@ -568,6 +626,13 @@ def test_render_matrix(template: Path, combo: dict, tmp_path_factory):
                 "name": "AAI_PROMPT_VERSION",
                 "value": "${var.prompt_version}",
             }
+            assert environment["AAI_ENVIRONMENT"]["value"] == (
+                "${var.deployment_environment}"
+            )
+            assert environment["AAI_LIFECYCLE"]["value"] == (
+                "${var.deployment_lifecycle}"
+            )
+            assert environment["AAI_RELEASE"]["value"] == ("${var.deployment_release}")
             assert environment["MLFLOW_EXPERIMENT_ID"] == {
                 "name": "MLFLOW_EXPERIMENT_ID",
                 "value": "replace-with-mlflow-experiment-id",
@@ -643,12 +708,15 @@ def _assert_rag_release_contract(
     assert release_gate["job_clusters"][0]["new_cluster"]["spark_env_vars"] == {
         "GIT_COMMIT": "${var.source_commit}",
         "GIT_DIRTY": "${var.source_state}",
+        "AAI_ENVIRONMENT": "${var.deployment_environment}",
+        "AAI_LIFECYCLE": "${var.deployment_lifecycle}",
+        "AAI_RELEASE": "${var.deployment_release}",
     }
     deploy_workflow = (output / ".github/workflows/deploy.yml").read_text()
     assert "Verify source checkout provenance" in deploy_workflow
     assert "git status --porcelain --untracked-files=normal" in deploy_workflow
-    assert "BUNDLE_VAR_source_commit: ${{ github.sha }}" in deploy_workflow
-    assert 'BUNDLE_VAR_source_state: "false"' in deploy_workflow
+    assert "BUNDLE_VAR_source_commit=$GITHUB_SHA" in deploy_workflow
+    assert "BUNDLE_VAR_source_state=false" in deploy_workflow
     assert "--knowledge-version <knowledge-version>" in readme
     assert "--evaluation-run <run-id>" in readme
 
@@ -666,7 +734,7 @@ def test_generated_project_quality(
 
     output = render(template, combo, tmp_path_factory)
     environment = dict(os.environ)
-    # Only application source is added. aai-core must come from the candidate
+    # Only application source is added. aai-core must come from the reviewed
     # wheel installed by packaged_sdk_python, never ROOT/src.
     environment["PYTHONPATH"] = str(output / "src")
     for command in (
@@ -711,6 +779,10 @@ def test_requirements_ci_uses_pip_source():
     for template in TEMPLATES:
         content = (template / "template" / "requirements-ci.txt.tmpl").read_text()
         assert "aai-core @ {{.aai_core_pip_source}}" in content
+        schema = schema_for(template)
+        source = schema["properties"]["aai_core_pip_source"]["default"]
+        assert "@{{.aai_core_source_ref}}" in source
+        assert "@v{{.aai_core_version}}" not in source
 
 
 def _template_script(name):

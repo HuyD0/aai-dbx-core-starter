@@ -51,6 +51,16 @@ def test_package_support_urls_follow_clone_repository_identifier():
     assert not sync_module._apply_project_urls(check=True)
 
 
+def test_git_sdk_source_keeps_the_clone_repository_and_uses_release_metadata():
+    source = "git+https://example.invalid/platform/aai-core@v0.3.0"
+
+    assert sync_module.projected_pip_source(source) == (
+        "git+https://example.invalid/platform/aai-core@{{.aai_core_source_ref}}"
+    )
+    artifact = "https://packages.example/aai_core-{{.aai_core_version}}.whl"
+    assert sync_module.projected_pip_source(artifact) == artifact
+
+
 def test_common_dependency_pins_agree():
     pins = json.loads((SHARED / "versions.json").read_text())["pins"]
     pin_pattern = re.compile(r"^([A-Za-z0-9_.\[\]-]+)==([A-Za-z0-9_.]+)\s*$")

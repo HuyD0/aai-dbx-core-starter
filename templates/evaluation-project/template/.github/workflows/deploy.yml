@@ -1,18 +1,32 @@
 name: deploy
 
-# Platform onboarding must create a branch-ref FIC for this repository's main
-# branch before this workflow is enabled. Do not add a GitHub environment
-# without first creating the matching environment-subject FIC.
+# Both credentialed jobs intentionally have no GitHub `environment:` and use
+# the repository's existing main branch-ref FIC. UAT remains manual and
+# disabled until the dedicated CI principal is registered externally in UAT
+# with least privilege; see docs/uat-promotion.md.
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Highest environment to deploy after the dev release gate passes.
+        required: true
+        type: choice
+        options: [dev, uat]
+        default: dev
+      bind_app:
+        description: >-
+          One-time name of the externally pre-created App to bind for the selected
+          target. Leave empty for normal deployments and for projects without an App.
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: deploy-dev
+  group: deploy-${{ inputs.target || 'dev' }}
   cancel-in-progress: false
 
 jobs:
@@ -38,17 +52,52 @@ jobs:
           make PYTHON=python check
 
       - name: Build application before cloud login
-        run: python scripts/build_application.py
+        run: |
+          python scripts/build_application.py
+          python scripts/release_artifact.py create \
+            --artifact-dir dist --source-commit "$GITHUB_SHA"
 
       - name: Stage application wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: application-wheel
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            dist/release-evidence.json
           if-no-files-found: error
           retention-days: 1
 
+  uat-prerequisites:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'uat' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require externally completed UAT onboarding
+        env:
+          UAT_DEPLOYMENT_ENABLED: ${{ vars.UAT_DEPLOYMENT_ENABLED }}
+          DATABRICKS_UAT_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::UAT promotion must be dispatched from protected main so the branch-ref FIC subject is exact."
+            exit 1
+          fi
+          if [ "$UAT_DEPLOYMENT_ENABLED" != "true" ]; then
+            echo "::error::UAT is disabled. Complete the external workspace onboarding in docs/uat-promotion.md, then set UAT_DEPLOYMENT_ENABLED=true."
+            exit 1
+          fi
+          case "$(printf '%s' "$DATABRICKS_UAT_HOST" | tr '[:upper:]' '[:lower:]')" in
+            ""|unset|unknown|todo|tbd|changeme|change-me|example|example-*|replace-with-*|your-*|*placeholder*)
+              echo "::error::DATABRICKS_UAT_HOST must be the reviewed UAT workspace host."
+              exit 1
+              ;;
+          esac
+          if [[ "$DATABRICKS_UAT_HOST" != https://* ]]; then
+            echo "::error::DATABRICKS_UAT_HOST must be an HTTPS workspace host."
+            exit 1
+          fi
+
   deploy-dev:
+    if: ${{ github.event_name == 'push' || inputs.target == 'dev' || inputs.target == 'uat' }}
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -71,6 +120,18 @@ jobs:
           name: application-wheel
           path: dist
 
+      - name: Verify immutable release evidence
+        run: |
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          python scripts/release_artifact.py verify \
+            --artifact-dir dist --source-commit "$GITHUB_SHA"
+          echo "BUNDLE_VAR_deployment_release=$GITHUB_SHA" >> "$GITHUB_ENV"
+          if grep -q '^  source_commit:' databricks.yml; then
+            echo "BUNDLE_VAR_source_commit=$GITHUB_SHA" >> "$GITHUB_ENV"
+            echo 'BUNDLE_VAR_source_state=false' >> "$GITHUB_ENV"
+          fi
+
       - name: Azure login (OIDC — no secret)
         uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
@@ -89,6 +150,18 @@ jobs:
         run: |
           APP_NAME=$(python -c 'import json; stamp = json.load(open(".aai-template.json")); print(stamp["generated_with"]["application_name"] + "-dev")')
           databricks apps get "$APP_NAME" >/dev/null
+
+      - name: Bind externally provisioned Databricks App (one-time)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'dev' && inputs.bind_app != '' && hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          APP_NAME: ${{ inputs.bind_app }}
+        run: |
+          EXPECTED_APP_NAME=$(python -c 'import json; stamp = json.load(open(".aai-template.json")); print(stamp["generated_with"]["application_name"] + "-dev")')
+          test "$APP_NAME" = "$EXPECTED_APP_NAME"
+          databricks apps get "$APP_NAME" >/dev/null
+          databricks bundle deployment bind agent_app "$APP_NAME" -t dev --auto-approve
 
       - name: Validate and deploy
         env:
@@ -117,3 +190,91 @@ jobs:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
         run: databricks bundle run agent_app -t dev
+
+  deploy-uat:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'uat' }}
+    needs: [build, deploy-dev, uat-prerequisites]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the dev-gated application
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: application-wheel
+          path: dist
+
+      - name: Verify immutable release evidence
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+        run: |
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          EXPECTED_HOST=$(python -c 'import json; print(json.load(open(".aai-template.json"))["generated_with"]["uat_workspace_host"])')
+          test "$DATABRICKS_HOST" = "$EXPECTED_HOST"
+          python scripts/release_artifact.py verify \
+            --artifact-dir dist --source-commit "$GITHUB_SHA"
+          echo "BUNDLE_VAR_deployment_release=$GITHUB_SHA" >> "$GITHUB_ENV"
+          if grep -q '^  source_commit:' databricks.yml; then
+            echo "BUNDLE_VAR_source_commit=$GITHUB_SHA" >> "$GITHUB_ENV"
+            echo 'BUNDLE_VAR_source_state=false' >> "$GITHUB_ENV"
+          fi
+
+      - name: Azure login (UAT; branch-ref OIDC — no secret)
+        uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
+
+      - name: Bind externally provisioned UAT App (one-time)
+        if: ${{ inputs.bind_app != '' && hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          APP_NAME: ${{ inputs.bind_app }}
+        run: |
+          EXPECTED_APP_NAME=$(python -c 'import json; stamp = json.load(open(".aai-template.json")); print(stamp["generated_with"]["application_name"] + "-uat")')
+          test "$APP_NAME" = "$EXPECTED_APP_NAME"
+          databricks apps get "$APP_NAME" >/dev/null
+          databricks bundle deployment bind agent_app "$APP_NAME" -t uat --auto-approve
+
+      - name: Verify externally provisioned UAT App
+        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: |
+          APP_NAME=$(python -c 'import json; stamp = json.load(open(".aai-template.json")); print(stamp["generated_with"]["application_name"] + "-uat")')
+          databricks apps get "$APP_NAME" >/dev/null
+
+      - name: Validate and deploy the dev-gated artifact to UAT
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          AAI_USE_PREBUILT_APPLICATION: "1"
+        run: |
+          databricks bundle validate -t uat --strict
+          databricks bundle deploy -t uat
+
+      - name: Run the UAT release gate
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: databricks bundle run release_gate -t uat
+
+      - name: Start or update the UAT Databricks App
+        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: databricks bundle run agent_app -t uat

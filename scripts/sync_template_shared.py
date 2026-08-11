@@ -1,6 +1,6 @@
 """Sync canonical shared scaffold files and identifier defaults into every template.
 
-Two canonical sources feed every bundle template:
+Three canonical sources feed every bundle template:
 
 1. templates/_shared/ holds byte-for-byte scaffold copies. The Databricks template
    renderer only sees one template root, so files cannot be shared natively.
@@ -8,6 +8,9 @@ Two canonical sources feed every bundle template:
    defaults were previously hand-copied into every template, which meant a
    clone had to edit the same value in several places and every upstream merge
    conflicted on all of them. They are now stamped from the fixture.
+3. compatibility.json owns the SDK version and immutable source ref offered by
+   generated projects. This is deliberately separate from the SDK version under
+   development in pyproject.toml.
 
 A template is any templates/<dir>/ containing databricks_template_schema.json.
 
@@ -31,6 +34,7 @@ TEMPLATES_DIR = REPO_ROOT / "templates"
 SHARED_DIR = TEMPLATES_DIR / "_shared"
 SCHEMA_FILE = "databricks_template_schema.json"
 IDENTIFIERS_FILE = REPO_ROOT / "platform-identifiers.json"
+COMPATIBILITY_FILE = REPO_ROOT / "compatibility.json"
 
 #: Schema property -> platform-identifiers.json key. Every one of these is an
 #: environment-specific value that a clone must change, and none of them varies
@@ -40,10 +44,13 @@ IDENTIFIERS_FILE = REPO_ROOT / "platform-identifiers.json"
 #: it silently makes every generated project's CI depend on the upstream repo.
 IDENTIFIER_DEFAULTS = {
     "workspace_host": "databricks_host",
+    "uat_workspace_host": "databricks_uat_host",
     "compute_policy_id": "job_compute_policy_id",
     "aai_core_volume": "sdk_artifact_volume",
     "aai_core_pip_source": "sdk_pip_source",
 }
+RELEASE_DEFAULTS = frozenset({"aai_core_version", "aai_core_source_ref"})
+SCHEMA_DEFAULTS = frozenset(IDENTIFIER_DEFAULTS) | RELEASE_DEFAULTS
 
 
 def load_identifiers() -> dict[str, str]:
@@ -59,10 +66,49 @@ def load_identifiers() -> dict[str, str]:
     return raw
 
 
+def load_generated_project_default() -> dict[str, str]:
+    """Return the clone-independent SDK defaults recorded for new projects."""
+
+    raw = json.loads(COMPATIBILITY_FILE.read_text(encoding="utf-8"))
+    try:
+        generated_default = raw["sdk"]["generated_project_default"]
+        version = str(generated_default["version"])
+        source_ref = str(generated_default["source"]["ref"])
+    except (KeyError, TypeError) as error:
+        raise SystemExit(
+            "compatibility.json is missing sdk.generated_project_default metadata"
+        ) from error
+    if not version.strip() or not source_ref.strip():
+        raise SystemExit(
+            "compatibility.json generated-project SDK version/ref cannot be empty"
+        )
+    return {
+        "aai_core_version": version,
+        "aai_core_source_ref": source_ref,
+    }
+
+
+def projected_pip_source(value: str) -> str:
+    """Bind a repository source to the reviewed release ref schema property.
+
+    Enterprise clones may replace the repository source with their own direct
+    URL. A Git source keeps its clone-owned repository location but always uses
+    the release-metadata ref; non-Git artifact URLs remain authoritative.
+    """
+
+    if not value.startswith("git+"):
+        return value
+    repository, separator, _ = value.rpartition("@")
+    if not separator or not repository:
+        raise SystemExit("sdk_pip_source Git URL must contain an immutable ref")
+    return f"{repository}@{{{{.aai_core_source_ref}}}}"
+
+
 def planned_schema_defaults() -> list[tuple[Path, str, str]]:
     """(schema path, property name, expected default) across all templates."""
 
     identifiers = load_identifiers()
+    release_defaults = load_generated_project_default()
     planned: list[tuple[Path, str, str]] = []
     for template in discover_templates():
         schema_path = template / SCHEMA_FILE
@@ -70,7 +116,13 @@ def planned_schema_defaults() -> list[tuple[Path, str, str]]:
         for prop, identifier_key in IDENTIFIER_DEFAULTS.items():
             if prop not in properties:
                 continue
-            planned.append((schema_path, prop, identifiers[identifier_key]))
+            value = identifiers[identifier_key]
+            if prop == "aai_core_pip_source":
+                value = projected_pip_source(value)
+            planned.append((schema_path, prop, value))
+        for prop, value in release_defaults.items():
+            if prop in properties:
+                planned.append((schema_path, prop, value))
     return planned
 
 
@@ -158,15 +210,16 @@ def _apply_bundle_identifiers(check: bool) -> list[str]:
         ):
             replace_scalar(index, expected[current_key])
             current_key = None
-        elif (
-            section == "targets"
-            and re.match(r"^      host:", line)
-            and current_key == "dev"
-        ):
-            # Only the dev target's host is this fixture's to own. A prod target
-            # points at a different workspace and must not be stamped from the
-            # dev identifier — see the commented prod block in databricks.yml.
-            replace_scalar(index, identifiers["databricks_host"])
+        elif section == "targets" and re.match(r"^      host:", line):
+            identifier_key = {
+                "dev": "databricks_host",
+                "uat": "databricks_uat_host",
+            }.get(current_key or "")
+            if identifier_key is not None:
+                # Authentication fields cannot use bundle-variable interpolation,
+                # so both governed workspace hosts remain literal values stamped
+                # from the clone-owned identifier fixture.
+                replace_scalar(index, identifiers[identifier_key])
 
     if not check and "".join(lines) != original:
         BUNDLE_FILE.write_text("".join(lines), encoding="utf-8")
@@ -254,7 +307,7 @@ def _apply_schema_defaults(check: bool) -> list[str]:
             if check:
                 drift.append(
                     f"{schema_path.relative_to(REPO_ROOT)}: {prop} default "
-                    f"{current!r} != platform-identifiers.json {expected!r}"
+                    f"{current!r} != canonical schema default {expected!r}"
                 )
             else:
                 document["properties"][prop]["default"] = expected
@@ -366,12 +419,13 @@ def main() -> int:
             print(f"DRIFT: {line}", file=sys.stderr)
         print(
             "Run `python scripts/sync_template_shared.py` after editing the "
-            "canonical copy under templates/_shared/ or platform-identifiers.json.",
+            "canonical copy under templates/_shared/, platform-identifiers.json, "
+            "or compatibility.json.",
             file=sys.stderr,
         )
         return 1
     print(
-        f"shared scaffold and identifier defaults in sync across "
+        f"shared scaffold and generated defaults in sync across "
         f"{len(discover_templates())} template(s)"
         if args.check
         else "sync complete"

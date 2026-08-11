@@ -31,6 +31,14 @@ variables:
   job_compute_policy_id:
     description: Constrained Job Compute policy that job clusters must use.
     default: "0005F2031B6D2319"
+  deployment_environment:
+    description: Platform-owned runtime environment selected by the bundle target.
+  deployment_lifecycle:
+    description: Platform-owned lifecycle selected by the bundle target.
+  deployment_release:
+    description: >-
+      Immutable source commit promoted by CI. The dev target has a local fallback;
+      UAT deliberately requires BUNDLE_VAR_deployment_release.
 
   # Platform console (resources/optional/platform_console.yml). These are declared here so
   # the bundle parses whether or not the console is opted in; nothing is deployed until
@@ -67,6 +75,27 @@ variables:
       remote execution remains gated until a durable reconciler and sanitized result
       ingestion are implemented and approved.
     default: unavailable
+  hub_state_mode:
+    description: >-
+      Hub repository selector. The normal development bundle stays unavailable;
+      the UAT target selects lakebase only when the optional App resource is
+      explicitly included and bound to the approved existing resource.
+    default: unavailable
+  hub_lakebase_schema:
+    description: >-
+      Dedicated PostgreSQL schema owned by the platform App service principal.
+      It must not be shared with another application.
+    default: aai_hub
+  hub_lakebase_branch:
+    description: >-
+      Full existing Lakebase Autoscaling branch resource path. Required when
+      the optional platform console is enabled; there is intentionally no
+      guessed default.
+  hub_lakebase_database:
+    description: >-
+      Full existing Lakebase Autoscaling database resource path. Required when
+      the optional platform console is enabled; there is intentionally no
+      guessed default.
   hub_registration_principals:
     description: >-
       Comma-separated non-secret CI service-principal identities allowed to register
@@ -98,9 +127,8 @@ artifacts:
 include:
   - resources/*.yml
 
-# Only a `dev` target for now (per project decision). To add prod later, map it
-# to dbx-uat and add a matching federated credential — see docs/cloud-setup.md
-# "Adding a prod target".
+# The supported delivery path ends at UAT. Production remains deliberately
+# absent until a separate environment contract is approved.
 targets:
   dev:
     mode: development
@@ -108,7 +136,11 @@ targets:
     workspace:
       host: https://adb-7405609799238491.11.azuredatabricks.net
     # run_as is left unset, so the bundle deploys and runs as the deploying
-    # principal — in CI that is the github-actions-dbx-platform service principal.
+    # principal — in CI that is this repository's dedicated service principal.
+    variables:
+      deployment_environment: dev
+      deployment_lifecycle: experimental
+      deployment_release: local-dev
     presets:
       # Applied to every job/pipeline in the bundle (organizational attribution
       # + serverless usage reporting). Compute-level attribution that reaches
@@ -123,12 +155,31 @@ targets:
         project: aai-dbx-core-starter
         environment: ${bundle.target}
         data_classification: internal
-        lifecycle: experimental
+        lifecycle: ${var.deployment_lifecycle}
         tag_schema_version: "2"
 
-  # prod:
-  #   mode: production
-  #   workspace:
-  #     host: https://adb-7405613180844632.12.azuredatabricks.net   # dbx-uat
-  #   run_as:
-  #     service_principal_name: <app-id-of-ci-sp>
+  uat:
+    # Production mode gives UAT one stable, non-developer-scoped deployment.
+    # The lifecycle remains validation; this is not a production target.
+    mode: production
+    workspace:
+      host: https://adb-7405613180844632.12.azuredatabricks.net
+    # run_as remains unset. The protected-main branch-ref OIDC identity must be
+    # registered externally with least privilege in this workspace before enablement.
+    variables:
+      deployment_environment: uat
+      deployment_lifecycle: validation
+      app_suffix: uat
+      hub_state_mode: lakebase
+      hub_lakebase_schema: aai_hub
+    presets:
+      tags:
+        application: aai-core
+        cost_center: ${var.cost_center}
+        team: ${var.team}
+        owner_group: ${var.owner_group}
+        project: aai-dbx-core-starter
+        environment: ${bundle.target}
+        data_classification: internal
+        lifecycle: ${var.deployment_lifecycle}
+        tag_schema_version: "2"

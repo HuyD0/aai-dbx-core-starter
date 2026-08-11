@@ -382,7 +382,7 @@ document.addEventListener("click", (event) => {
   const target = promotion.dataset.target;
   const version = promotion.dataset.version;
   const confirmed = window.confirm(
-    `Request production promotion?\n\nApplication: ${applicationId}\nVersion: ${version}\nEnvironment: ${source} → ${target}\n\nSubmission does not deploy. An administrator must review current readiness evidence.`,
+    `Request UAT promotion?\n\nApplication: ${applicationId}\nVersion: ${version}\nEnvironment: ${source} → ${target}\n\nSubmission does not deploy. An administrator must review current readiness evidence.`,
   );
   if (!confirmed) return;
   submitAction(

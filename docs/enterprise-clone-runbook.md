@@ -45,14 +45,15 @@ The keys:
 | `azure_tenant_id` | |
 | `azure_subscription_id` | |
 | `databricks_host` | |
+| `databricks_uat_host` | UAT workspace used only by the protected promotion path |
 | `job_compute_policy_id` | |
 | `sdk_artifact_volume` | `/Volumes/<catalog>/<schema>/<volume>`; the dotted form used by app resource bindings is derived from it |
 | `app_usage_policy_id` | Serverless usage policy for the optional console app; stamp the clone's policy even when the app remains disabled |
 | `template_repo` | The clone's own Git URL. Left pointing upstream, the platform console generates `bundle init` commands that initialise projects from the upstream repository |
-| `sdk_pip_source` | Where a generated project's **credential-free CI** installs `aai-core` from. Left pointing upstream, every generated project's CI depends on that repository over the public internet. Prefer an internal index: `aai-core=={{.aai_core_version}}` |
+| `sdk_pip_source` | PEP 508 direct URL from which a generated project's **credential-free CI** installs `aai-core`. Left pointing upstream, every generated project's CI depends on that repository over the public internet. Prefer an immutable URL in the internal artifact service, such as `https://packages.example/aai_core-{{.aai_core_version}}-py3-none-any.whl`. The sync step projects repository tag placeholders through the reviewed source ref in `compatibility.json`. |
 
 `make sync-templates` stamps the derived copies — `databricks.yml`'s variable
-defaults and dev workspace host, and the four platform-controlled defaults in
+defaults and both workspace hosts, and the platform-controlled defaults in
 each `templates/*/databricks_template_schema.json`.
 
 Verify:
@@ -218,6 +219,8 @@ console bills continuously while running and is stopped by default; use
    authorization test.
 5. Run `./scripts/cloud-verify.sh` for the credential-free local checks.
 
-Each additional staging or production target needs its externally managed
-federated credential and workspace registration before its GitHub environment
-or deployment job is enabled.
+The included UAT target reuses the protected-`main` branch-ref credential and
+needs the dedicated CI principal registered with least privilege in its UAT
+workspace before `UAT_DEPLOYMENT_ENABLED` is set. Its credentialed job has no
+GitHub `environment:` until a matching environment-subject credential is
+separately provisioned and verified. See `docs/uat-promotion.md`.
