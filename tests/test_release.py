@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from aai_core.deployment import ApplicationRelease
@@ -315,6 +316,13 @@ def test_sdk_content_digest_command_uses_the_local_candidate_commit(capsys):
 
     assert result == 0
     assert capsys.readouterr().out.strip() == source["content_sha256"]
+
+
+def test_release_validation_job_fetches_candidate_commit_history():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    checkout = workflow["jobs"]["lint-test"]["steps"][0]
+
+    assert checkout["with"]["fetch-depth"] == 0
 
 
 def test_dependency_canary_workflow_matches_release_acceptance_metadata():
