@@ -104,6 +104,33 @@ make ops-rag-check
 make ops-rag-notebook
 ```
 
+## Email Support Agent solution accelerator
+
+[`email-support-agent/`](email-support-agent/README.md) is a standalone,
+credential-free-first solution accelerator and reference design derived from a
+review of a public LangGraph email-support demo. It adds redacted durable
+state, deterministic routing and policy, identity/group/release-authorized
+retrieval, grounded drafting and abstention, identity-authorized human review,
+collision-safe transactional outbox writes, governed MLflow span/evaluation
+contracts, feedback curation, dry-run-first monitoring/judge/prompt-improvement
+recipes, quality-constrained cost controls, and a release-bound operational
+readiness scorecard. Its
+[`MATURITY_SCORECARD.md`](email-support-agent/MATURITY_SCORECARD.md) defines
+10/10 learning and production-reference coverage without treating synthetic
+evidence as live certification.
+
+It does not duplicate deployment scaffolding. Production teams graduate the
+domain package into `agent-app`, which owns the pinned dependencies, keyless
+CI/CD, cost tags, Agent Server, App resource, and release job. Run its complete
+offline safety and release gate from the repository root:
+
+```bash
+make email-support-check
+make email-support-demo
+make email-support-workshop
+make email-support-mlops-plan
+```
+
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or

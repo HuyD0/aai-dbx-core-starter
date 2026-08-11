@@ -19,6 +19,9 @@ OPS_RAG_DIR := $(CURDIR)/examples/agentic-ops-rag
 OPS_RAG_KERNEL := aai-agentic-ops-rag
 OPS_RAG_MLFLOW_DIR := $(OPS_RAG_DIR)/.aai
 OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
+EMAIL_SUPPORT_DIR := $(CURDIR)/examples/email-support-agent
+EMAIL_SUPPORT_PYTHONPATH := $(CURDIR)/src:$(EMAIL_SUPPORT_DIR)/src
+EMAIL_SUPPORT_LANGGRAPH_LOCK := $(CURDIR)/templates/agent-app/template/recipes/langgraph/requirements.lock
 
 .PHONY: help check-uv install lint format format-check typecheck test coverage audit \
 	build check verify \
@@ -32,7 +35,8 @@ OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 	classification-doctor classification-reset classification-check \
 	classification-notebook classification-ui \
 	ops-rag-install ops-rag-doctor ops-rag-render ops-rag-check \
-	ops-rag-notebook ops-rag-ui
+	ops-rag-notebook ops-rag-ui email-support-check email-support-demo \
+	email-support-langgraph-check email-support-workshop email-support-mlops-plan
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -153,6 +157,37 @@ ops-rag-ui: ops-rag-install ## Serve the workshop's isolated MLflow UI at http:/
 	$(PYTHON) -m mlflow ui --host 127.0.0.1 --port 5001 \
 		--backend-store-uri "$(OPS_RAG_MLFLOW_URI)" \
 		--default-artifact-root "$(OPS_RAG_MLFLOW_DIR)/mlruns"
+
+email-support-langgraph-check: check-uv ## Test the optional graph against the certified template lock.
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(UV) run --python 3.12 --isolated --no-project \
+		--with-requirements "$(EMAIL_SUPPORT_LANGGRAPH_LOCK)" \
+		--with pytest==9.1.1 python -m pytest -q \
+		$(EMAIL_SUPPORT_DIR)/recipes/langgraph/test_graph.py
+
+email-support-workshop: install ## Execute all four credential-free accelerator lessons.
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) $(EMAIL_SUPPORT_DIR)/workshop/01_graph_basics.py
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) $(EMAIL_SUPPORT_DIR)/workshop/02_reliability_hitl_idempotency.py
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) $(EMAIL_SUPPORT_DIR)/workshop/03_mlflow_trace_evaluation.py
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) $(EMAIL_SUPPORT_DIR)/workshop/04_improvement_release_decision.py
+
+email-support-mlops-plan: install ## Render MLflow monitoring, curation, optimization, and judge budgets without cloud calls.
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) $(EMAIL_SUPPORT_DIR)/recipes/mlflow/plan.py
+
+email-support-check: install email-support-langgraph-check email-support-workshop email-support-mlops-plan ## Run the complete credential-free accelerator proof.
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) -m pytest -q tests/test_email_support_*.py
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) -m email_support_agent.offline --check
+
+email-support-demo: install ## Prepare one synthetic email; no reply or ticket is sent.
+	PYTHONPATH="$(EMAIL_SUPPORT_PYTHONPATH)" \
+		$(PYTHON) -m email_support_agent.offline
 
 workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect

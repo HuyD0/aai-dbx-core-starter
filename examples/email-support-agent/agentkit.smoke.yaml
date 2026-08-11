@@ -1,0 +1,15 @@
+# Credential-free PR smoke policy. Judge thresholds intentionally live only
+# in agentkit.yaml because AgentKit smoke disables judges by design.
+version: 1
+agent: src/email_support_agent/target.py:respond
+dataset: evals/data/release_cases.jsonl
+
+thresholds:
+  response_length_ok: ">=1.0"
+  keyword_coverage: ">=0.55"
+
+regression_budget:
+  keyword_coverage/mean: 0.05
+
+smoke:
+  rows: 11

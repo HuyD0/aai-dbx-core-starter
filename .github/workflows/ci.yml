@@ -145,6 +145,7 @@ jobs:
         run: |
           .venv/bin/python -m pytest -q \
             templates/agent-app/template/recipes/langgraph/test_graph.py
+          make email-support-langgraph-check
 
       - name: Verify generated transitive template locks
         if: matrix.python == '3.12'
