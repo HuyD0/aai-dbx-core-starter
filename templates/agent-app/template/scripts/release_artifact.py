@@ -103,7 +103,8 @@ def main() -> int:
         result = operation(arguments.artifact_dir, arguments.source_commit)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         parser.error(str(error))
-    print(result)
+    else:
+        print(result)
     return 0
 
 
