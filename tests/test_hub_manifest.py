@@ -473,6 +473,41 @@ def test_readiness_profile_must_normalize_to_a_real_identifier():
         load_manifest(document)
 
 
+def test_uat_requires_an_environment_specific_validation_readiness_profile():
+    document = valid_document()
+    document["spec"]["readiness"] = {"profile": "development_v1"}
+    document["spec"]["environments"] = {
+        "dev": {"tags": {"environment": "dev"}},
+        "uat": {
+            "tags": {
+                "environment": "uat",
+                "lifecycle": "validation",
+            }
+        },
+    }
+
+    with pytest.raises(ValidationError, match="UAT requires uat_validation_v1"):
+        load_manifest(document)
+
+    document["spec"]["readiness"]["environmentProfiles"] = {"UAT": "UAT-Validation-v1"}
+    manifest = load_manifest(document)
+
+    assert manifest.spec.readiness.profile_for("dev") == "development_v1"
+    assert manifest.spec.readiness.profile_for("uat") == "uat_validation_v1"
+    serialized = manifest.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert serialized["spec"]["readiness"]["environmentProfiles"] == {
+        "uat": "uat_validation_v1"
+    }
+
+
+def test_readiness_environment_overrides_must_name_declared_environments():
+    document = valid_document()
+    document["spec"]["readiness"]["environmentProfiles"] = {"uat": "uat_validation_v1"}
+
+    with pytest.raises(ValidationError, match="undeclared environments: uat"):
+        load_manifest(document)
+
+
 @pytest.mark.parametrize("value", ["", "---", 123])
 def test_budget_policy_must_normalize_to_a_real_identifier(value):
     document = valid_document()

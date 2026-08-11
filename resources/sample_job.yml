@@ -25,6 +25,10 @@ resources:
             # cluster-create or workspace-admin rights. The id comes from a
             # bundle variable so a clone overrides it without editing this file.
             policy_id: ${var.job_compute_policy_id}
+            spark_env_vars:
+              AAI_ENVIRONMENT: ${var.deployment_environment}
+              AAI_LIFECYCLE: ${var.deployment_lifecycle}
+              AAI_RELEASE: ${var.deployment_release}
             # Cost-attribution tags. Cluster custom_tags propagate to the
             # underlying Azure VMs (Cost Management / chargeback) and to the
             # system.billing.usage `custom_tags` column for DBU attribution. Values
@@ -42,5 +46,5 @@ resources:
               project: aai-dbx-core-starter
               environment: ${bundle.target}
               data_classification: internal
-              lifecycle: experimental
+              lifecycle: ${var.deployment_lifecycle}
               tag_schema_version: "2"

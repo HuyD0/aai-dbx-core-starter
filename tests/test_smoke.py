@@ -1097,6 +1097,17 @@ def test_dev_target_is_pinned_to_dev_workspace():
     assert host.startswith("https://") and host.endswith(".azuredatabricks.net")
 
 
+def test_uat_target_is_pinned_to_uat_workspace_and_validation_lifecycle():
+    bundle = load_yaml("databricks.yml")
+    target = bundle["targets"]["uat"]
+    assert target["workspace"]["host"] == IDENTIFIERS["databricks_uat_host"]
+    assert target["mode"] == "production"
+    assert target["variables"]["deployment_environment"] == "uat"
+    assert target["variables"]["deployment_lifecycle"] == "validation"
+    assert "deployment_release" not in target["variables"]
+    assert "prod" not in bundle["targets"]
+
+
 def test_sample_job_uses_constrained_job_compute_policy():
     bundle = load_yaml("databricks.yml")
     resources = load_yaml("resources/sample_job.yml")
@@ -1122,22 +1133,20 @@ def _discovered_templates():
     )
 
 
-def test_identifier_fixture_is_the_single_source_of_truth():
-    """Every other file holding an environment identifier must agree with
-    platform-identifiers.json; a clone edits the fixture and this test lists
-    each remaining literal that must follow."""
+def test_generated_schema_defaults_have_canonical_sources():
+    """Environment defaults follow the clone fixture and release defaults
+    follow compatibility.json; this check reports every derived copy."""
     templates = _discovered_templates()
     assert templates, "no bundle templates discovered"
 
-    # The stamping map lives in the sync script so the check cannot drift from
-    # the thing that writes the values. `aai_core_pip_source` is in it too: it
-    # is the one default that points at a *repository*, so a clone that misses
-    # it makes every generated project's CI install the SDK from upstream.
+    # The stamping maps live in the sync script so this check cannot drift from
+    # the thing that writes the values. `aai_core_pip_source` remains clone-owned;
+    # its version/tag placeholder is projected through the immutable release ref.
     drift = sync_module.schema_default_drift()
     assert not drift, "run `make sync-templates`: " + "; ".join(drift)
     stamped = {prop for _, prop, _ in sync_module.planned_schema_defaults()}
-    assert stamped == set(sync_module.IDENTIFIER_DEFAULTS), (
-        "every identifier-owned schema property must exist in every template; "
+    assert stamped == set(sync_module.SCHEMA_DEFAULTS), (
+        "every canonical schema property must exist in every template; "
         f"stamped={sorted(stamped)}"
     )
 
@@ -1164,6 +1173,7 @@ REQUIRED_IDENTIFIER_KEYS = {
     "azure_tenant_id",
     "azure_subscription_id",
     "databricks_host",
+    "databricks_uat_host",
     "job_compute_policy_id",
     "sdk_artifact_volume",
     "sdk_pip_source",
@@ -1191,6 +1201,7 @@ _MARKDOWN_FORBIDDEN = (
     "azure_tenant_id",
     "azure_subscription_id",
     "databricks_host",
+    "databricks_uat_host",
     "job_compute_policy_id",
     "sdk_artifact_volume",
 )
@@ -1248,7 +1259,6 @@ def test_markdown_does_not_restate_environment_identifiers():
 def test_bundle_and_compute_use_required_platform_tags():
     bundle = load_yaml("databricks.yml")
     resources = load_yaml("resources/sample_job.yml")
-    bundle_tags = bundle["targets"]["dev"]["presets"]["tags"]
     compute_tags = resources["resources"]["jobs"]["aai_dbx_base_template_sample"][
         "job_clusters"
     ][0]["new_cluster"]["custom_tags"]
@@ -1263,9 +1273,14 @@ def test_bundle_and_compute_use_required_platform_tags():
         "lifecycle",
         "tag_schema_version",
     }
-    assert required.issubset(bundle_tags)
+    for target_name in ("dev", "uat"):
+        bundle_tags = bundle["targets"][target_name]["presets"]["tags"]
+        assert required.issubset(bundle_tags)
+        assert bundle_tags["environment"] == "${bundle.target}"
+        assert bundle_tags["lifecycle"] == "${var.deployment_lifecycle}"
     assert required.issubset(compute_tags)
-    assert bundle_tags["tag_schema_version"] == "2"
+    assert compute_tags["environment"] == "${bundle.target}"
+    assert compute_tags["lifecycle"] == "${var.deployment_lifecycle}"
     assert compute_tags["tag_schema_version"] == "2"
 
 
@@ -1291,7 +1306,7 @@ def test_pr_ci_is_credential_free():
     assert "${{ secrets." not in text
 
 
-def test_credentialed_jobs_do_not_use_github_environments_or_secrets():
+def test_credentialed_jobs_have_no_github_environment_and_no_secrets():
     for name in ("auth-smoke.yml", "deploy.yml", "publish-sdk.yml"):
         text = (WORKFLOWS / name).read_text()
         workflow = yaml.safe_load(text)
@@ -1306,8 +1321,16 @@ def test_credentialed_jobs_do_not_use_github_environments_or_secrets():
         ]
         assert credentialed_jobs
         assert "${{ secrets." not in text
-        for job in workflow["jobs"].values():
-            assert "environment" not in job
+        environment_jobs = {
+            job_name: job["environment"]
+            for job_name, job in workflow["jobs"].items()
+            if "environment" in job
+        }
+        assert not environment_jobs
+        if name == "deploy.yml":
+            assert "UAT_DEPLOYMENT_ENABLED" in text
+            assert "DATABRICKS_UAT_HOST" in text
+            assert "refs/heads/main" in text
 
 
 def test_cloud_environment_is_reproducible_and_credential_free():

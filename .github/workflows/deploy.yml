@@ -1,18 +1,23 @@
 name: deploy
 
-# Keyless deploy of the Databricks Asset Bundle to the dev workspace.
-# Triggers: push to main (fully automated) and manual dispatch.
+# Keyless deploy of the Databricks Asset Bundle. Pushes continuously deploy
+# dev; manual dispatch can promote the same verified wheel through dev to UAT.
 #
-# NOTE: this job intentionally sets NO `environment:`. The federated credential
-# subject is the branch-ref form (repo:<owner>/<repo>:ref:refs/heads/main); a
-# GitHub environment would change the OIDC subject to :environment:<name> and
-# break the token exchange. Before adding an environment gate, have the
-# platform identity owner add a matching federated credential externally.
+# Both credentialed jobs intentionally have no GitHub `environment:` and use
+# the repository's existing main branch-ref FIC. UAT remains manual and
+# disabled until the dedicated CI principal is registered externally in UAT
+# with least privilege; see docs/uat-promotion.md.
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
+      target:
+        description: Highest environment to deploy after dev succeeds.
+        required: true
+        type: choice
+        options: [dev, uat]
+        default: dev
       bind_app:
         description: >-
           One-time only. Name of the pre-created platform console app to bind to the
@@ -27,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-dev
+  group: deploy-${{ inputs.target || 'dev' }}
   cancel-in-progress: false
 
 jobs:
@@ -49,16 +54,63 @@ jobs:
           uv sync --python 3.12 --extra dev --locked
           uv run --python 3.12 python -m build --wheel --no-isolation
           uv run --python 3.12 python scripts/validate_release.py --wheel dist
+          uv run --python 3.12 python scripts/release_artifact.py create \
+            --artifact-dir dist --source-commit "$GITHUB_SHA"
 
       - name: Stage SDK wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: aai-core-wheel
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            dist/release-evidence.json
           if-no-files-found: error
           retention-days: 1
 
+  uat-prerequisites:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'uat' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require externally completed UAT onboarding
+        env:
+          UAT_DEPLOYMENT_ENABLED: ${{ vars.UAT_DEPLOYMENT_ENABLED }}
+          DATABRICKS_UAT_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          HUB_LAKEBASE_BRANCH: ${{ vars.HUB_LAKEBASE_BRANCH }}
+          HUB_LAKEBASE_DATABASE: ${{ vars.HUB_LAKEBASE_DATABASE }}
+          HUB_LAKEBASE_SCHEMA: ${{ vars.HUB_LAKEBASE_SCHEMA }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::UAT promotion must be dispatched from protected main so the branch-ref FIC subject is exact."
+            exit 1
+          fi
+          if [ "$UAT_DEPLOYMENT_ENABLED" != "true" ]; then
+            echo "::error::UAT is disabled. Complete the external workspace onboarding in docs/uat-promotion.md, then set UAT_DEPLOYMENT_ENABLED=true."
+            exit 1
+          fi
+          validate_reference() {
+            local name="$1"
+            local value="$2"
+            local normalized
+            normalized=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+            case "$normalized" in
+              ""|unset|unknown|todo|tbd|changeme|change-me|example|example-*|replace-with-*|your-*|*placeholder*)
+                echo "::error::$name must name an existing externally provisioned resource."
+                return 1
+                ;;
+            esac
+          }
+          validate_reference DATABRICKS_UAT_HOST "$DATABRICKS_UAT_HOST"
+          validate_reference HUB_LAKEBASE_BRANCH "$HUB_LAKEBASE_BRANCH"
+          validate_reference HUB_LAKEBASE_DATABASE "$HUB_LAKEBASE_DATABASE"
+          validate_reference HUB_LAKEBASE_SCHEMA "$HUB_LAKEBASE_SCHEMA"
+          if ! [[ "$HUB_LAKEBASE_SCHEMA" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+            echo "::error::HUB_LAKEBASE_SCHEMA must be an explicit lowercase PostgreSQL schema name."
+            exit 1
+          fi
+
   deploy-dev:
+    if: ${{ github.event_name == 'push' || inputs.target == 'dev' || inputs.target == 'uat' }}
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -77,6 +129,14 @@ jobs:
         with:
           name: aai-core-wheel
           path: dist
+
+      - name: Verify immutable release evidence
+        run: |
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          python scripts/release_artifact.py verify \
+            --artifact-dir dist --source-commit "$GITHUB_SHA"
+          echo "BUNDLE_VAR_deployment_release=$GITHUB_SHA" >> "$GITHUB_ENV"
 
       - name: Azure login (OIDC — no secret)
         uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
@@ -108,12 +168,14 @@ jobs:
         # The app name goes through `env` and is referenced as a shell variable, never
         # interpolated into the script body (zizmor template-injection; this job holds a
         # live service-principal token).
-        if: inputs.bind_app != ''
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'dev' && inputs.bind_app != '' }}
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
           CONSOLE_APP_NAME: ${{ inputs.bind_app }}
         run: |
+          test "$CONSOLE_APP_NAME" = "aai-platform-console-dev"
+          databricks apps get "$CONSOLE_APP_NAME" >/dev/null
           databricks bundle deployment bind platform_console "$CONSOLE_APP_NAME" \
             -t dev --auto-approve
 
@@ -142,3 +204,77 @@ jobs:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
         run: python3 scripts/validate_templates.py
+
+  deploy-uat:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'uat' }}
+    needs: [build, deploy-dev, uat-prerequisites]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the dev-verified SDK wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aai-core-wheel
+          path: dist
+
+      - name: Verify immutable release evidence
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+        run: |
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          EXPECTED_HOST=$(python -c 'import json; print(json.load(open("platform-identifiers.json"))["databricks_uat_host"])')
+          test "$DATABRICKS_HOST" = "$EXPECTED_HOST"
+          python scripts/release_artifact.py verify \
+            --artifact-dir dist --source-commit "$GITHUB_SHA"
+          echo "BUNDLE_VAR_deployment_release=$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - name: Azure login (UAT; branch-ref OIDC — no secret)
+        uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
+
+      - name: Bind the pre-created UAT console app (one-time)
+        if: inputs.bind_app != ''
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          CONSOLE_APP_NAME: ${{ inputs.bind_app }}
+        run: |
+          test "$CONSOLE_APP_NAME" = "aai-platform-console-uat"
+          databricks apps get "$CONSOLE_APP_NAME" >/dev/null
+          databricks bundle deployment bind platform_console "$CONSOLE_APP_NAME" \
+            -t uat --auto-approve
+
+      - name: Validate & deploy the dev-verified bundle (UAT)
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+          BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER || 'CC-1234' }}
+          BUNDLE_VAR_team: ${{ vars.TEAM || 'data-platform' }}
+          BUNDLE_VAR_owner_group: ${{ vars.OWNER_GROUP || 'group:data-platform-owners' }}
+          BUNDLE_VAR_hub_lakebase_branch: ${{ vars.HUB_LAKEBASE_BRANCH }}
+          BUNDLE_VAR_hub_lakebase_database: ${{ vars.HUB_LAKEBASE_DATABASE }}
+          BUNDLE_VAR_hub_lakebase_schema: ${{ vars.HUB_LAKEBASE_SCHEMA }}
+          AAI_USE_PREBUILT_WHEEL: "1"
+        run: |
+          databricks bundle validate -t uat --strict
+          databricks bundle deploy -t uat
+
+      - name: Validate template catalog against UAT
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: python3 scripts/validate_templates.py --target uat

@@ -10,6 +10,7 @@ This is the only module that calls ``mlflow.genai.evaluate``.
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -17,6 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from statistics import fmean
 from typing import Any, Literal
 
 from aai_core.agentkit import catalog as catalog_module
@@ -70,6 +72,11 @@ from aai_core.agentkit.results import (
     complete_results_attempt,
     publish_results,
     write_results,
+)
+from aai_core.agentkit.statistics import (
+    StatisticalEvidence,
+    build_statistical_evidence,
+    is_statistics_metric,
 )
 from aai_core.agentkit.targets import (
     Target,
@@ -156,6 +163,8 @@ class _ScoredRun:
     change_id: str
     baseline_metrics: dict[str, float]
     policy: GatePolicy
+    metric_samples: Mapping[str, tuple[float | None, ...]]
+    statistics: StatisticalEvidence | None
 
 
 def set_concurrency_env(
@@ -644,31 +653,48 @@ def _score_prepared_run(
         plan=prepared.plan,
         allow_missing_regression_baseline=establish_baseline or not baseline_metrics,
     )
+    baseline_samples = dict(baseline.metric_samples) if baseline else {}
+    metric_samples: Mapping[str, tuple[float | None, ...]]
     if backend.mlflow is None:
+        local_metrics, metric_samples = _score_locally(prepared.dataset, prepared.plan)
+        statistics, statistical_metrics = build_statistical_evidence(
+            metric_samples,
+            baseline_samples,
+            policy.rules,
+            project.config.statistics,
+        )
+        local_metrics.update(statistical_metrics)
         gate = apply_gate(
-            _score_locally(prepared.dataset, prepared.plan),
+            local_metrics,
             policy=policy,
             baseline_metrics=baseline_metrics,
         )
         recorded_decision = _decision_value(decision, gate)
         run_id = experiment_id = experiment_name = None
     else:
-        gate, recorded_decision, run_id, experiment_id, experiment_name = (
-            _score_with_mlflow(
-                project,
-                prepared,
-                backend,
-                metadata=metadata,
-                summary=summary,
-                command=command,
-                decision=decision,
-                transport=transport,
-                judge_model_identity=judge_model_identity,
-                recorded_at=recorded_at,
-                baseline_metrics=baseline_metrics,
-                policy=policy,
-                warnings=warnings,
-            )
+        (
+            gate,
+            recorded_decision,
+            run_id,
+            experiment_id,
+            experiment_name,
+            metric_samples,
+            statistics,
+        ) = _score_with_mlflow(
+            project,
+            prepared,
+            backend,
+            metadata=metadata,
+            summary=summary,
+            command=command,
+            decision=decision,
+            transport=transport,
+            judge_model_identity=judge_model_identity,
+            recorded_at=recorded_at,
+            baseline_metrics=baseline_metrics,
+            baseline_samples=baseline_samples,
+            policy=policy,
+            warnings=warnings,
         )
     return _ScoredRun(
         gate=gate,
@@ -680,6 +706,8 @@ def _score_prepared_run(
         change_id=change_id,
         baseline_metrics=baseline_metrics,
         policy=policy,
+        metric_samples=metric_samples,
+        statistics=statistics,
     )
 
 
@@ -696,9 +724,18 @@ def _score_with_mlflow(
     judge_model_identity: str | None,
     recorded_at: str,
     baseline_metrics: Mapping[str, float],
+    baseline_samples: Mapping[str, tuple[float | None, ...]],
     policy: GatePolicy,
     warnings: list[str],
-) -> tuple[GateResult, str, str | None, str | None, str]:
+) -> tuple[
+    GateResult,
+    str,
+    str | None,
+    str | None,
+    str,
+    Mapping[str, tuple[float | None, ...]],
+    StatisticalEvidence | None,
+]:
     mlflow = backend.mlflow
     assert mlflow is not None
     predict_fn = (
@@ -740,8 +777,17 @@ def _score_with_mlflow(
             predict_fn=predict_fn,
         )
         warnings.extend(_coverage_warnings(native_result))
+        metric_samples = _metric_samples(native_result)
+        metrics = _metrics_with_scorer_errors(native_result)
+        statistics, statistical_metrics = build_statistical_evidence(
+            metric_samples,
+            baseline_samples,
+            policy.rules,
+            project.config.statistics,
+        )
+        metrics.update(statistical_metrics)
         gate = apply_gate(
-            _metrics_with_scorer_errors(native_result),
+            metrics,
             policy=policy,
             baseline_metrics=baseline_metrics,
         )
@@ -757,7 +803,15 @@ def _score_with_mlflow(
         mlflow.log_metrics(dict(gate.metrics))
         mlflow.set_tags(tags)
         _record_reproducibility(mlflow)
-    return gate, recorded_decision, run_id, experiment_id, experiment_name
+    return (
+        gate,
+        recorded_decision,
+        run_id,
+        experiment_id,
+        experiment_name,
+        metric_samples,
+        statistics,
+    )
 
 
 def _run_tags(
@@ -903,6 +957,8 @@ def _results_record(
         scope=scope,
         mode=prepared.mode,
         metrics=dict(scored.gate.metrics),
+        metric_samples=dict(scored.metric_samples),
+        statistics=scored.statistics,
         versions=versions,
         baseline_run_id=baseline.run_id if baseline else None,
         baseline_metrics=scored.baseline_metrics,
@@ -969,6 +1025,7 @@ def _write_new_baseline(
             dataset=results.dataset,
             scope=scope,
             metrics=dict(scored.gate.metrics),
+            metric_samples=dict(scored.metric_samples),
             versions=versions,
             recorded_by=f"agentkit {command} --establish-baseline",
             change_id=scored.change_id,
@@ -1127,6 +1184,49 @@ def _metrics_with_scorer_errors(native_result: Any) -> dict[str, float]:
     return metrics
 
 
+def _metric_samples(
+    native_result: Any,
+) -> dict[str, tuple[float | None, ...]]:
+    """Extract aligned numeric per-row scores from MLflow's native table.
+
+    Boolean and yes/no feedback are converted to 1/0, matching MLflow's mean
+    aggregation. Unsupported categorical values remain absent rather than being
+    assigned an invented ordering.
+    """
+
+    frame = _result_frame(native_result)
+    columns = getattr(frame, "columns", None)
+    if columns is None:
+        return {}
+    samples: dict[str, tuple[float | None, ...]] = {}
+    for column in list(columns):
+        name = str(column)
+        if not name.endswith("/value"):
+            continue
+        scorer = name.removesuffix("/value")
+        values = tuple(_numeric_score(value) for value in frame[column])
+        if any(value is not None for value in values):
+            samples[f"{scorer}/mean"] = values
+    return samples
+
+
+def _numeric_score(value: Any) -> float | None:
+    if is_missing_scalar(value):
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, int | float):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"yes", "true", "pass", "passed"}:
+            return 1.0
+        if normalized in {"no", "false", "fail", "failed"}:
+            return 0.0
+    return None
+
+
 def _coverage_warnings(native_result: Any) -> list[str]:
     """Name the scorers that judged fewer rows than the run scored.
 
@@ -1270,7 +1370,9 @@ def _comparison_rows(
     thresholds = {rule.metric: rule for rule in policy.rules}
     failed = {failure.metric for failure in gate.failures}
     rows = []
-    for metric in sorted(gate.metrics):
+    for metric in sorted(
+        metric for metric in gate.metrics if not is_statistics_metric(metric)
+    ):
         current = gate.metrics[metric]
         reference = baseline_metrics.get(metric)
         rule = thresholds.get(metric)
@@ -1377,6 +1479,25 @@ def _render_outcome(
         for item in table
     )
     lines.append("")
+    if results.statistics is not None and results.statistics.estimates:
+        level = results.statistics.confidence_level * 100
+        lines.append(
+            f"uncertainty: {level:g}% normal-mean intervals; minimum "
+            f"enforceable sample {results.statistics.minimum_cases}"
+        )
+        for estimate in results.statistics.estimates:
+            lines.append(
+                f"  {estimate.metric}: n={estimate.sample_size}, "
+                f"CI [{estimate.lower:.4g}, {estimate.upper:.4g}]"
+            )
+        for paired in results.statistics.paired:
+            lines.append(
+                f"  {paired.metric}: paired n={paired.pair_count}, "
+                "improvement CI "
+                f"[{paired.lower_improvement:+.4g}, "
+                f"{paired.upper_improvement:+.4g}]"
+            )
+        lines.append("")
     lines.append("gate: PASSED" if results.gate_passed else "gate: FAILED")
     for failure in results.gate_failures:
         lines.append(f"  FAIL {failure['metric']}: {failure['reason']}")
@@ -1500,17 +1621,24 @@ def _is_locally_scorable(plan: ScorerPlan, mode: str) -> bool:
     )
 
 
-def _score_locally(dataset: LoadedDataset, plan: ScorerPlan) -> dict[str, float]:
+def _score_locally(
+    dataset: LoadedDataset, plan: ScorerPlan
+) -> tuple[dict[str, float], dict[str, tuple[float | None, ...]]]:
     """Score recorded answers in-process — no MLflow, no cloud, no cost."""
 
-    totals: dict[str, float] = {}
+    samples: dict[str, list[float | None]] = {
+        entry.spec.metric: [] for entry in plan.entries
+    }
     for row in dataset.rows:
         outputs = catalog_module._require_output_text(row.get("outputs"))
         expectations = dict(row.get("expectations") or {})
         for entry in plan.entries:
             function = catalog_module.CODE_SCORER_FUNCTIONS[entry.spec.name]
-            totals[entry.spec.metric] = totals.get(entry.spec.metric, 0.0) + function(
-                outputs, expectations
-            )
-    row_count = len(dataset.rows) or 1
-    return {metric: value / row_count for metric, value in totals.items()}
+            samples[entry.spec.metric].append(float(function(outputs, expectations)))
+    frozen = {metric: tuple(values) for metric, values in samples.items()}
+    metrics = {
+        metric: fmean(value for value in values if value is not None)
+        for metric, values in frozen.items()
+        if any(value is not None for value in values)
+    }
+    return metrics, frozen

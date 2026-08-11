@@ -92,6 +92,10 @@ resources:
             value: ${var.job_compute_policy_id}
           - name: AAI_CONSOLE_TEMPLATE_REPO
             value: ${var.template_repo}
+          - name: AAI_HUB_STATE_MODE
+            value: ${var.hub_state_mode}
+          - name: AAI_HUB_LAKEBASE_SCHEMA
+            value: ${var.hub_lakebase_schema}
           - name: AAI_HUB_JOB_MODE
             value: ${var.hub_job_mode}
           - name: AAI_HUB_REGISTRATION_PRINCIPALS
@@ -104,6 +108,17 @@ resources:
             value: ${var.hub_platform_auditor_group}
 
       resources:
+        # Existing Lakebase Autoscaling resource only. The bundle binds the app to
+        # full branch/database resource paths supplied by the platform owner; it does
+        # not provision or select a project, branch, database, endpoint, or identity.
+        # CAN_CONNECT_AND_CREATE lets the app SP create and own its dedicated Hub
+        # schema. It does not grant access to schemas owned by another principal.
+        - name: postgres
+          postgres:
+            branch: ${var.hub_lakebase_branch}
+            database: ${var.hub_lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
+
         # Lets the console report whether the platform can read the published SDK wheel.
         # READ only — the console reads no application data and needs nothing else.
         - name: sdk-artifact-volume

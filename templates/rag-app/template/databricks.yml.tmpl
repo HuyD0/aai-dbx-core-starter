@@ -6,6 +6,14 @@ variables:
     default: {{.aai_core_version}}
   aai_core_volume:
     default: {{.aai_core_volume}}
+  deployment_environment:
+    description: Platform-owned runtime environment selected by the bundle target.
+  deployment_lifecycle:
+    description: Platform-owned lifecycle selected by the bundle target.
+  deployment_release:
+    description: >-
+      Immutable source commit promoted by CI. The dev target has a local fallback;
+      UAT deliberately requires BUNDLE_VAR_deployment_release.
   prompt_version:
     description: Exact immutable Prompt Registry version evaluated by the gate.
     default: "{{.prompt_version}}"
@@ -41,6 +49,10 @@ targets:
     default: true
     workspace:
       host: {{.workspace_host}}
+    variables:
+      deployment_environment: dev
+      deployment_lifecycle: experimental
+      deployment_release: local-dev
     presets:
       tags:
         application: {{.application_name}}
@@ -50,5 +62,26 @@ targets:
         owner_group: {{.owner_group}}
         cost_center: {{.cost_center}}
         data_classification: internal
-        lifecycle: experimental
+        lifecycle: ${var.deployment_lifecycle}
+        tag_schema_version: "2"
+
+  uat:
+    mode: production
+    workspace:
+      host: {{.uat_workspace_host}}
+    # The externally provisioned UAT CI identity deploys and runs the bundle.
+    # Keep run_as unset; do not fall back to the shared legacy principal.
+    variables:
+      deployment_environment: uat
+      deployment_lifecycle: validation
+    presets:
+      tags:
+        application: {{.application_name}}
+        project: {{.project_name}}
+        environment: ${bundle.target}
+        team: {{.team}}
+        owner_group: {{.owner_group}}
+        cost_center: {{.cost_center}}
+        data_classification: internal
+        lifecycle: ${var.deployment_lifecycle}
         tag_schema_version: "2"

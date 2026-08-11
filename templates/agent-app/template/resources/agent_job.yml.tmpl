@@ -27,6 +27,9 @@ resources:
             spark_env_vars:
               GIT_COMMIT: ${var.source_commit}
               GIT_DIRTY: ${var.source_state}
+              AAI_ENVIRONMENT: ${var.deployment_environment}
+              AAI_LIFECYCLE: ${var.deployment_lifecycle}
+              AAI_RELEASE: ${var.deployment_release}
             custom_tags:
               application: {{.application_name}}
               project: {{.project_name}}
@@ -35,5 +38,5 @@ resources:
               owner_group: {{.owner_group}}
               cost_center: {{.cost_center}}
               data_classification: internal
-              lifecycle: experimental
+              lifecycle: ${var.deployment_lifecycle}
               tag_schema_version: "2"

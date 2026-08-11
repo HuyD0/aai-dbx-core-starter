@@ -26,6 +26,8 @@ from aai_core.context import PlatformContext
 from aai_core.providers.types import (
     ModelCapabilities,
     ModelResponse,
+    RetrievalMode,
+    SearchRankingOptions,
     SearchResult,
     UnsupportedCapabilityError,
 )
@@ -210,10 +212,11 @@ class FakeRetriever:
         top_k: int = 10,
         filters: Mapping[str, Any] | None = None,
         query_vector: Sequence[float] | None = None,
-        mode: str = "hybrid",
+        mode: str | RetrievalMode = RetrievalMode.HYBRID,
+        ranking: SearchRankingOptions | None = None,
         provider_options: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
-        if mode.lower() not in {"text", "vector", "hybrid"}:
+        if str(mode).lower() not in {"text", "vector", "hybrid"}:
             raise ValueError(f"Unsupported retrieval mode: {mode}")
         self.queries.append(query)
         return list(self.results)[:top_k]

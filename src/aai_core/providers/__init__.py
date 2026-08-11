@@ -10,13 +10,16 @@ from aai_core.providers.search import (
     DatabricksAISearchRetriever,
 )
 from aai_core.providers.types import (
+    AzureSemanticRankOptions,
     ChatModel,
+    DatabricksRerankOptions,
     EmbeddingProvider,
     ModelCapabilities,
     ModelResponse,
     ProviderConfigurationError,
     ProviderError,
     ProviderRequestError,
+    RetrievalMode,
     Retriever,
     SearchResult,
     UnsupportedCapabilityError,
@@ -24,8 +27,10 @@ from aai_core.providers.types import (
 
 __all__ = [
     "AzureAISearchRetriever",
+    "AzureSemanticRankOptions",
     "ChatModel",
     "DatabricksAISearchRetriever",
+    "DatabricksRerankOptions",
     "EmbeddingProvider",
     "ModelCapabilities",
     "ModelResponse",
@@ -36,6 +41,7 @@ __all__ = [
     "ProviderRequestError",
     "ProviderResolver",
     "Retriever",
+    "RetrievalMode",
     "SearchResult",
     "UnsupportedCapabilityError",
 ]

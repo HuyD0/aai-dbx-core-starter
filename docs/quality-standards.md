@@ -80,6 +80,10 @@ workload-specific controls with the generated application.
 ## Release completion
 
 A release is ready only after the root workflow, CodeQL, provider/Foundry lanes,
-template render matrix, dependency canary, wheel validation, and relevant
-credentialed Databricks validation are green. Publishing must consume the same
-verified wheel and must never overwrite an existing version.
+template render matrix, wheel validation, and relevant credentialed Databricks
+validation are green. The most recent manually dispatched dependency canary for
+the frozen candidate must also pass all four Python 3.11/3.12 × lowest/latest
+lanes; a previous-version or partially green run is not release evidence.
+Publishing must consume the same verified wheel and must never overwrite an
+existing version. A commit-pinned generated-project source is release-candidate
+CI evidence only, never evidence of a published runtime artifact.

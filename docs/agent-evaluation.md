@@ -175,7 +175,35 @@ dataset: evals/data/golden_cases.json
 Everything else — the experiment name, the run tags, which scorers apply, what
 this is compared against, where evidence lands — is inferred or generated. The
 optional keys (thresholds, regression budgets, scorer selection, judge budget,
-HTTP field mapping) are escape hatches, not the normal path.
+statistical confidence, HTTP field mapping) are escape hatches, not the normal
+path.
+
+Every run reports uncertainty around numeric scorer means and, once a baseline
+has recorded the same ordered rows, a paired improvement interval. Only nullable
+numeric scores are persisted for this calculation; prompts, responses, and
+expectations are not copied into the results record. Positive paired improvement
+always means better, including for lower-is-better metrics such as latency.
+
+Confidence starts in report-only mode so an existing five-row teaching dataset
+does not masquerade as production evidence or suddenly become unusable. A UAT
+gate can opt into enforcement after growing its suite:
+
+```yaml
+statistics:
+  confidence_level: 0.95
+  minimum_cases: 30
+  enforce_confidence: true
+  minimum_effect:
+    correctness: 0.02
+```
+
+Enforcement applies absolute thresholds to the conservative confidence bound,
+requires the minimum number of scored rows, and applies regression budgets to
+the lower bound of the paired improvement. `minimum_effect` is optional and
+requires that the paired lower bound show a practically meaningful improvement
+in the metric's native units. Enabling paired enforcement against an older
+baseline without per-row scores fails closed; re-establish the baseline on the
+same governed dataset.
 
 `agent:` resolves by shape, so the same project can evaluate a local Python
 function today and a deployed endpoint tomorrow with a one-line change:

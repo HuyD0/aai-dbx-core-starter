@@ -26,6 +26,15 @@ _VARIABLE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _GOVERNED_BUNDLE_VARIABLES = frozenset(
     {"team", "owner_group", "cost_center", "compute_policy_id"}
 )
+_DEPLOYMENT_VARIABLES = frozenset(
+    {"deployment_environment", "deployment_lifecycle", "deployment_release"}
+)
+_TARGET_LIFECYCLES = {"dev": "experimental", "uat": "validation"}
+_RUNTIME_CONTEXT_ENV = {
+    "AAI_ENVIRONMENT": "${var.deployment_environment}",
+    "AAI_LIFECYCLE": "${var.deployment_lifecycle}",
+    "AAI_RELEASE": "${var.deployment_release}",
+}
 
 
 def _load_yaml(path: Path) -> Mapping[str, Any]:
@@ -119,16 +128,28 @@ def _bundle_tag_failures(
     )
     failures = _governed_override_failures(root, variables)
     failures.extend(target_failures)
-    failures.extend(
-        _bundle_document_failures(
-            root,
-            documents,
-            approved_compute_policy_id=approved_compute_policy_id,
-            defaults=defaults,
-            expected_tags=expected_tags,
-            target_name=resource.environment,
-        )
-    )
+    targets = bundle.get("targets", {})
+    if isinstance(targets, Mapping):
+        for target_name, lifecycle in _TARGET_LIFECYCLES.items():
+            target = targets.get(target_name, {})
+            if not isinstance(target, Mapping):
+                continue
+            target_defaults = _target_defaults(defaults, target)
+            target_tags = {
+                **expected_tags,
+                "environment": target_name,
+                "lifecycle": lifecycle,
+            }
+            failures.extend(
+                _bundle_document_failures(
+                    root,
+                    documents,
+                    approved_compute_policy_id=approved_compute_policy_id,
+                    defaults=target_defaults,
+                    expected_tags=target_tags,
+                    target_name=target_name,
+                )
+            )
     return failures
 
 
@@ -152,22 +173,16 @@ def _governed_override_failures(
 ) -> list[str]:
     """Reject local and environment overrides of platform-owned values."""
 
-    failures: list[str] = []
-    for name in sorted(_GOVERNED_BUNDLE_VARIABLES.intersection(variables)):
-        failures.append(
-            f"databricks.yml governed value {name!r} must not be a runtime variable"
-        )
-    for name in sorted(_GOVERNED_BUNDLE_VARIABLES):
-        if f"BUNDLE_VAR_{name}" in os.environ:
-            failures.append(
-                f"BUNDLE_VAR_{name} cannot override a governed ownership tag"
-            )
-
-    override_files = sorted(root.glob(".databricks/bundle/*/variable-overrides.json"))
-    for path in override_files:
-        failures.append(
-            f"{path.relative_to(root)} is not permitted for a governed deployment"
-        )
+    failures = _deployment_variable_declaration_failures(variables)
+    failures.extend(_bundle_environment_override_failures())
+    failures.extend(
+        f"databricks.yml governed value {name!r} must not be a runtime variable"
+        for name in sorted(_GOVERNED_BUNDLE_VARIABLES.intersection(variables))
+    )
+    failures.extend(
+        f"{path.relative_to(root)} is not permitted for a governed deployment"
+        for path in sorted(root.glob(".databricks/bundle/*/variable-overrides.json"))
+    )
 
     try:
         ignored = {
@@ -182,6 +197,35 @@ def _governed_override_failures(
     return failures
 
 
+def _deployment_variable_declaration_failures(
+    variables: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    for name in sorted(_DEPLOYMENT_VARIABLES):
+        declaration = variables.get(name)
+        if not isinstance(declaration, Mapping):
+            failures.append(f"databricks.yml must declare {name!r} as a variable")
+        elif "default" in declaration:
+            failures.append(
+                f"databricks.yml deployment variable {name!r} must be target-owned"
+            )
+    return failures
+
+
+def _bundle_environment_override_failures() -> list[str]:
+    failures: list[str] = []
+    for name in sorted(_GOVERNED_BUNDLE_VARIABLES):
+        if f"BUNDLE_VAR_{name}" in os.environ:
+            failures.append(
+                f"BUNDLE_VAR_{name} cannot override a governed ownership tag"
+            )
+    for name in ("deployment_environment", "deployment_lifecycle"):
+        if f"BUNDLE_VAR_{name}" in os.environ:
+            failures.append(f"BUNDLE_VAR_{name} cannot override a target-owned value")
+
+    return failures
+
+
 def _target_contract_failures(
     bundle: Mapping[str, Any],
     *,
@@ -189,42 +233,81 @@ def _target_contract_failures(
     defaults: Mapping[str, str],
     expected_tags: Mapping[str, str],
 ) -> list[str]:
-    """Validate the one declared target and its non-overridable policy."""
+    """Validate the complete dev-to-UAT target contract."""
 
     failures: list[str] = []
     targets = bundle.get("targets", {})
-    if isinstance(targets, Mapping):
-        extra_targets = sorted(set(map(str, targets)) - {resource.environment})
-        if extra_targets:
-            failures.append(
-                "databricks.yml contains undeclared deployment target(s): "
-                + ", ".join(extra_targets)
-            )
-    target = targets.get(resource.environment) if isinstance(targets, Mapping) else None
-    if not isinstance(target, Mapping):
+    if not isinstance(targets, Mapping):
+        return ["databricks.yml targets must be a mapping"]
+    actual_targets = set(map(str, targets))
+    expected_targets = set(_TARGET_LIFECYCLES)
+    missing_targets = sorted(expected_targets - actual_targets)
+    extra_targets = sorted(actual_targets - expected_targets)
+    if missing_targets:
         failures.append(
-            f"databricks.yml target {resource.environment!r} must be a mapping"
+            "databricks.yml is missing deployment target(s): "
+            + ", ".join(missing_targets)
         )
-        target = {}
-    failures.extend(
-        _target_override_failures(
-            bundle,
-            target,
-            environment=resource.environment,
+    if extra_targets:
+        failures.append(
+            "databricks.yml contains undeclared deployment target(s): "
+            + ", ".join(extra_targets)
         )
-    )
-    presets = target.get("presets", {})
-    preset_tags = presets.get("tags", {}) if isinstance(presets, Mapping) else {}
-    failures.extend(
-        _resolved_tag_failures(
-            preset_tags,
-            expected=expected_tags,
-            variables=defaults,
-            target=resource.environment,
-            source=f"databricks.yml target {resource.environment!r} preset",
+
+    for target_name, lifecycle in _TARGET_LIFECYCLES.items():
+        target = targets.get(target_name)
+        if not isinstance(target, Mapping):
+            failures.append(f"databricks.yml target {target_name!r} must be a mapping")
+            continue
+        target_defaults = _target_defaults(defaults, target)
+        failures.extend(
+            _target_override_failures(
+                bundle,
+                target,
+                environment=target_name,
+                lifecycle=lifecycle,
+            )
         )
-    )
+        expected_mode = "development" if target_name == "dev" else "production"
+        if target.get("mode") != expected_mode:
+            failures.append(
+                f"databricks.yml target {target_name!r} must use mode {expected_mode!r}"
+            )
+        expected_for_target = {
+            **expected_tags,
+            "environment": target_name,
+            "lifecycle": lifecycle,
+        }
+        presets = target.get("presets", {})
+        preset_tags = presets.get("tags", {}) if isinstance(presets, Mapping) else {}
+        failures.extend(
+            _resolved_tag_failures(
+                preset_tags,
+                expected=expected_for_target,
+                variables=target_defaults,
+                target=target_name,
+                source=f"databricks.yml target {target_name!r} preset",
+            )
+        )
     return failures
+
+
+def _target_defaults(
+    defaults: Mapping[str, str], target: Mapping[str, Any]
+) -> dict[str, str]:
+    """Return bundle defaults overlaid with literal target variable values."""
+
+    resolved = dict(defaults)
+    variables = target.get("variables", {})
+    if isinstance(variables, Mapping):
+        resolved.update(
+            {
+                str(name): value
+                for name, value in variables.items()
+                if isinstance(value, str)
+            }
+        )
+    return resolved
 
 
 def _target_override_failures(
@@ -232,17 +315,62 @@ def _target_override_failures(
     target: Mapping[str, Any],
     *,
     environment: str,
+    lifecycle: str,
 ) -> list[str]:
     """Reject target and bundle escape hatches around governed compute."""
 
-    failures: list[str] = []
     target_variables = target.get("variables", {})
-    if isinstance(target_variables, Mapping):
-        for name in sorted(_GOVERNED_BUNDLE_VARIABLES.intersection(target_variables)):
+    failures = _target_variable_failures(
+        target_variables,
+        environment=environment,
+        lifecycle=lifecycle,
+    )
+    failures.extend(_compute_override_failures(bundle, target, environment=environment))
+    return failures
+
+
+def _target_variable_failures(
+    target_variables: Any,
+    *,
+    environment: str,
+    lifecycle: str,
+) -> list[str]:
+    if not isinstance(target_variables, Mapping):
+        return [f"databricks.yml target {environment!r} variables must be a mapping"]
+    failures = [
+        f"databricks.yml target {environment!r} cannot override "
+        f"governed tag variable {name!r}"
+        for name in sorted(_GOVERNED_BUNDLE_VARIABLES.intersection(target_variables))
+    ]
+    for name, expected in {
+        "deployment_environment": environment,
+        "deployment_lifecycle": lifecycle,
+    }.items():
+        if target_variables.get(name) != expected:
             failures.append(
-                f"databricks.yml target {environment!r} cannot override "
-                f"governed tag variable {name!r}"
+                f"databricks.yml target {environment!r} must set {name!r} "
+                f"to {expected!r}"
             )
+    release = target_variables.get("deployment_release")
+    if environment == "dev" and release != "local-dev":
+        failures.append(
+            "databricks.yml target 'dev' must set deployment_release to 'local-dev'"
+        )
+    if environment == "uat" and release is not None:
+        failures.append(
+            "databricks.yml target 'uat' must require the CI-attested "
+            "BUNDLE_VAR_deployment_release"
+        )
+    return failures
+
+
+def _compute_override_failures(
+    bundle: Mapping[str, Any],
+    target: Mapping[str, Any],
+    *,
+    environment: str,
+) -> list[str]:
+    failures: list[str] = []
     if target.get("cluster_id") is not None or target.get("compute_id") is not None:
         failures.append(
             f"databricks.yml target {environment!r} cannot use "
@@ -476,6 +604,15 @@ def _cluster_contract_failures(
         failures.append(f"{source} approved compute policy is unknown")
     elif policy_id != expected_policy_id:
         failures.append(f"{source} policy_id does not match the generation contract")
+    spark_env_vars = new_cluster.get("spark_env_vars")
+    if not isinstance(spark_env_vars, Mapping):
+        failures.append(f"{source} must inject the governed runtime context")
+    else:
+        for name, expected in _RUNTIME_CONTEXT_ENV.items():
+            if spark_env_vars.get(name) != expected:
+                failures.append(
+                    f"{source} spark_env_vars {name!r} must be {expected!r}"
+                )
     failures.extend(
         _resolved_tag_failures(
             new_cluster.get("custom_tags"),
@@ -504,7 +641,10 @@ def _resolved_tag_failures(
         if (
             isinstance(raw_value, str)
             and "${" in raw_value
-            and not (key == "environment" and raw_value == "${bundle.target}")
+            and not (
+                (key == "environment" and raw_value == "${bundle.target}")
+                or (key == "lifecycle" and raw_value == "${var.deployment_lifecycle}")
+            )
         ):
             failures.append(f"{source} tag {key!r} must be a literal governed value")
             continue
@@ -546,19 +686,19 @@ def _approved_compute_policy_id(root: Path) -> tuple[str | None, list[str]]:
     try:
         stamp = json.loads((root / ".aai-template.json").read_text(encoding="utf-8"))
         generated_with = stamp.get("generated_with", {})
-        candidate_policy_id = (
+        recorded_policy_id = (
             generated_with.get("compute_policy_id")
             if isinstance(generated_with, Mapping)
             else None
         )
-        if not isinstance(candidate_policy_id, str) or not candidate_policy_id.strip():
+        if not isinstance(recorded_policy_id, str) or not recorded_policy_id.strip():
             raise ValueError("missing compute_policy_id")
     except (OSError, TypeError, ValueError):
         failures.append(
             ".aai-template.json must record the approved generated compute_policy_id"
         )
         return None, failures
-    return candidate_policy_id, failures
+    return recorded_policy_id, failures
 
 
 def _manifest_resource_failures(manifest: Any, resource: Any) -> list[str]:

@@ -68,7 +68,9 @@ from .repository import HubConflictError, HubNotFoundError, HubRepository
 _TAG_KEY = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _ENVIRONMENT = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _SAFE_FILTER_VALUE = re.compile(r"^[^,\r\n|]{1,256}$")
-_LIFECYCLES = frozenset({"experimental", "candidate", "production", "retired"})
+_LIFECYCLES = frozenset(
+    {"experimental", "validation", "candidate", "production", "retired"}
+)
 _HEALTH_STATES = frozenset({"HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"})
 _OWNERSHIP = frozenset({"visible", "owned", "teams"})
 _SORTS = frozenset(
@@ -88,7 +90,7 @@ class HubServiceError(RuntimeError):
 
 
 class HubCapabilityUnavailableError(HubServiceError):
-    """A required production capability has not been configured."""
+    """A required environment capability has not been configured."""
 
 
 class HubPermissionDeniedError(HubServiceError):
@@ -100,11 +102,11 @@ class HubQueryValidationError(HubServiceError):
 
 
 class HubReadinessBlockedError(HubServiceError):
-    """Production promotion is blocked by the immutable readiness evidence."""
+    """Promotion is blocked by the immutable release-readiness evidence."""
 
     def __init__(self, snapshot: ReadinessSnapshot) -> None:
         self.snapshot = snapshot
-        super().__init__("blocking production-readiness checks have not passed")
+        super().__init__("blocking release-readiness checks have not passed")
 
 
 class HubExternalServiceError(HubServiceError):
@@ -169,7 +171,7 @@ class EvaluationRequest(HubModel):
 
 
 class PromotionRequest(HubModel):
-    """Input needed to create a reviewed production-promotion request."""
+    """Input needed to create a reviewed environment-promotion request."""
 
     source_environment: NonEmptyStr = Field(alias="sourceEnvironment")
     target_environment: NonEmptyStr = Field(alias="targetEnvironment")
@@ -310,6 +312,15 @@ class HubService:
                 require_ai_gateway=False,
                 require_request_tags=False,
                 require_monitoring=False,
+            ),
+            "uat_validation_v1": ReadinessProfile(
+                profile_id="uat_validation_v1",
+                version="1",
+                require_ai_gateway=True,
+                require_request_tags=True,
+                require_rate_limit=True,
+                require_budget_policy=True,
+                require_monitoring=True,
             ),
             "medium_risk_production_v1": ReadinessProfile(
                 profile_id="medium_risk_production_v1",
@@ -565,7 +576,8 @@ class HubService:
                 unresolved_blocking_actions=None,
             ),
         )
-        profile = self._readiness_profiles[manifest.spec.readiness.profile].model_copy(
+        selected_profile = manifest.spec.readiness.profile_for(version.environment)
+        profile = self._readiness_profiles[selected_profile].model_copy(
             update={
                 "minimum_evaluation_cases": manifest.spec.evaluation.minimum_cases,
                 "maximum_evaluation_age_hours": (

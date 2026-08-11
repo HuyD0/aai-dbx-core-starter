@@ -12,17 +12,29 @@ release on a branch. Do not push a release commit directly to protected `main`.
 Align every SDK-version surface explicitly:
 
 - Set `[project].version` in `pyproject.toml`.
-- Set `sdk.version` and every `templates.<name>.aai_core` value in
-  `compatibility.json`.
+- Set `sdk.version` in `compatibility.json` for the checkout under development.
+- Set `sdk.generated_project_default.version`, its reviewed full commit ref and
+  content digest, and every `templates.<name>.aai_core` value to the SDK that new
+  projects may actually consume. A candidate is commit-pinned; do not claim a
+  release tag or volume publication yet.
 - Set the source-checkout fallback `__version__` in
   `src/aai_core/__init__.py`.
-- Set `properties.aai_core_version.default` in every
-  `templates/*/databricks_template_schema.json`.
+- Run `make sync-templates` to stamp `aai_core_version`,
+  `aai_core_source_ref`, and the projected pip source into every template
+  schema from the canonical metadata.
 
 Run `uv lock` so the root package entry in `uv.lock` records the same version.
 
-`make sync-templates` does not derive these values from `pyproject.toml`; the
-release validator checks that they already agree.
+Calculate the reviewed commit's canonical SDK digest locally; this command does
+not contact the remote repository:
+
+```bash
+python scripts/validate_release.py \
+  --print-sdk-content-sha256 <full-candidate-commit>
+```
+
+The release validator permits the checkout version and generated-project
+default to differ, but requires every generated surface to agree with the latter.
 
 Add a matching section to `CHANGELOG.md`. The release tooling requires a
 heading that starts with the exact version:
@@ -54,6 +66,10 @@ make sync-templates
 make verify
 python scripts/validate_release.py --wheel dist
 ```
+
+Manually dispatch `dependency-canary.yml` for the frozen candidate and require
+all Python 3.11/3.12 `lowest-direct` and `highest` jobs to pass. Record the run
+with the release review; scheduled or earlier-version success is not sufficient.
 
 Review all generated changes. Commit them on the release branch, open a pull
 request into `main`, and merge only after the required checks and code-owner
@@ -88,6 +104,12 @@ gh workflow run publish-sdk.yml --ref main -f version=X.Y.Z
 The workflow validates the tag and wheel, then publishes the wheel, checksum,
 and release manifest immutably. Never overwrite an existing SDK version; use a
 new patch release to correct one.
+
+Only after the completion manifest is present in the volume should a follow-up
+change advance the checkout to the next unreleased version and switch
+`sdk.generated_project_default` from the candidate commit to the exact annotated
+`vX.Y.Z` tag with `status: published`. Until then, UAT/runtime deployment remains
+blocked even though generated-project PR CI can install the commit-pinned source.
 
 ## Do not
 

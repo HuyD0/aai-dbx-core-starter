@@ -309,6 +309,31 @@ def test_portfolio_and_detail_expose_each_current_environment() -> None:
     assert detail.json()["currentVersion"]["environment"] == "dev"
 
 
+def test_application_page_offers_only_the_declared_uat_target_from_dev() -> None:
+    client = _client()
+    manifest = _manifest()
+    manifest["spec"]["environments"]["uat"] = {
+        "workspaceId": "456",
+        "databricksAppName": "claims-assistant-uat",
+        "mlflowExperimentId": "789",
+        "aiGatewayService": "ai_platform.models.enterprise_chat",
+        "tags": {"environment": "uat", "lifecycle": "validation"},
+    }
+    assert _register(client, manifest).status_code == 201
+
+    response = client.get(
+        "/applications/claims_assistant",
+        params={"environment": "dev"},
+        headers=_headers(OWNER_PRINCIPAL),
+    )
+
+    assert response.status_code == 200
+    assert "Request UAT promotion" in response.text
+    assert 'data-source="dev"' in response.text
+    assert 'data-target="uat"' in response.text
+    assert "Request production promotion" not in response.text
+
+
 def test_tag_filters_are_or_within_a_key_and_and_across_keys() -> None:
     resolver = StaticRoleResolver(
         {

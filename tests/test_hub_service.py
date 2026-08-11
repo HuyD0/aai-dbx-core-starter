@@ -208,6 +208,22 @@ def _ready_snapshot_for(version, *, evidence: str = "all checks passed"):
     )
 
 
+def test_readiness_selects_the_uat_profile_without_weakening_dev():
+    _, service = _service()
+    manifest = _manifest(environments=("dev", "uat"))
+    manifest["spec"]["readiness"] = {
+        "profile": "development_v1",
+        "environmentProfiles": {"uat": "uat_validation_v1"},
+    }
+    manifest["spec"]["environments"]["uat"]["tags"]["lifecycle"] = "validation"
+
+    dev = _register(service, manifest, environment="dev")
+    uat = _register(service, manifest, environment="uat", git_sha="b" * 40)
+
+    assert service.readiness_for_version(dev.version).profile_id == "development_v1"
+    assert service.readiness_for_version(uat.version).profile_id == "uat_validation_v1"
+
+
 def test_registration_is_idempotent_for_the_same_manifest_and_git_sha():
     repository, service = _service()
     manifest = _manifest()
@@ -387,6 +403,10 @@ def test_portfolio_query_rejects_non_allowlisted_filters_and_sorts(field, value)
 
 def test_portfolio_query_accepts_candidate_lifecycle():
     assert PortfolioQuery(lifecycle="candidate").lifecycle == "candidate"
+
+
+def test_portfolio_query_accepts_validation_lifecycle():
+    assert PortfolioQuery(lifecycle="validation").lifecycle == "validation"
 
 
 def test_portfolio_pagination_is_stable_and_reports_total_pages():

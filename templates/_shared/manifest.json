@@ -9,6 +9,7 @@
     "aai-platform.yml.tmpl",
     "ai-app.yaml.tmpl",
     "databricks.yml.tmpl",
+    "docs/uat-promotion.md",
     "pyproject.toml.tmpl",
     "requirements-ci.txt.tmpl",
     "requirements-dev.lock",
@@ -17,6 +18,7 @@
     "scripts/build_application.py",
     "scripts/install_core.py.tmpl",
     "scripts/promote_prompt.py",
+    "scripts/release_artifact.py",
     "scripts/register_prompt.py",
     "scripts/setup_dev.py.tmpl",
     "scripts/sync_dataset.py",
@@ -28,10 +30,6 @@
       "evaluation-project",
       "experiment-starter",
       "prompt-app",
-      "rag-app"
-    ],
-    ".github/workflows/deploy.yml": [
-      "agent-app",
       "rag-app"
     ],
     "Makefile": [

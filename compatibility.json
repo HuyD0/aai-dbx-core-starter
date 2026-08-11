@@ -1,7 +1,17 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sdk": {
     "version": "0.4.0",
+    "development_status": "unreleased",
+    "generated_project_default": {
+      "version": "0.4.0",
+      "status": "release-candidate",
+      "source": {
+        "kind": "git-commit",
+        "ref": "ca467b74d2a2c05375cbc93f6e0b0bcca1dffa24",
+        "content_sha256": "fcf5a6558f26e9fde0be8b34d72ec961477764688810c0e80f00f722a34befba"
+      }
+    },
     "python": [
       "3.11",
       "3.12"
@@ -13,34 +23,48 @@
     "dependency_policy": "dependency-policy.toml",
     "lock": "uv.lock"
   },
+  "release_acceptance": {
+    "dependency_canary": {
+      "required": true,
+      "minimum_green_runs": 1,
+      "python": [
+        "3.11",
+        "3.12"
+      ],
+      "resolutions": [
+        "lowest-direct",
+        "highest"
+      ]
+    }
+  },
   "templates": {
     "agent-app": {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "analytics-app": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "evaluation-project": {
-      "version": "2.0.0",
+      "version": "2.1.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "experiment-starter": {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "prompt-app": {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "rag-app": {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     }
@@ -53,6 +77,16 @@
     "mlflow_tracing": {
       "support": "stable",
       "owner": "aai-core"
+    },
+    "retrieval_strategies": {
+      "support": "stable",
+      "owner": "aai-core-native-provider-adapter",
+      "note": "Typed text, vector, and hybrid query strategies retain the native Azure AI Search and Databricks AI Search execution paths."
+    },
+    "provider_reranking": {
+      "support": "preview",
+      "owner": "native-provider-with-aai-typed-options",
+      "note": "Azure semantic ranking and Databricks reranking remain provider-native capabilities selected through typed query options."
     },
     "agent_decision_observability": {
       "support": "preview",

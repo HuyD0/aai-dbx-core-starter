@@ -25,6 +25,7 @@ from pydantic import Field, ValidationError, field_serializer, field_validator
 
 from aai_core.agentkit.cost import DEFAULT_CHUNKS_PER_ROW
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
+from aai_core.agentkit.statistics import StatisticsConfig
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.evaluation import (
     MetricDirection,
@@ -136,6 +137,7 @@ class AgentkitConfig(ContractModel):
     regression_budget: Mapping[str, float] = Field(default_factory=dict)
     baseline: BaselineConfig = Field(default_factory=BaselineConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    statistics: StatisticsConfig = Field(default_factory=StatisticsConfig)
     smoke: SmokeConfig = Field(default_factory=SmokeConfig)
     strata: tuple[str, ...] = ()
     request_mapping: RequestMapping = Field(default_factory=RequestMapping)
