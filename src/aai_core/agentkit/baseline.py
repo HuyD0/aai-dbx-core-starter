@@ -14,7 +14,7 @@ import math
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import Field, ValidationError, field_serializer, field_validator
 
@@ -69,11 +69,11 @@ class BaselineVersions(ContractModel):
     @field_validator("scorers", "judge_prompts", mode="after")
     @classmethod
     def freeze_versions(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        return freeze_value(value)
+        return cast(Mapping[str, Any], freeze_value(value))
 
     @field_serializer("scorers", "judge_prompts")
     def serialize_versions(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        return thaw_value(value)
+        return cast(dict[str, Any], thaw_value(value))
 
 
 class BaselineRecord(ContractModel):
@@ -109,11 +109,11 @@ class BaselineRecord(ContractModel):
             raise ValueError(
                 "metric values must be finite (invalid: " + ", ".join(non_finite) + ")"
             )
-        return freeze_value(value)
+        return cast(Mapping[str, float], freeze_value(value))
 
     @field_serializer("metrics")
     def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
-        return thaw_value(value)
+        return cast(dict[str, float], thaw_value(value))
 
 
 def load_baseline(path: Path) -> tuple[BaselineRecord | None, list[str]]:
@@ -402,16 +402,24 @@ def drift_warnings(
 def _baseline_from_run(
     run_id: str, origin: str, mlflow_module: Any | None
 ) -> BaselineRecord:
-    mlflow = mlflow_module
-    if mlflow is None:
-        try:
-            import mlflow  # type: ignore[no-redef]
-        except ImportError as error:
-            from aai_core.agentkit.errors import missing_extra
+    mlflow = _baseline_mlflow(mlflow_module, origin)
+    run, info = _finished_baseline_run(mlflow, run_id, origin)
+    return _validated_baseline_from_run(mlflow, run, info, run_id, origin)
 
-            raise missing_extra(
-                f"Fetching the {origin} baseline run", "genai"
-            ) from error
+
+def _baseline_mlflow(mlflow_module: Any | None, origin: str) -> Any:
+    if mlflow_module is not None:
+        return mlflow_module
+    try:
+        import mlflow
+    except ImportError as error:
+        from aai_core.agentkit.errors import missing_extra
+
+        raise missing_extra(f"Fetching the {origin} baseline run", "genai") from error
+    return mlflow
+
+
+def _finished_baseline_run(mlflow: Any, run_id: str, origin: str) -> tuple[Any, Any]:
     try:
         run = mlflow.get_run(run_id)
     except Exception as error:
@@ -434,6 +442,12 @@ def _baseline_from_run(
             origin,
             f"its status is {status or 'unknown'}, not FINISHED",
         )
+    return run, info
+
+
+def _validated_baseline_from_run(
+    mlflow: Any, run: Any, info: Any, run_id: str, origin: str
+) -> BaselineRecord:
     tags = dict(getattr(run.data, "tags", {}) or {})
     run_metrics = dict(getattr(run.data, "metrics", {}) or {})
     missing = [
@@ -516,9 +530,7 @@ def _baseline_from_run(
     if evidence.baseline_run_id is not None or evidence.baseline_metrics:
         mismatches.append("baseline_lineage")
     evidence_metrics = dict(evidence.metrics)
-    if not evidence_metrics:
-        mismatches.append("metrics")
-    elif evidence_metrics != run_metrics:
+    if not evidence_metrics or evidence_metrics != run_metrics:
         mismatches.append("metrics")
     if mismatches:
         raise _invalid_remote_baseline(

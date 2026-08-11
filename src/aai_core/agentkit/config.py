@@ -18,7 +18,7 @@ import math
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import yaml
 from pydantic import Field, ValidationError, field_serializer, field_validator
@@ -35,6 +35,20 @@ from aai_core.evaluation import (
 )
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings, find_platform_config
+
+if TYPE_CHECKING:
+    from aai_core.experiments import ExperimentManager
+    from aai_core.prompts import PromptManager
+
+
+class _ServingEndpoints(Protocol):
+    def get(self, endpoint: str) -> Any:
+        raise NotImplementedError
+
+
+class _WorkspaceClient(Protocol):
+    serving_endpoints: _ServingEndpoints
+
 
 CONFIG_FILENAME = "agentkit.yaml"
 CONFIG_ENV = "AGENTKIT_CONFIG"
@@ -104,11 +118,11 @@ class RequestMapping(ContractModel):
     @field_validator("extra_body", mode="after")
     @classmethod
     def freeze_body(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        return freeze_value(value)
+        return cast(Mapping[str, Any], freeze_value(value))
 
     @field_serializer("extra_body")
     def serialize_body(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        return thaw_value(value)
+        return cast(dict[str, Any], thaw_value(value))
 
 
 class AgentkitConfig(ContractModel):
@@ -151,11 +165,11 @@ class AgentkitConfig(ContractModel):
     @field_validator("thresholds", "regression_budget", mode="after")
     @classmethod
     def freeze_mappings(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        return freeze_value(value)
+        return cast(Mapping[str, Any], freeze_value(value))
 
     @field_serializer("thresholds", "regression_budget")
     def serialize_mappings(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        return thaw_value(value)
+        return cast(dict[str, Any], thaw_value(value))
 
 
 def parse_threshold(metric: str, expression: str) -> MetricRule:
@@ -232,6 +246,8 @@ def load_config(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> AgentkitConfig:
+    """Load and fully validate an AgentKit project configuration."""
+
     config_path = (
         Path(path) if path is not None else find_agentkit_config(environ=environ)
     )
@@ -324,7 +340,7 @@ class ProjectContext:
     def evidence_dir(self) -> Path:
         return self.root / ".aai" / "agentkit" / "evidence"
 
-    def experiment_manager(self, mlflow_module: Any | None = None):
+    def experiment_manager(self, mlflow_module: Any | None = None) -> ExperimentManager:
         from aai_core.experiments import ExperimentManager
 
         return ExperimentManager(
@@ -333,7 +349,7 @@ class ProjectContext:
             mlflow_module=mlflow_module,
         )
 
-    def prompt_manager(self, mlflow_module: Any | None = None):
+    def prompt_manager(self, mlflow_module: Any | None = None) -> PromptManager:
         from aai_core.prompts import PromptManager
 
         return PromptManager(
@@ -356,7 +372,10 @@ class ProjectContext:
             ) from error
 
     def judge_model_identity(
-        self, logical_name: str | None = None, *, client: Any | None = None
+        self,
+        logical_name: str | None = None,
+        *,
+        client: _WorkspaceClient | None = None,
     ) -> str | None:
         """What the judge endpoint currently serves, if it can be read.
 
@@ -380,7 +399,7 @@ class ProjectContext:
             if client is None:
                 from aai_core.identity import databricks_workspace_client
 
-                client = databricks_workspace_client()
+                client = cast(_WorkspaceClient, databricks_workspace_client())
             served = client.serving_endpoints.get(endpoint)
         except Exception:  # noqa: BLE001 - absent SDK, auth, or permission
             return None
@@ -427,7 +446,7 @@ def _validate_scorer_references(config: AgentkitConfig) -> None:
             ("regression_budget", config.regression_budget),
         ):
             for key in keys:
-                if key == name or key == metric:
+                if key in (name, metric):
                     raise ConfigError(
                         f"scorers.remove drops {name!r} but {field_name} "
                         f"still gates {key!r}",

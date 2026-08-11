@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.errors import ConfigError, missing_extra
@@ -305,6 +305,18 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
     """
 
     sheet_path = Path(sheet_path)
+    located_records = _load_answer_sheet_records(sheet_path)
+    answers = _answers_by_input(located_records, sheet_path)
+    rows = _rows_with_answers(dataset, answers, sheet_path)
+    return _build_dataset(
+        dataset.ref,
+        f"{dataset.source}+answers",
+        rows,
+        sampled_from=dataset.sampled_from,
+    )
+
+
+def _load_answer_sheet_records(sheet_path: Path) -> list[tuple[Any, str]]:
     try:
         text = sheet_path.read_text(encoding="utf-8")
     except FileNotFoundError as error:
@@ -329,15 +341,16 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             raise ConfigError(
                 f"answer sheet {sheet_path} must contain at least one JSON object"
             )
-        located_records = [(record, f"line {line}") for line, record in parsed]
-    else:
-        records = _load_json_value(text, subject=f"answer sheet {sheet_path}")
-        if not isinstance(records, list):
-            raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
-        located_records = [
-            (record, f"row {index}") for index, record in enumerate(records)
-        ]
+        return [(record, f"line {line}") for line, record in parsed]
+    records = _load_json_value(text, subject=f"answer sheet {sheet_path}")
+    if not isinstance(records, list):
+        raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
+    return [(record, f"row {index}") for index, record in enumerate(records)]
 
+
+def _answers_by_input(
+    located_records: Sequence[tuple[Any, str]], sheet_path: Path
+) -> dict[str, Any]:
     answers: dict[str, Any] = {}
     answer_locations: dict[str, str] = {}
     for record, location in located_records:
@@ -345,33 +358,7 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             raise ConfigError(
                 f"answer sheet {sheet_path} {location} must be a JSON object"
             )
-        if "question" in record and "answer" in record:
-            if not _is_populated(record["question"]):
-                raise ConfigError(
-                    f"answer sheet {sheet_path} {location} needs a populated question"
-                )
-            inputs = {"question": record["question"]}
-            output = record["answer"]
-            output_name = "answer"
-        elif "inputs" in record and "outputs" in record:
-            inputs = record["inputs"]
-            if not isinstance(inputs, Mapping) or not inputs:
-                raise ConfigError(
-                    f"answer sheet {sheet_path} {location} needs a non-empty "
-                    "inputs object"
-                )
-            output = record["outputs"]
-            output_name = "outputs"
-        else:
-            raise ConfigError(
-                f"answer sheet {sheet_path} {location} needs question/answer "
-                "or inputs/outputs fields"
-            )
-        if not _is_populated(output):
-            raise ConfigError(
-                f"answer sheet {sheet_path} {location} needs populated "
-                f"{output_name}"
-            )
+        inputs, output, output_name = _answer_record(record, sheet_path, location)
         output = _bounded_plain(
             output,
             subject=f"answer sheet {sheet_path} {location} {output_name}",
@@ -388,7 +375,43 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             )
         answers[key] = output
         answer_locations[key] = location
+    return answers
 
+
+def _answer_record(
+    record: Mapping[str, Any], sheet_path: Path, location: str
+) -> tuple[Any, Any, str]:
+    if "question" in record and "answer" in record:
+        if not _is_populated(record["question"]):
+            raise ConfigError(
+                f"answer sheet {sheet_path} {location} needs a populated question"
+            )
+        inputs: Any = {"question": record["question"]}
+        output = record["answer"]
+        output_name = "answer"
+    elif "inputs" in record and "outputs" in record:
+        inputs = record["inputs"]
+        if not isinstance(inputs, Mapping) or not inputs:
+            raise ConfigError(
+                f"answer sheet {sheet_path} {location} needs a non-empty inputs object"
+            )
+        output = record["outputs"]
+        output_name = "outputs"
+    else:
+        raise ConfigError(
+            f"answer sheet {sheet_path} {location} needs question/answer "
+            "or inputs/outputs fields"
+        )
+    if not _is_populated(output):
+        raise ConfigError(
+            f"answer sheet {sheet_path} {location} needs populated {output_name}"
+        )
+    return inputs, output, output_name
+
+
+def _rows_with_answers(
+    dataset: LoadedDataset, answers: Mapping[str, Any], sheet_path: Path
+) -> list[Mapping[str, Any]]:
     rows: list[Mapping[str, Any]] = []
     missing: list[str] = []
     for index, row in enumerate(dataset.rows):
@@ -406,12 +429,7 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             f"row(s): {listed}",
             remediation=("Re-record the answer sheet so it covers every dataset row."),
         )
-    return _build_dataset(
-        dataset.ref,
-        f"{dataset.source}+answers",
-        rows,
-        sampled_from=dataset.sampled_from,
-    )
+    return rows
 
 
 def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
@@ -429,11 +447,11 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     **A stored trace travels only in ``traces`` mode.** It is the recorded
     answer, so in ``live`` the answer comes from ``predict_fn`` and in
     ``answer-sheet`` from the sheet. It is not inert baggage either:
-    ``_convert_to_eval_set`` pipes any present trace column through
-    ``_extract_request_response_from_trace``, which calls
-    ``trace.data._get_root_span()`` on every value — one ``NaN`` raises
-    before the agent is called — and through
-    ``_extract_expectations_from_trace``, which overwrites expectations.
+    ``_convert_to_eval_set`` pipes any present trace column through root-span
+    validation, which calls ``trace.data._get_root_span()`` on every value —
+    one ``NaN`` raises before the agent is called. MLflow 3.15 preserves
+    authored inputs, outputs, and expectations, filling those columns from
+    traces only when each column is absent.
     MLflow's own validation agrees the column is unwanted here: it adds
     ``trace`` to the satisfied columns whenever a ``predict_fn`` is given.
 
@@ -442,14 +460,10 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     digest recovers it, because otherwise removing the trace would leave a
     row MLflow cannot evaluate at all.
 
-    **In ``traces`` mode, expectations come from the traces** whenever any
-    one of them carries an expectation assessment — MLflow replaces the
-    whole column, so a row whose trace has no assessment ends up with
-    *none*, whatever the dataset wrote. Mirroring that here is what stops
-    a scorer being selected against a curated field the run will not have:
-    `keyword_coverage` reads an absent expected response as a vacuous
-    1.0, and a gate passing on that is the exact failure this toolkit
-    exists to prevent.
+    **In ``traces`` mode, authored expectations win.** MLflow 3.15 extracts
+    expectation assessments only when the dataset has no expectations column.
+    Mirroring that rule here keeps scorer planning and dataset identity aligned
+    with the payload MLflow evaluates.
 
     **A missing value is an absent key.** A Unity Catalog dataset arrives
     through ``to_dict("records")``, where an absent field is ``NaN``; only
@@ -459,17 +473,18 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     — which is why the mode rule exists as well.
 
     The digest is recomputed from the effective rows. That makes identity
-    mode-aware: ``traces`` binds the expectation assessments MLflow actually
-    scores, while live and answer-sheet modes discard the trace and retain
-    authored expectations. The digest still excludes trace outputs, ids, and
+    mode-aware: ``traces`` binds trace expectation assessments only when no
+    authored expectations column exists, while live and answer-sheet modes
+    discard the trace. The digest still excludes trace outputs, ids, and
     timestamps through ``dataset_digest``. Ref and sampling provenance stay
     attached to the source dataset.
     """
 
     keep_trace = mode in STORED_TRACE_MODES
-    # MLflow replaces the column wholesale, or not at all.
-    replace_expectations = keep_trace and any(
-        _trace_expectation_names(row.get("trace")) for row in dataset.rows
+    # MLflow 3.15 extracts trace assessments only when the dataframe has no
+    # authored expectations column at all.
+    extract_trace_expectations = keep_trace and not any(
+        not _is_missing(row.get("expectations")) for row in dataset.rows
     )
     rows: list[Mapping[str, Any]] = []
     for row in dataset.rows:
@@ -484,7 +499,7 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
             request = _trace_inputs(row.get("trace"))
             if request is not None:
                 kept["inputs"] = request
-        if replace_expectations:
+        if extract_trace_expectations:
             kept["expectations"] = _trace_expectations(row.get("trace"))
         rows.append(kept)
     frozen = tuple(rows)
@@ -830,7 +845,7 @@ def _complete_trace_info(info: Mapping[str, Any], *, schema: str) -> bool:
 
     assessments = info.get("assessments", [])
     return isinstance(assessments, list) and all(
-        _complete_assessment(item, expected_request_id=request_id)
+        _complete_assessment(item, expected_request_id=cast(str, request_id))
         for item in assessments
     )
 
@@ -959,7 +974,9 @@ def _complete_span(
     attributes = span.get("attributes")
     if not (
         _otel_attributes(attributes)
-        and _request_id_attribute_matches(attributes, expected_request_id)
+        and _request_id_attribute_matches(
+            cast(Mapping[str, Any], attributes), expected_request_id
+        )
         and _non_empty_string(span.get("name"))
     ):
         return False
@@ -1348,38 +1365,11 @@ def _malformed_trace_expectation(name: str, detail: str) -> ConfigError:
     return ConfigError(
         f"trace expectation {name!r} is malformed: {detail}",
         remediation=(
-            "Re-record the trace expectation with MLflow 3.14 or provide a "
+            "Re-record the trace expectation with MLflow 3.15 or provide a "
             "direct scalar value; do not run a gate after ground truth could "
             "not be decoded."
         ),
     )
-
-
-def trace_expectation_overrides(dataset: LoadedDataset) -> tuple[str, ...]:
-    """Rows whose curated expectations MLflow will replace with the trace's.
-
-    ``_extract_expectations_from_trace`` documents itself as filling the
-    column "if it is not already present", but it has no such check: any
-    trace carrying an expectation assessment rewrites the whole column. In
-    ``traces`` mode that is MLflow's behaviour and may be what the project
-    wants — so this reports rather than refuses, naming the expectations
-    whose value comes from the trace instead of the dataset.
-    """
-
-    overridden: set[str] = set()
-    for row in dataset.rows:
-        if not _is_populated(row.get("expectations")):
-            continue
-        overridden.update(_trace_expectation_names(row.get("trace")))
-    return tuple(sorted(overridden))
-
-
-def _trace_expectation_names(trace: Any) -> tuple[str, ...]:
-    # Use the same strict reader as `_trace_expectations`: a malformed value
-    # must not count as an override here and then disappear when the effective
-    # rows are built. `Trace.to_dict()` writes `assessment_name`; the
-    # in-memory entity attribute is `name`, and the shared reader accepts both.
-    return tuple(name for name, _ in _trace_expectation_items(trace))
 
 
 def validate_dataset(
@@ -2066,14 +2056,15 @@ def _looks_like_uc_dataset(reference: str, root: Path) -> bool:
 
 
 def _load_uc_rows(reference: str, mlflow_module: Any | None) -> list[Mapping[str, Any]]:
-    mlflow = mlflow_module
-    if mlflow is None:
+    if mlflow_module is None:
         try:
-            import mlflow  # type: ignore[no-redef]
+            import mlflow
         except ImportError as error:
             raise missing_extra(
                 f"Loading the Unity Catalog dataset {reference!r}", "genai"
             ) from error
+    else:
+        mlflow = mlflow_module
     try:
         dataset = mlflow.genai.datasets.get_dataset(name=reference)
         frame = dataset.to_df()

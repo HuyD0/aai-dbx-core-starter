@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify AAI Release"
+  short_description: "Validate candidate artifacts before release"
+  default_prompt: "Use $aai-verify-release to perform a dry-run release verification."

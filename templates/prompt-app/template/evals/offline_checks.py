@@ -23,7 +23,7 @@ REQUIRED_GATED_METRICS = (
 PLACEHOLDER_MARKERS = ("replace this", "replace-with", "todo", "changeme")
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901 - linear, independent contract assertions
     failures: list[str] = []
 
     config = json.loads((ROOT / "evals" / "gate_config.json").read_text("utf-8"))

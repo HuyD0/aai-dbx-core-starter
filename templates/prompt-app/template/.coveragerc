@@ -1,0 +1,8 @@
+[run]
+branch = true
+source = app
+
+[report]
+fail_under = 96
+show_missing = true
+skip_covered = true

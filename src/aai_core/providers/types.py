@@ -8,6 +8,19 @@ from typing import Any, Protocol, runtime_checkable
 
 from aai_core.exceptions import AaiCoreError
 
+__all__ = [
+    "ChatModel",
+    "EmbeddingProvider",
+    "ModelCapabilities",
+    "ModelResponse",
+    "ProviderConfigurationError",
+    "ProviderError",
+    "ProviderRequestError",
+    "Retriever",
+    "SearchResult",
+    "UnsupportedCapabilityError",
+]
+
 
 class ProviderError(AaiCoreError):
     """Base error for a provider operation."""
@@ -28,9 +41,25 @@ class UnsupportedCapabilityError(ProviderError):
 
 
 class ProviderRequestError(ProviderError):
-    """A provider request failed at runtime; the native error is chained."""
+    """A sanitized provider failure with stable, non-secret diagnostics."""
 
     code = "aai_core.provider.request_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        operation: str | None = None,
+        logical_name: str | None = None,
+        status_code: int | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        super().__init__(message, remediation=remediation)
+        self.provider = provider
+        self.operation = operation
+        self.logical_name = logical_name
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -44,6 +73,8 @@ class ModelCapabilities:
 
 @dataclass(frozen=True)
 class ModelResponse:
+    """Normalized synchronous chat response with the native result retained."""
+
     content: str
     provider: str
     logical_name: str
@@ -56,6 +87,8 @@ class ModelResponse:
 
 @dataclass(frozen=True)
 class SearchResult:
+    """Normalized retrieval result suitable for MLflow document evidence."""
+
     document_id: str
     content: str
     score: float | None
@@ -80,6 +113,8 @@ class SearchResult:
 
 @runtime_checkable
 class ChatModel(Protocol):
+    """Capability-bearing synchronous chat model contract."""
+
     logical_name: str
     provider: str
     capabilities: ModelCapabilities
@@ -87,7 +122,7 @@ class ChatModel(Protocol):
 
     def create_native_async_client(self) -> Any:
         """Create a provider-native async client owned by the caller."""
-        ...
+        raise NotImplementedError
 
     def generate(
         self,
@@ -98,23 +133,30 @@ class ChatModel(Protocol):
         tools: Sequence[Mapping[str, Any]] | None = None,
         response_format: Mapping[str, Any] | None = None,
         provider_options: Mapping[str, Any] | None = None,
-    ) -> ModelResponse: ...
+    ) -> ModelResponse:
+        raise NotImplementedError
 
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):
+    """Synchronous query and document embedding contract."""
+
     logical_name: str
     provider: str
     dimensions: int | None
     native_client: Any
 
-    def embed_query(self, text: str) -> list[float]: ...
+    def embed_query(self, text: str) -> list[float]:
+        raise NotImplementedError
 
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        raise NotImplementedError
 
 
 @runtime_checkable
 class Retriever(Protocol):
+    """Provider-neutral retrieval contract with a native-client escape hatch."""
+
     logical_name: str
     provider: str
     native_client: Any
@@ -128,4 +170,5 @@ class Retriever(Protocol):
         query_vector: Sequence[float] | None = None,
         mode: str = "hybrid",
         provider_options: Mapping[str, Any] | None = None,
-    ) -> list[SearchResult]: ...
+    ) -> list[SearchResult]:
+        raise NotImplementedError

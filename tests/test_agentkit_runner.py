@@ -216,7 +216,7 @@ class FakeMlflow:
         self.genai = SimpleNamespace(
             evaluate=self._evaluate,
             scorers=SimpleNamespace(scorer=self._scorer, **_BUILTIN_FAKES),
-            make_judge=lambda **kwargs: SimpleNamespace(**kwargs),
+            make_judge=SimpleNamespace,
         )
 
     # --- experiment plumbing -------------------------------------------
@@ -227,10 +227,10 @@ class FakeMlflow:
         info = SimpleNamespace(run_id=self.run_id, experiment_id=self.experiment_id)
 
         class _Run:
-            def __enter__(inner):
+            def __enter__(self):
                 return SimpleNamespace(info=info)
 
-            def __exit__(inner, *args):
+            def __exit__(self, *args):
                 return False
 
         return _Run()
@@ -251,7 +251,7 @@ class FakeMlflow:
         outer = self
 
         class _Client:
-            def log_artifact(inner, run_id, local_path, artifact_path=None):
+            def log_artifact(self, run_id, local_path, artifact_path=None):
                 outer.run_artifacts.append(
                     (run_id, Path(local_path).name, artifact_path)
                 )
@@ -2748,7 +2748,7 @@ def test_a_traces_run_still_carries_its_traces(tmp_path):
     assert all("trace" in row for row in call["data"])
 
 
-def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
+def test_a_traces_run_preserves_curated_expectations(tmp_path):
     project = _traced_project(
         tmp_path,
         trace=lambda i: _serialized_trace(
@@ -2767,9 +2767,11 @@ def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
         mlflow_module=fake,
     )
 
-    assert any(
-        "trace's assessments" in warning for warning in outcome.warnings
-    ), outcome.warnings
+    assert not any("expectation" in warning for warning in outcome.warnings)
+    assert all(
+        row["expectations"]["expected_response"].startswith("answer")
+        for row in fake.evaluate_calls[0]["data"]
+    )
 
 
 def test_a_live_run_prices_the_fanout_it_will_actually_have(tmp_path):
@@ -2876,13 +2878,8 @@ def test_a_trace_without_a_usable_request_or_root_span_is_refused(tmp_path):
     assert fake.evaluate_calls == []
 
 
-def test_a_trace_replaced_expectation_removes_the_scorer_it_fed(tmp_path):
-    """The plan must not promise what MLflow will have taken away.
-
-    One trace assessment replaces the whole expectations column, so the
-    rows without one lose `expected_response` entirely — and
-    keyword_coverage reads an absent expected response as a vacuous 1.0.
-    """
+def test_a_trace_assessment_does_not_remove_an_authored_scorer(tmp_path):
+    """MLflow 3.15 keeps the curated column used to select the scorer."""
 
     def trace(index):
         assessments = (
@@ -2905,6 +2902,4 @@ def test_a_trace_replaced_expectation_removes_the_scorer_it_fed(tmp_path):
     )
 
     selected = {entry.spec.name for entry in outcome.plan.entries}
-    assert "keyword_coverage" not in selected
-    excluded = {item.spec.name: item.reason for item in outcome.plan.excluded}
-    assert "expected_response" in excluded.get("keyword_coverage", "")
+    assert "keyword_coverage" in selected

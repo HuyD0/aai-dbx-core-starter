@@ -1,0 +1,4 @@
+interface:
+  display_name: "Author AAI Example"
+  short_description: "Build reproducible AI lifecycle lessons"
+  default_prompt: "Use $aai-author-example to create or revise this learning example."

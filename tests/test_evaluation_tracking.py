@@ -46,7 +46,8 @@ def test_gate_result_contains_only_immutable_release_evidence():
         }
     )
 
-    gate = apply_gate(native_result, policy=GatePolicy())
+    policy = GatePolicy()
+    gate = apply_gate(native_result, policy=policy)
 
     assert gate.model_dump(mode="json") == {
         "metrics": {"quality/mean": 0.95},
@@ -54,6 +55,8 @@ def test_gate_result_contains_only_immutable_release_evidence():
         "policy": GatePolicy().model_dump(mode="json"),
         "baseline_metrics": None,
     }
+    assert gate.policy_digest == policy.digest
+    assert gate.baseline_digest is None
 
 
 def test_evaluate_with_gate_returns_the_native_result_by_identity():

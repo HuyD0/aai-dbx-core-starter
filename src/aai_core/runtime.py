@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from pydantic import Field, field_serializer, field_validator
@@ -32,6 +32,10 @@ _PLATFORM_ENV = {
     "experiment_name": "AAI_EXPERIMENT_NAME",
     "azure_identity": "AAI_AZURE_IDENTITY",
 }
+
+_DEVELOPMENT_ENVIRONMENTS = frozenset({"dev", "development", "local", "sandbox"})
+
+__all__ = ["PlatformSettings", "find_platform_config"]
 
 
 class PlatformSettings(ContractModel):
@@ -61,20 +65,28 @@ class PlatformSettings(ContractModel):
         mode="after",
     )
     @classmethod
-    def freeze_configuration(cls, value: Mapping[str, Any]):
-        return freeze_value(value)
+    def freeze_configuration(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return cast(Mapping[str, Any], freeze_value(value))
 
     @field_serializer("models", "embeddings", "retrievers", "secrets")
-    def serialize_configuration(self, value: Mapping[str, Any]):
-        return thaw_value(value)
+    def serialize_configuration(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], thaw_value(value))
 
     @property
     def strict(self) -> bool:
-        strict_environments = {"test", "staging", "uat", "prod", "production"}
-        return self.resource.environment.lower() in strict_environments
+        """Whether production-grade configuration checks apply.
+
+        Only explicitly recognized development environments relax the checks.
+        Unknown names fail safe so a typo such as ``prod-east`` cannot silently
+        inherit development defaults.
+        """
+
+        return (
+            self.resource.environment.strip().lower() not in _DEVELOPMENT_ENVIRONMENTS
+        )
 
     @property
-    def schema(self) -> str:
+    def schema(self) -> str:  # type: ignore[override]
         """Unity Catalog schema name.
 
         The internal field name avoids shadowing Pydantic's deprecated
@@ -101,7 +113,9 @@ class PlatformSettings(ContractModel):
         resource = self.resource
         return f"/Shared/{resource.team}-{resource.project}-{resource.application}"
 
-    def validate(self) -> None:
+    def validate(self) -> None:  # type: ignore[override]
+        """Apply environment-sensitive completeness and identity checks."""
+
         self.resource.validate(strict=self.strict)
         if self.strict:
             missing = [
@@ -156,7 +170,7 @@ class PlatformSettings(ContractModel):
             resource_values[field_name] = environment.get(
                 env_name, platform.get(field_name, _resource_default(field_name))
             )
-        resource_values["tag_schema_version"] = platform.get("tag_schema_version", "1")
+        resource_values["tag_schema_version"] = platform.get("tag_schema_version", "2")
 
         platform_values: dict[str, Any] = {}
         for field_name, env_name in _PLATFORM_ENV.items():

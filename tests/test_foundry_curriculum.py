@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
+import inspect
 import json
+import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +24,18 @@ assert _spec is not None and _spec.loader is not None
 setup = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = setup
 _spec.loader.exec_module(setup)
+labs = setup.load_offline_labs(CURRICULUM)
+
+CORE_NOTEBOOKS = tuple(
+    sorted(path for path in (CURRICULUM / "notebooks").glob("0[0-7]_*.ipynb"))
+)
+ADVANCED_NOTEBOOKS = tuple(
+    sorted(
+        path
+        for path in (CURRICULUM / "notebooks").glob("*.ipynb")
+        if path.name[:2] in {"08", "09", "10", "11", "12"}
+    )
+)
 
 
 def _fake_context(config_path: Path):
@@ -32,6 +47,38 @@ def _fake_context(config_path: Path):
             raw=document,
         )
     )
+
+
+def _execute_notebook(path: Path) -> dict[str, object]:
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    namespace: dict[str, object] = {"__name__": f"offline_{path.stem}"}
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        source = "".join(cell["source"])
+        exec(compile(source, f"{path.name}:{cell['id']}", "exec"), namespace)
+    return namespace
+
+
+async def _execute_async_notebook(path: Path) -> dict[str, object]:
+    """Execute a clean notebook namespace, including top-level-await cells."""
+
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    namespace: dict[str, object] = {"__name__": f"offline_{path.stem}"}
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        code = compile(
+            "".join(cell["source"]),
+            f"{path.name}:{cell['id']}",
+            "exec",
+            flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+            dont_inherit=True,
+        )
+        result = eval(code, namespace)
+        if inspect.isawaitable(result):
+            _ = await result
+    return namespace
 
 
 def test_example_configuration_is_portable_and_project_scoped():
@@ -256,10 +303,29 @@ def test_curriculum_has_thirteen_clean_compilable_notebooks():
         "12_dual_otel_export_foundry_and_mlflow.ipynb",
     ]
 
+    lesson_ids = set()
     for path in notebooks:
         notebook = json.loads(path.read_text(encoding="utf-8"))
         assert notebook["nbformat"] == 4
         assert notebook["cells"]
+        lesson = notebook["metadata"]["aai_lesson"]
+        assert set(lesson) >= {
+            "audience",
+            "cleanup",
+            "duration_minutes",
+            "evidence",
+            "execution_modes",
+            "id",
+            "level",
+            "next_lesson",
+            "objectives",
+            "prerequisites",
+        }
+        assert lesson["duration_minutes"] > 0
+        assert "offline" in lesson["execution_modes"]
+        assert lesson["evidence"] and lesson["objectives"]
+        assert lesson["id"] not in lesson_ids
+        lesson_ids.add(lesson["id"])
         ids = [cell.get("id") for cell in notebook["cells"]]
         assert all(ids)
         assert len(ids) == len(set(ids))
@@ -281,27 +347,202 @@ def test_curriculum_has_thirteen_clean_compilable_notebooks():
             )
 
 
-def test_advanced_notebooks_are_opt_in_and_do_not_provision_a2a():
-    sources = {
-        path.name: path.read_text(encoding="utf-8")
-        for path in (CURRICULUM / "notebooks").glob("*.ipynb")
-        if path.name[:2] in {"08", "09", "10", "11", "12"}
-    }
+def test_core_lab_cells_stay_focused():
+    for path in CORE_NOTEBOOKS:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        for cell in notebook["cells"]:
+            if cell["cell_type"] != "code":
+                continue
+            nonblank_lines = sum(bool(line.strip()) for line in cell.get("source", []))
+            limit = 40 if cell["id"] == "load-config" else 25
+            assert nonblank_lines <= limit, (
+                f"{path.name}:{cell['id']} has {nonblank_lines} nonblank lines; "
+                f"limit is {limit}"
+            )
 
+
+def test_core_labs_execute_twice_offline_from_clean_state(monkeypatch):
+    config = CURRICULUM / "config" / "aai-platform.dev.example.yml"
+    monkeypatch.setenv("AAI_PLATFORM_CONFIG", str(config))
+    monkeypatch.chdir(ROOT)
+
+    executions = []
+    for _ in range(2):
+        executions.append(
+            {path.name: _execute_notebook(path) for path in CORE_NOTEBOOKS}
+        )
+
+    observed = executions[-1]
     assert (
-        '"RUN_CONNECTED = False' in sources["08_context_engineering_and_memory.ipynb"]
+        sum(
+            cell["cell_type"] == "code"
+            for path in CORE_NOTEBOOKS
+            for cell in json.loads(path.read_text(encoding="utf-8"))["cells"]
+        )
+        == 40
     )
-    assert '"RUN_A2A_CONNECTED = False' in sources["09_foundry_a2a_and_handoffs.ipynb"]
-    assert '"RUN_FOUNDRY_EVAL = False' in sources["10_foundry_native_evaluation.ipynb"]
+    assert observed["00_setup_and_architecture.ipynb"]["risk_evidence"]["complete"]
+    model_lab = observed["01_models_and_prompting.ipynb"]
+    assert model_lab["model_decision"].decision == "adopt"
+    assert model_lab["underpowered_decision"].decision == "inconclusive"
+    structured = observed["02_responses_and_structured_outputs.ipynb"]
+    assert structured["safe_validation_view"]["valid"]["accepted"]
+    assert not structured["safe_validation_view"]["oversized"]["accepted"]
+    retrieval = observed["03_rag_and_retrieval_security.ipynb"]
+    assert retrieval["retrieval_evidence"]["indirect_injection_gate"] == "pass"
+    tools = observed["04_agents_tools_and_mcp.ipynb"]
+    assert tools["published"].attempts == 2 and tools["replayed"].replayed
+    evaluation = observed["05_evaluation_safety_and_red_team.ipynb"]
+    assert evaluation["evaluation_decision"].decision == "adopt"
+    operations = observed["06_observability_and_genaiops.ipynb"]
+    assert operations["release_router"].active_version == "baseline-v1"
+    capstone = observed["07_capstone_release_gate.ipynb"]
+    assert capstone["release_decision"].decision == "inconclusive"
+    assert capstone["complete_fixture_decision"].decision == "adopt"
+    assert capstone["failed_fixture_decision"].decision == "reject"
+
+
+def test_offline_lab_boundaries_fail_closed():
+    risks = ("prompt injection",)
+    incomplete = {
+        "prompt injection": labs.RiskTreatment(
+            owner="group:security", control="instruction boundary", verification=""
+        )
+    }
+    assert not labs.assess_risk_treatments(risks, incomplete)["complete"]
+
+    with pytest.raises(ValueError, match="limit"):
+        labs.hybrid_retrieve("query", (), frozenset(), limit=0)
+
+    backend = labs.SimulatedToolBackend({"publish_release": 3})
+    gateway = labs.ToolGateway(
+        {
+            "publish_release": labs.ToolPolicy(
+                frozenset({"release-owners"}), side_effect=True, max_attempts=2
+            )
+        },
+        backend,
+    )
+    exhausted = gateway.execute(
+        "publish_release",
+        {"version": "v2"},
+        caller_groups=frozenset({"release-owners"}),
+        approved=True,
+        idempotency_key="release-exhausted",
+    )
+    assert exhausted.status == "failed" and exhausted.attempts == 2
+    assert not backend.committed_keys
+
+    router = labs.SimulatedReleaseRouter({"baseline-v1"}, "baseline-v1")
+    with pytest.raises(ValueError, match="known immutable"):
+        router.rollback("unknown-v2")
+
+    evidence = {
+        "review": labs.EvidenceItem("pass", None, "group:reviewers"),
+        "safety": labs.EvidenceItem("fail", "run://failed", "group:security"),
+    }
+    decision = labs.decide_evidence_map(evidence, ("review", "safety"))
+    assert decision.decision == "reject"
+    assert decision.failed == ("safety",) and decision.missing == ("review",)
+
+
+def test_offline_model_selection_requires_aligned_threshold_evidence():
+    thresholds = labs.ModelThresholds(0.9, 500, 1.0, 2)
+    eligible = labs.ModelResult("a", 1.0, 100, 0.5, ("one", "two"))
+    misaligned = labs.ModelResult("b", 1.0, 100, 0.5, ("one", "three"))
+    ineligible = labs.ModelResult("b", 0.5, 900, 2.0, ("one", "two"))
+
+    assert labs.select_model((), thresholds).decision == "inconclusive"
     assert (
-        '"RUN_MLFLOW_EVAL = False'
+        labs.select_model((eligible, misaligned), thresholds).decision == "inconclusive"
+    )
+    assert labs.select_model((ineligible,), thresholds).decision == "reject"
+    assert not labs.citations_resolve({}, ())
+
+
+def test_tool_and_evaluation_policies_reject_invalid_evidence():
+    with pytest.raises(ValueError, match="max_attempts"):
+        labs.ToolPolicy(frozenset({"owners"}), side_effect=True, max_attempts=0)
+
+    gateway = labs.ToolGateway(
+        {"read": labs.ToolPolicy(frozenset({"readers"}), False, 1)},
+        labs.SimulatedToolBackend(),
+    )
+    blank_key = gateway.execute(
+        "read",
+        {},
+        caller_groups=frozenset({"readers"}),
+        approved=False,
+        idempotency_key=" ",
+    )
+    assert blank_key.reason == "idempotency key is required"
+
+    with pytest.raises(ValueError, match="same non-empty"):
+        labs.calibrate_binary_judge({"one": True}, {})
+
+    baseline = labs.EvaluationSummary("v1", "same", 0.8, 1.0, {}, ())
+    improved = labs.EvaluationSummary("v2", "same", 0.9, 1.0, {}, ())
+    thresholds = labs.EvaluationThresholds(0.85, 1.0, 0.8)
+    calibrated = labs.JudgeCalibration(0.9, (), ())
+    weak_calibration = labs.JudgeCalibration(0.5, (), ())
+
+    different_data = labs.EvaluationSummary("v2", "different", 0.9, 1.0, {}, ())
+    assert (
+        labs.decide_evaluation(
+            baseline, different_data, calibrated, thresholds
+        ).decision
+        == "inconclusive"
+    )
+    assert (
+        labs.decide_evaluation(
+            baseline, improved, weak_calibration, thresholds
+        ).decision
+        == "inconclusive"
+    )
+    unsafe = labs.EvaluationSummary("v2", "same", 0.9, 0.75, {}, ())
+    assert (
+        labs.decide_evaluation(baseline, unsafe, calibrated, thresholds).decision
+        == "reject"
+    )
+    stronger_baseline = labs.EvaluationSummary("v1", "same", 0.9, 1.0, {}, ())
+    unchanged = labs.EvaluationSummary("v2", "same", 0.9, 1.0, {}, ())
+    assert (
+        labs.decide_evaluation(
+            stronger_baseline, unchanged, calibrated, thresholds
+        ).decision
+        == "inconclusive"
+    )
+
+
+def test_release_router_rejects_unknown_versions_and_blank_requests():
+    with pytest.raises(ValueError, match="active version"):
+        labs.SimulatedReleaseRouter({"baseline-v1"}, "unknown-v2")
+
+    router = labs.SimulatedReleaseRouter({"baseline-v1"}, "baseline-v1")
+    with pytest.raises(ValueError, match="must not be blank"):
+        router.invoke(" ", correlation_id="trace-1", dependency_state="healthy")
+
+
+def test_advanced_notebooks_are_opt_in_and_do_not_provision_a2a():
+    sources = {}
+    for path in ADVANCED_NOTEBOOKS:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        sources[path.name] = "\n".join(
+            "".join(cell.get("source", [])) for cell in notebook["cells"]
+        )
+
+    assert "RUN_CONNECTED = False" in sources["08_context_engineering_and_memory.ipynb"]
+    assert "RUN_A2A_CONNECTED = False" in sources["09_foundry_a2a_and_handoffs.ipynb"]
+    assert "RUN_FOUNDRY_EVAL = False" in sources["10_foundry_native_evaluation.ipynb"]
+    assert (
+        "RUN_MLFLOW_EVAL = False"
         in sources["11_mlflow_tracing_and_genai_evaluation.ipynb"]
     )
     assert (
-        '"RUN_DUAL_EXPORT = False'
+        "RUN_DUAL_EXPORT = False"
         in sources["12_dual_otel_export_foundry_and_mlflow.ipynb"]
     )
-    assert "'canceled'" in sources["10_foundry_native_evaluation.ipynb"]
+    assert "canceled" in sources["10_foundry_native_evaluation.ipynb"]
     assert (
         "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"
         in sources["12_dual_otel_export_foundry_and_mlflow.ipynb"]
@@ -310,6 +551,144 @@ def test_advanced_notebooks_are_opt_in_and_do_not_provision_a2a():
     assert all(
         "project.agents.create_version(" not in source for source in sources.values()
     )
+
+
+def test_advanced_notebooks_execute_twice_offline_without_network(
+    monkeypatch,
+):
+    """Exercise every default advanced-lab cell in the certified extras lane."""
+
+    pytest.importorskip(
+        "agent_framework",
+        reason="advanced Foundry execution runs in the provider-extras CI lane",
+    )
+    pytest.importorskip(
+        "mlflow",
+        reason="advanced Foundry execution runs in the provider-extras CI lane",
+    )
+    pytest.importorskip(
+        "opentelemetry.sdk.trace",
+        reason="advanced Foundry execution runs in the provider-extras CI lane",
+    )
+
+    def deny_network(*_args, **_kwargs):
+        raise AssertionError("advanced offline notebooks attempted network access")
+
+    monkeypatch.setattr(socket, "create_connection", deny_network)
+    monkeypatch.setattr(socket, "getaddrinfo", deny_network)
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny_network)
+    monkeypatch.setenv(
+        "AAI_PLATFORM_CONFIG",
+        str(CURRICULUM / "config" / "aai-platform.dev.example.yml"),
+    )
+    monkeypatch.chdir(ROOT)
+
+    previous_setup = sys.modules.get("foundry_curriculum_setup")
+    executions: list[dict[str, dict[str, object]]] = []
+
+    async def execute_all() -> dict[str, dict[str, object]]:
+        observed: dict[str, dict[str, object]] = {}
+        for path in ADVANCED_NOTEBOOKS:
+            namespace = await _execute_async_notebook(path)
+            observed[path.name] = namespace
+            provider = namespace.get("offline_provider")
+            if provider is not None:
+                provider.shutdown()
+        return observed
+
+    try:
+        for _ in range(2):
+            executions.append(asyncio.run(execute_all()))
+    finally:
+        if previous_setup is None:
+            sys.modules.pop("foundry_curriculum_setup", None)
+        else:
+            sys.modules["foundry_curriculum_setup"] = previous_setup
+
+    observed = executions[-1]
+    context = observed["08_context_engineering_and_memory.ipynb"]
+    assert [item.context_id for item in context["envelope"].selected] == [
+        "policy-current"
+    ]
+    routing = observed["09_foundry_a2a_and_handoffs.ipynb"]["routing_evidence"]
+    assert all(item["expected"] == item["actual"] for item in routing)
+    assert (
+        observed["10_foundry_native_evaluation.ipynb"]["offline_evidence"].status
+        == "completed"
+    )
+    assert (
+        len(
+            observed["11_mlflow_tracing_and_genai_evaluation.ipynb"][
+                "evaluation_records"
+            ]
+        )
+        == 20
+    )
+    dual = observed["12_dual_otel_export_foundry_and_mlflow.ipynb"]
+    assert dual["foundry_shape"] == dual["mlflow_shape"]
+
+
+def test_dual_export_offline_probe_preserves_native_sibling_topology():
+    pytest.importorskip("opentelemetry.sdk.trace")
+    notebook = json.loads(
+        (
+            CURRICULUM / "notebooks" / "12_dual_otel_export_foundry_and_mlflow.ipynb"
+        ).read_text(encoding="utf-8")
+    )
+    cell = next(
+        cell for cell in notebook["cells"] if cell["id"] == "dual-offline-proof"
+    )
+    namespace = {"__name__": "notebook_dual_export_probe"}
+
+    exec(compile("".join(cell["source"]), "dual-offline-proof", "exec"), namespace)
+
+    foundry_spans = namespace["foundry_probe"].get_finished_spans()
+    invoke_span = next(span for span in foundry_spans if span.name == "invoke_agent")
+    native_children = [
+        span for span in foundry_spans if span.name in {"chat", "execute_tool"}
+    ]
+    assert [span.name for span in native_children] == [
+        "chat",
+        "execute_tool",
+        "chat",
+    ]
+    assert all(
+        span.parent.span_id == invoke_span.context.span_id for span in native_children
+    )
+    assert namespace["foundry_shape"] == namespace["mlflow_shape"]
+    assert (
+        invoke_span.attributes["aai.measurement_source"] == "synthetic_offline_topology"
+    )
+
+
+def test_dual_export_teaches_assurance_ownership_routing_and_review_loop():
+    readme = (CURRICULUM / "README.md").read_text(encoding="utf-8")
+    practices = (CURRICULUM / "CURRENT_PRACTICES.md").read_text(encoding="utf-8")
+    notebook = (
+        CURRICULUM / "notebooks" / "12_dual_otel_export_foundry_and_mlflow.ipynb"
+    ).read_text(encoding="utf-8")
+    combined = "\n".join((readme, practices, notebook))
+
+    assert "authoritative assurance" in combined
+    assert "Application Insights" in combined
+    assert "hidden chain-of-thought" in combined
+    assert "/v1/traces" in combined
+    assert "x-mlflow-experiment-id" in combined
+    assert "/api/2.0/otel/v1/traces" in combined
+    assert "X-Databricks-UC-Table-Name" in combined
+    assert "collector/gateway" in combined
+    assert "renewable" in combined
+    assert "invoke_agent" in combined
+    assert "execute_tool" in combined
+    assert "direct siblings" in combined or "direct_sibling_children" in combined
+    assert "live-validate" in combined
+    assert "EvaluationDataset" in combined
+    assert "Feedback" in combined
+    assert "Debug" in combined
+    assert "dual-export/correlation smoke test" in combined
+    assert "does not invoke Agent Framework" in combined
+    assert "authenticated live validation" in combined
 
 
 def test_evaluation_starter_has_twenty_cases_and_four_attacks():
@@ -349,9 +728,19 @@ def test_advanced_datasets_use_mlflow_standard_shape(dataset_name):
 def test_current_practices_cites_primary_foundry_and_mlflow_sources():
     guide = (CURRICULUM / "CURRENT_PRACTICES.md").read_text(encoding="utf-8")
 
-    assert "2026-08-01" in guide
+    assert "last_verified: 2026-08-09" in guide
+    assert "review_by: 2026-11-07" in guide
+    assert "live_validation: required before production use" in guide
+    for dependency in (
+        "agent-framework-core: 1.12.1",
+        "azure-ai-projects: 2.4.0",
+        "mlflow: 3.15.1",
+        "opentelemetry-sdk: 1.43.0",
+    ):
+        assert dependency in guide
+    assert "2026-08-09" in guide
     assert "learn.microsoft.com/en-us/azure/foundry" in guide
     assert "mlflow.org/docs/latest" in guide
-    assert "docs.databricks.com" in guide
+    assert "learn.microsoft.com/en-us/azure/databricks" in guide
     assert "Application Insights" in guide
     assert "backend synchronization" in guide

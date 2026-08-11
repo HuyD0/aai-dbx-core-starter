@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from aai_core.contracts import ContractModel
 
@@ -39,14 +40,34 @@ _BEARER_CREDENTIAL = re.compile(r"^bearer\s+\S+", re.IGNORECASE)
 
 DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER = "Databricks-Ai-Gateway-Request-Tags"
 
+__all__ = [
+    "DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER",
+    "DataClassification",
+    "DatabricksAIRequestTags",
+    "LifecycleStage",
+    "ResourceContext",
+    "databricks_ai_gateway_request_headers",
+]
+
 
 class LifecycleStage(StrEnum):
     """Supported maturity states for an AI application resource."""
 
     EXPERIMENTAL = "experimental"
+    VALIDATION = "validation"
+    # Historical schema-v1 value. New evidence must use VALIDATION.
     CANDIDATE = "candidate"
     PRODUCTION = "production"
     RETIRED = "retired"
+
+
+class DataClassification(StrEnum):
+    """Platform-owned information-handling categories."""
+
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
 
 
 class ResourceContext(ContractModel):
@@ -58,11 +79,26 @@ class ResourceContext(ContractModel):
     team: str = Field(min_length=1)
     owner_group: str = Field(min_length=1)
     cost_center: str = Field(min_length=1)
-    data_classification: str = Field(min_length=1)
+    data_classification: DataClassification
     lifecycle: LifecycleStage
     repository: str = Field(min_length=1)
     release: str = Field(min_length=1)
-    tag_schema_version: Literal["1"] = "1"
+    tag_schema_version: Literal["1", "2"] = "2"
+
+    @field_validator("data_classification", mode="before")
+    @classmethod
+    def parse_data_classification(cls, value: object) -> DataClassification:
+        if isinstance(value, DataClassification):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("data_classification must be a string")
+        try:
+            return DataClassification(value.strip().lower())
+        except ValueError as error:
+            choices = ", ".join(item.value for item in DataClassification)
+            raise ValueError(
+                f"data_classification must be one of: {choices}"
+            ) from error
 
     @field_validator("lifecycle", mode="before")
     @classmethod
@@ -77,7 +113,34 @@ class ResourceContext(ContractModel):
             choices = ", ".join(stage.value for stage in LifecycleStage)
             raise ValueError(f"lifecycle must be one of: {choices}") from error
 
-    def validate(self, *, strict: bool = False) -> None:
+    @model_validator(mode="after")
+    def validate_lifecycle_schema(self) -> Self:
+        """Keep historical candidate evidence readable without rewriting it."""
+
+        if self.tag_schema_version == "1":
+            if self.lifecycle is LifecycleStage.VALIDATION:
+                raise ValueError(
+                    "tag schema version 1 uses lifecycle='candidate'; "
+                    "use tag schema version 2 for lifecycle='validation'"
+                )
+            if self.lifecycle is LifecycleStage.CANDIDATE:
+                warnings.warn(
+                    "tag schema version 1 lifecycle='candidate' is deprecated; "
+                    "new evidence must use tag schema version 2 with "
+                    "lifecycle='validation'",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            return self
+        if self.lifecycle is LifecycleStage.CANDIDATE:
+            raise ValueError(
+                "tag schema version 2 uses lifecycle='validation', not 'candidate'"
+            )
+        return self
+
+    def validate(self, *, strict: bool = False) -> None:  # type: ignore[override]
+        """Check completeness and production-only ownership constraints."""
+
         values = self.model_dump(mode="python")
         empty = [name for name, value in values.items() if not str(value).strip()]
         if empty:

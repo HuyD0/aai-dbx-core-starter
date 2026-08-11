@@ -1,3 +1,4 @@
+import stat
 from pathlib import Path
 
 import yaml
@@ -45,5 +46,16 @@ def test_commit_and_push_scripts_reuse_repository_verification_contracts():
     commit_script = (ROOT / "scripts/pre-commit.sh").read_text(encoding="utf-8")
     push_script = (ROOT / "scripts/pre-push.sh").read_text(encoding="utf-8")
 
-    assert "make check-templates format-check test" in commit_script
+    assert "git diff --cached --check" in commit_script
+    assert "make check-templates format-check typecheck" in commit_script
+    assert '-m "not generated_project"' in commit_script
     assert "./scripts/cloud-verify.sh" in push_script
+
+
+def test_hook_scripts_are_executable_and_generated_tier_is_registered():
+    for relative in ("scripts/pre-commit.sh", "scripts/pre-push.sh"):
+        mode = (ROOT / relative).stat().st_mode
+        assert mode & stat.S_IXUSR, f"{relative} must remain executable"
+
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"generated_project:' in project

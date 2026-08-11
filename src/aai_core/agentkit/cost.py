@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from pydantic import Field, field_serializer, field_validator
 
@@ -48,11 +48,11 @@ class CostEstimate(ContractModel):
     @field_validator("calls_by_scorer", mode="after")
     @classmethod
     def freeze_calls(cls, value: Mapping[str, int]) -> Mapping[str, int]:
-        return freeze_value(value)
+        return cast(Mapping[str, int], freeze_value(value))
 
     @field_serializer("calls_by_scorer")
     def serialize_calls(self, value: Mapping[str, int]) -> dict[str, int]:
-        return thaw_value(value)
+        return cast(dict[str, int], thaw_value(value))
 
 
 def estimate(

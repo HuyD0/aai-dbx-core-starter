@@ -1,13 +1,8 @@
-"""Chunking pipeline: governed source table -> CDF-enabled chunk table.
-
-The chunk table feeds the DELTA_SYNC vector search index
-(resources/index.yml). Change Data Feed must stay enabled so the index can
-sync incrementally. The chunking profile is an application release input —
-change it deliberately and re-run the evaluation gate
-(scripts/create_release.py records it).
-"""
+"""Chunking pipeline: governed source table -> idempotent Delta chunk sync."""
 
 from __future__ import annotations
+
+import hashlib
 
 from aai_core.rag import ChunkingProfile
 
@@ -31,37 +26,88 @@ def chunk_text(text: str, profile: ChunkingProfile = CHUNKING) -> list[str]:
     ]
 
 
+def stable_chunk_id(document_id: str, position: int) -> str:
+    """Stable merge key: content changes update a chunk rather than duplicate it."""
+
+    if not document_id.strip() or position < 0:
+        raise ValueError(
+            "chunk identity requires a document id and nonnegative position"
+        )
+    payload = f"{document_id}:{position}".encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def main() -> None:
+    from delta.tables import DeltaTable
     from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
-    from pyspark.sql.types import ArrayType, StringType
 
     from app.config import CHUNK_TABLE, SOURCE_TABLE
 
     spark = SparkSession.builder.getOrCreate()
-    # Chunking runs distributed on the executors — the corpus never
-    # materializes on the driver, so table size is bounded by the cluster,
-    # not driver memory.
-    chunk_udf = F.udf(lambda text: chunk_text(text or ""), ArrayType(StringType()))
-    chunks = (
+    source = (
         spark.table(SOURCE_TABLE)
         .select(
-            F.col("id").alias("document_id"),
-            "source_uri",
-            F.posexplode(chunk_udf(F.col("content"))).alias("position", "content"),
+            F.col("id").cast("string").alias("document_id"),
+            F.col("source_uri").cast("string").alias("source_uri"),
+            F.col("content").cast("string").alias("document_content"),
+        )
+        .where(F.col("document_id").isNotNull())
+    )
+    duplicate = (
+        source.groupBy("document_id").count().where(F.col("count") > 1).limit(1).count()
+    )
+    if duplicate:
+        raise ValueError("source table contains duplicate document ids")
+
+    step = CHUNKING.chunk_size - CHUNKING.chunk_overlap
+    chunks = (
+        source.where(F.length("document_content") > 0)
+        .withColumn(
+            "_starts",
+            F.sequence(
+                F.lit(0),
+                F.length("document_content") - F.lit(1),
+                F.lit(step),
+            ),
         )
         .select(
-            F.concat_ws("-", F.col("document_id"), F.col("position")).alias("id"),
-            "content",
+            "document_id",
             "source_uri",
-            F.concat(F.lit("chunk-"), F.col("position")).alias("chunk_id"),
+            "document_content",
+            F.posexplode("_starts").alias("position", "start"),
+        )
+        .select(
+            F.sha2(
+                F.concat_ws(":", "document_id", F.col("position").cast("string")),
+                256,
+            ).alias("id"),
+            F.expr(
+                f"substring(document_content, start + 1, {CHUNKING.chunk_size})"
+            ).alias("content"),
+            "source_uri",
+            F.concat_ws(":", "document_id", F.col("position").cast("string")).alias(
+                "chunk_id"
+            ),
         )
     )
-    (
-        chunks.write.mode("overwrite")
-        .option("delta.enableChangeDataFeed", "true")
-        .saveAsTable(CHUNK_TABLE)
-    )
+
+    if not spark.catalog.tableExists(CHUNK_TABLE):
+        (
+            chunks.write.format("delta")
+            .option("delta.enableChangeDataFeed", "true")
+            .saveAsTable(CHUNK_TABLE)
+        )
+    else:
+        target = DeltaTable.forName(spark, CHUNK_TABLE)
+        (
+            target.alias("target")
+            .merge(chunks.alias("source"), "target.id = source.id")
+            .whenMatchedUpdateAll()
+            .whenNotMatchedInsertAll()
+            .whenNotMatchedBySourceDelete()
+            .execute()
+        )
     written = spark.table(CHUNK_TABLE).count()
     print({"source": SOURCE_TABLE, "chunks": written, "table": CHUNK_TABLE})
 

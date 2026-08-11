@@ -220,6 +220,15 @@ def load_decision(
     run_id = _validated_run_id(decision_run_id)
     mlflow = _decision_client(mlflow_module)
     client = mlflow.MlflowClient()
+    run = _load_finished_decision_run(client, run_id)
+    record = _load_decision_artifact(client, run_id)
+    _verify_decision_evidence(run, record)
+    return record
+
+
+def _load_finished_decision_run(client: Any, run_id: str) -> Any:
+    """Load one run while keeping provider outages distinct from bad evidence."""
+
     try:
         run = client.get_run(run_id)
     except Exception as error:
@@ -236,6 +245,11 @@ def load_decision(
             "The decision run is not finished; only completed evidence may "
             "authorize promotion."
         )
+    return run
+
+
+def _load_decision_artifact(client: Any, run_id: str) -> DecisionRecord:
+    """Download and validate the decision artifact from a finished run."""
 
     try:
         artifact_path = client.download_artifacts(run_id, "decision/decision.json")
@@ -258,6 +272,11 @@ def load_decision(
             "The decision run does not contain a valid decision/decision.json "
             "artifact."
         ) from error
+    return record
+
+
+def _verify_decision_evidence(run: Any, record: DecisionRecord) -> None:
+    """Require searchable run data to agree with the canonical artifact."""
 
     data = getattr(run, "data", None)
     tags = getattr(data, "tags", None)
@@ -268,20 +287,21 @@ def load_decision(
         )
 
     expected_tags = _persisted_tags(record)
-    for name, expected in expected_tags.items():
-        if tags.get(name) != expected:
+    for tag_name, expected_tag in expected_tags.items():
+        if tags.get(tag_name) != expected_tag:
             raise DecisionEvidenceError(
-                f"The decision run tag {name!r} contradicts decision.json."
+                f"The decision run tag {tag_name!r} contradicts decision.json."
             )
 
     expected_metrics = dict(record.gate.metrics) if record.gate is not None else {}
-    for name, expected in expected_metrics.items():
-        observed = metrics.get(name)
-        if not isinstance(observed, (int, float)) or float(observed) != float(expected):
+    for metric_name, expected_metric in expected_metrics.items():
+        observed = metrics.get(metric_name)
+        if not isinstance(observed, (int, float)) or float(observed) != float(
+            expected_metric
+        ):
             raise DecisionEvidenceError(
-                f"The decision run metric {name!r} contradicts decision.json."
+                f"The decision run metric {metric_name!r} contradicts decision.json."
             )
-    return record
 
 
 def _persisted_tags(record: DecisionRecord) -> dict[str, str]:

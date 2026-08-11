@@ -32,6 +32,7 @@ from aai_core.evaluation import (
     GateFailure,
     GatePolicy,
     GateResult,
+    MetricDirection,
     MetricRule,
     apply_gate,
 )
@@ -121,7 +122,7 @@ def build_policy(
             # must mean slower, not faster.
             rules[metric] = MetricRule(
                 metric=metric,
-                direction=registry_direction(metric),
+                direction=MetricDirection(registry_direction(metric)),
                 max_regression=float(allowance),
             )
     return GatePolicy(

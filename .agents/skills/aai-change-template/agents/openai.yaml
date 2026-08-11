@@ -1,0 +1,4 @@
+interface:
+  display_name: "Change AAI Template"
+  short_description: "Safely update generated Databricks projects"
+  default_prompt: "Use $aai-change-template to implement and verify this template change."

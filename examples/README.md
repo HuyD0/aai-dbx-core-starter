@@ -19,6 +19,7 @@ offline contract
   → optional aligned-judge prompt optimization
   → recorded decisions and evidence-gated promotion
   → platform-team LLM operations
+  → enterprise model-selection workshop
 ```
 
 The first four MLflow examples run locally and deterministically without a
@@ -27,7 +28,9 @@ call, and native async/streaming notebook come next. Advanced labs 08–11 and
 13 are credential-free decision fixtures; lab 12 is a disabled-by-default
 connected optimization skeleton whose experimental dependencies are not in
 the certified locks; lab 14 is the platform operator's connected loop with a
-credential-free default path.
+credential-free default path. Lab 15 is a complete, credential-free model-
+selection reference whose intentional learner stubs live only in a separate
+[`workshops/`](workshops/15_compare_and_select_llms_exercises.ipynb) copy.
 
 Every latency, token, and cost value in the credential-free stages is labelled
 `simulated_offline_fixture`; those values teach evidence shape and comparison
@@ -120,6 +123,54 @@ Holding everything except the prompt requirement constant matters because it
 makes the result explainable. If the model, cases, and instructions all changed
 at once, the team could not tell what caused a different answer.
 
+## Agent behavior assurance
+
+The agent lessons use this operating model:
+
+> Code tells us what could happen. Traces tell us what did happen. Evaluation
+> determines whether the observed behavior was acceptable.
+
+| Layer | What it answers | Examples |
+|---|---|---|
+| **Outcome** | What happened at the end? | Completion, correctness, groundedness, and schema validity. |
+| **Behavior** | How did the agent get there? | Decisions, tools, retrieval, routing, retries, recovery, escalation, and human intervention. |
+| **Operations** | How well did the system operate? | Latency, tokens, cost, failures, safety, and policy compliance. |
+| **Optional internal diagnostics** | What provider-supported debugging signal is available? | Explicit reasoning summaries or metadata, when the provider supplies them. |
+
+An **Assessment** is a separate evaluator verdict over this evidence. It may
+say that a response was correct, that a declared tool choice matched the tool
+that actually ran, or that the choice was inappropriate for the benchmark.
+The verdict stays in MLflow Feedback/Assessment; it is not written into the
+agent's decision record after the fact.
+
+A runtime agent decision records a meaningful choice such as
+`tool_selection` or `answer_readiness`, with a concise operational reason and
+stable evidence references. It is not the lifecycle `decision` later made by
+the release process (`adopt`, `reject`, or `inconclusive`). It is also not
+chain-of-thought: these examples never request, reconstruct, infer, or persist
+hidden model reasoning. Provider-supported diagnostics are optional and remain
+separate from the decision record. The observed `TOOL`, retriever, and `LLM`
+spans remain authoritative for what executed and whether it succeeded.
+
+Use Examples 04 and 10 for outcome assessment, Examples 08 and 09 for behavior
+assurance, and Examples 01, 07, and 11 for operations evidence. Optional
+internal diagnostics have no required lesson because an application must behave
+and remain assessable when a provider exposes none.
+
+Across those lessons, MLflow is the authoritative assurance evidence plane:
+the reviewed trace, EvaluationDataset, evaluation run, and Feedback /
+Assessment stay together for regression and release decisions. Foundry and
+Application Insights are complementary operational views, not a second source
+of benchmark truth and not a backend synchronization mechanism.
+
+The production loop is `trace -> select -> minimize -> human review ->
+Feedback -> versioned MLflow EvaluationDataset -> evaluation gate`. Promotion
+into the dataset is intentional; an unreviewed trace never becomes an expected
+answer or expected trajectory automatically. The Foundry curriculum's
+[dual-export lab](foundry-curriculum/notebooks/12_dual_otel_export_foundry_and_mlflow.ipynb)
+shows how the same native OTel execution spans can reach both operational and
+assurance destinations while keeping their roles separate.
+
 ## MLflow concepts in plain language
 
 | Concept | Plain-language meaning | Why it matters |
@@ -179,13 +230,14 @@ only that store at `http://127.0.0.1:5000`.
 | 05 | [`05_connected_setup.ipynb`](05_connected_setup.ipynb) | Why kernel/config readiness and cloud authorization are separate checkpoints. It makes no LLM request. |
 | 06 | [`06_connected_first_call.py`](06_connected_first_call.py) | How to call a real configured LLM through stable synchronous `model.generate()` while recording bounded trace and run evidence. |
 | 07 | [`07_first_llm_call.ipynb`](07_first_llm_call.ipynb) | Native async streaming, readable chat traces, exact prompt lineage, and an optional UC EvaluationDataset linked to described A/B runs. |
-| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer can fail an exact tool trajectory, with optional governed dataset/run evidence but no fabricated trace. |
+| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer and internally consistent decision can still choose an inappropriate tool, with optional governed dataset/run evidence but no fabricated trace. |
 | 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope real traces, retain their IDs, register the session contract, and gate complete conversations. |
 | 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | How deterministic checks and human calibration become separate UC datasets linked to a report-only judge run. |
 | 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality comes before cost, with actual synthetic cases registered separately from simulated measurement artifacts. |
 | 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | How disjoint UC datasets, immutable prompt versions, readable real-call traces, and held-out runs prevent optimizer-to-production shortcuts. |
 | 13 | [`13_decision_and_promotion_lifecycle.ipynb`](13_decision_and_promotion_lifecycle.ipynb) | Why every comparison ends in a recorded `adopt`/`reject`/`inconclusive` decision, and why the `production` prompt alias moves only on adopt-grade evidence. |
 | 14 | [`14_platform_llm_operations.ipynb`](14_platform_llm_operations.ipynb) | The platform team's operating loop: judge governance, gateway request tags, cost-by-tag queries, fleet provenance, monitoring adoption, and rollback levers. |
+| 15 | [`15_compare_and_select_llms.ipynb`](15_compare_and_select_llms.ipynb) | A complete reference for same-case model A/B accuracy, blinded judge win rates, session TCO, and fail-closed governance checks with SDK-compatible offline fixtures. |
 
 Open any advanced lab through the stable runner name, for example:
 
@@ -196,15 +248,19 @@ make local-example EXAMPLE=layered_judges
 make local-example EXAMPLE=cost_quality_tradeoff
 make local-example EXAMPLE=agent_alignment_optimization
 make local-example EXAMPLE=decision_promotion_lifecycle
+make local-example EXAMPLE=compare_and_select_llms
 ```
 
 The command prints the exact numbered path and selected kernel. The default
-path for all six labs makes no model request and writes no remote evidence.
-Each lab exposes an explicit Databricks switch for its governed evidence path.
+path for every locally runnable advanced lab makes no model request and writes
+no remote evidence. Connected evidence paths stay behind explicit switches.
 The platform-operations lab runs through the workspace runner
 (`make workspace-example EXAMPLE=platform_llm_operations`) because its
 connected checks address the operator, not the application developer; its
-deterministic cells still run anywhere.
+deterministic cells still run anywhere. Lab 15 remains offline until the learner
+deliberately substitutes configured logical models; use its
+[separate workshop](workshops/15_compare_and_select_llms_exercises.ipynb) to
+practise without weakening the canonical run-all path.
 
 ### Cookbook adaptations
 
@@ -213,7 +269,7 @@ deterministic cells still run anywhere.
 | [Evaluation-driven development](https://mlflow.org/cookbook/eval-driven-development/) | 02, 04, 07 | Fixed ordered data, exact digests, scorer-error failure, critical-row gates, and explicit release decisions. |
 | [Prompt engineering lifecycle](https://mlflow.org/cookbook/prompt-engineering/) | 03, 04, 07, 12 | Idempotent immutable versions, exact-version lineage, one controlled change, and alias movement only after the normal gate. |
 | [Cost-quality trade-off](https://mlflow.org/cookbook/cost-quality-tradeoff/) | 07, 11 | Logical model names, no embedded vendor prices, separate target/judge cost, and explicit cost coverage. |
-| [LangGraph agent](https://mlflow.org/cookbook/langgraph-agent/) | 08 plus the optional agent-template recipe | Exact tool-call scoring for gates, one tracing owner, durable checkpoints, interrupts, and idempotency. |
+| [LangGraph agent](https://mlflow.org/cookbook/langgraph-agent/) | 08 plus the optional agent-template recipe | Independent decision/action and appropriateness assessments, exact tool-call scoring for gates, one tracing owner, durable checkpoints, interrupts, and idempotency. |
 | [Multi-turn agent](https://mlflow.org/cookbook/multi-turn-agent/) | 09 | One trace per turn, opaque session IDs, exact trace scoping, numeric gates, and durable application-owned state. |
 | [Custom LLM judges](https://mlflow.org/cookbook/custom-llm-judges/) | 10 | Deterministic rules first, keyless governed judge models, balanced human rationales, and held-out agreement. |
 | [Agent alignment and optimization](https://mlflow.org/cookbook/agent-alignment-optimization/) | 10, 12 | Three disjoint evidence splits, bounded calls, prompt loading inside `predict_fn`, and no optimizer-to-production shortcut. |
@@ -431,13 +487,21 @@ Use `make examples-list` to see the runner's accepted names and modes.
 | `11_cost_quality_tradeoff.ipynb`, `12_agent_alignment_optimization.ipynb` | a connected prompt or agent project after dependency and judge approval |
 | `13_decision_and_promotion_lifecycle.ipynb` | `templates/prompt-app` promotion scripts and every template's release gate |
 | `14_platform_llm_operations.ipynb` | the platform team's operating runbook ([platform operations](../docs/platform-operations.md)) |
+| `15_compare_and_select_llms.ipynb` | a governed model-selection experiment after golden-data, judge, pricing, and provider-catalog approval |
 | `00_offline_hello_world.py` | every template's hermetic test pattern |
 
 ## Notebook conventions
 
-- Jupyter (`.ipynb`) is for local exploration and explicitly guarded connected
-  labs, like `07_first_llm_call.ipynb` through
-  `14_platform_llm_operations.ipynb`.
+- Jupyter (`.ipynb`) is for local exploration, credential-free workshops, and
+  explicitly guarded connected labs, including `07_first_llm_call.ipynb` through
+  `15_compare_and_select_llms.ipynb`.
+- Advanced cells show one teaching decision at a time. Typed mechanics for
+  streaming, scoring, evidence persistence, optimization, and model selection
+  live under [`support/`](support/) so they can be tested directly and reused
+  without copying notebook cells.
+- Canonical numbered notebooks are complete reference solutions. Intentional
+  TODOs and `NotImplementedError` stubs belong under `workshops/`, which is not
+  part of the numbered runner sequence.
 - Generated projects use packaged Python under `src/`; Databricks-format
   notebooks remain thin teaching or operational entry points.
 - Configuration is never hardcoded. `bootstrap()` discovers

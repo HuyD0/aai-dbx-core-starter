@@ -11,12 +11,15 @@ MLflow run or mirrors native parameters.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from enum import StrEnum
 from math import isfinite
 from numbers import Real
 from re import fullmatch, search
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from pydantic import Field, field_serializer, field_validator, model_validator
 
@@ -24,8 +27,25 @@ from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.exceptions import AaiCoreError
 from aai_core.providers.types import ProviderConfigurationError
 
+__all__ = [
+    "EvaluationGateError",
+    "GateFailure",
+    "GatePolicy",
+    "GateResult",
+    "MetricDirection",
+    "MetricRule",
+    "apply_gate",
+    "evaluate_with_gate",
+    "gate_enforces_release_rule",
+    "get_or_create_evaluation_dataset",
+    "judge_model_uri",
+    "log_gate_evidence",
+]
+
 
 class MetricDirection(StrEnum):
+    """Whether a governed metric improves by increasing or decreasing."""
+
     HIGHER = "higher"
     LOWER = "lower"
 
@@ -83,6 +103,12 @@ class GatePolicy(ContractModel):
     scorer_error_metric_suffix: str = Field(default="/error_count", min_length=1)
     allow_missing_regression_baseline: bool = False
 
+    @property
+    def digest(self) -> str:
+        """Canonical identifier for the exact deterministic gate policy."""
+
+        return _canonical_digest(self.model_dump(mode="json"))
+
     @field_validator("cost_coverage_metric", "scorer_error_metric_suffix")
     @classmethod
     def normalize_metric_selector(cls, value: str) -> str:
@@ -97,6 +123,8 @@ class GatePolicy(ContractModel):
 
 
 class GateFailure(ContractModel):
+    """One deterministic reason an evaluation gate did not pass."""
+
     metric: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
@@ -131,13 +159,13 @@ class GateResult(ContractModel):
                 raise ValueError(
                     f"gate evidence metric {name!r} must be a finite number"
                 )
-        return freeze_value(value)
+        return cast(Mapping[str, float], freeze_value(value))
 
     @field_serializer("metrics", "baseline_metrics")
     def serialize_metrics(
         self, value: Mapping[str, float] | None
     ) -> dict[str, float] | None:
-        return None if value is None else thaw_value(value)
+        return None if value is None else cast(dict[str, float], thaw_value(value))
 
     @model_validator(mode="after")
     def failures_match_the_recorded_policy(self) -> Self:
@@ -155,6 +183,20 @@ class GateResult(ContractModel):
                 "apply_gate()"
             )
         return self
+
+    @property
+    def policy_digest(self) -> str | None:
+        """Canonical digest of the recorded gate policy, when present."""
+
+        return None if self.policy is None else self.policy.digest
+
+    @property
+    def baseline_digest(self) -> str | None:
+        """Canonical digest of the exact recorded regression baseline."""
+
+        if self.baseline_metrics is None:
+            return None
+        return _canonical_digest(dict(self.baseline_metrics))
 
     @property
     def passed(self) -> bool:
@@ -191,6 +233,8 @@ def gate_enforces_release_rule(gate: GateResult) -> bool:
 
 
 class EvaluationGateError(AaiCoreError):
+    """Raised when callers require a passing evaluation gate."""
+
     code = "aai_core.evaluation.gate_failed"
 
 
@@ -249,118 +293,117 @@ def _evaluate_policy(
     policy: GatePolicy,
     baseline: dict[str, float],
 ) -> tuple[GateFailure, ...]:
-    failures: list[GateFailure] = []
-
-    if policy.fail_on_scorer_errors:
-        for metric, value in metrics.items():
-            if not metric.endswith(policy.scorer_error_metric_suffix):
-                continue
-            if value > 0:
-                failures.append(
-                    GateFailure(
-                        metric=metric,
-                        reason=f"{value:g} scorer invocation(s) failed",
-                    )
-                )
-            elif value < 0:
-                # A count cannot be negative; this runs inside the
-                # recomputation, so even a hand-built result cannot claim a
-                # pass over corrupt scorer-health evidence.
-                failures.append(
-                    GateFailure(
-                        metric=metric,
-                        reason=(
-                            f"error count {value:g} is negative; scorer "
-                            "health evidence is corrupt"
-                        ),
-                    )
-                )
-
-    if policy.minimum_cost_coverage is not None:
-        observed = metrics.get(policy.cost_coverage_metric)
-        if observed is None:
-            failures.append(
-                GateFailure(
-                    metric=policy.cost_coverage_metric,
-                    reason="cost coverage is unknown",
-                )
-            )
-        elif not 0.0 <= observed <= 1.0:
-            # Coverage is a fraction by definition (the policy bounds its
-            # threshold to [0, 1]); an impossible observed value would
-            # otherwise satisfy any threshold. This runs inside the
-            # recomputation, so a hand-built result cannot claim a pass
-            # over corrupt coverage evidence.
-            failures.append(
-                GateFailure(
-                    metric=policy.cost_coverage_metric,
-                    reason=(
-                        f"coverage {observed:g} is outside the unit "
-                        "interval; cost-coverage evidence is corrupt"
-                    ),
-                )
-            )
-        elif observed < policy.minimum_cost_coverage:
-            failures.append(
-                GateFailure(
-                    metric=policy.cost_coverage_metric,
-                    reason=(
-                        f"{observed:g} is below required "
-                        f"{policy.minimum_cost_coverage:g}"
-                    ),
-                )
-            )
-
+    failures = _scorer_error_failures(metrics, policy)
+    failures.extend(_cost_coverage_failures(metrics, policy))
     for rule in policy.rules:
-        observed = metrics.get(rule.metric)
-        if observed is None:
-            failures.append(GateFailure(metric=rule.metric, reason="metric is missing"))
-            continue
-        if rule.required is not None:
-            below = (
-                rule.direction is MetricDirection.HIGHER and observed < rule.required
-            )
-            above = rule.direction is MetricDirection.LOWER and observed > rule.required
-            if below or above:
-                comparison = "below" if below else "above"
-                failures.append(
-                    GateFailure(
-                        metric=rule.metric,
-                        reason=(
-                            f"{observed:g} is {comparison} required "
-                            f"{rule.required:g}"
-                        ),
-                    )
-                )
-        if rule.max_regression is None:
-            continue
-        reference = baseline.get(rule.metric)
-        if reference is None:
-            if not policy.allow_missing_regression_baseline:
-                failures.append(
-                    GateFailure(
-                        metric=rule.metric,
-                        reason="regression baseline is missing",
-                    )
-                )
-            continue
-        regression = (
-            reference - observed
-            if rule.direction is MetricDirection.HIGHER
-            else observed - reference
-        )
-        if regression > rule.max_regression:
-            failures.append(
-                GateFailure(
-                    metric=rule.metric,
-                    reason=(
-                        f"regressed by {regression:g} from baseline {reference:g}; "
-                        f"maximum allowed is {rule.max_regression:g}"
-                    ),
-                )
-            )
-
+        failures.extend(_metric_rule_failures(metrics, baseline, policy, rule))
     return tuple(failures)
+
+
+def _scorer_error_failures(
+    metrics: Mapping[str, float], policy: GatePolicy
+) -> list[GateFailure]:
+    if not policy.fail_on_scorer_errors:
+        return []
+    failures: list[GateFailure] = []
+    for metric, value in metrics.items():
+        if not metric.endswith(policy.scorer_error_metric_suffix):
+            continue
+        if value > 0:
+            reason = f"{value:g} scorer invocation(s) failed"
+        elif value < 0:
+            reason = (
+                f"error count {value:g} is negative; scorer health evidence is corrupt"
+            )
+        else:
+            continue
+        failures.append(GateFailure(metric=metric, reason=reason))
+    return failures
+
+
+def _cost_coverage_failures(
+    metrics: Mapping[str, float], policy: GatePolicy
+) -> list[GateFailure]:
+    required = policy.minimum_cost_coverage
+    if required is None:
+        return []
+    observed = metrics.get(policy.cost_coverage_metric)
+    if observed is None:
+        reason = "cost coverage is unknown"
+    elif not 0.0 <= observed <= 1.0:
+        reason = (
+            f"coverage {observed:g} is outside the unit interval; "
+            "cost-coverage evidence is corrupt"
+        )
+    elif observed < required:
+        reason = f"{observed:g} is below required {required:g}"
+    else:
+        return []
+    return [GateFailure(metric=policy.cost_coverage_metric, reason=reason)]
+
+
+def _metric_rule_failures(
+    metrics: Mapping[str, float],
+    baseline: Mapping[str, float],
+    policy: GatePolicy,
+    rule: MetricRule,
+) -> list[GateFailure]:
+    observed = metrics.get(rule.metric)
+    if observed is None:
+        return [GateFailure(metric=rule.metric, reason="metric is missing")]
+    failures = _required_metric_failures(observed, rule)
+    failures.extend(_regression_failures(observed, baseline, policy, rule))
+    return failures
+
+
+def _required_metric_failures(observed: float, rule: MetricRule) -> list[GateFailure]:
+    required = rule.required
+    if required is None:
+        return []
+    below = rule.direction is MetricDirection.HIGHER and observed < required
+    above = rule.direction is MetricDirection.LOWER and observed > required
+    if not (below or above):
+        return []
+    comparison = "below" if below else "above"
+    return [
+        GateFailure(
+            metric=rule.metric,
+            reason=f"{observed:g} is {comparison} required {required:g}",
+        )
+    ]
+
+
+def _regression_failures(
+    observed: float,
+    baseline: Mapping[str, float],
+    policy: GatePolicy,
+    rule: MetricRule,
+) -> list[GateFailure]:
+    if rule.max_regression is None:
+        return []
+    reference = baseline.get(rule.metric)
+    if reference is None:
+        if policy.allow_missing_regression_baseline:
+            return []
+        return [
+            GateFailure(metric=rule.metric, reason="regression baseline is missing")
+        ]
+    regression = (
+        reference - observed
+        if rule.direction is MetricDirection.HIGHER
+        else observed - reference
+    )
+    if regression <= rule.max_regression:
+        return []
+    return [
+        GateFailure(
+            metric=rule.metric,
+            reason=(
+                f"regressed by {regression:g} from baseline {reference:g}; "
+                f"maximum allowed is {rule.max_regression:g}"
+            ),
+        )
+    ]
 
 
 def _row_level_error_counts(result: Any, suffix: str) -> dict[str, float]:
@@ -376,7 +419,7 @@ def _row_level_error_counts(result: Any, suffix: str) -> dict[str, float]:
 
     frame = getattr(result, "result_df", None)
     columns = getattr(frame, "columns", None)
-    if columns is None:
+    if frame is None or columns is None:
         return {}
     counts: dict[str, float] = {}
     for column in columns:
@@ -413,6 +456,17 @@ def _extract_metrics(result: Any) -> dict[str, float]:
         if isfinite(numeric):
             metrics[str(name)] = numeric
     return metrics
+
+
+def _canonical_digest(value: Any) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
@@ -672,80 +726,134 @@ def _is_missing_registry_error(error: Exception) -> bool:
     if not chain_complete:
         return False
     coded = tuple((item, _registry_error_code(item)) for item in errors)
-    missing_codes = {"404", "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}
-
-    # One non-absence code anywhere in a wrapper chain wins over an outer
-    # "does not exist" message and over a nested absence-looking exception.
-    for item, error_code in coded:
-        if not error_code or error_code in missing_codes:
-            continue
-        if error_code == "INVALID_PARAMETER_VALUE" and _is_missing_alias_shape(item):
-            continue
+    missing_codes = frozenset({"404", "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"})
+    if _has_non_absence_code(coded, missing_codes):
         return False
 
     statuses_by_error = {
         id(item): frozenset(_http_status_codes(item)) for item in errors
     }
-    statuses = {
-        status
-        for statuses_for_item in statuses_by_error.values()
-        for status in statuses_for_item
-    }
-    alias_candidates = {
-        id(item)
-        for item, error_code in coded
-        if error_code in {"", "INVALID_PARAMETER_VALUE"}
-        and _is_missing_alias_shape(item)
-    }
-    alias_missing = {
-        id(item)
-        for item in errors
-        if id(item) in alias_candidates
-        and (not statuses_by_error[id(item)] or statuses_by_error[id(item)] == {400})
-    }
+    alias_missing = _missing_alias_ids(errors, coded, statuses_by_error)
     # A response is structured evidence too. Only 404 denotes general
     # absence; 401, 403, 429, 5xx, and every other non-404 response must
     # propagate. MLflow's exact missing-alias exception is the documented
     # special case: it uses INVALID_PARAMETER_VALUE/HTTP 400 for absence.
-    if any(
-        status != 404 and not (status == 400 and id(item) in alias_missing)
-        for item in errors
-        for status in statuses_by_error[id(item)]
-    ):
+    if _has_non_absence_status(errors, statuses_by_error, alias_missing):
         return False
     # An explicit absence code/status outranks a generic type on that same
     # exception. Databricks NotFound is an OSError, and httpx HTTPStatusError
     # is an HTTPError; neither generic base may erase NOT_FOUND/404. A wrapper
     # or nested exception without its own explicit absence remains an
     # independent non-absence signal and wins across the chain.
-    explicitly_missing = {
+    explicitly_missing = _explicitly_missing_ids(
+        errors, coded, statuses_by_error, alias_missing, missing_codes
+    )
+    if _has_non_absence_signal(errors, explicitly_missing):
+        return False
+    return _has_missing_signal(
+        errors, coded, statuses_by_error, alias_missing, missing_codes
+    )
+
+
+def _has_non_absence_code(
+    coded: tuple[tuple[Exception, str], ...], missing_codes: frozenset[str]
+) -> bool:
+    """Whether a structured provider code proves this is not absence."""
+
+    for item, error_code in coded:
+        if not error_code or error_code in missing_codes:
+            continue
+        if error_code == "INVALID_PARAMETER_VALUE" and _is_missing_alias_shape(item):
+            continue
+        return True
+    return False
+
+
+def _missing_alias_ids(
+    errors: tuple[Exception, ...],
+    coded: tuple[tuple[Exception, str], ...],
+    statuses_by_error: Mapping[int, frozenset[int]],
+) -> set[int]:
+    candidates = {
         id(item)
         for item, error_code in coded
-        if error_code in missing_codes
+        if error_code in {"", "INVALID_PARAMETER_VALUE"}
+        and _is_missing_alias_shape(item)
+    }
+    return {
+        id(item)
+        for item in errors
+        if id(item) in candidates
+        and (not statuses_by_error[id(item)] or statuses_by_error[id(item)] == {400})
+    }
+
+
+def _has_non_absence_status(
+    errors: tuple[Exception, ...],
+    statuses_by_error: Mapping[int, frozenset[int]],
+    alias_missing: set[int],
+) -> bool:
+    return any(
+        status != 404 and not (status == 400 and id(item) in alias_missing)
+        for item in errors
+        for status in statuses_by_error[id(item)]
+    )
+
+
+def _explicitly_missing_ids(
+    errors: tuple[Exception, ...],
+    coded: tuple[tuple[Exception, str], ...],
+    statuses_by_error: Mapping[int, frozenset[int]],
+    alias_missing: set[int],
+    missing_codes: frozenset[str],
+) -> set[int]:
+    codes_by_id = {id(item): error_code for item, error_code in coded}
+    return {
+        id(item)
+        for item in errors
+        if codes_by_id[id(item)] in missing_codes
         or 404 in statuses_by_error[id(item)]
         or id(item) in alias_missing
         or _is_explicit_missing_exception_type(item)
         or isinstance(item, FileNotFoundError)
     }
-    for item in errors:
-        # Confirmed absence on this node outranks that node's generic base or
-        # incidental wording. A separate wrapper/nested node is still checked
-        # independently and can therefore veto absence for the whole chain.
-        if id(item) in explicitly_missing:
-            continue
-        if _is_authoritative_non_absence_exception(
-            item
-        ) or _has_authoritative_non_absence_message(item):
-            return False
-    if 404 in statuses:
+
+
+def _has_non_absence_signal(
+    errors: tuple[Exception, ...], explicitly_missing: set[int]
+) -> bool:
+    # Confirmed absence on a node outranks its generic base or incidental
+    # wording. A separate wrapper/nested node can still veto absence.
+    return any(
+        id(item) not in explicitly_missing
+        and (
+            _is_authoritative_non_absence_exception(item)
+            or _has_authoritative_non_absence_message(item)
+        )
+        for item in errors
+    )
+
+
+def _has_missing_signal(
+    errors: tuple[Exception, ...],
+    coded: tuple[tuple[Exception, str], ...],
+    statuses_by_error: Mapping[int, frozenset[int]],
+    alias_missing: set[int],
+    missing_codes: frozenset[str],
+) -> bool:
+    statuses = {
+        status
+        for statuses_for_item in statuses_by_error.values()
+        for status in statuses_for_item
+    }
+    if 404 in statuses or alias_missing:
         return True
     if any(error_code in missing_codes for _, error_code in coded):
         return True
-    if any(_is_explicit_missing_exception_type(item) for item in errors):
-        return True
-    if alias_missing:
-        return True
-    if any(isinstance(item, FileNotFoundError) for item in errors):
+    if any(
+        _is_explicit_missing_exception_type(item) or isinstance(item, FileNotFoundError)
+        for item in errors
+    ):
         return True
     return any(
         marker in _registry_error_message(item).upper()
@@ -846,20 +954,16 @@ def _http_status_codes(error: Exception) -> tuple[int, ...]:
 
     values: list[Any] = []
     for attribute in ("status_code", "http_status_code", "status"):
-        try:
+        with suppress(Exception):  # opaque provider wrapper
             values.append(getattr(error, attribute, None))
-        except Exception:  # noqa: BLE001 - opaque provider wrapper
-            pass
     try:
         response = getattr(error, "response", None)
     except Exception:  # noqa: BLE001 - opaque provider wrapper
         response = None
     if response is not None:
         for attribute in ("status_code", "status"):
-            try:
+            with suppress(Exception):  # opaque provider response
                 values.append(getattr(response, attribute, None))
-            except Exception:  # noqa: BLE001 - opaque provider response
-                pass
 
     statuses: list[int] = []
     for value in values:

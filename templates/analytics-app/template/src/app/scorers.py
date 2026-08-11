@@ -10,13 +10,16 @@ means stay comparable across mixed case categories.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from app.provenance import SourceTier, parse_footer
 from app.semantics.executor import WarehouseExecutionError, ensure_read_only
 
 _VALUE_TOLERANCE = 1e-6
 
 
-def routing_tier_match(outputs: str, expectations: dict) -> float:
+def routing_tier_match(outputs: str, expectations: Mapping[str, Any]) -> float:
     """The answer's primary source tier matches the expected routing."""
 
     expected = expectations.get("expected_tier")
@@ -28,7 +31,7 @@ def routing_tier_match(outputs: str, expectations: dict) -> float:
     return 1.0 if records[0].tier.value == expected else 0.0
 
 
-def provenance_complete(outputs: str, expectations: dict) -> float:
+def provenance_complete(outputs: str, expectations: Mapping[str, Any]) -> float:
     """Every answer carries evidence; semantic claims must show their SQL."""
 
     records = parse_footer(str(outputs))
@@ -40,7 +43,7 @@ def provenance_complete(outputs: str, expectations: dict) -> float:
     return 1.0
 
 
-def sql_read_only(outputs: str, expectations: dict) -> float:
+def sql_read_only(outputs: str, expectations: Mapping[str, Any]) -> float:
     """Any SQL shown in provenance passes the read-only guard."""
 
     for record in parse_footer(str(outputs)):
@@ -53,7 +56,7 @@ def sql_read_only(outputs: str, expectations: dict) -> float:
     return 1.0
 
 
-def execution_match(outputs: str, expectations: dict) -> float:
+def execution_match(outputs: str, expectations: Mapping[str, Any]) -> float:
     """The recorded numeric result equals the snapshot-pinned expectation."""
 
     expected = expectations.get("expected_value")
@@ -76,7 +79,7 @@ def execution_match(outputs: str, expectations: dict) -> float:
     return 0.0
 
 
-def semantic_share(outputs: str, expectations: dict) -> float:
+def semantic_share(outputs: str, expectations: Mapping[str, Any]) -> float:
     """Share of answers resolved through the semantic layer (monitor the
     mean; clarifications and sanctioned raw fallbacks legitimately score 0)."""
 
@@ -97,5 +100,5 @@ CODE_SCORERS = (
 )
 
 
-def score_all(outputs: str, expectations: dict) -> dict[str, float]:
+def score_all(outputs: str, expectations: Mapping[str, Any]) -> dict[str, float]:
     return {fn.__name__: fn(outputs, expectations) for fn in CODE_SCORERS}

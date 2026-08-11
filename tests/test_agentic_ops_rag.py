@@ -461,7 +461,8 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
         try:
             yield span
         finally:
-            assert active_spans.pop() is span
+            closed_span = active_spans.pop()
+            assert closed_span is span
 
     def trace(**_options):
         return lambda target: target
@@ -486,7 +487,7 @@ def test_connected_prediction_has_one_governed_trace_and_matching_evidence(
         policy=tracing.TracePolicy(capture_mode=tracing.TraceCaptureMode.OFF),
     )
     monkeypatch.setattr(tracing, "_DEFAULT_TRACE_STATE", default_trace_state)
-    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", None)
+    monkeypatch.setattr(tracing, "_PROCESS_TRACE_CONFIGURATION", {})
     trace_state_token = tracing._TRACE_STATE.set(None)
 
     class FakeIndex:

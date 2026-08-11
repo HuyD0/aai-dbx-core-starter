@@ -47,6 +47,7 @@ The keys:
 | `databricks_host` | |
 | `job_compute_policy_id` | |
 | `sdk_artifact_volume` | `/Volumes/<catalog>/<schema>/<volume>`; the dotted form used by app resource bindings is derived from it |
+| `app_usage_policy_id` | Serverless usage policy for the optional console app; stamp the clone's policy even when the app remains disabled |
 | `template_repo` | The clone's own Git URL. Left pointing upstream, the platform console generates `bundle init` commands that initialise projects from the upstream repository |
 | `sdk_pip_source` | Where a generated project's **credential-free CI** installs `aai-core` from. Left pointing upstream, every generated project's CI depends on that repository over the public internet. Prefer an internal index: `aai-core=={{.aai_core_version}}` |
 
@@ -205,11 +206,17 @@ console bills continuously while running and is stopped by default; use
 
 ## 7. Protect and verify
 
-1. Protect `main` and require code-owner review.
-2. Run `gh workflow run auth-smoke.yml --ref main`.
-3. Run or merge into `deploy.yml`; a green deployment is the definitive
+1. Replace the upstream entry in `.github/CODEOWNERS` with a non-personal
+   enterprise team that has at least two eligible reviewers, then verify that
+   GitHub recognizes the team as a code owner.
+2. Protect `main`; require at least one approval, code-owner review, approval
+   of the latest push, conversation resolution, and the repository's required
+   quality/security checks. Enforce the rule for administrators and block
+   direct, force, and deletion pushes.
+3. Run `gh workflow run auth-smoke.yml --ref main`.
+4. Run or merge into `deploy.yml`; a green deployment is the definitive
    authorization test.
-4. Run `./scripts/cloud-verify.sh` for the credential-free local checks.
+5. Run `./scripts/cloud-verify.sh` for the credential-free local checks.
 
 Each additional staging or production target needs its externally managed
 federated credential and workspace registration before its GitHub environment

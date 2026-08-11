@@ -54,6 +54,11 @@
       "support": "stable",
       "owner": "aai-core"
     },
+    "agent_decision_observability": {
+      "support": "preview",
+      "owner": "mlflow-native-with-application-records",
+      "note": "Strict provider-neutral decision records use privacy-governed MLflow AGENT spans; observed execution spans remain authoritative and provider reasoning signals remain optional diagnostics."
+    },
     "framework_autologging": {
       "support": "preview",
       "owner": "aai-core-opt-in"

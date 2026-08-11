@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _TABLE = re.compile(r"^[A-Za-z0-9_{}.-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class Aggregation(StrEnum):
@@ -59,6 +60,10 @@ class SourceTable(BaseModel):
                 f"source table {self.table!r} must be a three-part "
                 "catalog.schema.table name"
             )
+        if self.loaded_at_column is not None and not _COLUMN.fullmatch(
+            self.loaded_at_column
+        ):
+            raise ValueError("loaded_at_column must be a simple column identifier")
         return self
 
     @property
@@ -81,6 +86,26 @@ class Dimension(BaseModel):
     type: Literal["string", "date", "number"]
     encodings: Mapping[str, str] = Field(default_factory=dict)
     join: Join | None = None
+
+
+class DetailField(BaseModel):
+    """Governed row-level field exposed to ``query_rows``.
+
+    Logical names are model-facing. Physical columns remain human-curated in
+    the semantic model and are never accepted from a model-generated request.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: str = Field(min_length=1)
+    column: str = Field(min_length=1)
+    type: Literal["string", "date", "number", "boolean"]
+
+    @model_validator(mode="after")
+    def check_column(self) -> DetailField:
+        if not _COLUMN.fullmatch(self.column):
+            raise ValueError("detail field column must be a simple identifier")
+        return self
 
 
 class Metric(BaseModel):
@@ -106,11 +131,17 @@ class SemanticModel(BaseModel):
     semantic_model: ModelInfo
     sources: Mapping[str, SourceTable]
     dimensions: Mapping[str, Dimension]
+    detail_fields: Mapping[str, DetailField] = Field(default_factory=dict)
     metrics: Mapping[str, Metric]
 
     @model_validator(mode="after")
     def check_cross_references(self) -> SemanticModel:
-        for group in (self.sources, self.dimensions, self.metrics):
+        for group in (
+            self.sources,
+            self.dimensions,
+            self.detail_fields,
+            self.metrics,
+        ):
             for name in group:
                 if not _NAME.match(name):
                     raise ValueError(f"name {name!r} must be lowercase snake_case")
@@ -124,6 +155,12 @@ class SemanticModel(BaseModel):
             if metric.source not in self.sources:
                 raise ValueError(
                     f"metric {name!r} references unknown source {metric.source!r}"
+                )
+        for name, field in self.detail_fields.items():
+            if field.source not in self.sources:
+                raise ValueError(
+                    f"detail field {name!r} references unknown source "
+                    f"{field.source!r}"
                 )
         if not self.metrics:
             raise ValueError("a semantic model requires at least one metric")
@@ -143,6 +180,11 @@ class SemanticModel(BaseModel):
             )
         dimension_names = ", ".join(sorted(self.dimensions))
         lines.append(f"- dimensions available: {dimension_names}")
+        by_source: dict[str, list[str]] = {}
+        for name, field in sorted(self.detail_fields.items()):
+            by_source.setdefault(field.source, []).append(name)
+        for source, names in sorted(by_source.items()):
+            lines.append(f"- governed row fields on {source}: {', '.join(names)}")
         return "\n".join(lines)
 
 

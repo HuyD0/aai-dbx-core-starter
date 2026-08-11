@@ -48,10 +48,13 @@ def main() -> None:
         schema=DEMO_SCHEMA,
     )
     seed = json.loads(SEED.read_text(encoding="utf-8"))
-    for statement in statements(seed):
-        executor.execute_unguarded(statement)
-    for name, payload in seed["tables"].items():
-        print({"table": name, "rows_loaded": len(payload["rows"])})
+    try:
+        for statement in statements(seed):
+            executor.execute_unguarded(statement)
+        for name, payload in seed["tables"].items():
+            print({"table": name, "rows_loaded": len(payload["rows"])})
+    finally:
+        executor.close()
 
 
 def _literal(value: str | None) -> str:

@@ -565,15 +565,14 @@ class PromotionRequestRecord(HubModel):
             != self.application_version_id
         ):
             raise ValueError("readiness snapshot belongs to another version")
-        if self.approval_readiness_snapshot is not None:
-            if (
-                self.approval_readiness_snapshot.application_id != self.application_id
-                or self.approval_readiness_snapshot.application_version_id
-                != self.application_version_id
-            ):
-                raise ValueError(
-                    "approval readiness snapshot belongs to another application version"
-                )
+        if self.approval_readiness_snapshot is not None and (
+            self.approval_readiness_snapshot.application_id != self.application_id
+            or self.approval_readiness_snapshot.application_version_id
+            != self.application_version_id
+        ):
+            raise ValueError(
+                "approval readiness snapshot belongs to another application version"
+            )
         if self.reviewed_at is not None and self.reviewed_at < self.requested_at:
             raise ValueError("reviewed_at cannot precede requested_at")
         if (self.reviewed_by is None) != (self.reviewed_at is None):

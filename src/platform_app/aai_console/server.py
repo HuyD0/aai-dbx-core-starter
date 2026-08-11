@@ -30,6 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
+from aai_core.manifest import load_manifest, manifest_json_schema
+
 from . import __version__
 from .checks import (
     PLATFORM_STATE_HEADING,
@@ -73,7 +75,6 @@ from .hub.jobs import (
     RecordingJobRunner,
     UnavailableJobRunner,
 )
-from .hub.manifest import load_manifest, manifest_json_schema
 from .hub.models import (
     AuthorizationContext,
     EvaluationRunRecord,
@@ -232,7 +233,6 @@ class ContainExceptions:
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _APPLICATION_ID = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
-_METRIC_KEY = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class ProblemError(RuntimeError):

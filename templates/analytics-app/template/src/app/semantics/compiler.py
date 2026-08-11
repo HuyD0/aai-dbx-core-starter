@@ -11,13 +11,15 @@ is what keeps it portable across warehouses and testable offline.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.semantics.models import Aggregation, Join, SemanticModel
+from app.semantics.models import Aggregation, DetailField, Join, SemanticModel
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_{}.-]+$")
 _YEAR = re.compile(r"^\d{4}$")
@@ -38,6 +40,53 @@ class Dialect(StrEnum):
     # WarehouseExecutor with its own dialect value; the compiled grammar is
     # already portable (DATE_TRUNC and standard aggregates).
     DATABRICKS = "databricks"
+
+
+class RowOperator(StrEnum):
+    EQ = "eq"
+    NE = "ne"
+    LT = "lt"
+    LTE = "lte"
+    GT = "gt"
+    GTE = "gte"
+    IN = "in"
+    IS_NULL = "is_null"
+
+
+class OrderDirection(StrEnum):
+    ASC = "asc"
+    DESC = "desc"
+
+
+ScalarValue = str | int | float | bool
+
+
+class RowFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    field: str = Field(min_length=1)
+    operator: RowOperator
+    value: ScalarValue | tuple[ScalarValue, ...] | None = None
+
+
+class RowOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    field: str = Field(min_length=1)
+    direction: OrderDirection = OrderDirection.ASC
+
+
+class RowQuery(BaseModel):
+    """Constrained row-level query; it contains no SQL or identifiers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source: str = Field(min_length=1)
+    fields: tuple[str, ...] = Field(min_length=1, max_length=20)
+    filters: tuple[RowFilter, ...] = Field(default=(), max_length=20)
+    order_by: tuple[RowOrder, ...] = Field(default=(), max_length=5)
+    limit: int = Field(default=100, ge=1, le=100)
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class QueryFilter(BaseModel):
@@ -64,7 +113,7 @@ class QueryParameter(BaseModel):
 
     name: str = Field(min_length=1)
     value: str = Field(min_length=1)
-    type: Literal["STRING", "DATE"]
+    type: Literal["STRING", "DATE", "DECIMAL", "BOOLEAN"]
 
 
 class CompiledQuery(BaseModel):
@@ -160,6 +209,177 @@ def compile_query(
         sql += f" GROUP BY {ordinals} ORDER BY 1"
     sql += f" LIMIT {query.limit}"
     return CompiledQuery(sql=sql, parameters=tuple(parameters), sources=tuple(sources))
+
+
+def compile_rows(
+    model: SemanticModel,
+    query: RowQuery,
+    dialect: Dialect = Dialect.DATABRICKS,
+) -> CompiledQuery:
+    """Compile governed row fields and typed values into parameterized SQL."""
+
+    if dialect is not Dialect.DATABRICKS:
+        raise SemanticCompileError(f"unsupported row-query dialect {dialect!r}")
+    source = model.sources.get(query.source)
+    if source is None:
+        raise SemanticCompileError(f"unknown source {query.source!r}")
+    if len(set(query.fields)) != len(query.fields):
+        raise SemanticCompileError("query_rows fields must be unique")
+
+    selected = [
+        f"{_quote(_row_field(model, query.source, name).column)} AS {_quote(name)}"
+        for name in query.fields
+    ]
+    sql = "SELECT " + ", ".join(selected)
+    sql += " FROM " + ".".join(_quote(part) for part in source.table.split("."))
+
+    clauses, parameters = _row_filter_clauses(model, query)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+
+    order_clause = _row_order_clause(model, query)
+    if order_clause:
+        sql += " ORDER BY " + order_clause
+    sql += f" LIMIT {query.limit}"
+    return CompiledQuery(
+        sql=sql,
+        parameters=tuple(parameters),
+        sources=(source.table,),
+    )
+
+
+def _row_filter_clauses(
+    model: SemanticModel, query: RowQuery
+) -> tuple[list[str], list[QueryParameter]]:
+    clauses: list[str] = []
+    parameters: list[QueryParameter] = []
+    for index, item in enumerate(query.filters):
+        field = _row_field(model, query.source, item.field)
+        column = _quote(field.column)
+        if item.operator is RowOperator.IS_NULL:
+            _append_is_null(clauses, column, item)
+        elif item.operator is RowOperator.IN:
+            _append_in_filter(clauses, parameters, column, field, item, index)
+        else:
+            _append_scalar_filter(clauses, parameters, column, field, item, index)
+    return clauses, parameters
+
+
+def _append_is_null(clauses: list[str], column: str, item: RowFilter) -> None:
+    if item.value is not None:
+        raise SemanticCompileError("is_null does not accept a value")
+    clauses.append(f"{column} IS NULL")
+
+
+def _append_in_filter(
+    clauses: list[str],
+    parameters: list[QueryParameter],
+    column: str,
+    field: DetailField,
+    item: RowFilter,
+    index: int,
+) -> None:
+    if field.type == "boolean":
+        raise SemanticCompileError("operator 'in' is not allowed for boolean fields")
+    if not isinstance(item.value, tuple) or not item.value:
+        raise SemanticCompileError("in requires a non-empty value list")
+    if len(item.value) > 20:
+        raise SemanticCompileError("in accepts at most 20 values")
+    names = []
+    for value_index, value in enumerate(item.value):
+        name = f"r{index}_{value_index}"
+        names.append(f":{name}")
+        parameters.append(_row_parameter(name, field, value))
+    clauses.append(f"{column} IN ({', '.join(names)})")
+
+
+def _append_scalar_filter(
+    clauses: list[str],
+    parameters: list[QueryParameter],
+    column: str,
+    field: DetailField,
+    item: RowFilter,
+    index: int,
+) -> None:
+    if isinstance(item.value, tuple) or item.value is None:
+        raise SemanticCompileError(f"{item.operator.value} requires exactly one value")
+    _require_operator(field, item.operator)
+    name = f"r{index}"
+    parameters.append(_row_parameter(name, field, item.value))
+    clauses.append(f"{column} {_SQL_OPERATORS[item.operator]} :{name}")
+
+
+def _row_order_clause(model: SemanticModel, query: RowQuery) -> str:
+    terms = []
+    for item in query.order_by:
+        field = _row_field(model, query.source, item.field)
+        terms.append(f"{_quote(field.column)} {item.direction.value.upper()}")
+    return ", ".join(terms)
+
+
+_SQL_OPERATORS = {
+    RowOperator.EQ: "=",
+    RowOperator.NE: "<>",
+    RowOperator.LT: "<",
+    RowOperator.LTE: "<=",
+    RowOperator.GT: ">",
+    RowOperator.GTE: ">=",
+}
+
+
+def _row_field(model: SemanticModel, source: str, name: str) -> DetailField:
+    field = model.detail_fields.get(name)
+    if field is None:
+        raise SemanticCompileError(f"unknown governed row field {name!r}")
+    if field.source != source:
+        raise SemanticCompileError(
+            f"field {name!r} is not available on source {source!r}"
+        )
+    return field
+
+
+def _require_operator(field: DetailField, operator: RowOperator) -> None:
+    allowed = {RowOperator.EQ, RowOperator.NE}
+    if field.type in {"date", "number"}:
+        allowed.update(
+            {RowOperator.LT, RowOperator.LTE, RowOperator.GT, RowOperator.GTE}
+        )
+    if operator not in allowed:
+        raise SemanticCompileError(
+            f"operator {operator.value!r} is not allowed for {field.type} fields"
+        )
+
+
+def _row_parameter(name: str, field: DetailField, value: ScalarValue) -> QueryParameter:
+    if field.type == "string":
+        if not isinstance(value, str) or not value:
+            raise SemanticCompileError("string filters require a non-empty string")
+        return QueryParameter(name=name, value=value, type="STRING")
+    if field.type == "date":
+        if not isinstance(value, str) or not _ISO_DATE.fullmatch(value):
+            raise SemanticCompileError("date filters require an ISO date")
+        try:
+            dt.date.fromisoformat(value)
+        except ValueError as error:
+            raise SemanticCompileError(
+                "date filters require a valid ISO date"
+            ) from error
+        return QueryParameter(name=name, value=value, type="DATE")
+    if field.type == "boolean":
+        if not isinstance(value, bool):
+            raise SemanticCompileError("boolean filters require true or false")
+        return QueryParameter(
+            name=name, value="true" if value else "false", type="BOOLEAN"
+        )
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SemanticCompileError("number filters require a finite number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise SemanticCompileError("number filters require a finite number")
+    try:
+        rendered = format(Decimal(str(value)), "f")
+    except InvalidOperation as error:
+        raise SemanticCompileError("number filters require a finite number") from error
+    return QueryParameter(name=name, value=rendered, type="DECIMAL")
 
 
 def _resolve_base_source(model: SemanticModel, query: SemanticQuery) -> str:

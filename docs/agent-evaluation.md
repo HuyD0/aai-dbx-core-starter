@@ -226,22 +226,18 @@ confirmation because MLflow cannot deserialize it for evaluation.
 A stored trace is therefore **passed to MLflow only in `traces` mode**. A
 live run's answers come from the agent and an answer-sheet run's from the
 file, so in both cases the recorded trace is a different run's answer — and
-MLflow does not treat it as inert baggage. A present trace column makes it
-rewrite `inputs`, `outputs` and `expectations` from the traces, and a row
-whose trace is null (which is how a nullable Unity Catalog column arrives)
-raises before your agent is ever called. Two consequences worth knowing:
+MLflow does not treat it as inert baggage. A present trace column participates
+in request/response extraction and root-span validation, and a row whose trace
+is null (which is how a nullable Unity Catalog column arrives) raises before
+your agent is ever called. Two consequences worth knowing:
 
 - Retrieval and tool-call scorers are not available in `answer-sheet` mode.
   Judging one run's retrieval beside another run's answers is not evidence
   about either; the plan excludes them and points at `--mode traces`.
-- In `traces` mode, an expectation recorded on the trace **wins over the
-  one in the dataset** — that is MLflow's behaviour, and may be exactly
-  what you want when reviewers curate expectations on traces. One
-  assessment anywhere replaces the *whole* column, so a row whose trace
-  carries none ends up with no expectations at all. The plan is built from
-  what will actually be there, so a scorer whose field the traces do not
-  supply is excluded and says so, rather than scoring an absent expected
-  response as a vacuous 1.0.
+- In `traces` mode, MLflow 3.15 preserves the dataset's authored expectations
+  column. Trace expectation assessments are extracted only when that column is
+  absent. AgentKit mirrors this rule before scorer selection, so its plan and
+  dataset digest describe the evidence MLflow actually evaluates.
 - Dropping the trace does not drop the question with it. A trace-only row
   keeps the request recovered from its trace, so re-running a production
   trace dataset with `--mode live` still has something to send the agent.

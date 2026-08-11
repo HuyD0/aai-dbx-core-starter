@@ -16,8 +16,13 @@ concurrency:
 
 jobs:
   lint-test:
+    name: Quality / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,20 +30,44 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
-      - name: Install aai-core (CI source) and project tooling
+      - name: Install the exact runtime and quality toolchains
         run: |
-          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-dev.lock
           python -m pip install -r requirements.lock
-          python -m pip install -e '.[dev]'
+          python -m pip install --no-deps -r requirements-ci.txt
+          python -m pip install --no-deps -e .
           python -m pip check
 
-      - name: Lint and unit tests
+      - name: Lint, type-check, test, and build the application
         run: |
           ruff check .
           black --check .
-          pytest -q
+          mypy \
+            --python-version "${{ matrix.python }}" \
+            --ignore-missing-imports \
+            --check-untyped-defs \
+            --disallow-incomplete-defs \
+            --disallow-untyped-defs \
+            src/app
+          pytest -q \
+            --cov=app --cov-report=term-missing
+          python -m build --wheel --no-isolation
 
-      - name: Offline release-gate checks
-        run: python evals/offline_checks.py
+      - name: Audit the generated runtime lock
+        run: |
+          while IFS= read -r lock; do
+            echo "auditing $lock"
+            python scripts/audit_dependencies.py \
+              --policy security-audit.toml \
+              --requirement "$lock"
+          done < <(
+            { find . -path ./.venv -prune -o -name requirements.lock -type f -print; \
+              printf '%s\n' requirements-dev.lock; } | sort -u
+          )
+
+      - name: Offline platform-contract and release-gate checks
+        run: |
+          python scripts/validate_project.py
+          python evals/offline_checks.py

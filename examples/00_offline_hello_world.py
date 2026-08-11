@@ -108,11 +108,14 @@ def main() -> None:
         }
     )
 
-    # Secrets are references; values render redacted everywhere.
+    # Secrets are references; verify their safe representations in memory.
+    # Output only the result of that check, never data derived from the value.
     secrets = SecretResolver()
     secrets.register("fake", StaticSecretProvider())
     secret: SecretValue = secrets.resolve("fake://vault/example-key")
-    print({"secret_repr": repr(secret), "secret_str": str(secret)})
+    assert repr(secret) == "SecretValue('[REDACTED]')"
+    assert str(secret) == "[REDACTED]"
+    print({"secret_redaction_verified": True})
 
     print("offline hello world completed with zero credentials")
     input_tokens = response.usage.get(

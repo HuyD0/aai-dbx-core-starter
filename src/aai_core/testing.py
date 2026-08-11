@@ -32,6 +32,16 @@ from aai_core.providers.types import (
 from aai_core.runtime import PlatformSettings
 from aai_core.tags import ResourceContext
 
+__all__ = [
+    "FakeChatModel",
+    "FakeEmbeddingProvider",
+    "FakeRetriever",
+    "StaticSecretProvider",
+    "dev_context",
+    "dev_settings",
+    "fake_tool_call",
+]
+
 
 def fake_tool_call(
     name: str, arguments: Mapping[str, Any], *, call_id: str = "call-1"
@@ -48,7 +58,7 @@ def fake_tool_call(
 def dev_settings(**overrides: Any) -> PlatformSettings:
     """A valid, non-strict settings object for tests (no YAML, no cloud)."""
 
-    resource_fields = {
+    resource_fields: dict[str, Any] = {
         "application": "test-app",
         "project": "test-project",
         "environment": "dev",

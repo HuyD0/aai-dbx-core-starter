@@ -5,8 +5,8 @@ Two canonical sources feed every bundle template:
 1. templates/_shared/ holds byte-for-byte scaffold copies. The Databricks template
    renderer only sees one template root, so files cannot be shared natively.
 2. platform-identifiers.json holds the environment-specific values. Their schema
-   defaults were previously hand-copied into all five templates, which meant a
-   clone had to edit the same value in six places and every upstream merge
+   defaults were previously hand-copied into every template, which meant a
+   clone had to edit the same value in several places and every upstream merge
    conflicted on all of them. They are now stamped from the fixture.
 
 A template is any templates/<dir>/ containing databricks_template_schema.json.
@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -77,11 +78,13 @@ def planned_schema_defaults() -> list[tuple[Path, str, str]]:
 #: same volume in dotted Unity Catalog form, which is what an app resource binding
 #: requires, so it is derived rather than stored twice.
 BUNDLE_VARIABLE_DEFAULTS = {
+    "app_usage_policy_id": "app_usage_policy_id",
     "job_compute_policy_id": "job_compute_policy_id",
     "sdk_artifact_volume": "sdk_artifact_volume",
     "template_repo": "template_repo",
 }
 BUNDLE_FILE = REPO_ROOT / "databricks.yml"
+PROJECT_FILE = REPO_ROOT / "pyproject.toml"
 
 
 def volume_full_name(volume_path: str) -> str:
@@ -148,16 +151,22 @@ def _apply_bundle_identifiers(check: bool) -> list[str]:
         if nested:
             current_key = nested.group(1)
             continue
-        if section == "variables" and re.match(r"^    default:", line):
-            if current_key in expected:
-                replace_scalar(index, expected[current_key])
-                current_key = None
-        elif section == "targets" and re.match(r"^      host:", line):
+        if (
+            section == "variables"
+            and re.match(r"^    default:", line)
+            and current_key in expected
+        ):
+            replace_scalar(index, expected[current_key])
+            current_key = None
+        elif (
+            section == "targets"
+            and re.match(r"^      host:", line)
+            and current_key == "dev"
+        ):
             # Only the dev target's host is this fixture's to own. A prod target
             # points at a different workspace and must not be stamped from the
             # dev identifier — see the commented prod block in databricks.yml.
-            if current_key == "dev":
-                replace_scalar(index, identifiers["databricks_host"])
+            replace_scalar(index, identifiers["databricks_host"])
 
     if not check and "".join(lines) != original:
         BUNDLE_FILE.write_text("".join(lines), encoding="utf-8")
@@ -169,6 +178,54 @@ def bundle_identifier_drift() -> list[str]:
     """databricks.yml literals that disagree with the fixture. Writes nothing."""
 
     return _apply_bundle_identifiers(check=True)
+
+
+def _apply_project_urls(check: bool) -> list[str]:
+    """Stamp package support links from the clone-owned repository URL."""
+
+    repository = str(load_identifiers()["template_repo"]).rstrip("/")
+    if repository.endswith(".git"):
+        repository = repository[:-4]
+    if not repository.startswith("https://"):
+        raise SystemExit("template_repo must be an HTTPS repository URL")
+    expected = {
+        "Documentation": f"{repository}/tree/main/docs",
+        "Issues": f"{repository}/issues",
+        "Repository": repository,
+    }
+    original = PROJECT_FILE.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    section: str | None = None
+    seen: set[str] = set()
+    drift: list[str] = []
+    for index, line in enumerate(lines):
+        header = re.match(r"^\[([^]]+)]\s*$", line)
+        if header:
+            section = header.group(1)
+            continue
+        if section != "project.urls":
+            continue
+        assignment = re.match(r'^([A-Za-z]+)\s*=\s*"[^"]*"\s*$', line)
+        if assignment is None or assignment.group(1) not in expected:
+            continue
+        key = assignment.group(1)
+        seen.add(key)
+        rendered = f'{key} = "{expected[key]}"\n'
+        if line == rendered:
+            continue
+        if check:
+            drift.append(f"pyproject.toml project URL {key} differs from template_repo")
+        else:
+            lines[index] = rendered
+    missing = sorted(set(expected) - seen)
+    if missing:
+        raise SystemExit(
+            "pyproject.toml [project.urls] is missing: " + ", ".join(missing)
+        )
+    if not check and "".join(lines) != original:
+        PROJECT_FILE.write_text("".join(lines), encoding="utf-8")
+        print("stamped package support URLs into pyproject.toml")
+    return drift
 
 
 def schema_default_drift() -> list[str]:
@@ -240,6 +297,36 @@ def planned_copies() -> list[tuple[Path, Path]]:
     return pairs
 
 
+def unmanaged_duplicate_sources() -> list[str]:
+    """Report byte-identical template source files outside shared ownership.
+
+    Rendered locks are generated independently and intentionally excluded. A
+    duplicate application/scaffold source must either be manifest-owned or be
+    made workload-specific so future security fixes cannot silently drift.
+    """
+
+    managed = {destination.resolve() for _, destination in planned_copies()}
+    groups: dict[str, list[Path]] = {}
+    for template in discover_templates():
+        for path in (template / "template").rglob("*"):
+            if not path.is_file() or path.stat().st_size <= 200:
+                continue
+            if path.name.endswith(".lock"):
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            groups.setdefault(digest, []).append(path)
+
+    drift: list[str] = []
+    for paths in groups.values():
+        if len(paths) < 2 or all(path.resolve() in managed for path in paths):
+            continue
+        rendered = ", ".join(str(path.relative_to(REPO_ROOT)) for path in sorted(paths))
+        drift.append(
+            "unmanaged byte-identical template source exceeds 200 bytes: " + rendered
+        )
+    return sorted(drift)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -271,6 +358,8 @@ def main() -> int:
 
     drift.extend(_apply_schema_defaults(check=args.check))
     drift.extend(_apply_bundle_identifiers(check=args.check))
+    drift.extend(_apply_project_urls(check=args.check))
+    drift.extend(unmanaged_duplicate_sources())
 
     if drift:
         for line in drift:

@@ -398,6 +398,8 @@ def test_gate_contracts_are_strict_frozen_and_serializable():
         "policy": policy.model_dump(mode="json"),
         "baseline_metrics": None,
     }
+    assert result.policy_digest == policy.digest
+    assert result.baseline_digest is None
 
 
 def test_gate_result_refuses_failures_inconsistent_with_its_policy():
@@ -410,7 +412,6 @@ def test_gate_result_refuses_failures_inconsistent_with_its_policy():
             ),
         )
     )
-
     with pytest.raises(ValidationError, match="recorded policy"):
         GateResult(metrics={"quality": 0.0}, failures=(), policy=policy)
     with pytest.raises(ValidationError, match="recorded policy"):
@@ -453,6 +454,50 @@ def test_gate_result_with_regression_rule_round_trips_with_its_baseline():
 
     assert rebuilt == result
     assert rebuilt.passed
+
+
+def test_gate_records_canonical_policy_and_baseline_digests():
+    policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="quality",
+                direction=MetricDirection.HIGHER,
+                required=0.8,
+            ),
+        )
+    )
+    equivalent_policy = GatePolicy.model_validate(policy.model_dump())
+
+    first = apply_gate(
+        {"quality": 0.9},
+        policy=policy,
+        baseline_metrics={"latency": 100, "quality": 0.92},
+    )
+    reordered = apply_gate(
+        {"quality": 0.9},
+        policy=equivalent_policy,
+        baseline_metrics={"quality": 0.92, "latency": 100},
+    )
+    changed_baseline = apply_gate(
+        {"quality": 0.9},
+        policy=policy,
+        baseline_metrics={"quality": 0.91, "latency": 100},
+    )
+    changed_policy = GatePolicy(
+        rules=(
+            MetricRule(
+                metric="quality",
+                direction=MetricDirection.HIGHER,
+                required=0.85,
+            ),
+        )
+    )
+
+    assert first.policy_digest == policy.digest == equivalent_policy.digest
+    assert first.baseline_digest == reordered.baseline_digest
+    assert first.baseline_digest != changed_baseline.baseline_digest
+    assert policy.digest != changed_policy.digest
+    assert apply_gate({"quality": 0.9}, policy=policy).baseline_digest is None
 
 
 def test_gate_rejects_values_without_a_native_metrics_mapping():

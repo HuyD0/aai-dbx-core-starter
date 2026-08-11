@@ -33,6 +33,24 @@ def test_shared_files_are_in_sync():
     )
 
 
+def test_byte_identical_template_sources_have_shared_ownership():
+    assert not sync_module.unmanaged_duplicate_sources()
+
+
+def test_generated_tag_contract_uses_schema_two():
+    for template in sync_module.discover_templates():
+        for path in (template / "template").rglob("*.yml.tmpl"):
+            text = path.read_text(encoding="utf-8")
+            if "tag_schema_version:" not in text:
+                continue
+            assert 'tag_schema_version: "1"' not in text, path
+            assert 'tag_schema_version: "2"' in text, path
+
+
+def test_package_support_urls_follow_clone_repository_identifier():
+    assert not sync_module._apply_project_urls(check=True)
+
+
 def test_common_dependency_pins_agree():
     pins = json.loads((SHARED / "versions.json").read_text())["pins"]
     pin_pattern = re.compile(r"^([A-Za-z0-9_.\[\]-]+)==([A-Za-z0-9_.]+)\s*$")
@@ -74,7 +92,7 @@ def test_manifest_files_exist_and_nothing_orphaned():
     on_disk = {
         str(path.relative_to(SHARED / "files"))
         for path in (SHARED / "files").rglob("*")
-        if path.is_file()
+        if path.is_file() and "__pycache__" not in path.parts
     }
     assert declared == on_disk, (
         f"manifest/files mismatch: only-declared={sorted(declared - on_disk)} "

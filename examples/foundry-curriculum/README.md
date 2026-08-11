@@ -18,6 +18,7 @@ foundry-curriculum/
 │   ├── evaluation_cases.jsonl         20 held-out starter cases
 │   ├── context_cases.jsonl            context/security regression cases
 │   └── a2a_cases.jsonl                routing and handoff regression cases
+├── offline_labs.py                    typed deterministic provider-boundary fakes
 ├── notebook_setup.py                  strict config and keyless call helpers
 └── notebooks/
     ├── 00_setup_and_architecture.ipynb
@@ -34,6 +35,21 @@ foundry-curriculum/
     ├── 11_mlflow_tracing_and_genai_evaluation.ipynb
     └── 12_dual_otel_export_foundry_and_mlflow.ipynb
 ```
+
+Every notebook embeds an `aai_lesson` metadata record with its audience, level,
+prerequisites, duration, execution modes, objectives, evidence, cleanup, and
+next lesson. Credential-free tests enforce that contract. `CURRENT_PRACTICES.md`
+records the certified dependency set, primary-source verification scope, and a
+maximum `review_by` date; preview or regional behavior is still rechecked before
+each connected exercise.
+
+Lessons 00–07 execute a complete offline evidence path through the typed support
+in `offline_labs.py`: risk treatment coverage, same-case model selection,
+structured-output rejection, secure hybrid retrieval, authorized idempotent
+tools, calibrated baseline/change evaluation, failure and rollback drills, and
+a fail-closed capstone evidence map. Synthetic quality, latency, cost, ranking,
+and trace values are always labelled `simulated_offline_fixture`; they validate
+application behavior and evidence shape, never provider performance.
 
 ## Configure it
 
@@ -129,9 +145,38 @@ arrive.
 
 Notebook 12 demonstrates the correct dual-export shape: one OpenTelemetry
 provider sends the same spans to Azure Monitor and MLflow. It is not a sync
-between the two backends. For a managed Databricks destination, use a
-platform-owned collector or gateway with keyless authentication; never freeze a
-Databricks bearer token into a Foundry Hosted Agent version.
+between the two backends. Application Insights stores the Azure Monitor export
+and supplies Foundry's operational trace view; MLflow remains the authoritative
+assurance plane for reviewed traces, EvaluationDatasets, evaluation runs, and
+Feedback / Assessments.
+
+Trace privacy follows the instrumentation owner. SDK-owned client spans use the
+application's OTel provider and explicit content/baggage settings. Foundry-
+native or hosted spans are produced by the managed protocol runtime and follow
+that runtime's telemetry policy. Turning content off for one owner does not
+redact the other's exceptions, identifiers, tool schemas, or custom attributes.
+
+The direct receivers also have different contracts. OSS MLflow accepts
+OTLP/HTTP at `/v1/traces`, uses `x-mlflow-experiment-id`, and requires a SQL
+backend. The managed Databricks MLflow receiver uses the workspace
+`/api/2.0/otel/v1/traces` route and a Unity Catalog table header. Direct managed
+export is only safe when the runtime can acquire and renew a short-lived token.
+For a long-running or immutable Hosted Agent version, put token acquisition and
+refresh at a platform-owned collector/gateway boundary; never freeze a bearer
+token into the agent version.
+
+For the certified Agent Framework Core 1.12.1 shape, `chat` and `execute_tool`
+are repeated sibling children of `invoke_agent`, not a TOOL span nested under a
+chat span. A hosted protocol runtime can add another root or parent; validate
+that managed hierarchy and its MLflow mapping in the deployed environment.
+
+Use a producer-out debugging ladder: prove IDs with an in-memory exporter,
+confirm one provider and its privacy switches, verify endpoint/protocol/flush
+and renewable auth, check Application Insights ingestion and RBAC, then check
+Foundry correlation and MLflow translation independently. For production
+learning, select and minimize useful traces, have a human review them, attach
+Feedback, promote only approved cases into a versioned MLflow EvaluationDataset,
+and rerun the normal gate.
 
 See [CURRENT_PRACTICES.md](CURRENT_PRACTICES.md) for the dated status matrix and
 official primary sources used by the advanced labs.

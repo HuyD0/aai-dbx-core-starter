@@ -20,7 +20,8 @@ OPS_RAG_KERNEL := aai-agentic-ops-rag
 OPS_RAG_MLFLOW_DIR := $(OPS_RAG_DIR)/.aai
 OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 
-.PHONY: help check-uv install lint format format-check test build check verify \
+.PHONY: help check-uv install lint format format-check typecheck test coverage audit \
+	build check verify \
 	sync-templates check-templates lock-templates check-template-locks \
 	sync-upstream resolve-upstream bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
@@ -181,11 +182,33 @@ format-check: ## Check Ruff and Black formatting without changing files.
 	$(PYTHON) -m ruff check .
 	$(PYTHON) -m black --check .
 
+typecheck: ## Type-check the public SDK and provider boundaries.
+	$(PYTHON) -m mypy --config-file pyproject.toml src/aai_core
+
 test: ## Run the credential-free test suite.
 	$(PYTHON) -m pytest -q
 
-build: ## Build the SDK source distribution and wheel.
-	$(PYTHON) -m build
+coverage: check-uv ## Run SDK tests with branch coverage and the release quality floor.
+	$(UV) sync --extra dev --extra all --locked
+	$(PYTHON) -m pytest -q \
+		--cov=aai_core --cov-branch --cov-report=term-missing \
+		--cov-report=xml
+
+audit: ## Audit the locked environment for published dependency advisories.
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml --uv-project .
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--uv-project examples/local-classification
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--uv-project examples/local-finetuning
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--requirement examples/local-classification/src/aai_local_classification/model-requirements.lock
+
+build: ## Build the SDK wheel used by downstream templates.
+	$(PYTHON) -m build --wheel
 
 sync-templates: ## Copy the canonical shared scaffold into every template.
 	$(PYTHON) scripts/sync_template_shared.py
@@ -288,7 +311,7 @@ sync-upstream: ## Merge a reviewed upstream release into a clone: make sync-upst
 	@echo "sync of $(TAG) is staged. Review 'git diff --cached' and 'git log',"
 	@echo "then 'git commit' and open a PR into main."
 
-check: check-templates format-check test build ## Run the standard pre-commit checks.
+check: check-templates format-check typecheck test build ## Run standard local checks.
 
 verify: ## Run the complete credential-free verification used by CI.
 	./scripts/cloud-verify.sh

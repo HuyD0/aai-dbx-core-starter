@@ -21,9 +21,9 @@ import os
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:  # POSIX is the deployment/runtime platform; keep Windows import-safe.
     import fcntl
@@ -151,20 +151,20 @@ class ResultsRecord(ContractModel):
             raise ValueError(
                 "metric values must be finite (invalid: " + ", ".join(non_finite) + ")"
             )
-        return freeze_value(value)
+        return cast(Mapping[str, float], freeze_value(value))
 
     @field_validator("gate_failures", mode="after")
     @classmethod
     def freeze_failures(cls, value: tuple[Any, ...]) -> tuple[Any, ...]:
-        return freeze_value(value)
+        return cast(tuple[Any, ...], freeze_value(value))
 
     @field_serializer("metrics", "baseline_metrics")
     def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
-        return thaw_value(value)
+        return cast(dict[str, float], thaw_value(value))
 
     @field_serializer("gate_failures")
     def serialize_failures(self, value: tuple[Any, ...]) -> list[dict[str, str]]:
-        return thaw_value(value)
+        return cast(list[dict[str, str]], thaw_value(value))
 
     @property
     def is_comparison(self) -> bool:
@@ -246,10 +246,8 @@ def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
         # an old pass ineligible without depending on a new write succeeding.
         # Rewriting the marker binds it to this attempt; if that or any later
         # step fails, the marker remains and readers refuse.
-        try:
+        with suppress(FileNotFoundError):
             os.replace(pointer_path, transition_path)
-        except FileNotFoundError:
-            pass
         _write_contract_file(transition_path, pointer.model_dump())
         _write_attempt_state(directory, attempt)
         _write_contract_file(pointer_path, pointer.model_dump())
@@ -511,15 +509,17 @@ def fetch_results(run_id: str, *, mlflow_module: Any | None = None) -> ResultsRe
 
     if mlflow_module is None:
         try:
-            import mlflow as mlflow_module  # type: ignore[no-redef]
+            import mlflow
         except ImportError as error:
             from aai_core.agentkit.errors import missing_extra
 
             raise missing_extra(
                 "reading results from an MLflow run", "genai"
             ) from error
+    else:
+        mlflow = mlflow_module
     try:
-        local = mlflow_module.artifacts.download_artifacts(
+        local = mlflow.artifacts.download_artifacts(
             run_id=run_id, artifact_path=RESULTS_ARTIFACT_PATH
         )
     except Exception as error:

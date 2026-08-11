@@ -11,4 +11,6 @@ fi
 
 # Keep the commit gate credential-free and fast. The pre-push hook runs the
 # complete build, workflow-security, and schema verification tier.
-make check-templates format-check test
+git diff --cached --check
+make check-templates format-check typecheck
+.venv/bin/python -m pytest -q -m "not generated_project"

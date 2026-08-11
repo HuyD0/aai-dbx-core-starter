@@ -2,12 +2,6 @@ bundle:
   name: {{.project_name}}
 
 variables:
-  cost_center:
-    default: {{.cost_center}}
-  team:
-    default: {{.team}}
-  owner_group:
-    default: {{.owner_group}}
   aai_core_version:
     default: {{.aai_core_version}}
   aai_core_volume:
@@ -15,8 +9,12 @@ variables:
   prompt_version:
     description: Exact immutable Prompt Registry version evaluated and served.
     default: "{{.prompt_version}}"
-  compute_policy_id:
-    default: {{.compute_policy_id}}
+  source_commit:
+    description: CI-attested source commit; local-dev fails release evidence joins.
+    default: local-dev
+  source_state:
+    description: CI-attested Git worktree state; release gates fail closed unless clean.
+    default: unknown
   # Compute shape as variables so environments/policies can override them
   # without editing resource files (the compute policy remains the enforcer).
   node_type_id:
@@ -45,9 +43,9 @@ targets:
         application: {{.application_name}}
         project: {{.project_name}}
         environment: ${bundle.target}
-        team: ${var.team}
-        owner_group: ${var.owner_group}
-        cost_center: ${var.cost_center}
+        team: {{.team}}
+        owner_group: {{.owner_group}}
+        cost_center: {{.cost_center}}
         data_classification: internal
         lifecycle: experimental
-        tag_schema_version: "1"
+        tag_schema_version: "2"

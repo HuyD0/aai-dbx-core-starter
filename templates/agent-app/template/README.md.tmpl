@@ -49,11 +49,96 @@ provider integration.
 {{ end }}
 - `src/app/agent.py` drives a bounded async loop over the provider-native
   client, executes async tools, and validates the final answer with the
-  Pydantic contract in `src/app/schemas.py`.
+  Pydantic contract in `src/app/schemas.py`. It records only meaningful,
+  observable decisions: a provider-requested tool selection, convergence after
+  tool evidence, or answer readiness without a tool. It never asks for or
+  reconstructs hidden chain-of-thought.
+- `src/app/controls.py` centralizes conservative defaults for input size, tool
+  turns/fan-out/timeouts/output, model output tokens, streamed output
+  characters, and the whole-request deadline. The local stream ceiling still
+  applies if a provider ignores `max_tokens`. New teams inherit these bounds
+  without learning provider-specific knobs; change them only with an SLO/cost
+  decision.
+- The prompt alias is resolved once at worker startup. Each request then loads
+  that immutable version inside its active trace so MLflow records prompt
+  lineage; MLflow caches the small Registry metadata lookup for five minutes.
+- `src/app/feedback.py` keeps behavior evidence native: feedback,
+  interventions, delayed business outcomes, and explicitly reviewed
+  expectations are MLflow assessments on the originating trace. Intervention
+  and outcome evidence is marked `review_required` and never mutates a
+  dataset or training pipeline automatically.
 - `aai-core` owns only the serializable request/response boundary; the native
   client, stream, tools, and loop remain recognizable application objects.
 - Tests script provider-native responses and streams with async fakes, so they
   remain credential-free and exercise cancellation and cleanup.
+
+## Behavior assurance model
+
+Use four separate evidence layers when reviewing an agent:
+
+| Layer | Question | Evidence in this project |
+|---|---|---|
+| Outcome | What happened at the end? | Structured output, correctness, safety, and schema validation |
+| Behavior | How did the agent get there? | Decision, TOOL, LLM, intervention, and feedback evidence |
+| Operations | How well did it operate? | Span status, errors, latency, token usage, and cost |
+| Optional internal diagnostics | What supported provider signal is available? | Provider-native metadata when explicitly exposed and approved |
+
+Outcome, behavior, and operations are the production assurance evidence.
+Provider diagnostics are optional, must not be reconstructed, and cannot be a
+runtime dependency.
+
+The decision record is a concise application claim, not proof that an action
+succeeded:
+
+```text
+decision.tool_selection [AGENT]
+  selected_action = lookup_order_status
+  reason = provider response explicitly requested this tool
+
+lookup_order_status [TOOL]
+  inputs/status/output = authoritative observed execution
+
+decision_action_consistency [Assessment]
+  verdict = independent comparison of the claim and execution
+
+trace_execution_success [Assessment]
+  verdict = independent root/TOOL status check, not a quality judgment
+```
+
+`decision.*` spans are native MLflow `AGENT` spans. Their bounded attributes
+hold a goal, selected action, concise observable reason, evidence references,
+and optional confidence. They do not contain prompts, documents, or hidden
+reasoning. The default loop has no retry, fallback, or human-approval branch,
+so it does not fabricate those decisions. The optional LangGraph recipe adds
+such behavior only when the application genuinely implements it.
+
+Tool scoring canonicalizes both application SDK spans (`span.name` plus
+object `span.inputs`) and managed OTel GenAI spans (`gen_ai.tool.name` plus
+`gen_ai.tool.call.arguments`). Missing or non-object arguments are scorer
+errors rather than implicit empty arguments, so runtime portability never
+weakens exact trajectory evaluation.
+
+Production scorer registration has a narrower input contract than a release
+evaluation row. A registered scorer receives the sampled trace, but no reviewed
+benchmark `expectations`. The semantic rule behind
+`decision_action_consistency` can be reused because it needs only the trace,
+but the registered version must be self-contained notebook-defined `@scorer`
+code. Registration serializes notebook code; importing
+`decision_action_consistency_scorer()` from `app.tool_scoring` does not make the
+factory and its helper dependencies serializable. By contrast,
+`decision_tool_appropriateness` requires reviewed `expected_tool_calls`, so it
+cannot be registered unchanged. Keep that scorer in dataset-backed development
+and release evaluation.
+
+Turning production evidence into a regression case is a reviewed data operation,
+not scorer registration. Certified MLflow 3.15.1 has no public `promote_trace`
+API. After minimization and human review, use the MLflow UI Add/Export flow or
+native `dataset.merge_records(reviewed_traces)`. Trace conversion carries root
+inputs/outputs, expectation Assessments, and source trace/session lineage into
+the dataset row; it does not copy the full span tree. Normalize reviewed
+behavior expectations such as `expected_tool_calls` when the gate needs them.
+This repository adds no stable `aai-core` wrapper for that native surface;
+live-validate the managed UI and conversion behavior in the target workspace.
 
 ## Release lifecycle
 
@@ -64,28 +149,53 @@ provider integration.
 2. Grow `evals/data/release_cases.json` — every case declares
    exact `expected_tool_calls` names and arguments (or an empty list for a
    no-tool case), so missing, repeated, mis-parameterized, or gratuitous
-   calls fail the gate.
-3. Configure the approved `judge-model` endpoint, then run the gate:
+   calls fail the gate. Decision appropriateness reuses these same reviewed
+   expectations; there is no duplicate decision ground-truth format.
+3. Publish the reviewed cases to their native Unity Catalog EvaluationDataset:
+   `python scripts/sync_dataset.py`. The command safely gets or creates the
+   dataset, associates it with this application's experiment, and deliberately
+   does not pass unsupported UC dataset tags. If cases are removed, choose a
+   new versioned `DATASET_NAME`; sync is non-destructive.
+4. Configure an approved `judge-model` endpoint that is distinct from the
+   `general-chat` target, then run the gate:
    `make evaluate PROMPT_VERSION=<version>` — explicitly routed
-   Correctness/Safety judges plus an exact compatibility layer over MLflow
-   `ToolCallCorrectness` and traced TOOL spans. The required version must be
-   the same value recorded in `databricks.yml`. The gate covers empty and
-   repeated-call trajectories as well as names/arguments, with thresholds in
-   `evals/gate_config.json` and baseline regression. After a released run,
-   append `EVALUATE_ARGS=--update-baseline`. The gate records an adopt or
-   reject decision run and prints its `decision_run_id`.
-   Evaluation and the monitoring notebook use `aai-core`'s strict judge
-   resolver before tracing, loading a prompt, or constructing an agent; a
-   missing, placeholder, non-Databricks, or malformed endpoint fails locally.
-   After case changes merge, register the ground truth in Unity Catalog:
-   `python scripts/sync_dataset.py` — evaluation runs link the dataset
-   by name.
-4. Promote the prompt (`python scripts/promote_prompt.py --version <n>
-   --decision-run-id <run-id> --to validation|production`). The script reloads
+   Correctness/Safety judges plus an MLflow-compatible exact scorer over
+   traced TOOL spans, claimed-action consistency, and
+   tool-decision appropriateness. `trace_execution_success` separately checks
+   root and TOOL span status; it cannot prove outcome or decision quality. The
+   required version must be the same value recorded in `databricks.yml`. The
+   gate covers empty and repeated-call trajectories as well as names/arguments,
+   with thresholds in
+   `evals/gate_config.json` and baseline regression. Evaluation verdicts remain
+   MLflow Assessments and are never written back into the original decision
+   span. The gate loads and passes the native UC dataset, verifies it exactly
+   matches the repository-reviewed suite, and records target/judge identities
+   plus gate-policy and baseline digests. It also records an adopt or reject
+   decision run and prints both the evaluation run ID and `decision_run_id`.
+   The SDK's strict judge resolver runs before tracing, prompt loading, or agent
+   construction, so a missing, placeholder, non-Databricks, or malformed
+   endpoint fails locally. After a released run, append
+   `EVALUATE_ARGS=--update-baseline`.
+5. Materialize immutable release evidence from that passing run:
+   `python scripts/create_release.py --prompt-version <n> --evaluation-run
+   <evaluation-run-id> --world-version <source-snapshot>`. The v2 manifest records the
+   World/Learning/Control digests, tool and execution limits, dataset digest,
+   AI Platform manifest hash, readiness profile, budget policy, service
+   levels, owner, and cost center. A default/manual **remote** bundle gate is
+   deliberately diagnostic: its safe defaults record `source_commit=local-dev`
+   and `source_state=unknown`, so it can show behavior but cannot mint a
+   release. Use the included CI workflow, which first verifies a clean checkout
+   and then injects the full Git SHA plus `GIT_DIRTY=false`. An advanced manual
+   deployment must perform the same clean-tree check and explicitly set
+   `BUNDLE_VAR_source_commit` to the full 40- or 64-character object ID and
+   `BUNDLE_VAR_source_state=false`. `create_release.py` fails closed for a ref
+   name, short SHA, dirty/unknown source, or a gate run from different code.
+6. Promote the prompt (`python scripts/promote_prompt.py --version <n>
+   --decision-run-id <decision-run-id> --to validation|production`). The script reloads
    and verifies the persisted decision artifact, tags, gate metrics, and exact
    prompt binding before moving either alias.
 {{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
-5. Before enabling deployment, have the approved platform process create the
+7. Before enabling deployment, have the approved platform process create the
    Databricks App named `{{.application_name}}-dev`. App creation provisions
    its dedicated service principal. The platform owner must grant that
    identity only:
@@ -110,7 +220,7 @@ provider integration.
    exists before `bundle deploy`, so CI cannot become the identity or
    permissions bootstrap.
 
-6. Deploy the bundle, run the workspace gate, and only then start or restart
+8. Deploy the bundle, run the workspace gate, and only then start or restart
    the externally provisioned Databricks App:
 
    ```bash
@@ -124,11 +234,28 @@ provider integration.
    `${var.prompt_version}` to the `release_gate` job and to the App as
    `AAI_PROMPT_VERSION`; App startup rejects a missing, invalid, or alias-like
    value and `ToolAgent` loads only that exact version.
-7. Enable production monitoring from `notebooks/02_enable_monitoring.py`
-   (sampled scorers are Beta and notebook-only) and attach user feedback to
-   traces; curate real failures back into the release cases.
+
+   The three commands above use the safe diagnostic provenance defaults when
+   run manually. That is intentional for a new team: use the CI-produced gate
+   run for release evidence unless your platform process explicitly attests
+   and injects the clean full-SHA values described in step 5.
+9. Before calling scorer `register()` / `start()`, complete the managed
+   production-monitoring preflight: confirm Production Monitoring (Beta) is
+   enabled; confirm the selected experiment is receiving the deployed agent's
+   traces and has an approved serverless budget policy; and, when that
+   experiment stores traces in Unity Catalog, confirm an available SQL
+   warehouse plus the required catalog, schema, and trace-table permissions.
+   `notebooks/02_enable_monitoring.py` fails closed until you explicitly confirm
+   that checklist. It does not enable Beta, attach a budget policy, create a
+   warehouse, or grant permissions. Then register the low-rate sampled scorer
+   from the notebook and attach user feedback to traces. Registered scorers see
+   a trace, not a benchmark row: define any trace-only consistency scorer as
+   self-contained notebook `@scorer` code, and do not register the
+   expectation-dependent appropriateness scorer unchanged. Use stable
+   group/system assessment source IDs rather than personal emails, and curate
+   only human-reviewed failures back into release cases.
 {{ else }}
-5. Serving is out of scope for this generated configuration. The bundle still
+7. Serving is out of scope for this generated configuration. The bundle still
    deploys and runs `release_gate`; there is no `agent_app` resource. Route the
    model through a governed Databricks endpoint and regenerate (or add
    equivalent reviewed resources) before introducing an HTTP deployment.

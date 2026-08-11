@@ -23,9 +23,9 @@ import contextlib
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 EXIT_PASS = 0
 EXIT_ERROR = 1
@@ -37,10 +37,17 @@ DECISIONS = ("adopt", "reject", "inconclusive")
 MODES = ("live", "answer-sheet", "traces")
 
 
+class _Unset:
+    """Sentinel distinguishing an omitted CLI override from explicit None."""
+
+
+_UNSET = _Unset()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     arguments = parser.parse_args(argv)
-    handler = arguments.handler
+    handler = cast(Callable[[argparse.Namespace], int], arguments.handler)
     try:
         return handler(arguments)
     except KeyboardInterrupt:  # pragma: no cover - interactive only
@@ -462,16 +469,16 @@ def _score(
     judges_enabled: bool,
     mode: str | None,
     project: Any | None = None,
-    decision: str | None = ...,  # type: ignore[assignment]
-    baseline_run: str | None = ...,  # type: ignore[assignment]
+    decision: str | None | _Unset = _UNSET,
+    baseline_run: str | None | _Unset = _UNSET,
     require_baseline: bool = True,
 ) -> int:
     from aai_core.agentkit.runner import run_scoring
 
     project = project if project is not None else _project(arguments)
-    if decision is ...:
+    if isinstance(decision, _Unset):
         decision = getattr(arguments, "decision", None)
-    if baseline_run is ...:
+    if isinstance(baseline_run, _Unset):
         baseline_run = getattr(arguments, "baseline_run", None)
     assume_yes = bool(getattr(arguments, "assume_yes", False))
     as_json = bool(getattr(arguments, "as_json", False))
@@ -571,7 +578,7 @@ def _rows_limit(arguments: argparse.Namespace) -> int | None:
             remediation="Drop --rows to score the default scope, or pass "
             "--full to score every row deliberately.",
         )
-    return rows
+    return cast(int, rows)
 
 
 def _project(arguments: argparse.Namespace) -> Any:

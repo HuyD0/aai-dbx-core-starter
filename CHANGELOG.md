@@ -6,6 +6,32 @@ All notable changes to `aai-core` are documented here.
 
 ## 0.4.0
 
+- Hardened SDK-owned logging, secret resolution, provider caching, and resource
+  cleanup. Registered secrets are redacted from formatted messages,
+  tracebacks, and stack text; cold loads are single-flight; owned Databricks,
+  Azure, and provider clients close deterministically under races.
+- Added tag schema v2 with canonical `validation` lifecycle values while
+  retaining a warning-only reader for historical schema-v1 `candidate`
+  evidence. Generated templates now emit schema v2 consistently.
+- Centralized the application-manifest contract in `aai_core.manifest` and made
+  generated project validation fail closed on ownership, cost, lifecycle,
+  compute-policy, dataset, and resource drift.
+- Replaced model-authored analytics SQL with typed, allowlisted semantic query
+  plans and parameterized values. Warehouse work now has bounded concurrency,
+  request and statement deadlines, explicit remote cancellation, and
+  deterministic executor cleanup.
+- Bounded agent streaming output and deadlines, preserved native backpressure,
+  and added shared-agent concurrency, slow-consumer, cancellation, provider
+  failure, and cleanup coverage.
+- Upgraded agent and RAG release evidence to fail-closed schema-v2 joins across
+  clean source, exact prompt and dataset versions, gate status, target/judge,
+  tool or retrieval configuration, control limits, and policy digests.
+- Added full rendered-project quality gates for every supported template
+  combination, strict SDK/template typing, branch-coverage ratchets, exact dev
+  locks, dependency auditing, and SHA-pinned CodeQL Python/Actions workflows.
+- Expanded the credential-free Foundry and lifecycle curriculum with executable
+  offline labs, typed support modules, a separate learner workshop, and
+  repository-local Codex skills for SDK, template, example, and release work.
 - Added `docs/llmops-playbook.md`, mapping industry LLMOps practice areas onto
   the platform's AI application lifecycle for application teams and the
   platform team, with a maturity checklist and an honest gap roadmap.

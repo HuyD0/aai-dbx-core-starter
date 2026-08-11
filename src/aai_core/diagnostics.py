@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from re import fullmatch
+from typing import Any, cast
 
 from aai_core.evaluation import (
     _NAME_COMPONENT,
@@ -20,9 +21,13 @@ from aai_core.identity import identity_summary
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.runtime import PlatformSettings
 
+__all__ = ["DoctorCheck", "main", "run_doctor"]
+
 
 @dataclass(frozen=True)
 class DoctorCheck:
+    """One safe diagnostic result with pass, fail, skip, or info status."""
+
     name: str
     status: str
     detail: str
@@ -33,9 +38,20 @@ def run_doctor(
     config_path: str | Path = "aai-platform.yml",
     check_cloud: bool = False,
 ) -> list[DoctorCheck]:
+    """Run safe local preflight checks without accepting missing config."""
+
     checks: list[DoctorCheck] = []
+    resolved_config = Path(config_path)
+    if not resolved_config.is_file():
+        return [
+            DoctorCheck(
+                "configuration",
+                "fail",
+                f"configuration file does not exist: {resolved_config}",
+            )
+        ]
     try:
-        settings = PlatformSettings.load(config_path)
+        settings = PlatformSettings.load(resolved_config)
         checks.append(DoctorCheck("configuration", "pass", "configuration is valid"))
     except Exception as error:
         return [DoctorCheck("configuration", "fail", str(error))]
@@ -64,7 +80,8 @@ def run_doctor(
         try:
             from aai_core.identity import databricks_workspace_client
 
-            current = databricks_workspace_client().current_user.me()
+            workspace = cast(Any, databricks_workspace_client())
+            current = workspace.current_user.me()
             identity = getattr(current, "user_name", None) or getattr(
                 current, "display_name", "authenticated"
             )
@@ -147,6 +164,8 @@ def _module_available(module: str) -> bool:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the command-line doctor and return a process exit code."""
+
     parser = argparse.ArgumentParser(prog="aai-core")
     subcommands = parser.add_subparsers(dest="command", required=True)
     doctor = subcommands.add_parser("doctor")

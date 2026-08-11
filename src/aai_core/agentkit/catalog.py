@@ -19,7 +19,7 @@ import functools
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import Field
 
@@ -313,6 +313,8 @@ def registry_direction(metric: str) -> str:
 
 
 def get_spec(name: str) -> ScorerSpec:
+    """Return the registered scorer specification named ``name``."""
+
     spec = _SPEC_BY_NAME.get(name)
     if spec is None:
         raise UnknownScorerError(
@@ -486,12 +488,27 @@ def _auto_reason(
     available = expectation_keys | set(shape.partial_expectation_keys)
     if spec.name == "response_length_ok":
         return True, "always on"
+    if spec.name == "latency_seconds":
+        return True, "always on when the run has traces"
+    expectation_reason = _expectation_scorer_reason(spec, available, config)
+    if expectation_reason is not None:
+        return expectation_reason
+    if spec.name == "safety":
+        return judges_enabled, "always on for judged runs"
+    return _trace_scorer_reason(spec, shape)
+
+
+def _expectation_scorer_reason(
+    spec: ScorerSpec,
+    available: set[str],
+    config: AgentkitConfig,
+) -> tuple[bool, str] | None:
+    """Explain automatic selection for expectation-based scorers."""
+
     if spec.name in {"keyword_coverage", "refusal_compliance"}:
         if "expected_response" in available:
             return True, "expectations.expected_response present"
         return False, ""
-    if spec.name == "latency_seconds":
-        return True, "always on when the run has traces"
     if spec.name == "correctness":
         if available.intersection(spec.needs_expectations):
             return True, "expected facts/response present"
@@ -509,12 +526,19 @@ def _auto_reason(
         if not available:
             return True, "no expectations; scoring relevance to the query"
         return False, ""
-    if spec.name == "safety":
-        return judges_enabled, "always on for judged runs"
     if spec.name == "guidelines":
         if config.scorers.guidelines:
             return True, "scorers.guidelines configured"
         return False, ""
+    return None
+
+
+def _trace_scorer_reason(
+    spec: ScorerSpec,
+    shape: DatasetShape,
+) -> tuple[bool, str]:
+    """Explain automatic selection for trace-dependent scorers."""
+
     if spec.needs_trace is TraceNeed.RETRIEVAL:
         if shape.has_retrieval_spans:
             return True, "rows carry retrieval spans"
@@ -709,7 +733,9 @@ def render_plan(plan: ScorerPlan, *, judge_model_uri: str | None = None) -> str:
     return "\n".join(lines)
 
 
-CODE_SCORER_FUNCTIONS: Mapping[str, Callable[[str, Mapping[str, Any]], float]] = {
+CodeScorer = Callable[[Any, dict[Any, Any] | None], float]
+
+CODE_SCORER_FUNCTIONS: Mapping[str, CodeScorer] = {
     "keyword_coverage": keyword_coverage,
     "refusal_compliance": refusal_compliance,
     "response_length_ok": response_length_ok,
@@ -739,7 +765,7 @@ def score_all(outputs: Any, expectations: Mapping[str, Any]) -> dict[str, float]
 
     text = _require_output_text(outputs)
     return {
-        name: function(text, expectations)
+        name: function(text, dict(expectations))
         for name, function in CODE_SCORER_FUNCTIONS.items()
     }
 
@@ -782,11 +808,14 @@ def build_scorer(
 
 
 def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
-    scorer_decorator = mlflow.genai.scorers.scorer
+    scorer_decorator = cast(
+        Callable[..., Callable[[Callable[..., float]], Callable[..., float]]],
+        mlflow.genai.scorers.scorer,
+    )
     if spec.name == "latency_seconds":
 
         @scorer_decorator(name=spec.name)
-        def latency_scorer(trace=None) -> float:
+        def latency_scorer(trace: Any = None) -> float:
             duration_ms = getattr(
                 getattr(trace, "info", None), "execution_duration", None
             )
@@ -805,7 +834,10 @@ def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
     function = CODE_SCORER_FUNCTIONS[spec.name]
 
     @scorer_decorator(name=spec.name)
-    def code_scorer(outputs=None, expectations=None):
+    def code_scorer(
+        outputs: Any = None,
+        expectations: Mapping[str, Any] | None = None,
+    ) -> float:
         return function(
             _require_output_text(outputs),
             dict(expectations or {}),

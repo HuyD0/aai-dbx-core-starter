@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from black import Mode, format_str
 from notebook_content import LESSONS
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,13 @@ def _cell(notebook: str, position: int, kind: str, source: str) -> dict[str, obj
     normalized = source.strip() + "\n"
     metadata: dict[str, object] = {}
     if kind == "code":
+        # The locked authoring toolchain owns notebook formatting. Formatting
+        # here keeps generated JSON and its reviewable Python source in one
+        # deterministic contract instead of requiring hand edits after render.
+        # Black's Jupyter writer stores the final code line without a trailing
+        # newline; mirror that representation so `black --check` and
+        # `render_notebooks.py --check` agree byte-for-byte.
+        normalized = format_str(normalized, mode=Mode(line_length=88)).rstrip("\n")
         stripped = normalized.lstrip()
         if stripped.startswith("# Notebook preflight"):
             metadata["tags"] = ["preflight"]

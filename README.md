@@ -26,7 +26,7 @@ framework-specific behavior.
 ```text
 src/aai_core/               installable platform SDK
 src/platform_app/           guided onboarding console (a Databricks App)
-templates/                  five AI lifecycle Databricks project templates
+templates/                  six AI lifecycle Databricks project templates
 templates/_shared/          canonical scaffold synced into every template
 examples/                   lifecycle examples and standalone sample projects
 resources/                  this repository's bundle smoke job
@@ -109,6 +109,51 @@ MLflow supplies different records for these questions: prompt versions preserve
 instructions, traces explain individual requests, runs preserve test evidence,
 and experiments collect comparable runs. The examples introduce those ideas in
 that order and explain their purpose before using their APIs.
+
+### Agent behavior assurance
+
+The agent path adds one more discipline:
+
+> Code tells us what could happen. Traces tell us what did happen. Evaluation
+> determines whether the observed behavior was acceptable.
+
+Assurance keeps four evidence layers distinct:
+
+| Layer | Question | Typical evidence |
+|---|---|---|
+| Outcome | What happened at the end? | Task completion, correctness, groundedness, and schema validity. |
+| Behavior | How did the agent get there? | Concise decision records, tool and retrieval spans, routing, retries, recovery, escalation, and human intervention. |
+| Operations | How well did it operate? | Latency, token usage, cost, failures, safety, and policy compliance. |
+| Optional internal diagnostics | What provider-supported debugging signal is available? | Explicitly supported reasoning summaries or metadata, when a provider returns them. |
+
+Assessment is independent of all four layers. Native MLflow scorers and
+Feedback judge whether the outcome and observed behavior were acceptable; they
+do not rewrite the original trace as if the agent knew the verdict. A runtime
+agent decision such as `tool_selection` is also different from the lifecycle
+`adopt` / `reject` / `inconclusive` release decision made from evaluation
+evidence.
+
+Decision records contain only concise, observable application evidence: the
+chosen action, an operational reason, and stable evidence references. They do
+not request, reconstruct, infer, or persist hidden model chain-of-thought.
+Provider diagnostics remain optional, separate, and unnecessary for production
+assurance. The existing `LLM`, `TOOL`, and retriever spans remain the ground
+truth for what actually executed and whether it succeeded.
+
+For this lifecycle, **MLflow is the authoritative assurance evidence plane**:
+traces preserve observed application behavior, runs preserve reproducible test
+results, EvaluationDatasets preserve reviewed regression cases, and Feedback /
+Assessments preserve independent verdicts. Foundry and its connected
+Application Insights resource remain valuable operational views for service-side
+diagnosis, but they do not replace or synchronize the reviewed MLflow evidence
+used by the release gate.
+
+Production learning is deliberate rather than automatic. Teams select useful
+or failed traces, minimize sensitive content, review and label the cases, add
+the approved examples to a versioned MLflow EvaluationDataset, rerun the same
+outcome, behavior, and operations checks, and only then consider a lifecycle
+release decision. An unreviewed production trace does not silently become
+ground truth.
 
 When the local lifecycle is understood, send the same evidence to the
 configured Databricks experiment:
@@ -220,6 +265,9 @@ and authenticated Databricks bundle validation.
 CI-equivalent verifier as a pre-push hook. Both use only repository-local hook
 definitions—no third-party hook repository is downloaded or executed. Run them
 manually with `make pre-commit`, `make pre-push`, or `make hooks-run`.
+The commit hook checks staged whitespace, formatting, scaffold drift, SDK
+typing, and the non-generated test tier. The push hook adds coverage, every
+generated-project combination, workflow security, schemas, and the wheel build.
 
 Optional provider dependencies are separated:
 
@@ -381,10 +429,12 @@ comparable with another's, and what the gate refuses.
 - [12 — Optional agent alignment and optimization](examples/12_agent_alignment_optimization.ipynb)
 - [13 — Decision records and gated promotion](examples/13_decision_and_promotion_lifecycle.ipynb)
 - [14 — Platform LLM operations](examples/14_platform_llm_operations.ipynb)
+- [15 — Compare and select LLMs for enterprise processes](examples/15_compare_and_select_llms.ipynb)
 - [Local classical-classification course](examples/local-classification/README.md)
 - [Offline Apple-silicon fine-tuning sample](examples/local-finetuning/README.md)
 - [Governed batch inference pattern](examples/governed-batch-inference/README.md)
 - [Developer guide](docs/developer-guide.md)
+- [SDK public API](docs/sdk-api.md)
 - [LLMOps playbook](docs/llmops-playbook.md) — industry LLMOps practice map
   onto this platform, for application teams and the platform team
 - [Platform architecture](docs/platform-architecture.md)
@@ -393,7 +443,11 @@ comparable with another's, and what the gate refuses.
 - [Enterprise clone runbook](docs/enterprise-clone-runbook.md) — including
   how a downstream clone tracks this repository without re-resolving the
   same identifier conflicts on every sync
-- [Platform audit](docs/platform-audit.md) — findings and prioritised backlog
+- [Current SDK and template quality standard](docs/quality-standards.md)
+- [Historical platform audit](docs/platform-audit.md) — point-in-time July 2026
+  findings; current acceptance criteria live in the quality standard
+- [Contributing](CONTRIBUTING.md), [support](SUPPORT.md), and
+  [security reporting](SECURITY.md)
 - [Tagging standard](docs/tagging-standard.md)
 - [Cost estimation](docs/cost-estimation.md) — the console's list-price estimator
   and its pricing snapshot

@@ -12,7 +12,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from aai_console.hub.manifest import (
+import aai_console.hub.manifest as compatibility_manifest
+from aai_core.manifest import (
     AIApplicationManifest,
     ManifestEnvelope,
     build_manifest_envelope,
@@ -23,6 +24,7 @@ from aai_console.hub.manifest import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_TEMPLATE = ROOT / "templates" / "_shared" / "files" / "ai-app.yaml.tmpl"
+SHARED_MANIFEST = ROOT / "templates" / "_shared" / "manifest.json"
 TEMPLATE_VARIABLE = re.compile(r"\{\{\.(?P<name>[a-z_]+)\}\}")
 COMMON_TEMPLATE_VARIABLES = {
     "application_name",
@@ -34,6 +36,12 @@ COMMON_TEMPLATE_VARIABLES = {
     "schema",
     "team",
 }
+
+
+def test_console_manifest_module_is_a_compatibility_export_of_the_sdk_contract():
+    assert compatibility_manifest.AIApplicationManifest is AIApplicationManifest
+    assert compatibility_manifest.load_manifest is load_manifest
+    assert compatibility_manifest.manifest_json_schema is manifest_json_schema
 
 
 def valid_document() -> dict:
@@ -90,6 +98,7 @@ def valid_document() -> dict:
                 },
             },
             "readiness": {"profile": "Medium-Risk-Production-v1"},
+            "costControls": {"budgetPolicy": "Platform-Standard-v1"},
             "serviceLevels": {
                 "maximumErrorRate": 0.02,
                 "p95LatencyMs": 8000,
@@ -128,11 +137,15 @@ def test_valid_manifest_normalizes_platform_owned_identifiers_and_aliases():
         "token_count": 1000.0,
     }
     assert manifest.spec.readiness.profile == "medium_risk_production_v1"
+    assert manifest.spec.cost_controls.budget_policy == "platform_standard_v1"
 
     serialized = manifest.model_dump(mode="json", by_alias=True, exclude_none=True)
     assert serialized["apiVersion"] == "ai-platform/v1"
     assert serialized["metadata"]["supportGroup"] == "group:investment-ai-support"
     assert serialized["spec"]["resources"]["evaluationJobKey"] == "release_gate"
+    assert serialized["spec"]["costControls"]["budgetPolicy"] == (
+        "platform_standard_v1"
+    )
     assert serialized["spec"]["serviceLevels"]["p95LatencyMs"] == 8000
 
 
@@ -148,6 +161,24 @@ def test_models_and_nested_collections_are_immutable():
     with pytest.raises(TypeError):
         manifest.spec.evaluation.thresholds["groundedness"] = 0.0
     assert isinstance(manifest.spec.resources.ai_search_indexes, tuple)
+
+
+def test_candidate_lifecycle_matches_the_sdk_vocabulary():
+    document = valid_document()
+    document["metadata"]["tags"]["lifecycle"] = "candidate"
+
+    with pytest.warns(DeprecationWarning, match="historical"):
+        manifest = load_manifest(document)
+
+    assert manifest.metadata.tags["lifecycle"] == "candidate"
+
+
+def test_data_classification_tag_uses_the_sdk_vocabulary():
+    document = valid_document()
+    document["metadata"]["tags"]["data_classification"] = "customer_data"
+
+    with pytest.raises(ValidationError, match="data_classification tag must be"):
+        load_manifest(document)
 
 
 def test_canonical_json_and_hash_are_stable_for_semantically_equivalent_input():
@@ -442,6 +473,36 @@ def test_readiness_profile_must_normalize_to_a_real_identifier():
         load_manifest(document)
 
 
+@pytest.mark.parametrize("value", ["", "---", 123])
+def test_budget_policy_must_normalize_to_a_real_identifier(value):
+    document = valid_document()
+    document["spec"]["costControls"]["budgetPolicy"] = value
+    with pytest.raises(ValidationError, match="budgetPolicy"):
+        load_manifest(document)
+
+
+def test_v1_manifest_without_cost_controls_preserves_legacy_canonical_form():
+    legacy_document = valid_document()
+    del legacy_document["spec"]["costControls"]
+
+    manifest = load_manifest(legacy_document)
+    canonical = canonical_manifest_json(manifest)
+
+    assert manifest.spec.cost_controls is None
+    assert "costControls" not in canonical
+    # Regression value from the pre-costControls ai-platform/v1 contract.
+    assert build_manifest_envelope(manifest).manifest_hash == (
+        "653eb87bccf71d25341f2221b760db28c1b1b1cdf4c9d855b1f51614ee5fa102"
+    )
+
+
+def test_budget_policy_is_required_when_cost_controls_are_declared():
+    missing_policy = valid_document()
+    del missing_policy["spec"]["costControls"]["budgetPolicy"]
+    with pytest.raises(ValidationError):
+        load_manifest(missing_policy)
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -459,10 +520,15 @@ def test_repository_url_must_identify_a_real_https_repository(url):
         load_manifest(document)
 
 
-def test_lifecycle_tag_uses_the_hub_filter_vocabulary():
+def test_validation_is_the_canonical_lifecycle_tag():
     document = valid_document()
-    document["metadata"]["tags"]["lifecycle"] = "candidate"
+    document["metadata"]["tags"]["lifecycle"] = "validation"
 
+    manifest = load_manifest(document)
+
+    assert manifest.metadata.tags["lifecycle"] == "validation"
+
+    document["metadata"]["tags"]["lifecycle"] = "preproduction"
     with pytest.raises(ValidationError, match="lifecycle tag must be"):
         load_manifest(document)
 
@@ -518,6 +584,10 @@ def test_json_schema_uses_external_aliases_and_forbids_unknown_fields():
     resource_properties = schema["$defs"]["ResourceBindings"]["properties"]
     assert "evaluationJobKey" in resource_properties
     assert "promotionJobKey" in resource_properties
+    cost_properties = schema["$defs"]["CostControlsSpec"]["properties"]
+    assert "budgetPolicy" in cost_properties
+    assert "costControls" in schema["$defs"]["ApplicationSpec"]["properties"]
+    assert "costControls" not in schema["$defs"]["ApplicationSpec"]["required"]
     assert "serviceLevels" in schema["$defs"]["ApplicationSpec"]["properties"]
     json.dumps(schema, allow_nan=False)
 
@@ -525,9 +595,11 @@ def test_json_schema_uses_external_aliases_and_forbids_unknown_fields():
 def test_shared_template_uses_only_cross_template_variables_and_disables_promotion():
     text = SHARED_TEMPLATE.read_text(encoding="utf-8")
     assert set(TEMPLATE_VARIABLE.findall(text)) == COMMON_TEMPLATE_VARIABLES
+    assert text.count('{{ template "project_name_underscored" . }}') == 1
     assert "evaluationJobKey: release_gate" in text
     assert "promotionJobId:" not in text
     assert "promotionJobKey:" not in text
+    assert "budgetPolicy: platform_standard_v1" in text
 
 
 def test_shared_template_renders_to_a_valid_manifest_and_is_synced_everywhere():
@@ -545,6 +617,10 @@ def test_shared_template_renders_to_a_valid_manifest_and_is_synced_everywhere():
     rendered = canonical
     for name, value in values.items():
         rendered = rendered.replace(f"{{{{.{name}}}}}", value)
+    rendered = rendered.replace(
+        '{{ template "project_name_underscored" . }}',
+        values["project_name"].replace("-", "_"),
+    )
     assert "{{." not in rendered
 
     manifest = load_manifest(yaml.safe_load(rendered))
@@ -559,6 +635,9 @@ def test_shared_template_renders_to_a_valid_manifest_and_is_synced_everywhere():
         if (path / "databricks_template_schema.json").is_file()
     )
     assert len(template_roots) == 6
+    shared_manifest = json.loads(SHARED_MANIFEST.read_text(encoding="utf-8"))
+    opted_out = set(shared_manifest["opt_out"].get("ai-app.yaml.tmpl", []))
     for template in template_roots:
         copied = template / "template" / "ai-app.yaml.tmpl"
-        assert copied.read_text(encoding="utf-8") == canonical
+        if template.name not in opted_out:
+            assert copied.read_text(encoding="utf-8") == canonical

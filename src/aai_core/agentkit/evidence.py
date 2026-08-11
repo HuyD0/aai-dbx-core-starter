@@ -157,6 +157,16 @@ def render_markdown(document: Mapping[str, Any]) -> str:
         "## What it was compared against",
         "",
     ]
+    _render_comparison(lines, comparison)
+    _render_scoring(lines, versions)
+    _render_gate(lines, gate)
+    _render_approval(lines, document["approver"])
+    _render_warnings(lines, document["warnings"])
+    _render_provenance(lines, document, versions)
+    return "\n".join(lines)
+
+
+def _render_comparison(lines: list[str], comparison: Mapping[str, Any]) -> None:
     if comparison["established_baseline"]:
         lines.append(
             "This run **is** the recorded baseline - the first version of "
@@ -178,6 +188,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
             f"{_format(row['baseline'])} | {_format(row['delta'])} |"
         )
 
+
+def _render_scoring(lines: list[str], versions: Mapping[str, Any]) -> None:
     lines.extend(
         [
             "",
@@ -201,6 +213,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     for name, prompt in sorted(dict(versions["judge_prompts"]).items()):
         lines.append(f"- judge prompt `{name}`: `{prompt}`")
 
+
+def _render_gate(lines: list[str], gate: Mapping[str, Any]) -> None:
     if gate["failures"]:
         lines.extend(["", "## Why the gate failed", ""])
         for failure in gate["failures"]:
@@ -210,7 +224,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     if gate.get("policy_source"):
         lines.extend(["", f"Thresholds applied: {gate['policy_source']}."])
 
-    approver = document["approver"]
+
+def _render_approval(lines: list[str], approver: Mapping[str, Any]) -> None:
     lines.extend(
         [
             "",
@@ -230,11 +245,17 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     if approver.get("caveat"):
         lines.append(f"- **Not verified**: {approver['caveat']}")
 
-    if document["warnings"]:
+
+def _render_warnings(lines: list[str], warnings: list[str]) -> None:
+    if warnings:
         lines.extend(["", "## Warnings", ""])
-        for warning in document["warnings"]:
+        for warning in warnings:
             lines.append(f"- {warning}")
 
+
+def _render_provenance(
+    lines: list[str], document: Mapping[str, Any], versions: Mapping[str, Any]
+) -> None:
     lines.extend(
         [
             "",
@@ -251,7 +272,6 @@ def render_markdown(document: Mapping[str, Any]) -> str:
             "",
         ]
     )
-    return "\n".join(lines)
 
 
 def databricks_approver_lookup(

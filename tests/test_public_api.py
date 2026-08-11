@@ -1,9 +1,25 @@
 """Public API surface and import hygiene guards."""
 
+import importlib
+import inspect
+import pkgutil
 import subprocess
 import sys
 
 import aai_core
+
+
+def _public_sdk_modules():
+    """Yield the root package and importable, non-private SDK modules."""
+
+    yield aai_core
+    for module_info in pkgutil.walk_packages(
+        aai_core.__path__, prefix=f"{aai_core.__name__}."
+    ):
+        relative_parts = module_info.name.split(".")[1:]
+        if any(part.startswith("_") for part in relative_parts):
+            continue
+        yield importlib.import_module(module_info.name)
 
 
 def test_public_api_surface_is_snapshotted():
@@ -16,6 +32,21 @@ def test_public_api_surface_is_snapshotted():
         "__version__",
         "bootstrap",
     ]
+
+
+def test_public_exported_classes_and_functions_have_docstrings():
+    """Every class/function contract named by ``__all__`` is documented."""
+
+    missing: list[str] = []
+    for module in _public_sdk_modules():
+        for name in getattr(module, "__all__", ()):
+            value = getattr(module, name)
+            if (
+                inspect.isclass(value) or inspect.isfunction(value)
+            ) and not inspect.getdoc(value):
+                missing.append(f"{module.__name__}.{name}")
+
+    assert not missing, "public exports missing docstrings: " + ", ".join(missing)
 
 
 def test_importing_aai_core_pulls_no_provider_extras():

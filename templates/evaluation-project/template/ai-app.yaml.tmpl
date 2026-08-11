@@ -50,7 +50,7 @@ spec:
 
   evaluation:
     profile: golden_path_release_gate_v1
-    dataset: {{.catalog}}.{{.schema}}.evaluation_cases
+    dataset: {{.catalog}}.{{.schema}}.{{.dataset_name}}
     minimumCases: 1
     maximumAgeHours: 168
     thresholds:
@@ -58,6 +58,12 @@ spec:
 
   readiness:
     profile: development_v1
+
+  # Logical reference only. The platform resolves and enforces this policy at
+  # the gateway/serving boundary; mutable prices and credentials never belong
+  # in an application manifest.
+  costControls:
+    budgetPolicy: platform_standard_v1
 
   serviceLevels:
     maximumErrorRate: 0.02

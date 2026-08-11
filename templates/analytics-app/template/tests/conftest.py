@@ -52,6 +52,22 @@ MODEL_PAYLOAD = {
             "join": {"from_column": "customer_id", "to_column": "customer_id"},
         },
     },
+    "detail_fields": {
+        "order_id": {"source": "orders", "column": "order_id", "type": "string"},
+        "customer_id": {
+            "source": "orders",
+            "column": "customer_id",
+            "type": "string",
+        },
+        "order_date": {"source": "orders", "column": "order_date", "type": "date"},
+        "order_status": {"source": "orders", "column": "status", "type": "string"},
+        "order_amount": {"source": "orders", "column": "amount", "type": "number"},
+        "customer_region": {
+            "source": "customers",
+            "column": "region",
+            "type": "string",
+        },
+    },
     "metrics": {
         "revenue": {
             "source": "orders",

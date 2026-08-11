@@ -9,7 +9,7 @@ import pytest
 
 from aai_core.testing import dev_context, fake_tool_call
 from app.agent import AnalyticsAgent
-from app.config import MAX_AGENT_TURNS
+from app.controls import DEFAULT_ANALYTICS_LIMITS, AnalyticsLimits
 from app.knowledge import KnowledgeRouter
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +109,7 @@ def test_agent_answers_with_code_rendered_footer(model, seed_executor):
     system = client.requests[0]["messages"][0]["content"]
     assert "RUNBOOK" in system
     assert "orders" in system
+    assert all(request["max_tokens"] == 2048 for request in client.requests)
 
 
 def test_agent_review_pass_replaces_prose_and_counts_tokens(model, seed_executor):
@@ -159,7 +160,7 @@ def test_agent_without_tool_calls_omits_the_footer(model, seed_executor):
 def test_agent_bounds_the_tool_loop(model, seed_executor):
     calls = [
         _response(tool_calls=[fake_tool_call("list_metrics", {})])
-        for _ in range(MAX_AGENT_TURNS)
+        for _ in range(DEFAULT_ANALYTICS_LIMITS.max_agent_turns)
     ]
     agent = _agent(model, seed_executor, ScriptedAsyncClient(calls))
 
@@ -171,6 +172,35 @@ def test_agent_rejects_empty_questions(model, seed_executor):
     agent = _agent(model, seed_executor, ScriptedAsyncClient([]))
     with pytest.raises(ValueError, match="empty"):
         asyncio.run(agent.aanswer("   "))
+
+
+def test_agent_rejects_oversized_questions_before_a_model_call(model, seed_executor):
+    client = ScriptedAsyncClient([])
+    limits = AnalyticsLimits(max_question_chars=5)
+    agent = _agent(model, seed_executor, client, limits=limits)
+
+    with pytest.raises(ValueError, match="character bound"):
+        asyncio.run(agent.aanswer("123456"))
+    assert client.requests == []
+
+
+def test_agent_bounds_tool_calls_per_turn(model, seed_executor):
+    limits = AnalyticsLimits(max_tool_calls_per_turn=1)
+    response = _response(
+        tool_calls=[
+            fake_tool_call("list_metrics", {}),
+            fake_tool_call("list_metrics", {}),
+        ]
+    )
+    agent = _agent(
+        model,
+        seed_executor,
+        ScriptedAsyncClient([response]),
+        limits=limits,
+    )
+
+    with pytest.raises(RuntimeError, match="tools in one turn"):
+        asyncio.run(agent.aanswer("Use too many tools"))
 
 
 def test_agent_closes_only_clients_it_owns(model, seed_executor):

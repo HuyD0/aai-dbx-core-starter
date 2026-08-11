@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+__all__ = ["azure_credential", "databricks_workspace_client", "identity_summary"]
+
 
 def azure_credential(mode: str = "auto", **kwargs: Any) -> object:
     """Create an Azure credential without accepting a client secret."""

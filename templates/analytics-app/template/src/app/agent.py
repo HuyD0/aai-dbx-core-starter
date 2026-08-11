@@ -14,15 +14,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from aai_core import PlatformContext, bootstrap
+from aai_core.providers import ChatModel
 from aai_core.tracing import provider_span
-from app.config import MAX_AGENT_TURNS, adversarial_review_enabled
+from app.config import adversarial_review_enabled
+from app.controls import DEFAULT_ANALYTICS_LIMITS, AnalyticsLimits
 from app.knowledge import KnowledgeRouter
 from app.provenance import ProvenanceRecord, render_footer
 from app.reviewer import (
@@ -34,14 +36,14 @@ from app.reviewer import (
 )
 from app.semantics.executor import WarehouseExecutor
 from app.semantics.models import SemanticModel, load_semantic_model
-from app.tools import ProvenanceLog, build_registry
+from app.tools import ProvenanceLog, build_analytics_registry
 
 
 class FinalAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    answer: str
-    caveats: tuple[str, ...] = ()
+    answer: str = Field(min_length=1, max_length=8_000)
+    caveats: tuple[str, ...] = Field(default=(), max_length=10)
 
 
 class TokenUsage(BaseModel):
@@ -80,12 +82,15 @@ class AnalyticsAgent:
         reviewer_messages: tuple[dict[str, Any], ...] = (),
         enable_review: bool | None = None,
         async_client: Any | None = None,
+        limits: AnalyticsLimits = DEFAULT_ANALYTICS_LIMITS,
     ) -> None:
         self.context = context or bootstrap()
         self.model = self.context.providers.model("general-chat")
+        self._native_model_name = _native_model_name(self.model)
         self.semantic_model = semantic_model
         self.knowledge = knowledge
         self.executor = executor
+        self.limits = limits
         self._system_messages = system_messages
         self._reviewer_messages = reviewer_messages
         if enable_review is None:
@@ -124,19 +129,41 @@ class AnalyticsAgent:
         )
 
     async def aanswer(self, question: str) -> AnalyticsAnswer:
+        deadline = asyncio.timeout(self.limits.request_deadline_seconds)
+        try:
+            async with deadline:
+                return await self._aanswer(question)
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise
+            raise RuntimeError(
+                "Analytics request exceeded its centrally configured "
+                f"{self.limits.request_deadline_seconds:g}-second deadline"
+            ) from error
+
+    async def _aanswer(self, question: str) -> AnalyticsAnswer:
         if not question.strip():
             raise ValueError("question must not be empty")
+        if len(question) > self.limits.max_question_chars:
+            raise ValueError(
+                "question exceeds the centrally configured "
+                f"{self.limits.max_question_chars}-character bound"
+            )
         usage = _UsageAccumulator()
         log = ProvenanceLog()
-        registry = build_registry(
-            self.semantic_model, self.knowledge, self.executor, log
+        registry = build_analytics_registry(
+            self.semantic_model,
+            self.knowledge,
+            self.executor,
+            log,
+            self.limits,
         )
         client = self._client()
         transcript = self._render_system(question)
         tools_used: list[str] = []
 
         final_message = None
-        for _ in range(MAX_AGENT_TURNS):
+        for _ in range(self.limits.max_agent_turns):
             response = await self._complete(
                 client, transcript, usage, "main", tools=registry.openai_tools()
             )
@@ -145,6 +172,16 @@ class AnalyticsAgent:
             if not tool_calls:
                 final_message = message
                 break
+            if len(tool_calls) > self.limits.max_tool_calls_per_turn:
+                raise RuntimeError(
+                    "Model requested more than the centrally configured "
+                    f"{self.limits.max_tool_calls_per_turn} tools in one turn"
+                )
+            if len(tools_used) + len(tool_calls) > self.limits.max_total_tool_calls:
+                raise RuntimeError(
+                    "Analytics agent exceeded the centrally configured "
+                    f"{self.limits.max_total_tool_calls} total tool-call bound"
+                )
             transcript.append(_assistant_tool_message(message))
             for tool_call in tool_calls:
                 name = tool_call.function.name
@@ -162,7 +199,8 @@ class AnalyticsAgent:
                 )
         if final_message is None:
             raise RuntimeError(
-                f"Tool loop did not converge within {MAX_AGENT_TURNS} turns; "
+                "Tool loop did not converge within "
+                f"{self.limits.max_agent_turns} turns; "
                 "tighten the runbook or tool results before raising the bound."
             )
 
@@ -265,20 +303,21 @@ class AnalyticsAgent:
     async def _complete(
         self,
         client: Any,
-        messages: list[Mapping[str, Any]],
+        messages: Sequence[Mapping[str, Any]],
         usage: _UsageAccumulator,
         usage_pass: str,
         **options: Any,
     ) -> Any:
+        options.setdefault("max_tokens", self.limits.max_output_tokens)
         with provider_span(
             "model.generate",
             span_type="LLM",
             attributes={
                 "aai.provider": self.model.provider,
                 "aai.logical_name": self.model.logical_name,
-                "aai.model": self.model.model,
+                "aai.model": self._native_model_name,
                 "mlflow.llm.provider": self.model.provider,
-                "mlflow.llm.model": self.model.model,
+                "mlflow.llm.model": self._native_model_name,
                 "mlflow.message.format": "openai",
             },
         ) as span:
@@ -288,7 +327,7 @@ class AnalyticsAgent:
                     inputs["tools"] = options["tools"]
                 span.set_inputs(inputs)
             response = await client.chat.completions.create(
-                model=self.model.model,
+                model=self._native_model_name,
                 messages=list(messages),
                 temperature=0.0,
                 **options,
@@ -349,10 +388,13 @@ def _load_messages(path: str | Path) -> tuple[dict[str, Any], ...]:
     return tuple(dict(message) for message in payload["messages"])
 
 
-def _assistant_tool_message(message: Any) -> Mapping[str, Any]:
+def _assistant_tool_message(message: Any) -> dict[str, Any]:
     dump = getattr(message, "model_dump", None)
     if callable(dump):
-        return dump(exclude_none=True)
+        rendered = dump(exclude_none=True)
+        if not isinstance(rendered, Mapping):
+            raise TypeError("provider messages must serialize to an object")
+        return dict(rendered)
     return {
         "role": "assistant",
         "content": getattr(message, "content", None) or "",
@@ -400,6 +442,13 @@ def _usage_mapping(value: Any) -> dict[str, int]:
     return result
 
 
+def _native_model_name(model: ChatModel) -> str:
+    value = getattr(model, "model", None)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("the native chat client requires a configured model name")
+    return value
+
+
 async def _close_async_resource(resource: Any | None) -> None:
     if resource is None:
         return
@@ -408,4 +457,4 @@ async def _close_async_resource(resource: Any | None) -> None:
         return
     result = close()
     if inspect.isawaitable(result):
-        await result
+        _ = await result

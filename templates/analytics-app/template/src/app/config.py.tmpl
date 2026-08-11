@@ -15,6 +15,10 @@ DEMO_CATALOG = "{{.catalog}}"
 DEMO_SCHEMA = "{{.schema}}"
 ADVERSARIAL_REVIEW_DEFAULT = "{{.adversarial_review}}"
 
+# Native MLflow EvaluationDataset in Unity Catalog — the governed copy of
+# evals/data/golden_cases.json published by scripts/sync_dataset.py.
+DATASET_NAME = "{{ template "project_name_underscored" . }}_golden_cases"
+
 # Context budgets — the single tuning surface for what enters the model's
 # context (taught in notebooks/02_context_engineering.py). Routing beats
 # dumping: the knowledge index summary rides in the system prompt, full
@@ -22,7 +26,6 @@ ADVERSARIAL_REVIEW_DEFAULT = "{{.adversarial_review}}"
 # true row count stated.
 MAX_RESULT_ROWS_IN_CONTEXT = 20
 MAX_REFERENCE_DOC_CHARS = 6000
-MAX_AGENT_TURNS = 8
 
 _PLACEHOLDER_PREFIX = "replace-with-"
 

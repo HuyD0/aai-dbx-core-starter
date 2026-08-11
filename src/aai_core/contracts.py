@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+__all__ = ["ContractModel", "FrozenMapping", "freeze_value", "thaw_value"]
+
 
 class ContractModel(BaseModel):
     """Strict immutable base for configuration and evidence boundaries.
@@ -36,6 +38,7 @@ class FrozenMapping(Mapping[str, Any]):
     """
 
     __slots__ = ("_data",)
+    _data: dict[str, Any]
 
     def __init__(self, value: Mapping[str, Any]) -> None:
         object.__setattr__(
@@ -59,8 +62,8 @@ class FrozenMapping(Mapping[str, Any]):
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Mapping) and dict(self.items()) == dict(other.items())
 
-    def __reduce__(self):
-        return (type(self), (thaw_value(self),))
+    def __reduce__(self) -> tuple[type[FrozenMapping], tuple[dict[str, Any]]]:
+        return (type(self), (self.copy(),))
 
     def __deepcopy__(self, memo: dict[int, Any]) -> FrozenMapping:
         copied = type(self)(copy.deepcopy(thaw_value(self), memo))

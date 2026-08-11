@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install uv==0.8.23
           uv lock --check
-          uv sync --python 3.12 --extra dev --locked
+          uv sync --python 3.12 --extra dev --extra all --locked
 
       - name: Install Databricks CLI for local template rendering
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
@@ -63,9 +63,17 @@ jobs:
       - name: Test code and execute every notebook twice
         run: make -C examples/local-classification check
 
+      - name: Audit the course runtime dependency closure
+        run: |
+          examples/local-classification/.venv/bin/python \
+            templates/_shared/files/scripts/audit_dependencies.py \
+            --policy templates/_shared/files/security-audit.toml \
+            --requirement \
+            examples/local-classification/src/aai_local_classification/model-requirements.lock
+
   python-311:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,6 +82,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+
+      - name: Install Databricks CLI for local template rendering
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
       - name: Install and test Python 3.11 compatibility
         run: |
@@ -91,8 +102,13 @@ jobs:
           make -C examples/local-classification notebook-check
 
   provider-extras:
+    name: Provider and Foundry contracts / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,12 +116,19 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
-      - name: Install the certified provider stack
+      - name: Install the certified provider and Foundry stacks
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
         run: |
           python -m pip install uv==0.8.23
-          uv sync --python 3.12 --extra dev --extra all --locked
+          uv sync \
+            --python "$PYTHON_VERSION" \
+            --extra dev \
+            --extra all \
+            --extra foundry-labs \
+            --locked
           uv pip install \
             --python .venv/bin/python \
             --requirements templates/agent-app/template/recipes/langgraph/requirements.lock
@@ -115,25 +138,70 @@ jobs:
         env:
           LANGGRAPH_STRICT_MSGPACK: "true"
         run: |
-          uv run --python 3.12 pytest -q \
+          .venv/bin/python -m pytest -q \
             templates/agent-app/template/recipes/langgraph/test_graph.py
 
       - name: Verify generated transitive template locks
+        if: matrix.python == '3.12'
         run: |
-          uv run --python 3.12 python \
+          .venv/bin/python \
             scripts/lock_template_dependencies.py --check
 
-      - name: Exercise real provider import boundaries
+      - name: Audit installed dependencies
         run: |
-          uv run --python 3.12 python - <<'PY'
+          .venv/bin/python \
+            templates/_shared/files/scripts/audit_dependencies.py \
+            --policy templates/_shared/files/security-audit.toml \
+            --installed-python .venv/bin/python
+
+      - name: Audit every generated runtime lock
+        if: matrix.python == '3.12'
+        run: |
+          while IFS= read -r lock; do
+            echo "auditing $lock"
+            .venv/bin/python \
+              templates/_shared/files/scripts/audit_dependencies.py \
+              --policy templates/_shared/files/security-audit.toml \
+              --requirement "$lock"
+          done < <(
+            { find templates -name requirements.lock -type f -print; \
+              printf '%s\n' \
+                examples/local-classification/src/aai_local_classification/model-requirements.lock; \
+            } | sort -u
+          )
+
+      - name: Audit standalone course dependency graphs
+        if: matrix.python == '3.12'
+        run: |
+          for project in \
+            examples/local-classification \
+            examples/local-finetuning; do
+            echo "auditing $project"
+            .venv/bin/python \
+              templates/_shared/files/scripts/audit_dependencies.py \
+              --policy templates/_shared/files/security-audit.toml \
+              --uv-project "$project"
+          done
+
+      - name: Exercise provider and Foundry import boundaries
+        run: |
+          .venv/bin/python - <<'PY'
+          import a2a
+          import agent_framework
+          import azure.ai.projects
           import azure.identity
           import azure.keyvault.secrets
+          import azure.monitor.opentelemetry
           import azure.search.documents
           import databricks.ai_search.client
           import databricks.sdk
           import databricks_openai
           import mlflow
           import openai
+          import opentelemetry.sdk
 
-          print("all certified provider extras import successfully")
+          print("all certified provider and Foundry extras import successfully")
           PY
+
+      - name: Exercise Foundry curriculum contracts
+        run: .venv/bin/python -m pytest -q tests/test_foundry_curriculum.py
