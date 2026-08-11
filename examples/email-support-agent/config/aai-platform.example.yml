@@ -1,0 +1,64 @@
+platform:
+  application: email-support-agent
+  project: email-support-solution-accelerator
+  environment: dev
+  team: platform-ai-learning
+  owner_group: group:platform-ai-learning-owners
+  cost_center: CC-LEARNING
+  data_classification: confidential
+  lifecycle: experimental
+  repository: replace-with-owner/replace-with-repository
+  release: email-support-reference-v1
+  tag_schema_version: "1"
+  catalog: replace_with_catalog
+  schema: email_support
+  experiment_name: /Shared/email-support-quality-cost-release
+  azure_identity: azure_cli
+
+providers:
+  models:
+    # Use the cheapest approved structured-output deployment that meets the
+    # critical-urgency and route gates. Physical endpoint names vary by env.
+    email-triage:
+      provider: databricks
+      deployment: replace-with-small-triage-endpoint
+      capabilities:
+        structured_output: true
+    email-draft:
+      provider: databricks
+      deployment: replace-with-small-draft-endpoint
+      capabilities:
+        structured_output: true
+    email-complex-assist:
+      provider: databricks
+      deployment: replace-with-complex-assist-endpoint
+      capabilities:
+        structured_output: true
+    # Judges are reached through an approved Databricks endpoint, including
+    # a governed external-model endpoint when the underlying model is Foundry.
+    judge-model:
+      provider: databricks
+      # A plan-only name so credential-free `agentkit compare --plan` can
+      # estimate spend. It is not a deployed endpoint; replace before scoring.
+      deployment: example-email-support-judge-endpoint
+  embeddings:
+    support-embedding:
+      provider: databricks
+      deployment: replace-with-embedding-endpoint
+      dimensions: 1536
+  retrievers:
+    support-knowledge:
+      provider: databricks_ai_search
+      endpoint: replace-with-vector-search-endpoint
+      index: replace_with_catalog.email_support.replace_with_index
+      id_field: document_id
+      content_field: page_content
+      source_uri_field: doc_uri
+      chunk_id_field: chunk_id
+      columns: [document_id, page_content, doc_uri, chunk_id, tenant_id, active, release]
+      embedding: support-embedding
+
+# Email, CRM, ticketing, checkpoint, store, and outbox credentials are not
+# accepted here as values. Prefer workload identity; use reviewed secret
+# references only where the external system has no identity-based option.
+secrets: {}

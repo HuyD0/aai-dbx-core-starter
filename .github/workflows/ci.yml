@@ -117,6 +117,7 @@ jobs:
         run: |
           uv run --python 3.12 pytest -q \
             templates/agent-app/template/recipes/langgraph/test_graph.py
+          make email-support-langgraph-check
 
       - name: Verify generated transitive template locks
         run: |

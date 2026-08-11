@@ -205,6 +205,29 @@ normalized MLflow document evidence, enforces tenant and action boundaries, and
 finishes with a baseline/change/result/decision release gate. Production work
 graduates to the existing `rag-app` or `agent-app` template.
 
+### Use the Email Support Agent reference design
+
+The standalone [Email Support Agent solution accelerator](examples/email-support-agent/README.md)
+turns a reviewed LangGraph demo into a production-minded reference design. Its
+offline package and synthetic release set demonstrate redacted checkpoint
+state, deterministic risk routing, identity/group/release-scoped retrieval,
+grounded drafting, identity-authorized human approval, namespaced idempotency
+keys, an atomic transactional outbox and delivery worker, MLflow
+span/evaluation/monitoring contracts, governed feedback, pre-spend
+request/judge budgets, and a fail-closed operational-readiness scorecard. Its
+[maturity scorecard](examples/email-support-agent/MATURITY_SCORECARD.md)
+separates 10/10 reference coverage from live production certification.
+
+```bash
+make email-support-check
+make email-support-demo
+make email-support-workshop
+make email-support-mlops-plan
+```
+
+The accelerator intentionally graduates into `agent-app` rather than
+duplicating bundle, identity, serving, locking, and cost-tag scaffolding.
+
 ## Install for SDK development
 
 ```bash
