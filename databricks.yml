@@ -141,6 +141,11 @@ targets:
       deployment_environment: dev
       deployment_lifecycle: experimental
       deployment_release: local-dev
+      # These required variables belong to the opt-in console resource. Keep
+      # dev resolvable while the resource is excluded, but use invalid paths so
+      # an accidental opt-in still fails closed instead of guessing Lakebase.
+      hub_lakebase_branch: unavailable
+      hub_lakebase_database: unavailable
     presets:
       # Applied to every job/pipeline in the bundle (organizational attribution
       # + serverless usage reporting). Compute-level attribution that reaches

@@ -116,12 +116,16 @@ def test_uat_checks_existing_lakebase_references_before_requesting_credentials()
     } <= deploy_step["env"].keys()
 
 
-def test_uat_lakebase_defaults_do_not_enable_the_optional_console():
+def test_dev_resolves_lakebase_variables_without_weakening_the_uat_gate():
     bundle = yaml.safe_load((ROOT / "databricks.yml").read_text())
 
-    assert bundle["targets"]["uat"]["variables"]["hub_state_mode"] == "lakebase"
-    assert "default" not in bundle["variables"]["hub_lakebase_branch"]
-    assert "default" not in bundle["variables"]["hub_lakebase_database"]
+    dev_variables = bundle["targets"]["dev"]["variables"]
+    uat_variables = bundle["targets"]["uat"]["variables"]
+    assert uat_variables["hub_state_mode"] == "lakebase"
+    for name in ("hub_lakebase_branch", "hub_lakebase_database"):
+        assert "default" not in bundle["variables"][name]
+        assert dev_variables[name] == "unavailable"
+        assert name not in uat_variables
     assert bundle["include"] == ["resources/*.yml"]
 
     guide = (ROOT / "docs/uat-promotion.md").read_text()
