@@ -231,7 +231,9 @@ For agent HTTP serving, the generated agent template uses MLflow Agent Server
 on Databricks Apps as its native deployment path, with async `@invoke` and
 `@stream` handlers. LangGraph is an optional application-owned recipe for
 durable graph execution; inject an async persistent checkpointer/store and put
-an interrupt before irreversible work.
+an interrupt before irreversible work. When to reach for the recipe, how
+review decisions become trace evidence, and the Lakebase persistence wiring
+are covered in [Production LangGraph agents](langgraph-production.md).
 
 Production applications emit sampled asynchronous traces. Attach end-user and
 expert feedback to the originating trace, monitor quality and operations, and

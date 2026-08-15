@@ -4,6 +4,24 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Upgraded the agent template's LangGraph recipe so a review decision is
+  evidence, not a bare boolean: strict `ApprovalDecision` resume payloads
+  with a reason vocabulary, re-interrupt on malformed payloads instead of
+  poisoning the durable thread, bounded replanning with reviewer feedback on
+  `ambiguous_intent`, and rejection results that carry reason, note, and
+  attempt count.
+- Added the `langgraph-lakebase` agent-template recipe: production
+  checkpointer/store wiring for the LangGraph recipe using the native
+  Postgres saver/store against Lakebase, a fail-closed OAuth credential
+  provider that mints a fresh token for every new pooled connection, and
+  user-scoped memory tools with decision lineage. Certified
+  `langgraph-checkpoint-postgres`, `psycopg`, and `psycopg-pool`; CI
+  exercises the recipe against a local PostgreSQL server and the dependency
+  canary covers both resolution bounds. No Lakebase resource is provisioned.
+- Added `docs/langgraph-production.md`: when to reach for the LangGraph
+  recipes, how review decisions become trace evidence and regression cases,
+  the Lakebase persistence contract, and the MCP tool-recipe deferral
+  rationale.
 - Added an existing-resource-only Lakebase Autoscaling repository for the Hub,
   including checksumed schema migrations, OAuth connection pooling, bounded
   transient-connect retries, optimistic concurrency, and fail-closed hosted
