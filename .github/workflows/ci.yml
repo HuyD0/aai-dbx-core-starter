@@ -137,6 +137,9 @@ jobs:
           uv pip install \
             --python .venv/bin/python \
             --requirements templates/agent-app/template/recipes/langgraph/requirements.lock
+          uv pip install \
+            --python .venv/bin/python \
+            --requirements templates/agent-app/template/recipes/langgraph-lakebase/requirements.lock
           uv pip check --python .venv/bin/python
 
       - name: Exercise the optional LangGraph durability contract
@@ -145,6 +148,21 @@ jobs:
         run: |
           .venv/bin/python -m pytest -q \
             templates/agent-app/template/recipes/langgraph/test_graph.py
+
+      - name: Exercise the Lakebase persistence recipe against local PostgreSQL
+        env:
+          LANGGRAPH_STRICT_MSGPACK: "true"
+        run: |
+          # The runner image ships PostgreSQL preinstalled but stopped. A
+          # local scratch server stands in for Lakebase (managed Postgres);
+          # no credential or cloud resource is involved.
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql \
+            -c "CREATE ROLE aai_it LOGIN PASSWORD 'aai_it_pw' CREATEDB;" \
+            -c "CREATE DATABASE aai_it OWNER aai_it;"
+          AAI_LAKEBASE_TEST_DSN="postgresql://aai_it:aai_it_pw@127.0.0.1:5432/aai_it" \
+            .venv/bin/python -m pytest -q \
+              templates/agent-app/template/recipes/langgraph-lakebase/
 
       - name: Verify generated transitive template locks
         if: matrix.python == '3.12'

@@ -39,7 +39,7 @@ REQUIRED_TAGS = {
     "tag_schema_version",
 }
 CURRENT_TEMPLATE_VERSIONS = {
-    "agent-app": "1.3.0",
+    "agent-app": "1.4.0",
     "analytics-app": "1.2.0",
     "evaluation-project": "2.1.0",
     "experiment-starter": "1.3.0",
