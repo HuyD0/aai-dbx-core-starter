@@ -97,14 +97,16 @@ class Dependencies(Protocol):
         request: SupportRequest,
         *,
         feedback: dict[str, Any] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Produce the proposed action; feedback carries a prior rejection."""
 
     async def execute_once(
         self,
         *,
         idempotency_key: str,
         action: dict[str, Any],
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Perform the irreversible action at most once per idempotency key."""
 
 
 def initial_state(request: SupportRequest | Mapping[str, Any]) -> GraphState:
