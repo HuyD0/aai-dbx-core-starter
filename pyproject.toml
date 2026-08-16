@@ -32,18 +32,9 @@ databricks = [
   "databricks-sdk>=0.122,<0.123",
   "databricks-openai>=0.17,<0.18",
 ]
-foundry = [
+azure-apim = [
   "azure-identity>=1.25.3,<2",
   "openai>=2.48,<3",
-]
-foundry-labs = [
-  "a2a-sdk>=1.0.3,<1.1",
-  "agent-framework-core>=1.12.1,<1.13",
-  "azure-ai-projects>=2.4,<3",
-  "azure-monitor-opentelemetry>=1.8.9,<2",
-  "httpx>=0.28.1,<1",
-  "opentelemetry-exporter-otlp-proto-http>=1.43,<1.44",
-  "opentelemetry-sdk>=1.43,<1.44",
 ]
 azure-search = [
   "azure-identity>=1.25.3,<2",
@@ -62,7 +53,7 @@ examples = [
   "pandas>=2,<3",
 ]
 all = [
-  "aai-core[databricks,foundry,azure-search,keyvault,genai]",
+  "aai-core[databricks,azure-apim,azure-search,keyvault,genai]",
 ]
 dev = [
   "black[jupyter]>=26.5.1,<27",

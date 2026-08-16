@@ -32,7 +32,7 @@ def test_a_non_databricks_judge_is_rejected():
     ungoverned = ProjectContext(
         config=context.config,
         settings=context.settings.model_copy(
-            update={"models": {"judge-model": {"provider": "foundry"}}}
+            update={"models": {"judge-model": {"provider": "azure_apim"}}}
         ),
         root=context.root,
     )

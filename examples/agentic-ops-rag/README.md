@@ -108,8 +108,8 @@ under `scripts/`; edit that source and rerender instead of hand-editing JSON.
   `mlflow.genai.evaluate()`, built-in judges, and feedback.
 - Azure AI Search or Databricks AI Search owns managed indexing and retrieval.
   The application asks for `operations-knowledge`, not a physical index name.
-- Microsoft Foundry or a Databricks endpoint supplies models through configured
-  logical resources. Enterprises can place a governed gateway in front without
+- A Databricks endpoint supplies models through configured logical
+  resources. Enterprises can place a governed gateway in front without
   changing application architecture.
 - Production code graduates into [`rag-app`](../../templates/rag-app/) or
   [`agent-app`](../../templates/agent-app/). The primary custom-agent HTTP path

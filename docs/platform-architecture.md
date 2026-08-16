@@ -43,8 +43,8 @@ timeout, and retry configuration. Callers own async client and stream cleanup.
 MLflow helpers likewise retain native runs, traces, evaluation results, prompts,
 and logged models. The SDK adds governance and safe defaults; it does not rename
 or mirror provider async, streaming, Responses API, graph, or state types.
-Index provisioning, Foundry-hosted agents, Databricks Delta Sync, and provider
-administration remain provider-specific.
+Index provisioning, Databricks Delta Sync, and provider administration remain
+provider-specific.
 
 This boundary is intentionally escape-friendly:
 

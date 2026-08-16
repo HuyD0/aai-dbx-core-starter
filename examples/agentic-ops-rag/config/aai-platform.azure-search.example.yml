@@ -18,9 +18,8 @@ platform:
 providers:
   models:
     operations-chat:
-      provider: foundry
-      endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
-      deployment: replace-with-chat-deployment
+      provider: databricks
+      deployment: replace-with-chat-serving-endpoint
       capabilities:
         tool_calling: true
         structured_output: true
@@ -29,9 +28,8 @@ providers:
       deployment: replace-with-governed-judge-endpoint
   embeddings:
     operations-embedding:
-      provider: foundry
-      endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
-      deployment: replace-with-embedding-deployment
+      provider: databricks
+      deployment: replace-with-embedding-serving-endpoint
       dimensions: 1536
   retrievers:
     operations-knowledge:

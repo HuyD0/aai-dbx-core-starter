@@ -48,7 +48,6 @@ jobs:
             --python "$PYTHON_VERSION" \
             --extra dev \
             --extra all \
-            --extra foundry-labs \
             --locked
           uv pip install \
             --python .venv/bin/python \

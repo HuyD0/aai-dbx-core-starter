@@ -14,12 +14,10 @@ import argparse
 import asyncio
 import hashlib
 import json
-import re
 from collections import Counter
 from collections.abc import Mapping
 from contextvars import copy_context
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import mlflow
 from mlflow.genai.scorers import Correctness, Safety
@@ -255,60 +253,14 @@ def _model_config(settings, logical_name: str) -> dict[str, str]:
         raise ValueError(f"{logical_name} requires a provider")
     if not isinstance(deployment, str) or not deployment.strip():
         raise ValueError(f"{logical_name} requires a deployment")
-    normalized = {
+    return {
         "provider": provider.strip(),
         "deployment": deployment.strip(),
     }
-    endpoint = config.get("endpoint")
-    if endpoint is not None:
-        if not isinstance(endpoint, str):
-            raise TypeError(f"{logical_name} endpoint must be a string")
-        normalized["endpoint"] = endpoint
-    return normalized
 
 
 def _evaluation_model_identity(config: Mapping) -> str:
-    identity = f"{config['provider']}:{config['deployment']}"
-    if str(config["provider"]).casefold() == "foundry":
-        identity += "@endpoint-sha256:" + _endpoint_sha256(config.get("endpoint"))
-    return identity
-
-
-def _endpoint_sha256(value) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("Foundry model configuration requires an HTTPS endpoint")
-    endpoint = value.strip()
-    parsed = urlsplit(endpoint)
-    if (
-        any(character.isspace() or ord(character) < 32 for character in endpoint)
-        or parsed.scheme.casefold() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError(
-            "Foundry endpoint must be HTTPS without userinfo, query, or fragment"
-        )
-    try:
-        port = parsed.port
-    except ValueError as error:
-        raise ValueError("Foundry endpoint contains an invalid port") from error
-    raw_hostname = parsed.hostname.rstrip(".")
-    try:
-        hostname = raw_hostname.encode("idna").decode("ascii").casefold()
-    except UnicodeError as error:
-        raise ValueError("Foundry endpoint contains an invalid hostname") from error
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
-    path = re.sub(r"/+", "/", parsed.path or "/")
-    if any(segment in {".", ".."} for segment in path.split("/")):
-        raise ValueError("Foundry endpoint path must not contain dot segments")
-    if path != "/":
-        path = path.rstrip("/")
-    normalized = f"https://{hostname}:{port or 443}{path}"
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"{config['provider']}:{config['deployment']}"
 
 
 def _load_release_dataset(name: str, reviewed_cases: list[dict]):

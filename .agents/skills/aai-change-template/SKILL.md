@@ -45,10 +45,9 @@ candidate `aai-core` wheel.
 
 ## Provider-specific work
 
-Use the maintained `microsoft-foundry` or `azure-ai` skill when current Foundry
-or Azure AI behavior is material. Apply this repository's portability, evidence,
-and security rules around that provider guidance; do not copy provider manuals
-into this skill.
+Use the maintained `azure-ai` skill when current Azure AI behavior is
+material. Apply this repository's portability, evidence, and security rules
+around that provider guidance; do not copy provider manuals into this skill.
 
 ## Handoff
 

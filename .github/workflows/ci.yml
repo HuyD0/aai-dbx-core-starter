@@ -107,7 +107,7 @@ jobs:
           make -C examples/local-classification notebook-check
 
   provider-extras:
-    name: Provider and Foundry contracts / Python ${{ matrix.python }}
+    name: Provider contracts / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -123,7 +123,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install the certified provider and Foundry stacks
+      - name: Install the certified provider stacks
         env:
           PYTHON_VERSION: ${{ matrix.python }}
         run: |
@@ -132,7 +132,6 @@ jobs:
             --python "$PYTHON_VERSION" \
             --extra dev \
             --extra all \
-            --extra foundry-labs \
             --locked
           uv pip install \
             --python .venv/bin/python \
@@ -188,25 +187,17 @@ jobs:
               --uv-project "$project"
           done
 
-      - name: Exercise provider and Foundry import boundaries
+      - name: Exercise provider import boundaries
         run: |
           .venv/bin/python - <<'PY'
-          import a2a
-          import agent_framework
-          import azure.ai.projects
           import azure.identity
           import azure.keyvault.secrets
-          import azure.monitor.opentelemetry
           import azure.search.documents
           import databricks.ai_search.client
           import databricks.sdk
           import databricks_openai
           import mlflow
           import openai
-          import opentelemetry.sdk
 
-          print("all certified provider and Foundry extras import successfully")
+          print("all certified provider extras import successfully")
           PY
-
-      - name: Exercise Foundry curriculum contracts
-        run: .venv/bin/python -m pytest -q tests/test_foundry_curriculum.py

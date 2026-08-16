@@ -12,8 +12,8 @@ LESSONS: dict[str, list[tuple[str, str]]] = {
 ## Learning objectives
 
 - distinguish offline learning readiness from cloud authorization;
-- locate MLflow, Databricks, Microsoft Foundry, and Azure AI Search in one
-  application lifecycle;
+- locate MLflow, Databricks, and Azure AI Search in one application
+  lifecycle;
 - verify that provider names and endpoints live in configuration, not notebooks;
 - keep every connected call behind an explicit opt-in.
 
@@ -26,9 +26,9 @@ and reference solution while applying this repository's runtime contracts.
 ## Architecture in one sentence
 
 Databricks is the governed lifecycle and serving plane, MLflow 3 records traces
-and release evidence, Microsoft Foundry or Databricks supplies configured model
-endpoints, and Azure AI Search or Databricks AI Search supplies a configured
-retriever behind the same logical name.
+and release evidence, Databricks supplies configured model endpoints, and
+Azure AI Search or Databricks AI Search supplies a configured retriever
+behind the same logical name.
 
 The index, endpoint, identity, roles, and permissions are externally
 provisioned platform resources. A notebook can verify or use them; it must not
@@ -345,7 +345,7 @@ chunking = ChunkingProfile(
 )
 indexed_embedding = EmbeddingProfile(
     logical_name="operations-embedding",
-    provider="foundry",
+    provider="databricks",
     model="embedding-deployment-v1",
     dimensions=1536,
     normalized=True,
@@ -353,7 +353,7 @@ indexed_embedding = EmbeddingProfile(
 )
 query_embedding = EmbeddingProfile(
     logical_name="operations-embedding",
-    provider="foundry",
+    provider="databricks",
     model="embedding-deployment-v1",
     dimensions=1536,
     normalized=True,
@@ -365,7 +365,7 @@ indexed_embedding.assert_compatible(query_embedding)
 # YOUR TURN — TODO: define the proposed query profile for a controlled change.
 proposed_query_embedding = EmbeddingProfile(
     logical_name="operations-embedding",
-    provider="foundry",
+    provider="databricks",
     model="embedding-deployment-v1",
     dimensions=1536,
     normalized=True,
@@ -382,7 +382,7 @@ assert proposed_query_embedding.version != indexed_embedding.version
 # Reference solution
 incompatible = proposed_query_embedding.__class__(
     logical_name="operations-embedding",
-    provider="foundry",
+    provider="databricks",
     model="different-embedding-space",
     dimensions=3072,
     normalized=True,

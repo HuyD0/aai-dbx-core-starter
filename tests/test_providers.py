@@ -231,7 +231,7 @@ def test_openai_adapter_rejects_trace_bypasses_and_per_call_headers(
 def test_model_capabilities_fail_before_provider_call():
     model = OpenAICompatibleChatModel(
         logical_name="limited",
-        provider="foundry",
+        provider="azure_apim",
         model="deployment",
         client=FakeOpenAI(),
         capabilities=ModelCapabilities(tool_calling=False),

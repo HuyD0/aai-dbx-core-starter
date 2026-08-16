@@ -33,7 +33,7 @@ def _settings():
             "general-chat": {
                 "provider": "databricks",
                 "deployment": "target-endpoint",
-                "endpoint": "https://unused-foundry.example.invalid/api/projects/test",
+                "endpoint": "https://unused-runtime.example.invalid/api/projects/test",
                 "capabilities": {"structured_output": True},
             },
             "judge-model": {
@@ -45,7 +45,7 @@ def _settings():
             "knowledge-embedding": {
                 "provider": "databricks",
                 "deployment": "embedding-endpoint",
-                "endpoint": "https://unused-foundry.example.invalid/api/projects/test",
+                "endpoint": "https://unused-runtime.example.invalid/api/projects/test",
                 "dimensions": 1536,
             }
         },
@@ -304,16 +304,11 @@ def test_knowledge_version_rejects_non_string_values():
 
 def test_configuration_evidence_is_secret_free_and_endpoint_aware():
     settings = _settings()
-    settings.models["general-chat"].update(
-        {
-            "provider": "foundry",
-            "endpoint": "https://Foundry.example.invalid/api/projects/project-a/",
-        }
-    )
     configuration = release_configuration(settings)
 
     assert "endpoint" not in configuration["model"]
-    assert len(configuration["model"]["endpoint_sha256"]) == 64
+    assert "endpoint_sha256" not in configuration["model"]
+    assert len(configuration["retrieval"]["endpoint_sha256"]) == 64
     assert "https://" not in json.dumps(configuration)
     evaluated_target, _ = _evaluation_model_identities(settings)
     assert evaluated_target == model_identity(settings, "general-chat")

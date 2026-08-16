@@ -56,7 +56,7 @@ def release_configuration(settings: Any) -> dict[str, dict[str, Any]]:
         model_config,
         logical_name="general-chat",
         allowed=("provider", "deployment", "model", "capabilities"),
-        include_endpoint_for=("foundry",),
+        include_endpoint_for=(),
     )
     embedding = _reviewed_configuration(
         embedding_config,
@@ -68,7 +68,7 @@ def release_configuration(settings: Any) -> dict[str, dict[str, Any]]:
             "dimensions",
             "capabilities",
         ),
-        include_endpoint_for=("foundry",),
+        include_endpoint_for=(),
     )
     retrieval = _reviewed_configuration(
         retrieval_config,
@@ -134,10 +134,7 @@ def model_identity(settings: Any, logical_name: str) -> str:
     config = _configured(settings, "models", logical_name)
     provider = _required_string(config, "provider", logical_name)
     deployment = _required_string(config, "deployment", logical_name)
-    identity = f"{provider}:{deployment}"
-    if provider.casefold() == "foundry":
-        identity += "@endpoint-sha256:" + endpoint_sha256(config.get("endpoint"))
-    return identity
+    return f"{provider}:{deployment}"
 
 
 def knowledge_version(value: str) -> str:

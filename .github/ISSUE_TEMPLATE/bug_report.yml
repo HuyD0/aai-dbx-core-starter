@@ -16,7 +16,7 @@ body:
       options:
         - aai-core SDK
         - Generated template
-        - Example or Foundry curriculum
+        - Example or workshop
         - CI, release, or documentation
     validations:
       required: true

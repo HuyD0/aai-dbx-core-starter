@@ -217,7 +217,7 @@ def test_release_allows_token_usage_and_secret_references():
 
 
 def test_embedding_compatibility_and_chunk_validation():
-    profile = EmbeddingProfile("embedding", "foundry", "model", 1536, True, "1")
+    profile = EmbeddingProfile("embedding", "azure_apim", "model", 1536, True, "1")
     profile.assert_compatible(
         EmbeddingProfile("other", "databricks", "model", 1536, True, "2")
     )
