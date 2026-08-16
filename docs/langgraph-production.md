@@ -89,12 +89,19 @@ requires and production demands:
   are validated strictly — including refusing plaintext connections to any
   non-loopback host. The binding's `value_from: "database"` yields a
   hostname; credential minting needs the endpoint *resource path*, supplied
-  separately as `LAKEBASE_ENDPOINT`.
+  separately as `LAKEBASE_ENDPOINT`. The application's schema is part of the
+  same contract: `LAKEBASE_SCHEMA` names the schema the app role owns, and
+  every pooled connection pins `search_path` to it — the LangGraph saver and
+  store issue only unqualified statements, so the search path is what keeps
+  durable state out of a shared `public` schema.
 - **The provisioning boundary holds.** The Lakebase instance, database,
   role, and grants come from the approved external platform process. The
   recipe connects; it never creates. The savers' one-time DDL is an explicit
   application startup decision (`run_setup=True`), not an implicit
-  side effect.
+  side effect — it first ensures the configured schema exists and is owned
+  by the connected role (creating it when absent, which is what the
+  binding's `CAN_CONNECT_AND_CREATE` permission covers) and fails closed
+  when another principal owns it.
 - **Memory carries lineage.** The user-scoped memory tools store
   `preference` memories for durable context and `decision` memories that
   must carry their `reason_code` and originating `request_id` — so a later

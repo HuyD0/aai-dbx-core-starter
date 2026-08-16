@@ -23,8 +23,10 @@ The default test tier is credential-free. To run the integration tier
 against any PostgreSQL server (a local scratch database is enough), set
 `AAI_LAKEBASE_TEST_DSN` to its DSN first; those tests prove interrupt →
 resume durability across freshly constructed saver instances, duplicate
-delivery safety, and decision-reason survival through a real checkpoint
-round trip.
+delivery safety, decision-reason survival through a real checkpoint round
+trip, and that setup places every LangGraph table in the dedicated schema.
+The tier creates and drops a scratch schema in that database, so reruns
+start clean.
 
 ## What is provisioned externally
 
@@ -36,11 +38,22 @@ resource binding supplies the non-secret coordinates as environment
 variables: `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGSSLMODE`, and the
 `LAKEBASE_ENDPOINT` autoscaling endpoint resource path. Note the binding's
 `value_from: "database"` yields a hostname, while credential minting needs
-the endpoint *resource path* — supply `LAKEBASE_ENDPOINT` explicitly.
+the endpoint *resource path* — supply `LAKEBASE_ENDPOINT` explicitly. The
+binding does not name the application's schema either — supply
+`LAKEBASE_SCHEMA`, the lowercase PostgreSQL schema the app role owns.
 
 `LakebaseSettings.from_environment(os.environ)` validates that binding and
 refuses unsafe contracts: a malformed hostname or endpoint path, control
-characters in identifiers, or any non-TLS `sslmode` for a non-loopback host.
+characters in identifiers, a schema name that is not a lowercase PostgreSQL
+identifier, or any non-TLS `sslmode` for a non-loopback host.
+
+Every pooled connection pins `search_path` to the validated schema when it
+is created — as a session `SET`, not the libpq `options` startup parameter,
+which pooled endpoints can strip. The LangGraph saver and store issue only
+unqualified statements, so this is what places their DDL and every later
+lookup in the application's schema instead of a shared `public`. The search
+path is the schema alone; if you later enable extension-backed store
+features (for example vector indexes), append the extension's schema.
 
 ## Credential lifecycle
 
@@ -81,11 +94,14 @@ async with build_lakebase_persistence(
 
 The pair satisfies the sibling recipe's async construction check. The
 savers' one-time DDL (`run_setup=True`) is the application's own startup
-decision and requires the externally granted role to own its schema; run it
-once per environment, not on every request path. Everything from the base
-recipe's contract still applies: `thread_id` joins durable state to traces,
-resume payloads are strict `ApprovalDecision` values, and the graph
-interrupts before its irreversible action.
+decision; it first ensures the configured schema exists and is owned by the
+connected role — creating it when absent, which is exactly what the
+binding's `CAN_CONNECT_AND_CREATE` permission covers — and fails closed
+when another principal owns it. Run it once per environment, not on every
+request path. Everything from the base recipe's contract still applies:
+`thread_id` joins durable state to traces, resume payloads are strict
+`ApprovalDecision` values, and the graph interrupts before its irreversible
+action.
 
 ## User-scoped memory and decision lineage
 

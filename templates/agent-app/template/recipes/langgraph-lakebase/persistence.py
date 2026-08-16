@@ -4,7 +4,9 @@ Lakebase is managed PostgreSQL, so the native LangGraph Postgres saver and
 store are the persistence implementation; the only Databricks-specific part
 is credential minting. This module wires the two together without ever
 placing an OAuth token in a connection string, environment variable, log
-field, or exception.
+field, or exception. Every pooled connection pins its search path to the
+application-owned schema, so durable state never lands in a shared
+``public`` schema.
 
 LangGraph owns graph state and checkpoint APIs. `aai-core` supplies resource
 context, tracing policy, provider clients, evaluation and release evidence;
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -23,12 +25,14 @@ from typing import Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _TLS_SSLMODES = frozenset({"require", "verify-ca", "verify-full"})
+_POSTGRES_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _HOSTNAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _ENDPOINT_PATH = re.compile(
     r"^projects/[a-z][a-z0-9-]{0,62}/branches/"
@@ -46,9 +50,10 @@ class LakebaseSettings(BaseModel):
 
     A Databricks Apps ``postgres`` resource binding supplies ``PGHOST``,
     ``PGPORT``, ``PGDATABASE``, ``PGUSER``, ``PGSSLMODE`` and the
-    ``LAKEBASE_ENDPOINT`` resource path at runtime. The Lakebase instance,
-    role, and grants are provisioned through the external platform process;
-    this recipe only ever connects to them.
+    ``LAKEBASE_ENDPOINT`` resource path at runtime; ``LAKEBASE_SCHEMA`` names
+    the schema the application role owns. The Lakebase instance, role, and
+    grants are provisioned through the external platform process; this recipe
+    only ever connects to them.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -58,6 +63,7 @@ class LakebaseSettings(BaseModel):
     database: str
     user: str
     endpoint: str
+    schema_name: str
     sslmode: str = "require"
     application_name: str = "aai-agent-app"
     connect_timeout_seconds: int = Field(default=10, ge=1, le=60)
@@ -78,6 +84,13 @@ class LakebaseSettings(BaseModel):
             raise ValueError(
                 "endpoint must be a full Autoscaling endpoint resource path"
             )
+        return value
+
+    @field_validator("schema_name")
+    @classmethod
+    def _valid_schema_name(cls, value: str) -> str:
+        if not _POSTGRES_IDENTIFIER.fullmatch(value):
+            raise ValueError("schema_name must be a lowercase PostgreSQL identifier")
         return value
 
     @field_validator("database", "user", "application_name")
@@ -106,6 +119,7 @@ class LakebaseSettings(BaseModel):
             "PGDATABASE": environ.get("PGDATABASE", "").strip(),
             "PGUSER": environ.get("PGUSER", "").strip(),
             "LAKEBASE_ENDPOINT": environ.get("LAKEBASE_ENDPOINT", "").strip(),
+            "LAKEBASE_SCHEMA": environ.get("LAKEBASE_SCHEMA", "").strip(),
         }
         missing = sorted(name for name, value in required.items() if not value)
         if missing:
@@ -119,6 +133,7 @@ class LakebaseSettings(BaseModel):
             database=required["PGDATABASE"],
             user=required["PGUSER"],
             endpoint=required["LAKEBASE_ENDPOINT"],
+            schema_name=required["LAKEBASE_SCHEMA"],
             sslmode=(environ.get("PGSSLMODE", "require").strip() or "require"),
         )
 
@@ -243,6 +258,66 @@ class _FreshTokenPool(AsyncConnectionPool):
                 self.kwargs.pop("password", None)
 
 
+def _search_path_configure(schema_name: str) -> Callable[[Any], Awaitable[None]]:
+    """Build the pool ``configure`` hook that pins ``search_path``.
+
+    The LangGraph saver and store issue every statement — DDL included —
+    with unqualified table names, so the connection's search path is the
+    only thing deciding which schema they live in. The hook runs for each
+    new physical connection as a session-level ``SET`` rather than the
+    libpq ``options`` startup parameter, which pooled Lakebase endpoints
+    can strip. The pool discards any connection its configure hook leaves
+    inside a transaction; the connect kwargs' ``autocommit=True`` is what
+    keeps this ``SET`` transaction-free. The search path is the schema
+    alone — no ``public`` fallback — so state can never be read from or
+    written to a shared schema.
+    """
+
+    statement = sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name))
+
+    async def configure(connection: Any) -> None:
+        await connection.execute(statement)
+
+    return configure
+
+
+_SCHEMA_OWNER_PROBE = (
+    "SELECT pg_get_userbyid(nspowner) AS schema_owner, "
+    "current_user AS connected_role "
+    "FROM pg_namespace WHERE nspname = %s"
+)
+
+
+async def _ensure_owned_schema(pool: AsyncConnectionPool, schema_name: str) -> None:
+    """Create the schema when absent and require the connected role to own it.
+
+    Probing before creating matters: ``CREATE SCHEMA IF NOT EXISTS`` checks
+    the database-level CREATE privilege even when the schema already exists,
+    which would reject a deployment whose schema an administrator pre-created
+    ``WITH AUTHORIZATION`` for a role that cannot create database objects.
+    First-run creation is what the App binding's ``CAN_CONNECT_AND_CREATE``
+    permission covers. Ownership is required either way — the one-time DDL
+    must never land in a schema another principal controls.
+    """
+
+    async with pool.connection() as connection:
+        result = await connection.execute(_SCHEMA_OWNER_PROBE, (schema_name,))
+        row = await result.fetchone()
+        if row is None:
+            await connection.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+            result = await connection.execute(_SCHEMA_OWNER_PROBE, (schema_name,))
+            row = await result.fetchone()
+        if row is None or row["schema_owner"] != row["connected_role"]:
+            raise LakebasePersistenceError(
+                "The Lakebase persistence schema must be created and owned by "
+                "the connected application role."
+            )
+
+
 @asynccontextmanager
 async def build_lakebase_persistence(
     settings: LakebaseSettings,
@@ -254,16 +329,20 @@ async def build_lakebase_persistence(
     """Yield a durable ``(checkpointer, store)`` pair satisfying the recipe.
 
     The pair plugs directly into the sibling recipe's ``build_graph()`` and
-    passes its async-checkpointer construction check. ``run_setup=True``
-    executes the savers' one-time DDL — the application owns that decision
-    and the role must own its schema; the recipe never provisions Lakebase
-    objects themselves.
+    passes its async-checkpointer construction check. Every pooled connection
+    pins ``search_path`` to the validated ``settings.schema_name``, so the
+    LangGraph tables and lookups resolve only inside the application's own
+    schema. ``run_setup=True`` executes the savers' one-time DDL — the
+    application owns that decision; the schema is created when absent and
+    must be owned by the connected role. The recipe never provisions
+    Lakebase objects themselves.
     """
 
     provider = LakebaseCredentialProvider(generate_credential, clock=clock)
     pool = _FreshTokenPool(
         conninfo="",
         credential_provider=provider,
+        configure=_search_path_configure(settings.schema_name),
         kwargs={
             "host": settings.host,
             "port": settings.port,
@@ -273,7 +352,9 @@ async def build_lakebase_persistence(
             "connect_timeout": settings.connect_timeout_seconds,
             "application_name": settings.application_name,
             # The LangGraph Postgres saver and store require autocommit
-            # connections returning dict rows.
+            # connections returning dict rows. The search_path configure
+            # hook also depends on autocommit: the pool discards any
+            # connection whose configure hook leaves a transaction open.
             "autocommit": True,
             "prepare_threshold": 0,
             "row_factory": dict_row,
@@ -287,6 +368,7 @@ async def build_lakebase_persistence(
         checkpointer = AsyncPostgresSaver(pool)
         store = AsyncPostgresStore(pool)
         if run_setup:
+            await _ensure_owned_schema(pool, settings.schema_name)
             await checkpointer.setup()
             await store.setup()
         yield checkpointer, store

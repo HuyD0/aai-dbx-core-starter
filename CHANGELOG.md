@@ -14,10 +14,13 @@ All notable changes to `aai-core` are documented here.
   checkpointer/store wiring for the LangGraph recipe using the native
   Postgres saver/store against Lakebase, a fail-closed OAuth credential
   provider that mints a fresh token for every new pooled connection, and
-  user-scoped memory tools with decision lineage. Certified
-  `langgraph-checkpoint-postgres`, `psycopg`, and `psycopg-pool`; CI
-  exercises the recipe against a local PostgreSQL server and the dependency
-  canary covers both resolution bounds. No Lakebase resource is provisioned.
+  user-scoped memory tools with decision lineage. A required validated
+  `LAKEBASE_SCHEMA` pins every pooled connection's `search_path` to the
+  app-owned schema, and `run_setup` verifies schema ownership before the
+  one-time DDL. Certified `langgraph-checkpoint-postgres`, `psycopg`, and
+  `psycopg-pool`; CI exercises the recipe against a local PostgreSQL server
+  and the dependency canary covers both resolution bounds. No Lakebase
+  resource is provisioned.
 - Added `docs/langgraph-production.md`: when to reach for the LangGraph
   recipes, how review decisions become trace evidence and regression cases,
   the Lakebase persistence contract, and the MCP tool-recipe deferral
