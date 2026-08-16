@@ -62,29 +62,6 @@ COMBOS = {
             "expect_present": ["src/app/agent.py", "src/app/reviewer.py"],
             "expect_absent": [],
         },
-        {
-            "name": "foundry-review-off",
-            "overrides": {
-                "project_name": "test-analytics",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
-                "model_deployment": "chat",
-            },
-            "expect_present": ["src/app/agent.py"],
-            "expect_absent": [],
-        },
-        {
-            "name": "foundry-review-on",
-            "overrides": {
-                "project_name": "test-analytics",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
-                "model_deployment": "chat",
-                "adversarial_review": "yes",
-            },
-            "expect_present": ["src/app/agent.py", "src/app/reviewer.py"],
-            "expect_absent": [],
-        },
     ],
     "experiment-starter": [
         {
@@ -121,16 +98,6 @@ COMBOS = {
                 "scripts/promote_prompt.py",
                 "evals/evaluate.py",
             ],
-            "expect_absent": [],
-        },
-        {
-            "name": "foundry",
-            "overrides": {
-                "project_name": "test-prompt-app",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-            },
-            "expect_present": ["src/app/assistant.py"],
             "expect_absent": [],
         },
     ],
@@ -199,40 +166,6 @@ COMBOS = {
                 "tests/test_chunks.py",
             ],
         },
-        {
-            "name": "foundry-azure-search",
-            "overrides": {
-                "project_name": "test-rag",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-                "model_deployment": "chat",
-                "retrieval_provider": "azure_ai_search",
-                "search_endpoint": "https://search.search.windows.net",
-                "search_index": "knowledge",
-                "embedding_deployment": "embedding",
-            },
-            "expect_present": ["src/app/rag.py"],
-            "expect_absent": ["jobs/build_chunks.py"],
-        },
-        {
-            "name": "foundry-dbx-search",
-            "overrides": {
-                "project_name": "test-rag",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-                "model_deployment": "chat",
-                "retrieval_provider": "databricks_ai_search",
-                "search_endpoint": "https://unused",
-                "search_index": "knowledge",
-                "embedding_deployment": "embedding",
-            },
-            "expect_present": [
-                "src/app/rag.py",
-                "jobs/build_chunks.py",
-                "tests/test_chunks.py",
-            ],
-            "expect_absent": [],
-        },
     ],
     "agent-app": [
         {
@@ -274,27 +207,6 @@ COMBOS = {
             "expect_present": ["src/app/agent.py", "notebooks/01_explore.py"],
             "expect_absent": [
                 "notebooks/02_enable_monitoring.py",
-                "src/app/endpoint.py",
-                "start_server.py",
-                "app.yaml",
-                "requirements.txt",
-                "resources/agent_app.yml",
-                "tests/_endpoint_trace_probe.py",
-                "tests/test_app_endpoint.py",
-            ],
-        },
-        {
-            "name": "foundry-no-serving",
-            "overrides": {
-                "project_name": "test-agent-app",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-                "model_deployment": "chat",
-            },
-            # Foundry cannot satisfy serving resource declarations, so the
-            # serving path is omitted even though include_serving defaults yes.
-            "expect_present": ["src/app/agent.py"],
-            "expect_absent": [
                 "src/app/endpoint.py",
                 "start_server.py",
                 "app.yaml",

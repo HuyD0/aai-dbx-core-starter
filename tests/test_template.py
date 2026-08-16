@@ -408,7 +408,7 @@ def test_template_schema_shared_contract(template: Path):
     ), f"{template.name} has duplicate prompt orders"
     assert properties["project_name"]["pattern"] == "^[a-z][a-z0-9-]+$"
     if "model_provider" in properties:
-        assert properties["model_provider"]["enum"] == ["databricks", "foundry"]
+        assert properties["model_provider"]["enum"] == ["databricks"]
     generated_sdk = COMPATIBILITY["sdk"]["generated_project_default"]
     assert properties["aai_core_version"]["default"] == generated_sdk["version"]
     assert (

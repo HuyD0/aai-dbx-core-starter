@@ -4,6 +4,12 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Removed Microsoft Foundry support: the `foundry` model provider, the
+  `foundry` and `foundry-labs` extras, the Foundry notebook curriculum, and
+  every Foundry template option. Model configuration now targets Databricks
+  serving endpoints or an Azure APIM gateway (`azure_apim`, installable via
+  the new `azure-apim` extra); external models reach judges and serving
+  through governed Databricks external-model endpoints.
 - Added an existing-resource-only Lakebase Autoscaling repository for the Hub,
   including checksumed schema migrations, OAuth connection pooling, bounded
   transient-connect retries, optimistic concurrency, and fail-closed hosted

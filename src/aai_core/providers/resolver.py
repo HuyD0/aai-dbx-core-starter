@@ -39,7 +39,6 @@ class ProviderResolver:
         self._retrievers: dict[str, Any] = {}
         self._model_factories: dict[str, Callable[[str, dict[str, Any]], Any]] = {
             "databricks": self._openai_compatible_model,
-            "foundry": self._openai_compatible_model,
             "azure_apim": self._openai_compatible_model,
         }
         self._retriever_factories: dict[str, Callable[[str, dict[str, Any]], Any]] = {
@@ -195,25 +194,6 @@ class ProviderResolver:
                 DatabricksOpenAI(**native_options),
                 model,
                 lambda: AsyncDatabricksOpenAI(**native_options),
-            )
-        if provider == "foundry":
-            from openai import AsyncOpenAI, OpenAI
-
-            endpoint = _required(config, "endpoint").rstrip("/")
-            token_provider = self._bearer_token_provider(
-                config.get("token_scope")
-                or config.get("scope")
-                or "https://ai.azure.com/.default"
-            )
-            foundry_options = {
-                **native_options,
-                "base_url": f"{endpoint}/openai/v1/",
-                "api_key": token_provider,
-            }
-            return (
-                OpenAI(**foundry_options),
-                model,
-                lambda: AsyncOpenAI(**foundry_options),
             )
         if provider == "azure_apim":
             from openai import AsyncOpenAI, OpenAI

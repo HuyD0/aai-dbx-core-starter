@@ -159,17 +159,14 @@ and remain assessable when a provider exposes none.
 
 Across those lessons, MLflow is the authoritative assurance evidence plane:
 the reviewed trace, EvaluationDataset, evaluation run, and Feedback /
-Assessment stay together for regression and release decisions. Foundry and
-Application Insights are complementary operational views, not a second source
-of benchmark truth and not a backend synchronization mechanism.
+Assessment stay together for regression and release decisions. Operational
+telemetry backends remain complementary views, not a second source of
+benchmark truth and not a backend synchronization mechanism.
 
 The production loop is `trace -> select -> minimize -> human review ->
 Feedback -> versioned MLflow EvaluationDataset -> evaluation gate`. Promotion
 into the dataset is intentional; an unreviewed trace never becomes an expected
-answer or expected trajectory automatically. The Foundry curriculum's
-[dual-export lab](foundry-curriculum/notebooks/12_dual_otel_export_foundry_and_mlflow.ipynb)
-shows how the same native OTel execution spans can reach both operational and
-assurance destinations while keeping their roles separate.
+answer or expected trajectory automatically.
 
 ## MLflow concepts in plain language
 

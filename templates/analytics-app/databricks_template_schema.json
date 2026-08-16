@@ -58,31 +58,17 @@
     "model_provider": {
       "type": "string",
       "default": "databricks",
-      "description": "Model provider. Choose `databricks` (recommended default: gateway-ready serving endpoint) unless your team already operates its own Foundry resource. Application code only uses the logical name",
+      "description": "Model provider. `databricks` is a gateway-ready serving endpoint; the enterprise attaches AI Gateway rate limits and usage tracking. Application code only uses the logical name",
       "enum": [
-        "databricks",
-        "foundry"
+        "databricks"
       ],
       "order": 8
     },
     "model_deployment": {
       "type": "string",
       "default": "replace-with-model-endpoint",
-      "description": "Databricks serving endpoint name or Foundry deployment name",
+      "description": "Databricks serving endpoint name",
       "order": 9
-    },
-    "foundry_endpoint": {
-      "type": "string",
-      "default": "https://replace-with-foundry-resource.services.ai.azure.com",
-      "description": "Foundry resource endpoint (only asked for Foundry models)",
-      "order": 10,
-      "skip_prompt_if": {
-        "properties": {
-          "model_provider": {
-            "const": "databricks"
-          }
-        }
-      }
     },
     "judge_deployment": {
       "type": "string",

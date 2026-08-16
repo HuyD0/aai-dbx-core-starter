@@ -41,12 +41,6 @@ jobs:
           python -m pip install uv==0.8.23
           uv sync --python 3.12 --extra dev --extra all --locked
           ./scripts/cloud-verify.sh
-          uv sync \
-            --python 3.12 \
-            --extra dev \
-            --extra all \
-            --extra foundry-labs \
-            --locked
           uv run --python 3.12 python \
             templates/_shared/files/scripts/audit_dependencies.py \
             --policy templates/_shared/files/security-audit.toml \

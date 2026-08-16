@@ -7,7 +7,7 @@ Tool-using agent application generated from the AAI platform template
 (`agent-app`, successor of `agentic-rag`'s agent half): governed prompt,
 application-owned async tool loop, structured outputs, tracing,
 trajectory-aware offline evaluation, and feedback.
-{{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
+{{ if eq .include_serving "yes" }}
 The single generated serving path is a gated Databricks Apps deployment
 through MLflow Agent Server, with native async invoke and streaming endpoints.
 {{ else }}
@@ -43,7 +43,7 @@ provider integration.
   application-owned `AsyncToolRegistry`; for governed structured-data lookups,
   create Unity
   Catalog functions.
-{{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
+{{ if eq .include_serving "yes" }}
   Ask the platform owner to grant the App service principal least-privilege
   `EXECUTE` on each function.
 {{ else }}
@@ -197,7 +197,7 @@ live-validate the managed UI and conversion behavior in the target workspace.
    --decision-run-id <decision-run-id> --to validation|production`). The script reloads
    and verifies the persisted decision artifact, tags, gate metrics, and exact
    prompt binding before moving either alias.
-{{ if and (eq .include_serving "yes") (eq .model_provider "databricks") }}
+{{ if eq .include_serving "yes" }}
 7. Before enabling deployment, have the approved platform process create the
    Databricks App named `{{.application_name}}-dev`. App creation provisions
    its dedicated service principal. The platform owner must grant that

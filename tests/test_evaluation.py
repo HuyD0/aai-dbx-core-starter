@@ -517,7 +517,7 @@ def test_judge_resolves_only_an_approved_databricks_deployment():
     ("models", "match"),
     [
         ({}, "no 'judge-model' model entry"),
-        ({"judge-model": {"provider": "foundry", "deployment": "x"}}, "databricks"),
+        ({"judge-model": {"provider": "azure_apim", "deployment": "x"}}, "databricks"),
         ({"judge-model": {"provider": "databricks", "deployment": " "}}, "deployment"),
         (
             {

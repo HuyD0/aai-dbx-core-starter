@@ -25,32 +25,6 @@ certified = "6.0.3"
 maturity = "stable"
 family = "core"
 
-[packages.a2a-sdk]
-supported = ">=1.0.3,<1.1"
-certified = "1.0.3"
-maturity = "preview"
-family = "agent-interoperability"
-note = "Curriculum-only preview dependency; A2A v1.0 is preferred for new Foundry integrations."
-
-[packages.agent-framework-core]
-supported = ">=1.12.1,<1.13"
-certified = "1.12.1"
-maturity = "stable"
-family = "application-framework"
-note = "Curriculum uses native ContextProvider and OpenTelemetry APIs without wrapping them in aai-core."
-
-[packages.azure-ai-projects]
-supported = ">=2.4,<3"
-certified = "2.4.0"
-maturity = "stable-with-preview-agent-apis"
-family = "azure-openai"
-
-[packages.azure-monitor-opentelemetry]
-supported = ">=1.8.9,<2"
-certified = "1.8.9"
-maturity = "stable"
-family = "observability"
-
 [packages.azure-identity]
 supported = ">=1.25.3,<2"
 certified = "1.25.3"
@@ -94,12 +68,6 @@ certified = "0.122.0"
 maturity = "preview"
 family = "databricks-clients"
 
-[packages.httpx]
-supported = ">=0.28.1,<1"
-certified = "0.28.1"
-maturity = "stable"
-family = "core"
-
 [packages.langgraph]
 supported = ">=1.2,<1.3"
 certified = "1.2.9"
@@ -125,20 +93,6 @@ supported = ">=2.48,<3"
 certified = "2.48.0"
 maturity = "stable"
 family = "azure-openai"
-
-[packages.opentelemetry-exporter-otlp-proto-http]
-supported = ">=1.43,<1.44"
-certified = "1.43.0"
-maturity = "stable"
-family = "observability"
-note = "Pinned to the OpenTelemetry minor supported by azure-monitor-opentelemetry 1.8.9."
-
-[packages.opentelemetry-sdk]
-supported = ">=1.43,<1.44"
-certified = "1.43.0"
-maturity = "stable"
-family = "observability"
-note = "Direct dependency for explicit one-provider, multiple-exporter notebook examples."
 
 [packages.pandas]
 supported = ">=2,<3"

@@ -187,7 +187,7 @@ def test_azure_apim_requires_token_scope_and_secret_reference(monkeypatch):
     assert "keyvault://" in str(excinfo.value.remediation)
 
 
-def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
+def test_same_logical_name_resolves_via_both_providers(monkeypatch):
     recorded = {}
     _install_identity_fakes(monkeypatch, recorded)
     install_fake_module(
@@ -205,13 +205,6 @@ def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
 
     configs = {
         "databricks": {"provider": "databricks", "deployment": "chat-endpoint"},
-        "foundry": {
-            "provider": "foundry",
-            "endpoint": (
-                "https://foundry.services.ai.azure.com/api/projects/project-dev"
-            ),
-            "deployment": "gpt-chat",
-        },
         "azure_apim": {
             "provider": "azure_apim",
             "base_url": "https://gw.azure-api.net/llm",
@@ -238,11 +231,6 @@ def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
             )
         else:
             assert DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER not in headers
-        if provider == "foundry":
-            assert model.native_client.options["base_url"] == (
-                "https://foundry.services.ai.azure.com/api/projects/"
-                "project-dev/openai/v1/"
-            )
 
 
 def test_databricks_embedding_client_carries_governed_request_tags(monkeypatch):
@@ -333,11 +321,9 @@ def test_resilience_options_come_from_configuration(monkeypatch):
         _context(
             models={
                 "general-chat": {
-                    "provider": "foundry",
-                    "endpoint": (
-                        "https://foundry.services.ai.azure.com/api/projects/"
-                        "project-dev"
-                    ),
+                    "provider": "azure_apim",
+                    "base_url": "https://gw.azure-api.net/llm",
+                    "token_scope": "api://apim-gateway/.default",
                     "deployment": "gpt-chat",
                     "timeout_seconds": 15,
                     "max_retries": 0,

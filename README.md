@@ -11,7 +11,7 @@ It provides a paved road for:
 - Structured logging and MLflow tracing.
 - Governed MLflow experiment/prompt context and deterministic gates over
   native MLflow evaluation results.
-- Databricks and Microsoft Foundry model endpoints.
+- Databricks and Azure APIM gateway model endpoints.
 - Azure AI Search and Databricks AI Search retrieval.
 - Reproducible application releases.
 - Databricks Declarative Automation Bundles project templates.
@@ -143,10 +143,9 @@ truth for what actually executed and whether it succeeded.
 For this lifecycle, **MLflow is the authoritative assurance evidence plane**:
 traces preserve observed application behavior, runs preserve reproducible test
 results, EvaluationDatasets preserve reviewed regression cases, and Feedback /
-Assessments preserve independent verdicts. Foundry and its connected
-Application Insights resource remain valuable operational views for service-side
-diagnosis, but they do not replace or synchronize the reviewed MLflow evidence
-used by the release gate.
+Assessments preserve independent verdicts. Operational telemetry backends
+remain valuable views for service-side diagnosis, but they do not replace or
+synchronize the reviewed MLflow evidence used by the release gate.
 
 Production learning is deliberate rather than automatic. Teams select useful
 or failed traces, minimize sensitive content, review and label the cases, add
@@ -235,7 +234,7 @@ keeping sklearn out of the SDK runtime.
 
 The standalone [agentic operations RAG workshop](examples/agentic-ops-rag/README.md)
 adapts a progressive public RAG course outline to this platform's MLflow 3,
-Databricks, Microsoft Foundry, Azure AI Search, identity, and release contracts.
+Databricks, Azure AI Search, identity, and release contracts.
 Its six generated notebooks use original synthetic runbooks and execute without
 credentials by default; real provider calls are explicit opt-ins.
 
@@ -273,7 +272,7 @@ Optional provider dependencies are separated:
 
 ```bash
 uv sync --extra databricks --extra genai --locked
-uv sync --extra foundry --extra azure-search --extra keyvault --extra genai --locked
+uv sync --extra azure-apim --extra azure-search --extra keyvault --extra genai --locked
 ```
 
 ## Configure an application

@@ -10,7 +10,6 @@ import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import mlflow
 import yaml
@@ -301,10 +300,7 @@ def _model_identity(settings, logical_name: str) -> str:
         raise TypeError(f"{logical_name} provider must be a non-empty string")
     if not isinstance(deployment, str) or not deployment.strip():
         raise TypeError(f"{logical_name} deployment must be a non-empty string")
-    identity = f"{provider.strip()}:{deployment.strip()}"
-    if provider.strip().casefold() == "foundry":
-        identity += "@endpoint-sha256:" + _endpoint_sha256(config.get("endpoint"))
-    return identity
+    return f"{provider.strip()}:{deployment.strip()}"
 
 
 def _release_model_config(settings, logical_name: str) -> dict:
@@ -321,9 +317,6 @@ def _release_model_config(settings, logical_name: str) -> dict:
         if key in config
     }
     _model_identity(settings, logical_name)
-    provider = str(config["provider"]).strip()
-    if provider.casefold() == "foundry":
-        reviewed["endpoint_sha256"] = _endpoint_sha256(config.get("endpoint"))
     return {"logical_name": logical_name, **reviewed}
 
 
@@ -360,43 +353,6 @@ def _world_version(value: str) -> str:
     ):
         raise ValueError("--world-version must be a bounded non-secret identifier")
     return normalized
-
-
-def _endpoint_sha256(value) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise TypeError("Foundry model configuration requires an HTTPS endpoint")
-    endpoint = value.strip()
-    parsed = urlsplit(endpoint)
-    if (
-        any(character.isspace() or ord(character) < 32 for character in endpoint)
-        or parsed.scheme.casefold() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError(
-            "Foundry endpoint must be HTTPS without userinfo, query, or fragment"
-        )
-    try:
-        port = parsed.port
-    except ValueError as error:
-        raise ValueError("Foundry endpoint contains an invalid port") from error
-    raw_hostname = parsed.hostname.rstrip(".")
-    try:
-        hostname = raw_hostname.encode("idna").decode("ascii").casefold()
-    except UnicodeError as error:
-        raise ValueError("Foundry endpoint contains an invalid hostname") from error
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
-    path = re.sub(r"/+", "/", parsed.path or "/")
-    if any(segment in {".", ".."} for segment in path.split("/")):
-        raise ValueError("Foundry endpoint path must not contain dot segments")
-    if path != "/":
-        path = path.rstrip("/")
-    normalized = f"https://{hostname}:{port or 443}{path}"
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _normalized_source_commit(value: str) -> str:

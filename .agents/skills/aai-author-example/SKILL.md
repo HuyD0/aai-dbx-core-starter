@@ -1,6 +1,6 @@
 ---
 name: aai-author-example
-description: Create or revise executable AAI learning examples, notebooks, workshops, the Foundry curriculum, and local-classification lessons. Use for work under examples that teaches SDK, MLflow, Databricks, agentic, RAG, evaluation, streaming, Foundry, or classical-ML lifecycle practices.
+description: Create or revise executable AAI learning examples, notebooks, workshops, and local-classification lessons. Use for work under examples that teaches SDK, MLflow, Databricks, agentic, RAG, evaluation, streaming, or classical-ML lifecycle practices.
 ---
 
 # Author an AAI Example
@@ -45,9 +45,9 @@ automation. Keep exercises separate from the canonical solution.
 
 ## Domain routing
 
-Use the maintained `microsoft-foundry` skill for current Foundry APIs and the
-`azure-ai` skill for current Azure AI Search behavior. Add only this repository's
-lesson, governance, portability, and evidence rules around them.
+Use the maintained `azure-ai` skill for current Azure AI Search behavior. Add
+only this repository's lesson, governance, portability, and evidence rules
+around it.
 
 ## Verification
 
@@ -55,7 +55,6 @@ Run the affected subset of:
 
 ```text
 uv run pytest tests/test_smoke.py tests/test_examples_runner.py -q
-uv run pytest tests/test_foundry_curriculum.py -q
 make -C examples/local-classification check
 ```
 
