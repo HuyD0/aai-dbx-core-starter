@@ -109,7 +109,7 @@ class SmokeConfig(ContractModel):
 
 
 class RequestMapping(ContractModel):
-    """Field mapping for generic HTTP/JSON targets (Foundry included)."""
+    """Field mapping for generic HTTP/JSON targets."""
 
     request_field: str = Field(default="input", min_length=1)
     response_field: str = Field(default="output", min_length=1)

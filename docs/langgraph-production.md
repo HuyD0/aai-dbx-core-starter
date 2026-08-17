@@ -137,5 +137,4 @@ A managed-MCP tool recipe (Genie, Vector Search) is deliberately deferred:
 the `mcp` package took a breaking 2.0 major, `databricks-mcp` is a preview
 release with an unbounded `mcp` floor, and MCP endpoints cannot be exercised
 in credential-free CI, so certification now would buy churn without test
-evidence. `examples/foundry-curriculum` teaches the integration pattern;
-revisit certification when the client stack settles.
+evidence. Revisit certification when the client stack settles.

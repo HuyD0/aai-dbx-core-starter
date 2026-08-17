@@ -31,8 +31,8 @@ from aai_core.tags import ResourceContext
 
 
 class FakeCompletions:
-    """Stands in for any OpenAI-compatible endpoint (Databricks serving,
-    Foundry, or an APIM gateway) — the adapter neither knows nor cares."""
+    """Stands in for any OpenAI-compatible endpoint (Databricks serving or
+    an APIM gateway) — the adapter neither knows nor cares."""
 
     def create(self, **request):
         del request

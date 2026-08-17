@@ -23,13 +23,12 @@ providers:
     # with base_url/token_scope) — application code never changes.
     general-chat:
       provider: {{.model_provider}}
-      endpoint: {{.foundry_endpoint}}
       deployment: {{.model_deployment}}
       capabilities:
         tool_calling: true
         structured_output: true
     # Evaluation judges always use an approved gateway-fronted Databricks
-    # endpoint, including an external-model endpoint for Foundry judges.
+    # endpoint, including an external-model endpoint for external judges.
     judge-model:
       provider: databricks
       deployment: {{.judge_deployment}}

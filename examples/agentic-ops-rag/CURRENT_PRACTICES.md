@@ -8,7 +8,7 @@ target tenant and region before a production release.
 
 | Concern | Stable workshop and production path | Optional or evolving path |
 |---|---|---|
-| Serving | Databricks Apps with MLflow Agent Server and the Responses API contract | Models-from-code serving compatibility; Foundry Hosted Agents |
+| Serving | Databricks Apps with MLflow Agent Server and the Responses API contract | Models-from-code serving compatibility |
 | Retrieval | Azure AI Search classic hybrid BM25 + vector, optionally followed by semantic ranker | Azure AI Search agentic retrieval after platform/API-status review |
 | Lifecycle evidence | MLflow 3 traces, fixed evaluation data, `mlflow.genai.evaluate()`, and deterministic release gates | Unity Catalog trace storage and production monitoring when enabled |
 | Identity | Entra ID, Azure CLI for development, managed/workload identity in hosted environments, Databricks unified auth | No API keys, PATs, or client secrets |
@@ -130,21 +130,6 @@ References:
 - [Productionize an agent](https://learn.microsoft.com/en-us/azure/databricks/agents/agent-framework/productionize-agent)
 - [Databricks authentication](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/)
 - [Azure CLI authentication for Databricks](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/azure-cli)
-
-## Microsoft Foundry
-
-Foundry is a configured model/provider plane in this workshop, not a parallel
-release system. Hosted Agents provide managed identity, containerized code,
-sessions, endpoints, and OpenTelemetry integration, but several surrounding
-observability capabilities remain preview. Do not dual-export every prompt and
-response to MLflow and Application Insights by default; that duplicates
-sensitive content across retention, RBAC, and cost boundaries. Demonstrate dual
-export only after a privacy and operations review.
-
-References:
-
-- [Foundry Hosted Agents](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents)
-- [Foundry agent tracing setup](https://learn.microsoft.com/en-us/azure/foundry/observability/how-to/trace-agent-setup)
 
 ## Review checklist for a future refresh
 

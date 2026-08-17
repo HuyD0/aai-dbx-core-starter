@@ -62,7 +62,7 @@ def run_doctor(
     )
     for module, extra in (
         ("databricks.sdk", "databricks"),
-        ("azure.identity", "foundry or azure-search"),
+        ("azure.identity", "azure-apim or azure-search"),
         ("mlflow", "genai"),
     ):
         status = "pass" if _module_available(module) else "skip"

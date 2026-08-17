@@ -2,9 +2,9 @@
 
 The ``agent:`` value resolves by shape — a logical model from
 ``aai-platform.yml``, a Databricks serving endpoint, a UC registered model,
-any HTTP/JSON endpoint (a Foundry hosted agent included), a local Python
-callable, or a recorded answer sheet. Detection is pure string/filesystem
-logic; adapter construction imports heavy clients lazily.
+any HTTP/JSON endpoint, a local Python callable, or a recorded answer
+sheet. Detection is pure string/filesystem logic; adapter construction
+imports heavy clients lazily.
 """
 
 from __future__ import annotations

@@ -198,7 +198,7 @@ def test_judge_model_uri_requires_a_databricks_deployment(tmp_path):
     project = ProjectContext(
         config=_config(),
         settings=dev_settings(
-            models={"judge-model": {"provider": "foundry", "deployment": "j"}}
+            models={"judge-model": {"provider": "azure_apim", "deployment": "j"}}
         ),
         root=tmp_path,
     )

@@ -164,7 +164,7 @@ spans also duplicate token and cost evidence.
 
 MLflow is the authoritative assurance evidence plane for applications. Its
 traces, runs, versioned EvaluationDatasets, and Feedback / Assessments are the
-records evaluated by the release gate. Foundry and Application Insights provide
+records evaluated by the release gate. Operational telemetry backends provide
 a complementary service-operational view; neither backend copies verdicts or
 reviewed datasets into the other.
 
@@ -173,8 +173,7 @@ Tracing ownership determines which privacy controls actually apply:
 | Trace source | Owner and privacy boundary | What it proves |
 |---|---|---|
 | SDK-owned application tracing | The application selects one provider/integration, exporters, attributes, and bounded inputs/outputs. Its declared MLflow capture policy applies to these spans. | Client behavior the application directly observed. |
-| Foundry client instrumentation | The application owns the client OTel provider, but the preview `AIProjectInstrumentor` has its own content, trace-context, and baggage switches. Content capture stays off by default. | Foundry SDK calls and correlated client activity. |
-| Foundry-native or hosted telemetry | The Foundry protocol runtime owns server-side instrumentation and the platform-connected Application Insights export. Its runtime policy—not the SDK trace policy—controls those payloads. | What the managed service observed, subject to sampling and ingestion. |
+| Provider-managed or hosted telemetry | The managed runtime owns its server-side instrumentation and export. Its runtime policy—not the SDK trace policy—controls those payloads. | What the managed service observed, subject to sampling and ingestion. |
 
 Do not assume that disabling content in one owner redacts spans produced by
 another. Exception messages, identifiers, tool definitions, and custom span
@@ -185,15 +184,13 @@ gap.
 Native OTel GenAI conventions give MLflow a useful execution mapping after
 ingestion: `invoke_agent` is agent activity, `chat` is a model call, and
 `execute_tool` is actual tool execution. A tool call represented only inside a
-model response is intent, not proof that application tool code ran. Native
-Agent Framework 1.12.1 emits repeated `chat` and `execute_tool` spans as direct
-sibling children of `invoke_agent`; do not teach a TOOL span as nested under the
-model span that requested it. A hosted protocol runtime can add another parent,
-so validate the deployed platform root and managed-backend translation live.
-Native instrumentation has no portable decision-reason, retry/recovery, or human-
-approval span contract, so add small application spans only for those meaningful
-events. Record failures on execution spans and keep evaluator verdicts in
-Feedback / Assessments.
+model response is intent, not proof that application tool code ran; do not
+teach a TOOL span as nested under the model span that requested it. A hosted
+protocol runtime can add another parent, so validate the deployed platform
+root and managed-backend translation live. Native instrumentation has no
+portable decision-reason, retry/recovery, or human-approval span contract, so
+add small application spans only for those meaningful events. Record failures
+on execution spans and keep evaluator verdicts in Feedback / Assessments.
 
 Debug from the producer outward:
 
@@ -201,8 +198,9 @@ Debug from the producer outward:
 2. Confirm exactly one instrumentation owner and the intended content policy.
 3. Confirm exporter flush, endpoint, protocol, routing headers, and renewable
    authentication without printing credentials.
-4. Confirm ingestion in Application Insights or the MLflow receiver.
-5. Confirm Foundry correlation fields, viewer RBAC, sampling, and ingestion
+4. Confirm ingestion in the MLflow receiver or the configured operational
+   backend.
+5. Confirm backend correlation fields, viewer RBAC, sampling, and ingestion
    delay.
 6. Confirm MLflow translated the native spans, then run independent scorers.
 

@@ -48,7 +48,7 @@ _REMEDIATIONS = {
     "scope and subscription key reference in aai-platform.yml.",
     403: "The identity is authenticated but not authorized. Ask for "
     "CAN_QUERY on the serving endpoint (Databricks) or the required "
-    "role/product subscription (Foundry/APIM).",
+    "role/product subscription (APIM).",
     404: "The configured deployment/endpoint does not exist. Check the "
     "`deployment` (and `base_url`/`endpoint`) for this logical name in "
     "aai-platform.yml.",

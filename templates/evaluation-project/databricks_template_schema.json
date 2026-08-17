@@ -56,7 +56,7 @@
     "model_deployment": {
       "type": "string",
       "default": "replace-with-judge-endpoint",
-      "description": "Databricks serving endpoint used by the LLM judges (gateway-fronted; route Foundry models through an external-model endpoint first)",
+      "description": "Databricks serving endpoint used by the LLM judges (gateway-fronted; route external models through an external-model endpoint first)",
       "order": 9
     },
     "dataset_name": {

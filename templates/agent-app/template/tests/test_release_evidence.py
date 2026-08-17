@@ -267,30 +267,8 @@ def test_release_model_only_serializes_reviewed_non_secret_fields():
     }
 
 
-def test_foundry_release_model_uses_endpoint_digest_without_url():
+def test_eval_and_release_use_the_same_model_identity():
     settings = _settings()
-    settings.models["general-chat"].update(
-        {
-            "provider": "foundry",
-            "endpoint": "https://Foundry-A.example.invalid/api/projects/project-a",
-        }
-    )
-
-    evidence = create_release._release_model_config(settings, "general-chat")
-
-    assert len(evidence["endpoint_sha256"]) == 64
-    assert "endpoint" not in evidence
-    assert "https://" not in json.dumps(evidence)
-
-
-def test_foundry_eval_and_release_use_the_same_endpoint_aware_identity():
-    settings = _settings()
-    settings.models["general-chat"].update(
-        {
-            "provider": "foundry",
-            "endpoint": "https://foundry.example.invalid/api/projects/project-a/",
-        }
-    )
 
     evaluated_identity, _ = _evaluation_model_identities(settings)
 

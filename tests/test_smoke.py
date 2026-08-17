@@ -532,14 +532,12 @@ def test_assurance_docs_keep_mlflow_authoritative_and_production_cases_reviewed(
 
     for source in sources:
         assert "authoritative assurance" in source
-        assert "Application Insights" in source
         assert "EvaluationDataset" in source
         assert "Feedback" in source
         assert "unreviewed" in source or "human review" in source
 
     developer_guide = sources[1]
     assert "invoke_agent" in developer_guide
-    assert re.search(r"direct\s+sibling children", developer_guide)
     assert "execute_tool" in developer_guide
     assert "renewable" in developer_guide
 

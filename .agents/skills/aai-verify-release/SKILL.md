@@ -50,5 +50,5 @@ Verify that publication will:
 
 Return a compact table of each gate, command or evidence source, result, and
 remaining protected action. Distinguish a locally verified candidate from a
-release approved for publication. Never claim CodeQL, live Databricks, MLflow,
-or Foundry validation without its actual result.
+release approved for publication. Never claim CodeQL, live Databricks, or
+MLflow validation without its actual result.

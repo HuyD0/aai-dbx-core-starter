@@ -473,9 +473,9 @@ def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
     """Resolve an approved logical judge into MLflow's model URI.
 
     Judges run through a Databricks serving endpoint so authentication,
-    gateway policy, and cost controls stay platform-owned. A Foundry model
-    must first be exposed through a governed Databricks external-model
-    endpoint.
+    gateway policy, and cost controls stay platform-owned. An external
+    model must first be exposed through a governed Databricks
+    external-model endpoint.
     """
 
     models = getattr(settings, "models", {})
@@ -490,7 +490,7 @@ def judge_model_uri(settings: Any, logical_name: str = "judge-model") -> str:
         raise ProviderConfigurationError(
             f"LLM judge {logical_name!r} must use provider 'databricks'",
             remediation="Route the judge through a Databricks serving "
-            "endpoint; for Foundry models, use an external-model endpoint.",
+            "endpoint; for external models, use an external-model endpoint.",
         )
     deployment = config.get("deployment")
     if not isinstance(deployment, str) or not deployment.strip():

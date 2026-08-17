@@ -16,19 +16,12 @@ from evals.evaluate import (
 )
 
 
-def _settings(
-    *,
-    target_provider: str,
-    target: str,
-    judge: str,
-    endpoint: str = "https://foundry-a.example.invalid/api/projects/project-a",
-):
+def _settings(*, target: str, judge: str):
     return SimpleNamespace(
         models={
             "general-chat": {
-                "provider": target_provider,
+                "provider": "databricks",
                 "deployment": target,
-                "endpoint": endpoint,
             },
             "judge-model": {
                 "provider": "databricks",
@@ -38,52 +31,9 @@ def _settings(
     )
 
 
-def test_cross_provider_deployment_names_do_not_imply_same_target():
-    target, judge = _evaluation_model_identities(
-        _settings(target_provider="foundry", target="chat", judge="chat")
-    )
-
-    assert target.startswith("foundry:chat@endpoint-sha256:")
-    assert judge == "databricks:chat"
-
-
-def test_foundry_endpoint_origin_is_part_of_target_identity():
-    first, _ = _evaluation_model_identities(
-        _settings(
-            target_provider="foundry",
-            target="chat",
-            judge="judge",
-            endpoint="https://foundry.example.invalid/api/projects/a/",
-        )
-    )
-    second, _ = _evaluation_model_identities(
-        _settings(
-            target_provider="foundry",
-            target="chat",
-            judge="judge",
-            endpoint="https://foundry.example.invalid/api/projects/b",
-        )
-    )
-    equivalent_first, _ = _evaluation_model_identities(
-        _settings(
-            target_provider="foundry",
-            target="chat",
-            judge="judge",
-            endpoint="https://FOUNDRY.example.invalid:443/api//projects/a",
-        )
-    )
-
-    assert first != second
-    assert first == equivalent_first
-    assert "https://" not in first
-    assert "/api/projects" not in first
-
-
 def test_same_provider_and_deployment_cannot_self_judge():
     with pytest.raises(ValueError, match="cannot rely"):
-        _evaluation_model_identities(
-            _settings(target_provider="databricks", target="chat", judge="CHAT")
-        )
+        _evaluation_model_identities(_settings(target="chat", judge="CHAT"))
 
 
 def test_dataset_comparison_includes_review_tags_but_not_mlflow_system_tags():

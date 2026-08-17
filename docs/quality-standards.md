@@ -48,7 +48,7 @@ mutable state, becomes reusable, or introduces nested operational control flow.
 ## Architecture guardrails
 
 Use provider-neutral contracts only for capabilities the SDK actually owns.
-Keep native Databricks, MLflow, OpenAI, Azure AI Search, and Foundry clients
+Keep native Databricks, MLflow, OpenAI, and Azure AI Search clients
 available when their APIs are the clearer boundary.
 
 The following are deliberately not part of the architecture:
@@ -65,7 +65,7 @@ Create a shared helper when two production consumers need the same semantics
 and the helper removes more policy drift than it adds indirection. Keep small
 workload-specific controls with the generated application.
 
-## Databricks, MLflow, and Foundry conventions
+## Databricks and MLflow conventions
 
 - Databricks bundles own logical resource configuration; infrastructure and
   identity remain external. Use serverless policy IDs and required cost tags.
@@ -73,13 +73,10 @@ workload-specific controls with the generated application.
   remain the evidence system. Do not invent parallel evidence objects.
 - Agent serving keeps MLflow `ResponsesAgent` wire contracts and native async
   streaming ownership.
-- Foundry examples use maintained Azure SDKs and the repository's opt-in
-  curriculum. Preview A2A and telemetry features remain explicitly optional,
-  bounded, and cleanup-aware.
 
 ## Release completion
 
-A release is ready only after the root workflow, CodeQL, provider/Foundry lanes,
+A release is ready only after the root workflow, CodeQL, provider lanes,
 template render matrix, wheel validation, and relevant credentialed Databricks
 validation are green. The most recent manually dispatched dependency canary for
 the frozen candidate must also pass all four Python 3.11/3.12 × lowest/latest

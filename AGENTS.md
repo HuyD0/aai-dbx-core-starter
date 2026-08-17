@@ -13,8 +13,8 @@ This is the monorepo for the AAI AI/ML developer platform:
 - A keyless CI/CD foundation for Azure Databricks.
 
 The SDK helps development teams use Azure Databricks, Unity Catalog, MLflow 3,
-Microsoft Foundry, Azure AI Search, Databricks AI Search, experiments, prompts,
-tracing, evaluation, RAG, and agent lifecycle practices consistently.
+Azure AI Search, Databricks AI Search, experiments, prompts, tracing,
+evaluation, RAG, and agent lifecycle practices consistently.
 
 The contract is:
 

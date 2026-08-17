@@ -23,7 +23,6 @@ providers:
     # with base_url/token_scope) — application code never changes.
     general-chat:
       provider: {{.model_provider}}
-      endpoint: {{.foundry_endpoint}}
       deployment: {{.model_deployment}}
       capabilities:
         tool_calling: true

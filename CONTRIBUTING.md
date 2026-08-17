@@ -29,9 +29,9 @@ definitions are repository-local and never download third-party hook code.
 
 - Add behavior-focused tests for fixes and public behavior changes.
 - Keep public SDK entry points small and document exported symbols.
-- Prefer native Databricks, MLflow, and Foundry APIs over another abstraction
-  layer. Add a shared abstraction only after at least two real consumers have
-  the same stable contract.
+- Prefer native Databricks and MLflow APIs over another abstraction layer.
+  Add a shared abstraction only after at least two real consumers have the
+  same stable contract.
 - Keep synchronous batch templates synchronous. Async is required only at I/O
   concurrency or streaming boundaries, with deadlines and deterministic close.
 - Update dependency policy, exact locks, compatibility metadata, generated
