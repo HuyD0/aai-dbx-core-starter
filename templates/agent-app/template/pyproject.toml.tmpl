@@ -22,6 +22,12 @@ langgraph = [
   "langchain>=1.3,<1.4",
   "langgraph>=1.2,<1.3",
 ]
+langgraph-lakebase = [
+  "langgraph>=1.2,<1.3",
+  "langgraph-checkpoint-postgres>=3.1,<4",
+  "psycopg[binary]>=3.2.1,<4",
+  "psycopg-pool>=3.2,<4",
+]
 dev = [
   "black>=26.5.1,<27",
   "build>=1.5,<2",

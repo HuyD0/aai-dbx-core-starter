@@ -47,6 +47,10 @@ The stable SDK should not provide:
 
 Those capabilities move faster than the SDK contract. Templates may pin and
 exercise them while still exposing the underlying native MLflow objects.
+Durable LangGraph persistence follows the same rule: it ships as the
+certified `recipes/langgraph-lakebase/` template recipe against Lakebase
+(see [Production LangGraph agents](langgraph-production.md)), never as SDK
+checkpoint or store wrappers.
 
 OpenAI and LangChain autologging are opt-in because they can capture raw
 framework arguments. Stable `model.generate()` emits one bounded SDK LLM span.

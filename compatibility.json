@@ -39,7 +39,7 @@
   },
   "templates": {
     "agent-app": {
-      "version": "1.3.0",
+      "version": "1.4.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
@@ -122,6 +122,11 @@
       "support": "native-framework",
       "owner": "application",
       "note": "Supported through MLflow LangChain autologging; graph and state APIs are not wrapped by aai-core."
+    },
+    "agent_memory": {
+      "support": "native-framework",
+      "owner": "application",
+      "note": "Durable checkpoints and user-scoped memory through the LangGraph Postgres saver and store against Lakebase; persistence APIs are not wrapped by aai-core."
     },
     "decision_records": {
       "support": "preview",

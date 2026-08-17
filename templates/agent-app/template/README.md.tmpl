@@ -278,5 +278,8 @@ MLflow or provider behavior. If the application needs durable checkpoints,
 replay, or human approval, follow `recipes/langgraph/README.md`. The recipe
 uses native LangGraph state APIs, injected persistent checkpoint/store
 backends, an interrupt before side effects, and an application idempotency
-key. `aai-core` continues to own resource context, trace policy, evaluation,
-and release evidence rather than wrapping the graph.
+key. Review decisions are strict payloads with reasons, and
+`recipes/langgraph-lakebase/README.md` supplies the production
+checkpointer/store wiring against Lakebase plus user-scoped memory tools
+with decision lineage. `aai-core` continues to own resource context, trace
+policy, evaluation, and release evidence rather than wrapping the graph.
