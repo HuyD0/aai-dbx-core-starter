@@ -21,6 +21,23 @@ variables:
   owner_group:
     description: Non-personal group that owns this bundle's resources.
     default: group:data-platform-owners
+  # Cost anomaly watch (resources/cost_anomaly_job.yml). system.billing is
+  # account-wide, so exactly one live schedule is needed; everything else
+  # stays paused to avoid duplicate scans and duplicate alerts.
+  cost_alert_email:
+    description: >-
+      Non-personal group alias that receives cost-anomaly alerts (never an
+      individual's address — see AGENTS.md rule 11). CI supplies it via
+      BUNDLE_VAR_cost_alert_email from the repo variable COST_ALERT_EMAIL;
+      the default is an undeliverable RFC 2606 placeholder by design.
+    default: cost-alerts@example.com
+  cost_anomaly_pause_status:
+    description: >-
+      Pause state of the cost anomaly watch schedule. PAUSED by default so
+      laptop deploys and the dispatch-gated UAT target never add a duplicate
+      daily scan; only CI's deploy-dev step sets UNPAUSED, making the
+      continuously deployed dev job the single live monitor.
+    default: PAUSED
   # Environment identifier. The default is this instance's dev policy; a clone
   # overrides it per target or via BUNDLE_VAR_* without editing resource files.
   # tests/test_smoke.py cross-checks this default against

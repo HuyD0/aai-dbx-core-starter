@@ -98,7 +98,9 @@ These are non-secret identifiers. Do not classify them as secrets.
 5. **Least privilege.** The dedicated CI principal has no ARM RBAC, is
    registered only in `dbx-dev`, is not workspace admin, and uses constrained
    compute. Wheel publication adds only `READ VOLUME` and `WRITE VOLUME` on the
-   SDK artifact volume.
+   SDK artifact volume. The cost anomaly watch adds only `USE CATALOG` on
+   `system`, `USE SCHEMA` on `system.billing`, and `SELECT` on
+   `system.billing.usage` and `system.billing.list_prices`.
 6. **Never grant broad rights to fix authentication.** Solve failures with the
    correct Databricks object permission, Unity Catalog privilege, compute
    policy, or FIC.
