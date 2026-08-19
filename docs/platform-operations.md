@@ -92,7 +92,18 @@ capabilities, quotas, cost ownership, SLO, and support owner.
   cost budgets for development and production traces.
 - Feedback and evaluation-dataset retention, privacy, and access policies.
 - SDK compatibility and deprecation policy.
-- Incident, rollback, and provider-outage procedures.
+- Incident, rollback, and provider-outage procedures. Generated deploy
+  workflows verify the deployment live after the release gate
+  (`scripts/smoke_deployment.py`: App status always, golden probes when the
+  project commits them); a red smoke blocks promotion. Rollback stays a
+  reviewed re-promotion of a known-good commit — the immutable release
+  evidence makes it exact — plus prompt-alias pointer moves; never
+  `bundle destroy`, and never an automated undo.
+- Judge governance: per-judge calibration records
+  (`agentkit judge calibrate`, chance-adjusted agreement vs SME labels),
+  per-run judge self-consistency and frozen-anchor drift, and the rule that
+  judge releases re-establish baselines and anchors in changes of their
+  own.
 
 ## Release readiness
 

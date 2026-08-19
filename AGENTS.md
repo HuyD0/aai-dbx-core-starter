@@ -350,6 +350,5 @@ Use:
   GitHub org and Azure tenant (the identity must be re-minted — the FIC
   subject embeds immutable repo/owner ids).
 - `docs/platform-operations.md` for the SDK volume and platform controls.
-- `docs/archive/` for completed one-time migrations (historical record).
 
 Never delete the shared legacy application or its UAT assignment.

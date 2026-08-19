@@ -155,13 +155,15 @@ one.
 ## The commands
 
 ```
-agentkit init       scaffold a working project from the governed template
-agentkit compare    THE primary verb - score this version against the last
-agentkit smoke      fast gate: a sample, seconds, no cluster, no judges
-agentkit eval       the full suite, locally or as a Databricks job
-agentkit gate       promotion check against thresholds and the baseline
-agentkit evidence   the release record a reviewer can read
-agentkit scorers ls browse the shared registry
+agentkit init               scaffold a working project from the governed template
+agentkit compare            THE primary verb - score this version against the last
+agentkit smoke              fast gate: a sample, seconds, no cluster, no judges
+agentkit eval               the full suite, locally or as a Databricks job
+agentkit gate               promotion check against thresholds and the baseline
+agentkit evidence           the release record a reviewer can read
+agentkit scorers ls         browse the shared registry
+agentkit judge calibrate    measure a judge against SME labels (Cohen's kappa)
+agentkit baseline establish move the baseline to a verified run, via PR
 ```
 
 The whole configuration is three lines:
@@ -345,7 +347,7 @@ cannot be read keep the conservative per-row assumption.
 
 ## What the gate refuses
 
-`agentkit gate` is the promotion check, and it says no in four situations:
+`agentkit gate` is the promotion check, and it says no in six situations:
 
 1. **No evidence at all.** Nothing has been scored yet.
 2. **Evidence that is not a comparison.** A run that never named a baseline
@@ -365,6 +367,25 @@ cannot be read keep the conservative per-row assumption.
    evaluation, so it leaves the current evidence alone.) Reading stale
    evidence is the same failure as comparing against the wrong baseline: the
    number is real, it just answers a question nobody asked.
+5. **Evidence for a different commit.** When the gate runs under a release
+   identity (`AAI_RELEASE` on a job cluster, `GIT_COMMIT` in CI), the
+   results must have been scored for that exact commit; a stale results
+   directory from an earlier checkout refuses with both commits named. The
+   attempt pointer binds the gate to exact result *bytes*; this binds them
+   to the *commit*. A laptop with neither variable set skips the check
+   rather than inventing an identity.
+6. **A judge that cannot be trusted as an instrument.** With the
+   `integrity:` block configured, a judged run must carry its
+   self-inconsistency measurement (a re-judged sample of its own outputs)
+   under the configured flip-rate ceiling, and — once anchors are frozen
+   and `require_anchors` is set — its anchor-drift measurement over frozen
+   baseline outputs. An anchor-drift failure says explicitly that **the
+   judge changed, not the agent**: the agent is not in that loop at all, so
+   the fix is to check the judge endpoint and prompt pins (or, after a
+   deliberate judge release, re-establish the baseline and anchors), never
+   to debug the agent. With `integrity.require_calibration` set, every
+   judge the run used must also hold a passing, version-matched
+   calibration record (see `agentkit judge calibrate`).
 
 `compare` and `eval` refuse earlier still, before any judge call, when the
 recorded baseline measured something else. A delta is only evidence when both
@@ -466,7 +487,10 @@ Every run writes a governed MLflow run carrying the platform resource tags
 plus the lineage the developer would otherwise have to type: dataset reference
 and version digest, row count, agent target, scorer versions, judge model and
 the model that endpoint actually served, resolved judge prompt versions, the
-baseline it was compared against, the gate verdict, and the decision.
+baseline it was compared against, the gate verdict, and the decision. A run
+scored under a release identity records the full deployed commit, and a run
+with the integrity checks configured records its judge self-inconsistency
+and anchor-drift evidence alongside the metrics they gate.
 
 Decisions use the platform vocabulary — **adopt**, **reject**, or
 **inconclusive** — and default to `inconclusive`, because a comparison that
@@ -565,6 +589,37 @@ the native scorers, the runs and traces are all reachable directly, and
 `ExperimentManager.native_client` and `PromptManager.native_client` hand you
 the native module when you need something the toolkit does not wrap. When you
 outgrow a piece of it, drop to the native API for that piece and keep the rest.
+
+## Mapping an external eval-gated CI/CD design onto this platform
+
+Industry write-ups of agent CI/CD converge on one design contract: build one
+artifact per commit, gate the release on *that commit's* eval run against a
+champion with floors and deltas, pin the judge like the code and the data,
+verify the deployment live, and only then move the champion pointer. This
+platform implements that contract — under its own vocabulary and controls.
+The translation, for anyone arriving with those terms:
+
+| External term | Platform mechanism |
+|---|---|
+| champion run / champion promotion | the committed `evals/baseline.json` (+ `aai.baseline_run_id`); promotion is `agentkit baseline establish --from-run` after deploy + post-deploy smoke, committed via pull request |
+| "the gate checks THIS commit's run, never latest" | the attempt pointer binds the gate to exact result bytes, and the release binding refuses evidence scored for a different commit than `AAI_RELEASE`/`GIT_COMMIT` |
+| `eval_dataset_version: golden_v3` | `aai.dataset` (the ref) + `aai.dataset_digest` (a content digest of the questions — it cannot be forgotten when the file changes; encode a human label in the file name if you want one) |
+| `judge_version` | the scorer's catalog version + `aai.judge_model` + `aai.judge_model_identity` (what the endpoint actually served) + the resolved judge prompt URI, all blocking comparability checks |
+| judge self-consistency / canary set | `integrity.consistency_sample` → `judge/integrity/self_inconsistency`, and frozen judge anchors (`evals/judge_anchors.json`) → `judge/integrity/anchor_drift` — "the judge changed, not the agent" |
+| judge release (κ ≥ 0.60 vs SMEs) | `agentkit judge calibrate` → a committed per-judge calibration record with the human ceiling; judge releases move in their own change and end with a re-established baseline and anchors |
+| wheel-per-SHA / deploy by image digest | one wheel per commit bound by `release-evidence.json`, `BUNDLE_VAR_deployment_release=$GITHUB_SHA` into the runtime as `AAI_RELEASE`, and immutable Unity Catalog volume releases |
+| post-deploy smoke on golden prompts | `scripts/smoke_deployment.py` in the deploy workflow: app RUNNING always, golden probes via `evals/data/live_probes.json` |
+| auto-rollback (`rollout undo`) | a deliberate non-goal: rollback is a reviewed re-promotion of a known-good commit (immutable release evidence makes it exact), and prompt aliases roll back by pointer move |
+| GitHub `environment:` approval gates | manual `workflow_dispatch` promotion from protected `main` with the branch-ref federated credential — an `environment:` would change the OIDC subject and break keyless login (AGENTS.md section 4) |
+
+**What deliberately does not transfer:** the container half of such designs
+(a registry, digest-pinned cluster deploys, an in-repo IaC layer). This
+repository does not own infrastructure (AGENTS.md section 10), its CI
+identity holds no ARM RBAC by design, and the serving paths are Databricks
+Apps and Model Serving — the bundle deploy, the immutable volume, and
+workspace permissions are the equivalents. An external runtime can still
+front this gate: `agent:` resolves HTTPS endpoints, so the eval plane stays
+on Databricks while the runtime is wherever the application team runs it.
 
 ## Related documents
 

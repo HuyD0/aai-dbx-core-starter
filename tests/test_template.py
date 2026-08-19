@@ -973,9 +973,7 @@ def test_smoke_deployment_waits_for_running_then_passes_status_only(
     assert "status only" in output
 
 
-def test_smoke_deployment_fails_fast_on_a_terminal_state(
-    tmp_path, monkeypatch, capsys
-):
+def test_smoke_deployment_fails_fast_on_a_terminal_state(tmp_path, monkeypatch, capsys):
     module = _smoke_module(tmp_path, monkeypatch, target="uat")
     monkeypatch.setattr(
         module,
@@ -1056,9 +1054,7 @@ def test_smoke_deployment_probes_log_verdicts_never_bodies(
     assert "ssn" not in output
 
 
-def test_smoke_deployment_names_the_grant_on_forbidden(
-    tmp_path, monkeypatch, capsys
-):
+def test_smoke_deployment_names_the_grant_on_forbidden(tmp_path, monkeypatch, capsys):
     import io
     import urllib.error
 

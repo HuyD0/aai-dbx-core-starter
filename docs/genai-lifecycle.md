@@ -259,6 +259,27 @@ explicit provenance and rationale, calibrate on one reviewed split, and verify
 agreement on another before allowing the judge into a release gate. Keep judge
 model, rubric, examples, and alignment state versioned.
 
+Calibration is measured, not asserted: `agentkit judge calibrate` computes
+chance-adjusted agreement (Cohen's κ, target ≥ 0.60) between the judge and
+the reviewer consensus, plus the pairwise inter-annotator ceiling — a judge
+cannot be more consistent than the humans defining the target, and a low
+ceiling means the rubric is under-specified, so fix the rubric before
+touching the model. The committed per-judge record binds scorer version,
+served judge identity, and prompt URI; evidence always reports it, and
+`integrity.require_calibration` makes scoring and the gate demand it. The
+auditable claim is never "the agent scores 0.87" — it is "0.87 under a judge
+that agrees with our reviewers at κ 0.71 against a ceiling of 0.78".
+
+The judge also stays measured *inside* every judged run: a re-judged sample
+of the run's own outputs bounds how much of any delta is judge noise, and
+frozen judge anchors separate "the judge moved" from "the agent regressed".
+A judge release is therefore its own lifecycle, out-of-band from agent
+changes: new prompt version and scorer version from the platform team,
+re-calibration on held-out labels, then a re-established baseline and
+anchors — in separate commits from any agent change, because a
+champion-versus-change delta is a statement about the agent only while the
+dataset and the judge were held constant.
+
 Prompt optimization is an optional experiment, not a deployment action. Bound
 its request and cost budget, train on a dedicated split, and run the resulting
 exact prompt version against held-out cases through the normal gate. Only then
