@@ -4,6 +4,16 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Bumped the transitive `sqlparse` pin from 0.5.5 to 0.6.0 (root `uv.lock`,
+  both course locks, the classification course's exported model lock, and
+  every template's regenerated `requirements.lock`) to clear four published
+  advisories (CVE-2026-59893/-59894/-54284/-71491). `sqlparse` is pulled in
+  by `mlflow-skinny` (`sqlparse<1,>=0.4.0`); no certified direct dependency
+  changed, so `dependency-policy.toml` and `compatibility.json` needed no
+  edit. Template locks were regenerated with
+  `scripts/lock_template_dependencies.py`, which also picked up unrelated
+  transitive patch/minor bumps already eligible under existing certified
+  ranges.
 - Made the Deep Agents solution accelerator discoverable: a README stating
   its supervisor/sub-agent shape, connected-only boundaries, and guardrails;
   an entry in the examples index; and credential-free contract tests that
