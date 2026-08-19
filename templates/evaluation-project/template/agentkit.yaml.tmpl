@@ -17,6 +17,23 @@ dataset: evals/data/golden_cases.json
 regression_budget:
   keyword_coverage/mean: 0.05
 
+# Measure the judge inside every judged run, so a moved judge is never read
+# as an agent regression. Self-consistency re-judges a small sample of this
+# run's own outputs (a few extra judge calls, no agent re-run); anchors
+# re-judge frozen baseline outputs whose scores were recorded when the
+# baseline was established. `agentkit compare --establish-baseline` freezes
+# evals/judge_anchors.json — commit it with the baseline, then flip
+# require_anchors to true in that same change so the drift check gates.
+# Set consistency_sample: 0 to turn the checks off entirely.
+integrity:
+  consistency_sample: 8
+  max_self_inconsistency: 0.2
+  max_anchor_drift: 0.1
+  require_anchors: false
+  # Demand a passing `agentkit judge calibrate` record (evals/judges/) for
+  # every judge scorer in use before any judged run or gate:
+  # require_calibration: true
+
 # ---------------------------------------------------------------------------
 # Everything below is optional. The defaults are the paved road; these are
 # escape hatches, not the normal path.
