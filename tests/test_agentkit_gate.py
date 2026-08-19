@@ -936,3 +936,61 @@ def test_enabling_integrity_is_policy_drift_for_older_records(tmp_path):
 
     assert drift is not None
     assert SELF_INCONSISTENCY_METRIC in drift
+
+
+def test_run_gate_requires_calibration_when_configured(tmp_path, monkeypatch):
+    from aai_core.agentkit.calibration import (
+        CalibrationRecord,
+        calibration_path,
+        write_calibration,
+    )
+
+    monkeypatch.delenv("AAI_RELEASE", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path, integrity={"require_calibration": True})
+    directory = project.results_dir
+    attempt = begin_results_attempt(directory, command="compare")
+    results = _results(
+        attempt_id=attempt.attempt_id,
+        judges_enabled=True,
+        metrics={
+            "keyword_coverage/mean": 0.8,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+            "safety/mean": 1.0,
+        },
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 2, "safety": 1},
+            aai_core="0.4.0",
+        ),
+    )
+    path = write_results(directory, results, attempt=attempt)
+    complete_results_attempt(directory, attempt, path)
+
+    report, code, message = run_gate(project)
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert [failure.metric for failure in report.result.failures] == ["calibration"]
+    assert "agentkit judge calibrate" in message
+
+    write_calibration(
+        calibration_path(tmp_path, "evals/judges", "safety"),
+        CalibrationRecord(
+            scorer="safety",
+            scorer_version=1,
+            labels_digest="0" * 64,
+            sample_size=20,
+            annotator_count=2,
+            percent_agreement=0.9,
+            kappa=0.8,
+            passed=True,
+            recorded_at="2026-08-19T10:00:00Z",
+        ),
+    )
+
+    report, code, message = run_gate(project)
+
+    # The code-scorer keyword_coverage needs no calibration; the judged
+    # safety scorer is now covered, so the ordinary policy applies.
+    assert code == EXIT_PASS

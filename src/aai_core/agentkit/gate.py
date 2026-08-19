@@ -176,6 +176,7 @@ def evaluate_gate(
     plan: ScorerPlan | None = None,
     check_policy_drift: bool = False,
     check_release_binding: bool = False,
+    check_calibration: bool = False,
 ) -> tuple[GateReport, int]:
     """Apply the policy to an existing results record.
 
@@ -186,8 +187,10 @@ def evaluate_gate(
     fetched from another machine is not expected to match this checkout.
     ``check_release_binding`` is the same shape for commits: when the gate
     runs under a release identity (``AAI_RELEASE``/``GIT_COMMIT``), the
-    results must have been scored for that exact commit. Evidence
-    rendering and remote fetches leave it off for the same reason.
+    results must have been scored for that exact commit.
+    ``check_calibration`` (with ``integrity.require_calibration``) demands
+    a passing calibration record for every judge the run used. Evidence
+    rendering and remote fetches leave all three off for the same reason.
     """
 
     if check_release_binding:
@@ -207,6 +210,32 @@ def evaluate_gate(
                     "for the commit it is gating. Run the evaluation for this "
                     "commit:\n    agentkit compare\nthen run `agentkit gate` "
                     "again."
+                ),
+            )
+            return report, EXIT_THRESHOLD_FAILED
+
+    if check_calibration:
+        uncovered = _calibration_failures(project, results)
+        if uncovered:
+            listed = "\n".join(f"  - {failure}" for failure in uncovered)
+            refused = GateResult(
+                metrics=dict(results.metrics),
+                failures=tuple(
+                    GateFailure(metric="calibration", reason=failure)
+                    for failure in uncovered
+                ),
+            )
+            report = GateReport(
+                result=refused,
+                results=results,
+                baseline=baseline,
+                rules=(),
+                message=(
+                    "integrity.require_calibration is set, and the judges "
+                    "this run used are not covered by passing calibration "
+                    f"records:\n{listed}\nCalibrate each judge (`agentkit "
+                    "judge calibrate`) and commit the records under "
+                    f"{project.config.integrity.calibration_dir}/."
                 ),
             )
             return report, EXIT_THRESHOLD_FAILED
@@ -337,6 +366,7 @@ def run_gate(
         baseline=baseline,
         check_policy_drift=True,
         check_release_binding=True,
+        check_calibration=True,
     )
     return report, code, report.message
 
@@ -448,6 +478,31 @@ def _policy_drift(
     if changed:
         parts.append(f"changed {', '.join(changed)}")
     return "; ".join(parts) if parts else None
+
+
+def _calibration_failures(project: ProjectContext, results: ResultsRecord) -> list[str]:
+    """Calibration coverage for the judges this record says it used."""
+
+    config = project.config.integrity
+    if not config.require_calibration or not results.judges_enabled:
+        return []
+    from aai_core.agentkit.calibration import calibration_failures
+
+    judge_scorers: dict[str, int] = {}
+    for name, version in results.versions.scorers.items():
+        try:
+            spec = get_spec(name)
+        except UnknownScorerError:
+            continue
+        if spec.judge is not None:
+            judge_scorers[name] = int(version)
+    if not judge_scorers:
+        return []
+    return calibration_failures(
+        root=project.root,
+        directory=config.calibration_dir,
+        judge_scorers=judge_scorers,
+    )
 
 
 def _release_binding_failure(results: ResultsRecord) -> str | None:

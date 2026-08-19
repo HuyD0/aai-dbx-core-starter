@@ -542,3 +542,74 @@ def test_an_unresolved_judge_identity_adds_no_line(tmp_path):
 
     assert document["versions"]["judge_model_identity"] is None
     assert "judge model served" not in markdown
+
+
+def test_evidence_reports_judge_integrity_and_calibration(tmp_path):
+    from aai_core.agentkit.calibration import (
+        CalibrationRecord,
+        calibration_path,
+        write_calibration,
+    )
+    from aai_core.agentkit.integrity import (
+        AnchorDriftEvidence,
+        IntegrityEvidence,
+        JudgeConsistencyEvidence,
+    )
+
+    project = _project(tmp_path)
+    write_calibration(
+        calibration_path(tmp_path, "evals/judges", "pension_domain_policy"),
+        CalibrationRecord(
+            scorer="pension_domain_policy",
+            scorer_version=1,
+            labels_digest="0" * 64,
+            sample_size=25,
+            annotator_count=2,
+            percent_agreement=0.92,
+            kappa=0.71,
+            human_ceiling_kappa=0.78,
+            passed=True,
+            recorded_at="2026-08-19T10:00:00Z",
+        ),
+    )
+    results = _results(
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"pension_domain_policy": 1, "keyword_coverage": 2},
+            judge_model="endpoints:/judge",
+            judge_prompts={"pension_domain_policy": "prompts:/main.eval.p/4"},
+            aai_core="0.4.0",
+        ),
+        release="e" * 40,
+        integrity=IntegrityEvidence(
+            consistency=JudgeConsistencyEvidence(
+                sample_size=8,
+                seed=20260819,
+                flip_rates={"pension_domain_policy": 0.125},
+                overall=0.125,
+            ),
+            anchor_drift=AnchorDriftEvidence(
+                anchors_ref="evals/judge_anchors.json",
+                anchors_digest="f" * 64,
+                rows=12,
+                drift_by_scorer={"pension_domain_policy": 0.02},
+                overall=0.02,
+            ),
+        ),
+    )
+
+    document, markdown = build_evidence(
+        project, results=results, baseline=_baseline(), gate_report=None
+    )
+
+    assert document["release"] == "e" * 40
+    assert document["judge_integrity"]["consistency"]["overall"] == 0.125
+    calibration = {row["scorer"]: row for row in document["judge_calibration"]}
+    assert calibration["pension_domain_policy"]["status"] == "passed"
+    assert calibration["pension_domain_policy"]["kappa"] == 0.71
+    assert "## Judge integrity" in markdown
+    assert "## Judge calibration" in markdown
+    assert "Self-inconsistency: 0.125" in markdown
+    assert "Anchor drift: 0.02" in markdown
+    assert "0.71" in markdown and "0.78" in markdown
+    assert "Release commit" in markdown

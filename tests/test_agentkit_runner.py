@@ -3087,3 +3087,257 @@ def test_local_dev_release_records_nothing(tmp_path, monkeypatch):
         "baseline establish --from-run" in warning
         for warning in outcome.results.warnings
     )
+
+
+# --- calibration enforcement and baseline-from-run --------------------------
+
+
+_REQUIRE_CALIBRATION_CONFIG = (
+    "version: 1\n"
+    "agent: src/app/example_agent.py:respond\n"
+    "dataset: evals/data/golden_cases.json\n"
+    "integrity:\n"
+    "  require_calibration: true\n"
+)
+
+
+def _calibrate_every_catalog_judge(root):
+    from aai_core.agentkit.calibration import (
+        CalibrationRecord,
+        calibration_path,
+        write_calibration,
+    )
+    from aai_core.agentkit.catalog import CATALOG
+
+    for spec in CATALOG:
+        if spec.judge is None:
+            continue
+        write_calibration(
+            calibration_path(root, "evals/judges", spec.name),
+            CalibrationRecord(
+                scorer=spec.name,
+                scorer_version=spec.version,
+                labels_digest="0" * 64,
+                sample_size=20,
+                annotator_count=2,
+                percent_agreement=0.9,
+                kappa=0.8,
+                passed=True,
+                recorded_at="2026-08-19T10:00:00Z",
+            ),
+        )
+
+
+def test_require_calibration_refuses_before_any_judge_spend(tmp_path):
+    project = _project(tmp_path, config_text=_REQUIRE_CALIBRATION_CONFIG)
+    fake = FakeMlflow()
+
+    with pytest.raises(ConfigError, match="require_calibration"):
+        run_scoring(
+            project,
+            establish_baseline=True,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=fake,
+        )
+
+    assert fake.evaluate_calls == []
+
+
+def test_calibrated_judges_clear_the_requirement(tmp_path):
+    project = _project(tmp_path, config_text=_REQUIRE_CALIBRATION_CONFIG)
+    _calibrate_every_catalog_judge(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+
+
+def test_smoke_never_requires_calibration(tmp_path):
+    project = _project(tmp_path, config_text=_REQUIRE_CALIBRATION_CONFIG)
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        judges_enabled=False,
+        mode="answer-sheet",
+        assume_yes=True,
+        require_baseline=False,
+    )
+
+    assert code == EXIT_PASS
+
+
+def _verified_results_record(project, run_id="run-9", **overrides):
+    from aai_core.agentkit.baseline import (
+        BaselineDataset,
+        BaselineScope,
+        BaselineVersions,
+    )
+    from aai_core.agentkit.gate import build_policy
+    from aai_core.agentkit.results import ResultsRecord
+
+    policy = build_policy(project, scorer_names=("keyword_coverage",))
+    values = {
+        "command": "compare",
+        "recorded_at": "2026-08-18T10:00:00Z",
+        "run_id": run_id,
+        "experiment_id": "42",
+        "experiment_name": "/Shared/quality-eval",
+        "agent": "src/app/example_agent.py:respond",
+        "dataset": BaselineDataset(
+            ref="evals/data/golden_cases.json", digest="a" * 16, rows=12
+        ),
+        "scope": BaselineScope(mode="full", rows=12),
+        "mode": "answer-sheet",
+        "metrics": {
+            "keyword_coverage/mean": 0.9,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+        },
+        "versions": BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 2},
+            judge_model="endpoints:/judge-endpoint",
+            aai_core="0.4.0",
+        ),
+        "baseline_run_id": "run-0",
+        "baseline_metrics": {"keyword_coverage/mean": 0.85},
+        "policy_rules": policy.rules,
+        "decision": "inconclusive",
+        "change_id": "abc123456789",
+        "gate_passed": True,
+        "judges_enabled": True,
+    }
+    values.update(overrides)
+    return ResultsRecord(**values)
+
+
+class _FetchableMlflow(FakeMlflow):
+    """FakeMlflow that also serves a results artifact for fetch_results.
+
+    The real module exposes downloads as ``mlflow.artifacts``, which the
+    base fake uses as its log_artifact ledger — so the ledger moves aside
+    and the attribute takes the module's actual shape.
+    """
+
+    def __init__(self, artifact_path_by_run, **kwargs):
+        super().__init__(**kwargs)
+        self.logged_artifact_files = self.artifacts
+        self.artifacts = SimpleNamespace(
+            download_artifacts=(
+                lambda run_id, artifact_path: str(artifact_path_by_run[run_id])
+            )
+        )
+
+    def log_artifact(self, path, artifact_path=None):
+        self.logged_artifact_files.append((Path(path).name, artifact_path))
+
+
+def _served_record(tmp_path, project, **overrides):
+    record = _verified_results_record(project, **overrides)
+    path = tmp_path / "served-results.json"
+    path.write_text(
+        json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+    )
+    return record, _FetchableMlflow({record.run_id: path})
+
+
+def test_baseline_establish_from_run_moves_the_reference(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project)
+
+    messages, code = establish_baseline_from_run(
+        project,
+        record.run_id,
+        decided_by="group:pension-ai-owners",
+        mlflow_module=fake,
+    )
+
+    assert code == EXIT_PASS
+    joined = "\n".join(messages)
+    assert "adopt decision recorded" in joined
+    assert f"baseline -> run {record.run_id}" in joined
+    assert "pull request" in joined
+    baseline, _ = load_baseline(project.baseline_path)
+    assert baseline.run_id == record.run_id
+    assert baseline.recorded_by == "agentkit baseline establish --from-run"
+    assert baseline.metrics["keyword_coverage/mean"] == 0.9
+    # The governed adopt decision landed as a run with the decision tags.
+    assert fake.tags.get("aai.decision") == "adopt"
+
+
+def test_baseline_establish_accepts_an_existing_adopt_decision(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project, decision="adopt")
+
+    messages, code = establish_baseline_from_run(
+        project, record.run_id, mlflow_module=fake
+    )
+
+    assert code == EXIT_PASS
+    assert not any("adopt decision recorded" in message for message in messages)
+
+
+def test_baseline_establish_refuses_without_adopt_evidence(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project)
+
+    messages, code = establish_baseline_from_run(
+        project, record.run_id, mlflow_module=fake
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert any("--decided-by" in message for message in messages)
+    assert not project.baseline_path.exists()
+
+
+def test_baseline_establish_refuses_a_failing_gate(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(
+        tmp_path,
+        project,
+        metrics={
+            "keyword_coverage/mean": 0.2,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+        },
+        gate_passed=False,
+    )
+
+    messages, code = establish_baseline_from_run(
+        project, record.run_id, decided_by="group:owners", mlflow_module=fake
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert any("does not pass its own recorded gate" in m for m in messages)
+    assert not project.baseline_path.exists()
+
+
+def test_baseline_establish_refuses_judge_free_and_smoke_runs(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project, judges_enabled=False)
+    with pytest.raises(ConfigError, match="without judges"):
+        establish_baseline_from_run(project, record.run_id, mlflow_module=fake)
+
+    record, fake = _served_record(tmp_path, project, run_id="run-10", command="smoke")
+    with pytest.raises(ConfigError, match="smoke"):
+        establish_baseline_from_run(project, record.run_id, mlflow_module=fake)

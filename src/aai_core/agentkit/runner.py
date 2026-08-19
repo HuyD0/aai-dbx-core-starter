@@ -34,6 +34,7 @@ from aai_core.agentkit.baseline import (
     select_baseline,
     write_baseline,
 )
+from aai_core.agentkit.calibration import calibration_failures
 from aai_core.agentkit.catalog import (
     ScorerKind,
     ScorerPlan,
@@ -236,6 +237,7 @@ def run_scoring(
         return outcome, EXIT_PASS
     assert attempt is not None
 
+    _require_calibrated_judges(project, prepared, judges_enabled=judges_enabled)
     baseline, warnings = _select_run_baseline(
         project,
         prepared,
@@ -1214,6 +1216,156 @@ def _write_new_baseline(
             change_id=scored.change_id,
         ),
     )
+
+
+def _require_calibrated_judges(
+    project: ProjectContext,
+    prepared: _PreparedRun,
+    *,
+    judges_enabled: bool,
+) -> None:
+    """Refuse a judged run whose pinned judges lack calibration evidence.
+
+    Opt-in (``integrity.require_calibration``) and checked BEFORE any
+    judge spend: a score from an uncalibrated judge would be paid for and
+    then unusable as promotion evidence.
+    """
+
+    if not judges_enabled or not project.config.integrity.require_calibration:
+        return
+    judge_scorers = {spec.name: spec.version for spec in prepared.plan.judge_specs}
+    if not judge_scorers:
+        return
+    failures = calibration_failures(
+        root=project.root,
+        directory=project.config.integrity.calibration_dir,
+        judge_scorers=judge_scorers,
+    )
+    if failures:
+        raise ConfigError(
+            "integrity.require_calibration is set, and the pinned judges "
+            "are not covered:\n" + "\n".join(f"  - {failure}" for failure in failures),
+            remediation=(
+                "Calibrate each judge against SME labels (`agentkit judge "
+                "calibrate --scorer <name> --labels <file>`) and commit the "
+                "records, or unset integrity.require_calibration."
+            ),
+        )
+
+
+def establish_baseline_from_run(
+    project: ProjectContext,
+    run_id: str,
+    *,
+    decided_by: str | None = None,
+    mlflow_module: Any | None = None,
+) -> tuple[list[str], int]:
+    """Move the recorded baseline to an already-verified run's evidence.
+
+    The v2.1 principle "the reference moves only after live verification",
+    in this platform's vocabulary: after the deploy workflow's release
+    gate and post-deploy smoke are green, a human points the baseline at
+    that run. The run's own recorded policy is recomputed and must pass,
+    adopt evidence is required (or recorded here with ``--decided-by``),
+    and the result is a reviewable edit to the committed baseline file —
+    CI never commits.
+    """
+
+    from aai_core.agentkit.gate import evaluate_gate
+    from aai_core.agentkit.results import fetch_results
+    from aai_core.decisions import DecisionRecord, record_decision
+
+    messages: list[str] = []
+    record = fetch_results(run_id, mlflow_module=mlflow_module)
+    if record.command == "smoke":
+        raise ConfigError(
+            f"run {run_id} is a smoke run; a sampled, judge-free gate "
+            "cannot become the judged reference",
+            remediation="Point --from-run at an `agentkit compare` or "
+            "`agentkit eval` run.",
+        )
+    if not record.judges_enabled:
+        raise ConfigError(
+            f"run {run_id} was scored without judges; a judge-free run "
+            "must not become the judged reference",
+            remediation="Point --from-run at a judged run.",
+        )
+    report, code = evaluate_gate(project, results=record, baseline=None)
+    if code != EXIT_PASS:
+        messages.append(
+            f"run {run_id} does not pass its own recorded gate; the "
+            "baseline stays where it is:"
+        )
+        for failure in report.result.failures:
+            messages.append(f"  - {failure.metric}: {failure.reason}")
+        return messages, EXIT_THRESHOLD_FAILED
+    if record.decision != Decision.ADOPT.value:
+        if not decided_by:
+            messages.append(
+                f"run {run_id} carries decision {record.decision!r}, not an "
+                "adopt. Moving the baseline is adopting the change: pass "
+                "--decided-by group:<owners> to record the governed adopt "
+                "decision now, or record one first and re-run."
+            )
+            return messages, EXIT_THRESHOLD_FAILED
+        try:
+            decision = DecisionRecord(
+                decision=Decision.ADOPT,
+                change_id=record.change_id,
+                change_summary=("Move the recorded baseline to the verified release"),
+                rationale=(
+                    "Adopted after the deployment and its post-deploy "
+                    f"verification; the baseline moves to run {run_id}."
+                ),
+                baseline_run_id=record.baseline_run_id,
+                change_run_id=run_id,
+                gate=report.result,
+                decided_by=decided_by,
+            )
+        except ValueError as error:
+            raise ConfigError(
+                f"run {run_id} cannot back an adopt decision: {error}"
+            ) from error
+        decision_run = record_decision(
+            decision,
+            experiments=project.experiment_manager(mlflow_module=mlflow_module),
+        )
+        messages.append(f"adopt decision recorded: run {decision_run}")
+    with suppress(Exception):
+        current = load_dataset(
+            project.config.dataset, root=project.root, mlflow_module=mlflow_module
+        )
+        if current.digest != record.dataset.digest:
+            messages.append(
+                f"warning: run {run_id} scored dataset digest "
+                f"{record.dataset.digest}, but the local dataset is "
+                f"{current.digest}; the next `agentkit compare` will refuse "
+                "the comparison until they agree"
+            )
+    write_baseline(
+        project.baseline_path,
+        BaselineRecord(
+            schema_version=1,
+            run_id=record.run_id,
+            experiment_id=record.experiment_id,
+            recorded_at=record.recorded_at,
+            dataset=record.dataset,
+            scope=record.scope,
+            metrics=dict(record.metrics),
+            metric_samples=dict(record.metric_samples),
+            versions=record.versions,
+            recorded_by="agentkit baseline establish --from-run",
+            change_id=record.change_id,
+        ),
+    )
+    messages.append(f"baseline -> run {run_id} ({project.config.baseline.file})")
+    messages.append(
+        "Commit the baseline file via a pull request - CI never commits. "
+        "Judge anchors pin the judge, not the agent, and are not rebuilt "
+        "here; after a judge release, refresh them with a judged "
+        "`agentkit compare --establish-baseline` run."
+    )
+    return messages, EXIT_PASS
 
 
 def _scope_mode(prepared: _PreparedRun) -> Literal["sample", "full"]:

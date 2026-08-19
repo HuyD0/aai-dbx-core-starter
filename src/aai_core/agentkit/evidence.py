@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from aai_core.agentkit.baseline import BaselineRecord
+from aai_core.agentkit.calibration import calibration_status
+from aai_core.agentkit.catalog import get_spec
 from aai_core.agentkit.config import ProjectContext
+from aai_core.agentkit.errors import UnknownScorerError
 from aai_core.agentkit.gate import GateReport
 from aai_core.agentkit.integrity import is_integrity_metric
 from aai_core.agentkit.results import ResultsRecord
@@ -108,6 +111,9 @@ def build_evidence(
             if results.integrity is not None
             else None
         ),
+        # Calibration coverage for the judges the run used — reported
+        # always, enforced only when integrity.require_calibration is set.
+        "judge_calibration": _calibration_rows(project, results),
         "gate": {
             "passed": passed,
             "failures": [
@@ -176,6 +182,7 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     _render_comparison(lines, comparison)
     _render_statistics(lines, document.get("statistics"))
     _render_judge_integrity(lines, document.get("judge_integrity"))
+    _render_judge_calibration(lines, document.get("judge_calibration"))
     _render_scoring(lines, versions)
     _render_gate(lines, gate)
     _render_approval(lines, document["approver"])
@@ -314,6 +321,65 @@ def _render_judge_integrity(
     )
     if failures:
         lines.append(f"- Failed judge re-invocations: {failures}")
+
+
+def _calibration_rows(
+    project: ProjectContext, results: ResultsRecord
+) -> list[dict[str, Any]]:
+    judge_scorers: dict[str, int] = {}
+    for name, version in results.versions.scorers.items():
+        try:
+            spec = get_spec(name)
+        except UnknownScorerError:
+            continue
+        if spec.judge is not None:
+            judge_scorers[name] = int(version)
+    if not judge_scorers:
+        return []
+    return calibration_status(
+        root=project.root,
+        directory=project.config.integrity.calibration_dir,
+        judge_scorers=judge_scorers,
+        judge_prompts=dict(results.versions.judge_prompts),
+        judge_model_identity=results.versions.judge_model_identity,
+    )
+
+
+def _render_judge_calibration(
+    lines: list[str], calibration: list[Mapping[str, Any]] | None
+) -> None:
+    if not calibration:
+        return
+    lines.extend(
+        [
+            "",
+            "## Judge calibration",
+            "",
+            "A judged score is auditable only against a named human "
+            "agreement measurement (chance-adjusted κ vs SME labels).",
+            "",
+        ]
+    )
+    for row in calibration:
+        status = row.get("status", "unknown")
+        if status in {"uncalibrated", "unreadable"}:
+            lines.append(f"- `{row['scorer']}`: **{status}**")
+            if row.get("reason"):
+                lines.append(f"  - {row['reason']}")
+            continue
+        ceiling = row.get("human_ceiling_kappa")
+        ceiling_text = (
+            f", human ceiling κ {_format(ceiling)}" if ceiling is not None else ""
+        )
+        lines.append(
+            f"- `{row['scorer']}`: **{status}** — κ {_format(row.get('kappa'))} "
+            f"(minimum {_format(row.get('minimum_kappa'))}"
+            f"{ceiling_text}) over {row.get('sample_size')} labels, "
+            f"recorded {row.get('recorded_at')}"
+        )
+        for key in ("stale", "stale_prompt", "stale_judge"):
+            if row.get(key):
+                lines.append(f"  - **stale**: {row[key]}")
 
 
 def _render_gate(lines: list[str], gate: Mapping[str, Any]) -> None:
