@@ -39,12 +39,12 @@ REQUIRED_TAGS = {
     "tag_schema_version",
 }
 CURRENT_TEMPLATE_VERSIONS = {
-    "agent-app": "1.3.0",
-    "analytics-app": "1.2.0",
-    "evaluation-project": "2.1.0",
-    "experiment-starter": "1.3.0",
-    "prompt-app": "1.3.0",
-    "rag-app": "1.3.0",
+    "agent-app": "1.4.0",
+    "analytics-app": "1.3.0",
+    "evaluation-project": "2.2.0",
+    "experiment-starter": "1.4.0",
+    "prompt-app": "1.4.0",
+    "rag-app": "1.4.0",
 }
 STRICT_JUDGE_CALLS = (
     pytest.param(
@@ -355,6 +355,15 @@ def test_template_deploy_workflow_is_pinned_and_has_manual_branch_ref_uat(
     assert "hashFiles('resources/agent_app.yml')" in text
     app_preflight = 'databricks apps get "$APP_NAME"'
     assert text.index(app_preflight) < text.index("databricks bundle deploy -t dev")
+    # The deployed app is verified live AFTER it starts, on both targets: a
+    # red smoke fails the workflow, so an unverified deployment cannot reach
+    # UAT and the baseline is never moved onto it.
+    dev_smoke = "python scripts/smoke_deployment.py --target dev"
+    uat_smoke = "python scripts/smoke_deployment.py --target uat"
+    assert text.index(app_deploy) < text.index(dev_smoke)
+    assert text.index("databricks bundle run agent_app -t uat") < text.index(uat_smoke)
+    smoke_step = text[text.index("Post-deploy smoke (dev app)") :]
+    assert "hashFiles('resources/agent_app.yml')" in smoke_step
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
@@ -919,3 +928,167 @@ def test_the_evaluation_shim_requires_explicit_spend_confirmation():
         "--mode",
         "live",
     ]
+
+
+# ------------------------------------------------- post-deploy smoke script
+
+
+def _smoke_module(tmp_path, monkeypatch, target="dev"):
+    module = _template_script("scripts/smoke_deployment.py")
+    (tmp_path / ".aai-template.json").write_text(
+        json.dumps({"generated_with": {"application_name": "test-agent"}})
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["smoke_deployment.py", "--target", target, "--poll-seconds", "1"]
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    return module
+
+
+def test_smoke_deployment_waits_for_running_then_passes_status_only(
+    tmp_path, monkeypatch, capsys
+):
+    module = _smoke_module(tmp_path, monkeypatch)
+    states = iter(
+        [
+            {"app_status": {"state": "DEPLOYING"}},
+            {"app_status": {"state": "RUNNING"}, "url": "https://app.example"},
+        ]
+    )
+    seen_names = []
+
+    def fake_apps_get(app_name):
+        seen_names.append(app_name)
+        return next(states)
+
+    monkeypatch.setattr(module, "_apps_get", fake_apps_get)
+
+    code = module.main()
+
+    assert code == 0
+    assert seen_names == ["test-agent-dev", "test-agent-dev"]
+    output = capsys.readouterr().out
+    assert "RUNNING" in output
+    assert "status only" in output
+
+
+def test_smoke_deployment_fails_fast_on_a_terminal_state(
+    tmp_path, monkeypatch, capsys
+):
+    module = _smoke_module(tmp_path, monkeypatch, target="uat")
+    monkeypatch.setattr(
+        module,
+        "_apps_get",
+        lambda app_name: {"app_status": {"state": "ERROR", "message": "boom"}},
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.main()
+
+    assert excinfo.value.code == 1
+    assert "test-agent-uat is ERROR" in capsys.readouterr().err
+
+
+class _FakeResponse:
+    def __init__(self, body, status=200):
+        self._body = body
+        self.status = status
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _probed_module(tmp_path, monkeypatch, responder):
+    module = _smoke_module(tmp_path, monkeypatch)
+    (tmp_path / "evals" / "data").mkdir(parents=True)
+    (tmp_path / "evals" / "data" / "live_probes.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "gp-001",
+                    "path": "/invocations",
+                    "request": {"input": [{"role": "user", "content": "hi"}]},
+                    "must_contain": ["A-1001"],
+                    "max_seconds": 30,
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "_wait_until_running",
+        lambda name, **kwargs: {
+            "app_status": {"state": "RUNNING"},
+            "url": "https://app.example",
+        },
+    )
+    monkeypatch.setattr(module, "_bearer_token", lambda: "redacted-token")
+    monkeypatch.setattr(module.urllib.request, "urlopen", responder)
+    return module
+
+
+def test_smoke_deployment_probes_log_verdicts_never_bodies(
+    tmp_path, monkeypatch, capsys
+):
+    secret_body = b'{"output": "Order A-1001 has shipped; ssn 000-00-0000"}'
+    requests = []
+
+    def fake_urlopen(request, timeout=None):
+        requests.append(request)
+        return _FakeResponse(secret_body)
+
+    module = _probed_module(tmp_path, monkeypatch, fake_urlopen)
+
+    code = module.main()
+
+    assert code == 0
+    assert requests[0].full_url == "https://app.example/invocations"
+    output = capsys.readouterr().out
+    assert "gp-001: ok" in output
+    assert "shipped" not in output
+    assert "ssn" not in output
+
+
+def test_smoke_deployment_names_the_grant_on_forbidden(
+    tmp_path, monkeypatch, capsys
+):
+    import io
+    import urllib.error
+
+    def forbidden(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 403, "Forbidden", hdrs=None, fp=io.BytesIO(b"")
+        )
+
+    module = _probed_module(tmp_path, monkeypatch, forbidden)
+
+    code = module.main()
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "CAN_USE" in captured.err
+    assert "docs/uat-promotion.md" in captured.err
+
+
+def test_smoke_deployment_fails_on_missing_expected_content(
+    tmp_path, monkeypatch, capsys
+):
+    module = _probed_module(
+        tmp_path,
+        monkeypatch,
+        lambda request, timeout=None: _FakeResponse(b'{"output": "unrelated"}'),
+    )
+
+    code = module.main()
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "missing expected content 'A-1001'" in captured.err
+    assert "unrelated" not in captured.err

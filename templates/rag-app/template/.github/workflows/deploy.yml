@@ -191,6 +191,20 @@ jobs:
           DATABRICKS_AUTH_TYPE: azure-cli
         run: databricks bundle run agent_app -t dev
 
+      - name: Post-deploy smoke (dev app)
+        # The release gate proved the change scores; this proves the deployed
+        # app actually serves it. Status always; golden probes when the
+        # project commits evals/data/live_probes.json (needs CAN_USE on the
+        # app — an external grant, see docs/uat-promotion.md). A red smoke
+        # fails this workflow, so an unverified deployment never promotes;
+        # rollback is re-dispatching this workflow for the last known-good
+        # commit, never an automated undo.
+        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: python scripts/smoke_deployment.py --target dev
+
   deploy-uat:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'uat' }}
     needs: [build, deploy-dev, uat-prerequisites]
@@ -278,3 +292,10 @@ jobs:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
         run: databricks bundle run agent_app -t uat
+
+      - name: Post-deploy smoke (UAT app)
+        if: ${{ hashFiles('resources/agent_app.yml') != '' }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_UAT_HOST }}
+          DATABRICKS_AUTH_TYPE: azure-cli
+        run: python scripts/smoke_deployment.py --target uat

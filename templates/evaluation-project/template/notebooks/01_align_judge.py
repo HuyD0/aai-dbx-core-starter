@@ -15,6 +15,7 @@
 import json
 from random import Random
 
+import mlflow
 from mlflow.entities import AssessmentSource, AssessmentSourceType
 
 from aai_core.runtime import find_platform_config
@@ -88,8 +89,6 @@ print(
 
 # Export the labelled traces into the file `agentkit judge calibrate` reads:
 # one entry per example, the judge's verdict plus every human verdict.
-
-import mlflow
 
 JUDGE_NAME = "pension_domain_policy"
 labels = []

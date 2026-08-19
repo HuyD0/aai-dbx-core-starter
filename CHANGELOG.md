@@ -4,6 +4,33 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added per-run judge-integrity checks to AgentKit: an opt-in
+  self-consistency flip-rate over re-judged outputs and a frozen-anchor
+  drift check (`evals/judge_anchors.json`, written by judged
+  `--establish-baseline` runs) that separates judge drift from agent
+  regression, both enforced as gate rules and covered by the judge-call
+  budget. Enabling the `integrity:` block makes older results records
+  refuse with policy drift — re-run `agentkit compare` after adopting it.
+- Bound the AgentKit gate to the commit it runs for: results record the
+  full `AAI_RELEASE` commit (job clusters previously recorded
+  `local-dev`), and `agentkit gate` refuses evidence scored for a
+  different commit than the release identity in its environment.
+- Added `agentkit judge calibrate`: chance-adjusted Cohen's kappa against
+  SME label consensus with a pairwise human ceiling, persisted as a
+  committed per-judge calibration record that evidence reports and —
+  under `integrity.require_calibration` — scoring and the gate demand.
+- Added `agentkit baseline establish --from-run`, moving the committed
+  baseline to an already-verified run's recorded evidence after the
+  deploy and post-deploy smoke pass; adopt evidence is required and may
+  be recorded in the same step with `--decided-by`.
+- Added a post-deploy smoke step to every generated deploy workflow
+  (`scripts/smoke_deployment.py`): the Databricks App must report RUNNING
+  after `bundle run agent_app`, with opt-in golden-prompt probes via
+  `evals/data/live_probes.json`; a red smoke blocks UAT promotion.
+  Template versions: agent-app 1.4.0, analytics-app 1.3.0,
+  evaluation-project 2.2.0, experiment-starter 1.4.0, prompt-app 1.4.0,
+  rag-app 1.4.0.
+
 - Removed Microsoft Foundry support: the `foundry` model provider, the
   `foundry` and `foundry-labs` extras, the Foundry notebook curriculum, and
   every Foundry template option. Model configuration now targets Databricks
