@@ -390,5 +390,6 @@ remaining exploration and teaching artifacts. See
 - [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
 - [LangGraph interrupts and idempotency](https://docs.langchain.com/oss/python/langgraph/interrupts)
 - [Production LangGraph agents in this repository](langgraph-production.md)
+- [Multi-agent systems in production in this repository](multi-agent-systems.md)
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/)
 - [OpenTelemetry GenAI conventions — currently Development](https://github.com/open-telemetry/semantic-conventions-genai)

@@ -42,6 +42,7 @@ def _shape(
     partial_expectation_keys=(),
     has_retrieval_spans=None,
     has_tool_spans=None,
+    has_delegation_spans=False,
     expectation_rows=(),
 ):
     return DatasetShape(
@@ -57,6 +58,9 @@ def _shape(
             has_traces if has_retrieval_spans is None else has_retrieval_spans
         ),
         has_tool_spans=has_traces if has_tool_spans is None else has_tool_spans,
+        # Deliberately not mirrored from has_traces: the delegation marker
+        # is opt-in, and existing traces-mode plans must not grow it.
+        has_delegation_spans=has_delegation_spans,
     )
 
 
@@ -923,3 +927,228 @@ def test_a_trace_free_dataset_is_not_told_to_use_mode_traces():
     reason = str(excinfo.value)
     assert "--mode traces" not in reason
     assert "RETRIEVER spans" in reason
+
+
+def _delegation_span(sid, span_type, *, parent=None, role=None, name=None):
+    span = {
+        "context": {"span_id": sid},
+        "parent_id": parent,
+        "type": span_type,
+        "name": name or sid,
+    }
+    if role is not None:
+        span["attributes"] = {"agent.role": role}
+    return span
+
+
+def test_delegation_traces_select_the_multi_agent_scorers():
+    plan = select_scorers(
+        _shape(
+            has_traces=True,
+            has_retrieval_spans=False,
+            has_tool_spans=True,
+            has_delegation_spans=True,
+        ),
+        _config(),
+        mode="traces",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "delegation_structure_ok" in names
+    assert "subagent_routing_accuracy" in names
+    structure = next(
+        entry for entry in plan.entries if entry.spec.name == "delegation_structure_ok"
+    )
+    assert structure.reason == "rows carry delegation spans"
+    assert structure.threshold == ">=1.0"
+    routing = next(
+        entry
+        for entry in plan.entries
+        if entry.spec.name == "subagent_routing_accuracy"
+    )
+    assert routing.threshold == ">=0.7"
+
+
+def test_plain_traces_do_not_select_the_delegation_scorers():
+    """Single-agent RAG/tool traces must not buy multi-agent checks."""
+
+    plan = select_scorers(
+        _shape(has_traces=True, has_retrieval_spans=True, has_tool_spans=True),
+        _config(),
+        mode="traces",
+        judges_enabled=True,
+    )
+
+    names = _selected_names(plan)
+    assert "delegation_structure_ok" not in names
+    assert "subagent_routing_accuracy" not in names
+    reason = _excluded(plan, "delegation_structure_ok")
+    assert "carry no delegation spans" in reason
+    assert "agent.role" in reason
+
+
+def test_answer_sheet_with_delegation_traces_points_at_traces_mode():
+    plan = select_scorers(
+        _shape(
+            has_traces=True,
+            has_retrieval_spans=False,
+            has_tool_spans=False,
+            has_delegation_spans=True,
+        ),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=False,
+    )
+
+    reason = _excluded(plan, "delegation_structure_ok")
+    assert "--mode traces" in reason
+
+
+def test_live_plan_names_the_delegation_scorers_it_cannot_decide():
+    """A live supervisor run must not silently drop the delegation checks."""
+
+    plan = select_scorers(
+        _shape(has_traces=False), _config(), mode="live", judges_enabled=True
+    )
+
+    reason = _excluded(plan, "delegation_structure_ok")
+    assert "delegates to subagents" in reason
+    assert "name them in scorers.add" in reason
+    rendered = [
+        line for line in render_plan(plan).splitlines() if line.startswith("excluded:")
+    ]
+    delegation = next(line for line in rendered if "delegation_structure_ok" in line)
+    assert "subagent_routing_accuracy" in delegation
+    assert sum("delegates to subagents" in line for line in rendered) == 1
+    # The retrieval grouping in the same plan is untouched.
+    assert sum("whether this agent retrieves" in line for line in rendered) == 1
+
+
+def test_scorers_add_fails_before_spend_when_traces_have_no_delegation():
+    with pytest.raises(ConfigError) as excinfo:
+        select_scorers(
+            _shape(has_traces=True, has_retrieval_spans=False, has_tool_spans=False),
+            _config(scorers={"add": ["delegation_structure_ok"]}),
+            mode="traces",
+            judges_enabled=True,
+        )
+
+    message = str(excinfo.value)
+    assert "delegation_structure_ok" in message
+    assert "carry no delegation spans" in message
+
+
+def test_build_delegation_structure_scorer_skips_passes_and_fails():
+    built = build_scorer(
+        get_spec("delegation_structure_ok"), mlflow_module=_fake_mlflow()
+    )
+    assert built.name == "delegation_structure_ok"
+
+    supervised = {
+        "data": {
+            "spans": [
+                _delegation_span("root", "AGENT", role='"supervisor"'),
+                _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+                _delegation_span("tool", "TOOL", parent="d1", name="execute_sql_query"),
+            ]
+        }
+    }
+    assert built.function(trace=supervised) == 1.0
+
+    bypassing = {
+        "data": {
+            "spans": [
+                _delegation_span("root", "AGENT", role='"supervisor"'),
+                _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+                _delegation_span(
+                    "tool", "TOOL", parent="root", name="execute_sql_query"
+                ),
+            ]
+        }
+    }
+    assert built.function(trace=bypassing) == 0.0
+
+    # A single-agent trace is outside the contract: the empty feedback
+    # list marks the row unscorable rather than failed.
+    single = {
+        "data": {
+            "spans": [
+                _delegation_span("root", "AGENT"),
+                _delegation_span("tool", "TOOL", parent="root"),
+            ]
+        }
+    }
+    assert built.function(trace=single) == []
+
+
+def test_build_subagent_routing_judge_reads_the_trace_numerically():
+    captured = {}
+
+    def make_judge(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(name=kwargs["name"])
+
+    build_scorer(
+        get_spec("subagent_routing_accuracy"),
+        judge_model_uri="endpoints:/judge",
+        mlflow_module=_fake_mlflow(make_judge=make_judge),
+    )
+
+    assert captured["name"] == "subagent_routing_accuracy"
+    assert "{{ trace }}" in captured["instructions"]
+    assert "agent.role" in captured["instructions"]
+    assert "0.0 to 1.0" in captured["instructions"]
+    assert captured["feedback_value_type"] is float
+    assert captured["model"] == "endpoints:/judge"
+
+
+def test_build_subagent_routing_judge_prefers_registry_prompt_text():
+    captured = {}
+
+    def make_judge(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(name=kwargs["name"])
+
+    def prompt_loader(name, alias):
+        assert name == "agentkit_judge_subagent_routing"
+        assert alias == "production"
+        return SimpleNamespace(template="Registry routing rubric {{ trace }}")
+
+    build_scorer(
+        get_spec("subagent_routing_accuracy"),
+        prompt_loader=prompt_loader,
+        mlflow_module=_fake_mlflow(make_judge=make_judge),
+    )
+
+    assert captured["instructions"].startswith("Registry routing rubric")
+    assert captured["feedback_value_type"] is float
+
+
+def test_trace_judge_refuses_the_guidelines_fallback():
+    """A Guidelines judge reads only inputs/outputs; scoring a trace rubric
+    without the trace would put noise under a versioned metric name."""
+
+    with pytest.raises(ConfigError, match="make_judge"):
+        build_scorer(
+            get_spec("subagent_routing_accuracy"),
+            judge_model_uri="endpoints:/judge",
+            mlflow_module=_fake_mlflow(),
+        )
+
+
+def test_pension_judge_instructions_are_unchanged_by_the_trace_variant():
+    captured = {}
+
+    def make_judge(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(name=kwargs["name"])
+
+    build_scorer(
+        get_spec("pension_domain_policy"),
+        mlflow_module=_fake_mlflow(make_judge=make_judge),
+    )
+
+    assert "{{ trace }}" not in captured["instructions"]
+    assert "Answer 'yes'" in captured["instructions"]
+    assert "feedback_value_type" not in captured

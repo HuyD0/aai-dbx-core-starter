@@ -153,6 +153,10 @@ These are non-secret identifiers. Do not classify them as secrets.
   `1` configuration or runtime error.
 - RAG retriever spans must emit MLflow document fields `page_content`,
   `doc_uri`, `chunk_id`, metadata, and optional id.
+- Multi-agent applications declare delegation with non-root `AGENT` spans
+  carrying `agent.role`; delegation structure and subagent routing are scored
+  from the shared registry, never redefined per project. `aai-core` ships no
+  orchestration runtime. See `docs/multi-agent-systems.md`.
 - Treat code, model, prompt, tool, index, embedding, and chunking changes as
   application releases.
 - Pin supported dependency ranges in `pyproject.toml` and resolve exact
@@ -350,6 +354,8 @@ Use:
   GitHub org and Azure tenant (the identity must be re-minted — the FIC
   subject embeds immutable repo/owner ids).
 - `docs/platform-operations.md` for the SDK volume and platform controls.
-- `docs/archive/` for completed one-time migrations (historical record).
+- `CHANGELOG.md` and the repository history for completed one-time
+  migrations (the former `docs/archive/` runbooks were retired once their
+  migrations completed).
 
 Never delete the shared legacy application or its UAT assignment.
