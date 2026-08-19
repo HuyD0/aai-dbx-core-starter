@@ -10,7 +10,6 @@ This is the only module that calls ``mlflow.genai.evaluate``.
 
 from __future__ import annotations
 
-import math
 import os
 import subprocess
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -22,7 +21,8 @@ from statistics import fmean
 from typing import Any, Literal
 
 from aai_core.agentkit import catalog as catalog_module
-from aai_core.agentkit._values import is_missing_scalar
+from aai_core.agentkit import integrity as integrity_module
+from aai_core.agentkit._values import is_missing_scalar, numeric_score
 from aai_core.agentkit.baseline import (
     BaselineDataset,
     BaselineRecord,
@@ -45,6 +45,7 @@ from aai_core.agentkit.cost import CostEstimate, enforce_budget, estimate
 from aai_core.agentkit.cost import render as render_cost
 from aai_core.agentkit.datasets import (
     LoadedDataset,
+    _trace_response,
     attach_answer_sheet,
     effective_dataset,
     load_dataset,
@@ -65,6 +66,7 @@ from aai_core.agentkit.gate import (
     EXIT_THRESHOLD_FAILED,
     build_policy,
 )
+from aai_core.agentkit.integrity import IntegrityEvidence, JudgeAnchors
 from aai_core.agentkit.results import (
     ResultsAttempt,
     ResultsRecord,
@@ -142,6 +144,10 @@ class _PreparedRun:
     judge_model_uri: str | None
     mode_warnings: tuple[str, ...]
     outcome: RunOutcome
+    # Judge-integrity inputs, resolved before spend so the budget covers
+    # the re-scoring calls too.
+    anchors: JudgeAnchors | None = None
+    integrity_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,8 @@ class _ScoredRun:
     policy: GatePolicy
     metric_samples: Mapping[str, tuple[float | None, ...]]
     statistics: StatisticalEvidence | None
+    integrity: IntegrityEvidence | None = None
+    anchor_rows: tuple[Any, ...] = ()
 
 
 def set_concurrency_env(
@@ -239,6 +247,7 @@ def run_scoring(
     enforce_budget(
         prepared.cost,
         max_judge_calls=project.config.budget.max_judge_calls,
+        extra_judge_calls=prepared.integrity_calls,
     )
     judge_model_identity = project.judge_model_identity() if judges_enabled else None
     baseline = _check_model_comparability(
@@ -284,6 +293,7 @@ def run_scoring(
         command=command,
         transport=transport,
         judge_model_identity=judge_model_identity,
+        judges_enabled=judges_enabled,
         warnings=warnings,
     )
     return _finish_scoring(
@@ -341,6 +351,21 @@ def _prepare_run(
         price_per_1m_tokens=config.budget.judge_price_per_1m_tokens,
         chunks_per_row=config.budget.retrieved_chunks_per_row,
     )
+    anchors: JudgeAnchors | None = None
+    integrity_calls = 0
+    if judges_enabled:
+        anchors_path = project.root / config.integrity.anchors
+        if anchors_path.is_file():
+            anchors = integrity_module.load_anchors(anchors_path)
+        row_judges = sum(
+            1 for spec in plan.judge_specs if integrity_module.is_row_level_judge(spec)
+        )
+        integrity_calls = integrity_module.estimate_integrity_calls(
+            config.integrity,
+            row_judges=row_judges,
+            dataset_rows=dataset.shape.row_count,
+            anchor_rows=len(anchors.rows) if anchors is not None else 0,
+        )
     outcome = RunOutcome(plan=plan, cost=cost, dataset=dataset, plan_only=plan_only)
     outcome.messages.extend(
         (
@@ -350,6 +375,12 @@ def _prepare_run(
             render_cost(cost),
         )
     )
+    if integrity_calls:
+        outcome.messages.append(
+            f"Judge integrity re-scoring adds ~{integrity_calls} judge "
+            "call(s) (self-consistency sample and frozen anchors); the "
+            "budget ceiling covers them too."
+        )
     return _PreparedRun(
         target=target,
         mode=resolved_mode,
@@ -360,6 +391,8 @@ def _prepare_run(
         judge_model_uri=judge_model_uri,
         mode_warnings=mode_warnings,
         outcome=outcome,
+        anchors=anchors,
+        integrity_calls=integrity_calls,
     )
 
 
@@ -472,6 +505,13 @@ def _select_run_baseline(
         if existing is not None:
             warnings.append(
                 f"replacing the baseline recorded at {existing.recorded_at}"
+            )
+        if _release_value() is not None:
+            warnings.append(
+                "establishing the baseline inside a release run records the "
+                "reference before the deployment was verified live; prefer "
+                "`agentkit baseline establish --from-run <run_id>` after the "
+                "deploy and its post-deploy smoke pass"
             )
         return None, warnings
     try:
@@ -636,6 +676,7 @@ def _score_prepared_run(
     command: str,
     transport: Callable[..., Any] | None,
     judge_model_identity: str | None,
+    judges_enabled: bool,
     warnings: list[str],
 ) -> _ScoredRun:
     change_id = _change_id()
@@ -652,9 +693,12 @@ def _score_prepared_run(
         project,
         plan=prepared.plan,
         allow_missing_regression_baseline=establish_baseline or not baseline_metrics,
+        judges_enabled=judges_enabled,
     )
     baseline_samples = dict(baseline.metric_samples) if baseline else {}
     metric_samples: Mapping[str, tuple[float | None, ...]]
+    integrity: IntegrityEvidence | None = None
+    anchor_rows: tuple[Any, ...] = ()
     if backend.mlflow is None:
         local_metrics, metric_samples = _score_locally(prepared.dataset, prepared.plan)
         statistics, statistical_metrics = build_statistical_evidence(
@@ -680,6 +724,8 @@ def _score_prepared_run(
             experiment_name,
             metric_samples,
             statistics,
+            integrity,
+            anchor_rows,
         ) = _score_with_mlflow(
             project,
             prepared,
@@ -708,6 +754,8 @@ def _score_prepared_run(
         policy=policy,
         metric_samples=metric_samples,
         statistics=statistics,
+        integrity=integrity,
+        anchor_rows=anchor_rows,
     )
 
 
@@ -735,6 +783,8 @@ def _score_with_mlflow(
     str,
     Mapping[str, tuple[float | None, ...]],
     StatisticalEvidence | None,
+    IntegrityEvidence | None,
+    tuple[Any, ...],
 ]:
     mlflow = backend.mlflow
     assert mlflow is not None
@@ -786,6 +836,16 @@ def _score_with_mlflow(
             project.config.statistics,
         )
         metrics.update(statistical_metrics)
+        integrity, integrity_metrics, integrity_warnings, anchor_rows = _run_integrity(
+            project,
+            prepared,
+            scorers=scorers,
+            native_result=native_result,
+            metric_samples=metric_samples,
+            capture_anchors=metadata.purpose is RunPurpose.BASELINE,
+        )
+        metrics.update(integrity_metrics)
+        warnings.extend(integrity_warnings)
         gate = apply_gate(
             metrics,
             policy=policy,
@@ -811,7 +871,106 @@ def _score_with_mlflow(
         experiment_name,
         metric_samples,
         statistics,
+        integrity,
+        anchor_rows,
     )
+
+
+def _run_integrity(
+    project: ProjectContext,
+    prepared: _PreparedRun,
+    *,
+    scorers: Sequence[Any],
+    native_result: Any,
+    metric_samples: Mapping[str, tuple[float | None, ...]],
+    capture_anchors: bool,
+) -> tuple[
+    IntegrityEvidence | None,
+    dict[str, float],
+    list[str],
+    tuple[Any, ...],
+]:
+    """Measure the judge inside the run it just scored.
+
+    Runs between scoring and the gate so the integrity metrics are gate
+    evidence like any other, and inside the active MLflow run so they land
+    on the same run. Anchor rows are captured only for a baseline run —
+    they are what ``--establish-baseline`` freezes.
+    """
+
+    if not prepared.plan.judges_enabled:
+        return None, {}, [], ()
+    config = project.config.integrity
+    judges: list[integrity_module.RowJudge] = []
+    for entry, scorer in zip(prepared.plan.entries, scorers, strict=True):
+        spec = entry.spec
+        if integrity_module.is_row_level_judge(spec):
+            judges.append(
+                integrity_module.RowJudge(
+                    name=spec.name, metric=spec.metric, scorer=scorer
+                )
+            )
+    wants_checks = (
+        config.consistency_sample > 0
+        or config.require_anchors
+        or prepared.anchors is not None
+    )
+    if not wants_checks:
+        # Anchors carry eval outputs, so nothing output-bearing is written
+        # for a project that has not opted into the integrity checks.
+        return None, {}, [], ()
+    outputs_by_row = _integrity_outputs(native_result, prepared.dataset.rows)
+    evidence, metrics, warnings = integrity_module.run_integrity_checks(
+        config=config,
+        rows=prepared.dataset.rows,
+        outputs_by_row=outputs_by_row,
+        metric_samples=metric_samples,
+        judges=judges,
+        anchors=prepared.anchors,
+    )
+    anchor_rows: tuple[Any, ...] = ()
+    if capture_anchors and judges:
+        anchor_rows = integrity_module.build_anchor_rows(
+            rows=prepared.dataset.rows,
+            outputs_by_row=outputs_by_row,
+            metric_samples=metric_samples,
+            judges=judges,
+        )
+    return evidence, metrics, warnings, anchor_rows
+
+
+def _integrity_outputs(
+    native_result: Any, rows: Sequence[Mapping[str, Any]]
+) -> list[Any]:
+    """The answer each row was judged on, recovered without a second run.
+
+    Preference order: the native result frame's ``outputs`` column (live
+    runs — MLflow records what ``predict_fn`` returned), the row's own
+    recorded ``outputs`` (answer-sheet runs), then the response inside the
+    row's trace (trace runs). ``None`` marks a row whose answer cannot be
+    recovered; it is skipped rather than re-answered.
+    """
+
+    frame = _result_frame(native_result)
+    columns = getattr(frame, "columns", None)
+    frame_outputs: list[Any] | None = None
+    if columns is not None and "outputs" in {str(column) for column in columns}:
+        frame_outputs = list(frame["outputs"])
+    recovered: list[Any] = []
+    for index, row in enumerate(rows):
+        value: Any = None
+        if frame_outputs is not None and index < len(frame_outputs):
+            candidate = frame_outputs[index]
+            if not is_missing_scalar(candidate):
+                value = candidate
+        if value is None:
+            candidate = row.get("outputs")
+            if candidate is not None and not is_missing_scalar(candidate):
+                value = candidate
+        if value is None and row.get("trace") is not None:
+            value = _trace_response(row.get("trace"))
+        recovered.append(value)
+    return recovered
 
 
 def _run_tags(
@@ -895,6 +1054,28 @@ def _finish_scoring(
             scope=scope,
             command=command,
         )
+        if judges_enabled and scored.anchor_rows:
+            integrity_module.write_anchors(
+                project.root / project.config.integrity.anchors,
+                rows=scored.anchor_rows,
+                recorded_at=scored.recorded_at,
+                recorded_by=f"agentkit {command} --establish-baseline",
+                change_id=scored.change_id,
+                judge_model=prepared.judge_model_uri,
+                judge_model_identity=judge_model_identity,
+                judge_prompts=backend.judge_prompts,
+                scorer_versions={
+                    spec.name: spec.version
+                    for spec in prepared.plan.specs
+                    if spec.judge is not None
+                },
+            )
+            prepared.outcome.messages.append(
+                f"Judge anchors frozen at {project.config.integrity.anchors} "
+                f"({len(scored.anchor_rows)} rows) - commit them together "
+                "with the baseline so future runs can tell judge drift from "
+                "agent change."
+            )
     complete_results_attempt(project.results_dir, attempt, results_path)
     comparison = _comparison_rows(
         scored.gate,
@@ -959,6 +1140,7 @@ def _results_record(
         metrics=dict(scored.gate.metrics),
         metric_samples=dict(scored.metric_samples),
         statistics=scored.statistics,
+        integrity=scored.integrity,
         versions=versions,
         baseline_run_id=baseline.run_id if baseline else None,
         baseline_metrics=scored.baseline_metrics,
@@ -971,6 +1153,7 @@ def _results_record(
         ),
         decision=scored.decision,
         change_id=scored.change_id,
+        release=_release_value(),
         gate_passed=scored.gate.passed,
         gate_failures=tuple(
             {"metric": failure.metric, "reason": failure.reason}
@@ -1210,21 +1393,9 @@ def _metric_samples(
     return samples
 
 
-def _numeric_score(value: Any) -> float | None:
-    if is_missing_scalar(value):
-        return None
-    if isinstance(value, bool):
-        return 1.0 if value else 0.0
-    if isinstance(value, int | float):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, str):
-        normalized = value.strip().casefold()
-        if normalized in {"yes", "true", "pass", "passed"}:
-            return 1.0
-        if normalized in {"no", "false", "fail", "failed"}:
-            return 0.0
-    return None
+# The yes/no numeric mapping is shared with the integrity re-scoring path
+# so a re-score is compared in the same units as the original.
+_numeric_score = numeric_score
 
 
 def _coverage_warnings(native_result: Any) -> list[str]:
@@ -1371,7 +1542,10 @@ def _comparison_rows(
     failed = {failure.metric for failure in gate.failures}
     rows = []
     for metric in sorted(
-        metric for metric in gate.metrics if not is_statistics_metric(metric)
+        metric
+        for metric in gate.metrics
+        if not is_statistics_metric(metric)
+        and not integrity_module.is_integrity_metric(metric)
     ):
         current = gate.metrics[metric]
         reference = baseline_metrics.get(metric)
@@ -1498,12 +1672,33 @@ def _render_outcome(
                 f"{paired.upper_improvement:+.4g}]"
             )
         lines.append("")
+    lines.extend(_integrity_outcome_lines(results))
     lines.append("gate: PASSED" if results.gate_passed else "gate: FAILED")
     for failure in results.gate_failures:
         lines.append(f"  FAIL {failure['metric']}: {failure['reason']}")
     lines.append(f"decision recorded: {results.decision}")
     if results.run_id:
         lines.append(f"MLflow run: {results.run_id} in {results.experiment_name}")
+    return lines
+
+
+def _integrity_outcome_lines(results: ResultsRecord) -> list[str]:
+    if results.integrity is None:
+        return []
+    consistency = results.integrity.consistency
+    drift = results.integrity.anchor_drift
+    lines = ["judge integrity:"]
+    if consistency is not None:
+        lines.append(
+            f"  self-inconsistency {consistency.overall:.3f} over "
+            f"{consistency.sample_size} re-scored row(s)"
+        )
+    if drift is not None:
+        lines.append(
+            f"  anchor drift {drift.overall:.3f} over {drift.rows} "
+            f"frozen row(s) ({drift.anchors_ref})"
+        )
+    lines.append("")
     return lines
 
 
@@ -1580,6 +1775,13 @@ def _change_id() -> str:
     from_env = os.getenv("GIT_COMMIT")
     if from_env:
         return from_env[:12]
+    # Job clusters carry the deployed commit as AAI_RELEASE (the bundle's
+    # `deployment_release`, set to the CI SHA), and no GIT_COMMIT or .git
+    # directory. Without this fallback every release-gate run records
+    # "local-dev" — exactly the run whose commit identity matters most.
+    release = _release_value()
+    if release is not None:
+        return release[:12]
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -1591,6 +1793,15 @@ def _change_id() -> str:
         return result.stdout.strip() or "local-dev"
     except Exception:
         return "local-dev"
+
+
+def _release_value() -> str | None:
+    """The deployed-commit identity this process runs under, if any."""
+
+    value = (os.getenv("AAI_RELEASE") or "").strip()
+    if value and value != "local-dev":
+        return value
+    return None
 
 
 def _version() -> str:

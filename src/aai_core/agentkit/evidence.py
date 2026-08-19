@@ -16,6 +16,7 @@ from typing import Any
 from aai_core.agentkit.baseline import BaselineRecord
 from aai_core.agentkit.config import ProjectContext
 from aai_core.agentkit.gate import GateReport
+from aai_core.agentkit.integrity import is_integrity_metric
 from aai_core.agentkit.results import ResultsRecord
 from aai_core.agentkit.statistics import is_statistics_metric
 
@@ -99,6 +100,14 @@ def build_evidence(
             if results.statistics is not None
             else None
         ),
+        # The judge measured as an instrument: self-consistency on this
+        # run's outputs and drift on frozen anchors. A delta is a statement
+        # about the agent only while the instrument held still.
+        "judge_integrity": (
+            results.integrity.model_dump(mode="json")
+            if results.integrity is not None
+            else None
+        ),
         "gate": {
             "passed": passed,
             "failures": [
@@ -116,6 +125,7 @@ def build_evidence(
         },
         "decision": results.decision,
         "change_id": results.change_id,
+        "release": results.release,
         "recorded_at": results.recorded_at,
         "approver": dict(approver),
         "warnings": list(results.warnings),
@@ -165,6 +175,7 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     ]
     _render_comparison(lines, comparison)
     _render_statistics(lines, document.get("statistics"))
+    _render_judge_integrity(lines, document.get("judge_integrity"))
     _render_scoring(lines, versions)
     _render_gate(lines, gate)
     _render_approval(lines, document["approver"])
@@ -265,6 +276,46 @@ def _render_statistics(lines: list[str], statistics: Mapping[str, Any] | None) -
             )
 
 
+def _render_judge_integrity(
+    lines: list[str], integrity: Mapping[str, Any] | None
+) -> None:
+    if not integrity:
+        return
+    lines.extend(
+        [
+            "",
+            "## Judge integrity",
+            "",
+            "A delta is a statement about the agent only while the judge "
+            "held still; these checks measure the judge itself inside the "
+            "run.",
+            "",
+        ]
+    )
+    consistency = integrity.get("consistency")
+    if consistency:
+        lines.append(
+            f"- Self-inconsistency: {_format(consistency['overall'])} over "
+            f"{consistency['sample_size']} re-scored row(s)"
+        )
+        for name, rate in sorted(dict(consistency.get("flip_rates") or {}).items()):
+            lines.append(f"  - `{name}`: {_format(rate)}")
+    drift = integrity.get("anchor_drift")
+    if drift:
+        lines.append(
+            f"- Anchor drift: {_format(drift['overall'])} over "
+            f"{drift['rows']} frozen row(s) from `{drift['anchors_ref']}` "
+            f"(digest `{str(drift['anchors_digest'])[:16]}`)"
+        )
+        for name, value in sorted(dict(drift.get("drift_by_scorer") or {}).items()):
+            lines.append(f"  - `{name}`: {_format(value)}")
+    failures = (consistency or {}).get("rescore_failures", 0) + (drift or {}).get(
+        "rescore_failures", 0
+    )
+    if failures:
+        lines.append(f"- Failed judge re-invocations: {failures}")
+
+
 def _render_gate(lines: list[str], gate: Mapping[str, Any]) -> None:
     if gate["failures"]:
         lines.extend(["", "## Why the gate failed", ""])
@@ -307,12 +358,15 @@ def _render_warnings(lines: list[str], warnings: list[str]) -> None:
 def _render_provenance(
     lines: list[str], document: Mapping[str, Any], versions: Mapping[str, Any]
 ) -> None:
+    release = document.get("release")
+    release_line = [f"- Release commit: `{release}`"] if release else []
     lines.extend(
         [
             "",
             "## Provenance",
             "",
             f"- Change id: `{document['change_id']}`",
+            *release_line,
             f"- MLflow experiment: {document['experiment']['name'] or 'unknown'}"
             + (
                 f" (run `{document['experiment']['run_id']}`)"
@@ -470,7 +524,9 @@ def _metric_rows(results: ResultsRecord) -> list[dict[str, Any]]:
     baseline = dict(results.baseline_metrics)
     rows = []
     for metric in sorted(
-        metric for metric in results.metrics if not is_statistics_metric(metric)
+        metric
+        for metric in results.metrics
+        if not is_statistics_metric(metric) and not is_integrity_metric(metric)
     ):
         current = results.metrics[metric]
         reference = baseline.get(metric)

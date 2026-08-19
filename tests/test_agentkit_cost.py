@@ -6,7 +6,7 @@ import pytest
 
 from aai_core.agentkit.catalog import PlanEntry, ScorerPlan, get_spec, select_scorers
 from aai_core.agentkit.config import AgentkitConfig
-from aai_core.agentkit.cost import enforce_budget, estimate, render
+from aai_core.agentkit.cost import CostEstimate, enforce_budget, estimate, render
 from aai_core.agentkit.datasets import DatasetShape
 from aai_core.agentkit.errors import BudgetExceededError, ConfigError
 
@@ -625,3 +625,19 @@ def test_a_dangling_retriever_parent_keeps_the_conservative_assumption():
         "retrieval_relevance": 10,
     }
     assert cost.fanout_counted is False
+
+
+def test_budget_ceiling_covers_integrity_rescoring_calls():
+    cost = CostEstimate(
+        rows=10,
+        judge_scorers=("correctness",),
+        judge_calls=90,
+        mean_row_tokens=100,
+        estimated_tokens=1000,
+    )
+    enforce_budget(cost, max_judge_calls=100, extra_judge_calls=10)
+    with pytest.raises(BudgetExceededError) as excinfo:
+        enforce_budget(cost, max_judge_calls=100, extra_judge_calls=11)
+    assert "101 judge calls" in str(excinfo.value)
+    assert "11 integrity re-scoring calls" in str(excinfo.value)
+    assert "integrity.consistency_sample" in str(excinfo.value.remediation)

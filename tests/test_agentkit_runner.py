@@ -2903,3 +2903,187 @@ def test_a_trace_assessment_does_not_remove_an_authored_scorer(tmp_path):
 
     selected = {entry.spec.name for entry in outcome.plan.entries}
     assert "keyword_coverage" in selected
+
+
+# --- judge integrity and release binding ------------------------------------
+
+
+class _Frame:
+    """The minimal result_df surface the runner reads (duck-typed)."""
+
+    def __init__(self, data):
+        self._data = dict(data)
+        self.columns = list(self._data)
+
+    def __getitem__(self, name):
+        return self._data[name]
+
+    def get(self, name):
+        return self._data.get(name)
+
+
+class _ReinvocableJudge:
+    """A builtin-scorer stand-in whose re-invocation agrees with pass one."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def __call__(self, **kwargs):
+        return "yes"
+
+
+class JudgedFakeMlflow(FakeMlflow):
+    """A fake whose evaluate returns per-row scores and re-invocable judges."""
+
+    def __init__(self, rows=12, **kwargs):
+        super().__init__(**kwargs)
+        self.rows = rows
+        self.genai.scorers.Correctness = _ReinvocableJudge
+        self.genai.scorers.Safety = _ReinvocableJudge
+
+    def _evaluate(self, data=None, scorers=None, predict_fn=None):
+        self.evaluate_calls.append(
+            {"data": data, "scorers": scorers, "predict_fn": predict_fn}
+        )
+        count = len(data) if data is not None else self.rows
+        frame = _Frame(
+            {
+                "correctness/value": ["yes"] * count,
+                "safety/value": ["yes"] * count,
+            }
+        )
+        return SimpleNamespace(metrics=dict(self.metrics_to_return), result_df=frame)
+
+
+_INTEGRITY_CONFIG = (
+    "version: 1\n"
+    "agent: src/app/example_agent.py:respond\n"
+    "dataset: evals/data/golden_cases.json\n"
+    "integrity:\n"
+    "  consistency_sample: 3\n"
+)
+
+
+def test_judged_establish_freezes_anchors_and_measures_consistency(tmp_path):
+    from aai_core.agentkit.integrity import (
+        SELF_INCONSISTENCY_METRIC,
+        load_anchors,
+    )
+
+    project = _project(tmp_path, config_text=_INTEGRITY_CONFIG)
+    fake = JudgedFakeMlflow()
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert code == EXIT_PASS
+    results = outcome.results
+    assert results.integrity is not None
+    assert results.integrity.consistency.overall == 0.0
+    assert results.integrity.consistency.sample_size == 3
+    assert results.metrics[SELF_INCONSISTENCY_METRIC] == 0.0
+    assert fake.logged_metrics[SELF_INCONSISTENCY_METRIC] == 0.0
+
+    anchors = load_anchors(tmp_path / "evals" / "judge_anchors.json")
+    assert anchors.rows
+    assert all({"correctness", "safety"} <= set(row.scores) for row in anchors.rows)
+    assert anchors.scorer_versions == {"correctness": 1, "safety": 1}
+    assert any("Judge anchors frozen" in message for message in outcome.messages)
+
+
+def test_anchor_drift_is_measured_on_the_next_judged_run(tmp_path):
+    from aai_core.agentkit.integrity import ANCHOR_DRIFT_METRIC
+
+    project = _project(tmp_path, config_text=_INTEGRITY_CONFIG)
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=JudgedFakeMlflow(),
+    )
+    assert code == EXIT_PASS
+
+    outcome, code = run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=JudgedFakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    drift = outcome.results.integrity.anchor_drift
+    assert drift is not None
+    assert drift.overall == 0.0
+    assert outcome.results.metrics[ANCHOR_DRIFT_METRIC] == 0.0
+
+
+def test_unconfigured_projects_write_no_anchor_file(tmp_path):
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=JudgedFakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.integrity is None
+    assert not (tmp_path / "evals" / "judge_anchors.json").exists()
+
+
+def test_release_identity_comes_from_the_deployed_commit(tmp_path, monkeypatch):
+    release = "d" * 40
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setenv("AAI_RELEASE", release)
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.release == release
+    assert outcome.results.change_id == release[:12]
+    assert any(
+        "baseline establish --from-run" in warning
+        for warning in outcome.results.warnings
+    )
+
+
+def test_local_dev_release_records_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setenv("AAI_RELEASE", "local-dev")
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.release is None
+    assert not any(
+        "baseline establish --from-run" in warning
+        for warning in outcome.results.warnings
+    )
