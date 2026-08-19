@@ -4,6 +4,20 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Made the Deep Agents solution accelerator discoverable: a README stating
+  its supervisor/sub-agent shape, connected-only boundaries, and guardrails;
+  an entry in the examples index; and credential-free contract tests that
+  keep every standalone example linked with a README, keep the accelerator
+  notebooks output-free and compilable, keep its workspace `%pip` stack
+  exact-pinned to the certified dependency line, and keep the notebooks free
+  of environment identifiers.
+- Extended `docs/langgraph-production.md` with workflow-shape guidance: a
+  ten-question design checklist to answer before the first node, recurring
+  shapes with their guardrails (fan-out with code-owned reduction,
+  independent verification, bounded loops and budgets including a deliberate
+  `recursion_limit`, per-node failure policy, typed state with plain
+  checkpoints), and when to move from one agent with tools to supervised
+  delegation.
 - Upgraded the agent template's LangGraph recipe so a review decision is
   evidence, not a bare boolean: strict `ApprovalDecision` resume payloads
   with a reason vocabulary, re-interrupt on malformed payloads instead of
