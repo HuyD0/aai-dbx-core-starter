@@ -106,7 +106,7 @@ six==1.17.0
 skops==0.14.0
 smmap==5.0.3
 sqlalchemy==2.0.51
-sqlparse==0.5.5
+sqlparse==0.6.0
 starlette==1.6.0
 tenacity==9.1.4
 threadpoolctl==3.6.0
