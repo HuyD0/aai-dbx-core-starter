@@ -1,0 +1,93 @@
+# Daily observed-cost anomaly watch over system.billing.usage.
+#
+# system.billing is account-wide from any workspace, so ONE live schedule
+# covers every workspace. The schedule's pause state comes from a bundle
+# variable that defaults to PAUSED: laptop `bundle deploy -t dev` runs and
+# the dispatch-gated UAT target never add a duplicate daily scan. Only CI's
+# deploy-dev step sets BUNDLE_VAR_cost_anomaly_pause_status=UNPAUSED — the
+# continuously deployed dev job is the single live monitor. (An explicit
+# per-resource pause_status overrides development mode's schedule pausing.)
+#
+# Exit contract (aai_core.billing.cli): 0 pass, 2 anomaly detected,
+# 1 configuration/runtime error — including "no billing rows for the
+# evaluation day", because unknown cost is never reported as zero. Both
+# non-zero codes fail the run, so on_failure email alerts the owning group
+# even when the monitor itself is broken. Reading system.billing requires
+# externally granted access for the run-as principal (docs/cloud-setup.md).
+resources:
+  jobs:
+    aai_dbx_base_template_cost_anomaly:
+      name: "[${bundle.target}] aai-dbx-base-template cost anomaly detection"
+      max_concurrent_runs: 1
+
+      schedule:
+        # Daily at 06:00 UTC, after the previous day's billing data lands.
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: UTC
+        pause_status: ${var.cost_anomaly_pause_status}
+
+      email_notifications:
+        on_failure:
+          - ${var.cost_alert_email}
+        no_alert_for_skipped_runs: true
+
+      tasks:
+        - task_key: detect_cost_anomalies
+          spark_python_task:
+            # Path is relative to this resource file's directory.
+            python_file: ../src/jobs/detect_cost_anomalies.py
+            # Detection thresholds are a reviewed change to this file, not a
+            # runtime knob. min-delta / new-spend-floor are list-price
+            # currency units (see docs/platform-operations.md).
+            parameters:
+              - "detect"
+              - "--lookback-days"
+              - "28"
+              - "--lag-days"
+              - "1"
+              - "--sensitivity"
+              - "4.0"
+              - "--min-history"
+              - "7"
+              - "--min-delta"
+              - "10.0"
+              - "--new-spend-floor"
+              - "10.0"
+          job_cluster_key: default
+          libraries:
+            - whl: ../dist/*.whl
+
+      job_clusters:
+        - job_cluster_key: default
+          new_cluster:
+            spark_version: 18.0.x-scala2.13
+            node_type_id: Standard_DS3_v2
+            num_workers: 1
+            # The workspace's constrained "Job Compute" policy. The dedicated CI
+            # principal receives CAN_USE on this policy instead of unrestricted
+            # cluster-create or workspace-admin rights. The id comes from a
+            # bundle variable so a clone overrides it without editing this file.
+            policy_id: ${var.job_compute_policy_id}
+            spark_env_vars:
+              AAI_ENVIRONMENT: ${var.deployment_environment}
+              AAI_LIFECYCLE: ${var.deployment_lifecycle}
+              AAI_RELEASE: ${var.deployment_release}
+            # Cost-attribution tags. Cluster custom_tags propagate to the
+            # underlying Azure VMs (Cost Management / chargeback) and to the
+            # system.billing.usage `custom_tags` column for DBU attribution. Values
+            # come from bundle variables (see databricks.yml) so each instance sets
+            # them without editing this file. NOTE: if the constrained Job Compute
+            # policy above fixes or forbids any of these keys, the cluster fails
+            # with an invalid-settings error — align the keys with the policy (or
+            # enforce them via the policy) if that happens. The `deploy` job in CI
+            # is the definitive check (the data plane is unreachable locally).
+            custom_tags:
+              application: aai-core
+              cost_center: ${var.cost_center}
+              team: ${var.team}
+              owner_group: ${var.owner_group}
+              project: aai-dbx-core-starter
+              environment: ${bundle.target}
+              data_classification: internal
+              lifecycle: ${var.deployment_lifecycle}
+              tag_schema_version: "2"

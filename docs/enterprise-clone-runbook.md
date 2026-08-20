@@ -22,7 +22,10 @@ Ask the enterprise identity and platform owners for:
 - a `main` branch federated credential using the new immutable IDs;
 - registration in the target Databricks workspace;
 - `CAN_USE` on the approved job-compute policy;
-- least-privilege access to the SDK artifact volume.
+- least-privilege access to the SDK artifact volume;
+- for the cost anomaly watch: `USE CATALOG` on `system`, `USE SCHEMA` on
+  `system.billing`, and `SELECT` on `system.billing.usage` and
+  `system.billing.list_prices`.
 
 The identity must have no client secret and should have no Azure ARM role
 unless an independently reviewed workload requirement needs one. Do not add

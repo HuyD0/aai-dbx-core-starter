@@ -1390,3 +1390,104 @@ def test_databricks_cli_version_is_in_lockstep_everywhere():
         )
     assert pins, "no databricks/setup-cli pins found"
     assert set(pins) == {script_version}
+
+
+def _bundle_jobs():
+    """Every job declared by the default-deployed resources/*.yml files."""
+
+    jobs = {}
+    for path in sorted((ROOT / "resources").glob("*.yml")):
+        declared = load_yaml(path.relative_to(ROOT))
+        for name, job in declared.get("resources", {}).get("jobs", {}).items():
+            jobs[name] = job
+    return jobs
+
+
+def test_every_bundle_job_cluster_meets_platform_contract():
+    """Any job added under resources/ inherits the sample job's contract:
+    the constrained compute policy, the nine cost-attribution tags, and the
+    bundle-built wheel — not only the literally named sample job."""
+
+    required_tags = {
+        "application",
+        "project",
+        "environment",
+        "team",
+        "owner_group",
+        "cost_center",
+        "data_classification",
+        "lifecycle",
+        "tag_schema_version",
+    }
+    jobs = _bundle_jobs()
+    assert jobs, "no jobs declared under resources/*.yml"
+    for name, job in jobs.items():
+        assert job["name"].startswith("[${bundle.target}]"), name
+        clusters = job.get("job_clusters")
+        assert clusters, f"{name} declares no policy-governed job cluster"
+        for entry in clusters:
+            cluster = entry["new_cluster"]
+            assert cluster["policy_id"] == "${var.job_compute_policy_id}", name
+            assert cluster["num_workers"] == 1, name
+            assert cluster["spark_version"] == "18.0.x-scala2.13", name
+            assert cluster["node_type_id"] == "Standard_DS3_v2", name
+            assert "spark_conf" not in cluster, name
+            environment_keys = {"AAI_ENVIRONMENT", "AAI_LIFECYCLE", "AAI_RELEASE"}
+            assert environment_keys <= cluster["spark_env_vars"].keys(), name
+            tags = cluster["custom_tags"]
+            assert required_tags <= tags.keys(), name
+            assert tags["environment"] == "${bundle.target}", name
+            assert tags["lifecycle"] == "${var.deployment_lifecycle}", name
+            assert tags["tag_schema_version"] == "2", name
+        for task in job["tasks"]:
+            assert {"whl": "../dist/*.whl"} in task.get("libraries", []), name
+
+
+def test_cost_anomaly_job_is_scheduled_alerting_and_pause_safe():
+    """One live schedule (CI's dev deploy), group-alias alerting, and a
+    fail-loud runner: the wiring that makes the cost watch safe to clone."""
+
+    declared = load_yaml("resources/cost_anomaly_job.yml")
+    job = declared["resources"]["jobs"]["aai_dbx_base_template_cost_anomaly"]
+    assert job["max_concurrent_runs"] == 1
+    schedule = job["schedule"]
+    assert schedule["timezone_id"] == "UTC"
+    assert schedule["pause_status"] == "${var.cost_anomaly_pause_status}"
+    notifications = job["email_notifications"]
+    assert notifications["on_failure"] == ["${var.cost_alert_email}"]
+    (task,) = job["tasks"]
+    python_file = task["spark_python_task"]["python_file"]
+    assert python_file == "../src/jobs/detect_cost_anomalies.py"
+    assert task["spark_python_task"]["parameters"][0] == "detect"
+
+    runner = (ROOT / "src/jobs/detect_cost_anomalies.py").read_text()
+    assert "aai_core.billing.cli" in runner
+    assert "SystemExit" in runner
+
+    bundle = load_yaml("databricks.yml")
+    email_default = bundle["variables"]["cost_alert_email"]["default"]
+    # The committed default must stay an undeliverable placeholder, never a
+    # real (personal) address; the real group alias arrives via the repo
+    # variable COST_ALERT_EMAIL.
+    assert email_default == "cost-alerts@example.com"
+    assert email_default.endswith("@example.com")
+    pause_default = bundle["variables"]["cost_anomaly_pause_status"]["default"]
+    assert pause_default == "PAUSED"
+
+    deploy = yaml.safe_load((WORKFLOWS / "deploy.yml").read_text())
+    dev_steps = deploy["jobs"]["deploy-dev"]["steps"]
+    dev_env = next(
+        step
+        for step in dev_steps
+        if step.get("name") == "Validate & deploy bundle (dev)"
+    )["env"]
+    assert dev_env["BUNDLE_VAR_cost_anomaly_pause_status"] == "UNPAUSED"
+    assert "BUNDLE_VAR_cost_alert_email" in dev_env
+    uat_steps = deploy["jobs"]["deploy-uat"]["steps"]
+    uat_env = next(
+        step
+        for step in uat_steps
+        if step.get("name") == "Validate & deploy the dev-verified bundle (UAT)"
+    )["env"]
+    assert "BUNDLE_VAR_cost_alert_email" in uat_env
+    assert "BUNDLE_VAR_cost_anomaly_pause_status" not in uat_env

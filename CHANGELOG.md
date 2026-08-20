@@ -4,6 +4,19 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added the platform cost anomaly watch: a scheduled bundle job
+  (`resources/cost_anomaly_job.yml`) evaluates the previous day's observed
+  spend in `system.billing.usage` (list-priced via
+  `system.billing.list_prices`) against per-series median+MAD baselines —
+  account, workspace, product, and `custom_tags['project']` including an
+  `untagged` bucket — plus a new-spend rule and a fail-loud stale-data guard
+  (unknown cost is never reported as zero). Exit contract `0`/`2`/`1`;
+  failed runs email the `COST_ALERT_EMAIL` group alias. Exactly one live
+  schedule: CI's dev deployment unpauses it while laptop and UAT deployments
+  stay paused. Detection math is pure stdlib in the new `aai_core.billing`
+  module, unit-tested offline; only the loader touches Spark, lazily.
+  Reading `system.billing` is an externally granted read documented in
+  `docs/cloud-setup.md`.
 - Bumped the transitive `sqlparse` pin from 0.5.5 to 0.6.0 (root `uv.lock`,
   both course locks, the classification course's exported model lock, and
   every template's regenerated `requirements.lock`) to clear four published

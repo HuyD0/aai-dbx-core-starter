@@ -25,7 +25,10 @@ provide:
 - registration of that principal in `dbx-dev`;
 - `CAN_USE` on the constrained job-compute policy;
 - `USE CATALOG`, `USE SCHEMA`, `READ VOLUME`, and `WRITE VOLUME` on the SDK
-  artifact path, with no catalog or workspace administration rights.
+  artifact path, with no catalog or workspace administration rights;
+- for the scheduled cost anomaly watch: `USE CATALOG` on `system`,
+  `USE SCHEMA` on `system.billing`, and `SELECT` on `system.billing.usage`
+  and `system.billing.list_prices` — read-only, nothing broader.
 
 These resources are deliberately out of scope for repository setup and CI.
 Create, change, or revoke them through the organization's approved platform
@@ -55,6 +58,14 @@ databricks service-principals list \
 Confirm the returned credential name equals `$FIC_NAME`. The Databricks
 principal must not be a workspace admin and must not have unrestricted cluster
 creation.
+
+For the cost anomaly watch, confirm the billing grant is `SELECT` and nothing
+broader:
+
+```bash
+databricks grants get table system.billing.usage
+databricks grants get table system.billing.list_prices
+```
 
 ## 3. Configure GitHub repository variables
 
@@ -91,6 +102,14 @@ move together.
 externally provisioned Entra application, and a clone is issued a different one
 (see `docs/enterprise-clone-runbook.md`).
 
+Set the cost-anomaly alert recipient — a non-personal group alias, never an
+individual's address. Until it is set, the bundle default is a deliberately
+undeliverable placeholder:
+
+```bash
+gh variable set COST_ALERT_EMAIL -R "$REPO" -b "group-cost-alerts@example.com"
+```
+
 Do not add a `gh secret set` step.
 
 ## 4. Verify end-to-end
@@ -123,13 +142,14 @@ Remove the repository variables separately:
 
 ```bash
 for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DATABRICKS_HOST \
-  SDK_ARTIFACT_VOLUME; do
+  SDK_ARTIFACT_VOLUME COST_ALERT_EMAIL; do
   gh variable delete "$v"
 done
 ```
 
 The SDK volume and its grants are also external platform resources and must be
-revoked through the approved platform workflow.
+revoked through the approved platform workflow, as must the principal's
+`system.billing` read grants for the cost anomaly watch.
 
 ## 6. UAT promotion
 
