@@ -4,6 +4,11 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Upgraded the locked transitive `sqlparse` to 0.6.0 in the repository,
+  example, and template locks after four advisories were published against
+  0.5.5, regenerating the template transitive locks with
+  `scripts/lock_template_dependencies.py`; declared ranges and certified
+  direct dependency versions are unchanged.
 - Added multi-agent evaluation to the shared scorer registry:
   `delegation_structure_ok` deterministically verifies the AGENT-rooted
   delegation span hierarchy, and `subagent_routing_accuracy` judges the
