@@ -82,6 +82,27 @@ maturity = "preview"
 family = "application-framework"
 note = "Required by MLflow LangChain autologging; native framework contracts remain unwrapped."
 
+[packages.langgraph-checkpoint-postgres]
+supported = ">=3.1,<4"
+certified = "3.1.2"
+maturity = "stable"
+family = "application-framework"
+note = "Optional agent-template Lakebase persistence recipe; aai-core does not wrap checkpoint APIs."
+
+[packages.psycopg]
+supported = ">=3.2.1,<4"
+certified = "3.3.4"
+maturity = "stable"
+family = "application-framework"
+note = "PostgreSQL driver for the Lakebase persistence recipe; the platform console pins it independently through uv.lock."
+
+[packages.psycopg-pool]
+supported = ">=3.2,<4"
+certified = "3.3.1"
+maturity = "stable"
+family = "application-framework"
+note = "Async connection pooling for the Lakebase persistence recipe; new connections mint fresh OAuth tokens."
+
 [packages.mlflow]
 supported = ">=3.15.1,<3.16"
 certified = "3.15.1"

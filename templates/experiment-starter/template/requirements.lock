@@ -16,12 +16,12 @@ azure-core==1.41.0
 azure-storage-blob==12.30.0
 azure-storage-file-datalake==12.25.0
 blinker==1.9.0
-boto3==1.43.68
-botocore==1.43.68
+boto3==1.43.75
+botocore==1.43.75
 cachetools==7.1.7
 certifi==2026.7.22
 cffi==2.1.1 ; platform_python_implementation != 'PyPy'
-charset-normalizer==3.4.9
+charset-normalizer==3.5.1
 click==8.4.2
 cloudpickle==3.1.2
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -50,10 +50,10 @@ graphene==3.4.3
 graphql-core==3.2.11
 graphql-relay==3.2.0
 greenlet==3.5.5 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
-gunicorn==26.0.0 ; sys_platform != 'win32'
+gunicorn==26.1.0 ; sys_platform != 'win32'
 h11==0.16.0
 huey==3.3.4
-idna==3.18
+idna==3.19
 importlib-metadata==9.0.0
 isodate==0.7.2
 itsdangerous==2.2.0
@@ -73,10 +73,10 @@ mypy-extensions==1.1.0
 narwhals==2.24.0
 numpy==2.4.6 ; python_full_version < '3.12'
 numpy==2.5.2 ; python_full_version >= '3.12'
-opentelemetry-api==1.43.0
+opentelemetry-api==1.44.0
 opentelemetry-proto==1.44.0
-opentelemetry-sdk==1.43.0
-opentelemetry-semantic-conventions==0.64b0
+opentelemetry-sdk==1.44.0
+opentelemetry-semantic-conventions==0.65b0
 packaging==26.3
 pandas==2.3.3
 pillow==12.3.0
@@ -92,7 +92,7 @@ pydantic==2.13.4
 pydantic-core==2.46.4
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 pytz==2026.3.post1
 pywin32==312 ; sys_platform == 'win32'
 pyyaml==6.0.3
@@ -105,19 +105,19 @@ scipy==1.18.0 ; python_full_version >= '3.12'
 six==1.17.0
 skops==0.14.0
 smmap==5.0.3
-sqlalchemy==2.0.51
-sqlparse==0.5.5
+sqlalchemy==2.0.52
+sqlparse==0.6.0
 starlette==1.6.0
 tenacity==9.1.4
 threadpoolctl==3.6.0
-tiktoken==0.13.0
+tiktoken==0.14.0
 tqdm==4.70.0
 typing-extensions==4.16.0
 typing-inspect==0.9.0
-typing-inspection==0.4.3
+typing-inspection==0.4.4
 tzdata==2026.3
 urllib3==2.7.0
-uvicorn==0.52.1
+uvicorn==0.52.4
 waitress==3.0.2 ; sys_platform == 'win32'
 wcwidth==0.8.2
 werkzeug==3.1.8
