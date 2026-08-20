@@ -90,7 +90,6 @@ def _wait_until_running(
     app_name: str, *, timeout_seconds: int, poll_seconds: int
 ) -> dict:
     deadline = time.monotonic() + timeout_seconds
-    state = "UNKNOWN"
     while True:
         payload = _apps_get(app_name)
         state = str((payload.get("app_status") or {}).get("state") or "UNKNOWN")

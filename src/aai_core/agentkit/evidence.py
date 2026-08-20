@@ -288,17 +288,11 @@ def _render_judge_integrity(
 ) -> None:
     if not integrity:
         return
-    lines.extend(
-        [
-            "",
-            "## Judge integrity",
-            "",
-            "A delta is a statement about the agent only while the judge "
-            "held still; these checks measure the judge itself inside the "
-            "run.",
-            "",
-        ]
+    preamble = (
+        "A delta is a statement about the agent only while the judge "
+        "held still; these checks measure the judge itself inside the run."
     )
+    lines.extend(["", "## Judge integrity", "", preamble, ""])
     consistency = integrity.get("consistency")
     if consistency:
         lines.append(
@@ -350,16 +344,11 @@ def _render_judge_calibration(
 ) -> None:
     if not calibration:
         return
-    lines.extend(
-        [
-            "",
-            "## Judge calibration",
-            "",
-            "A judged score is auditable only against a named human "
-            "agreement measurement (chance-adjusted κ vs SME labels).",
-            "",
-        ]
+    preamble = (
+        "A judged score is auditable only against a named human "
+        "agreement measurement (chance-adjusted κ vs SME labels)."
     )
+    lines.extend(["", "## Judge calibration", "", preamble, ""])
     for row in calibration:
         status = row.get("status", "unknown")
         if status in {"uncalibrated", "unreadable"}:
