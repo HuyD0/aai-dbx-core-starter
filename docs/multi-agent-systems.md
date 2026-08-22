@@ -41,11 +41,17 @@ hundred acceptances); and shared channels invite convergence the way public
 price boards invite price-matching. Diversify roles through distinct
 prompts, tools, and skills — not by hoping identical agents will disagree.
 
+How to structure the second agent once it is justified — the ten-question
+workflow-shape checklist, the recurring shapes with their guardrails, and
+the single-agent-first rule — is `docs/langgraph-production.md`; this
+document owns why, and how the collective is measured.
+
 ## The delegation trace convention
 
 A multi-agent application declares itself in its traces. The convention,
 established by the Deep Agents solution accelerator
-(`examples/deepagents-solution-accelerator/notebooks/`), is:
+(`examples/deepagents-solution-accelerator/` — its README documents the
+workflow shape), is:
 
 - One root `AGENT` span for the supervisor.
 - A child `AGENT` span per delegation (`delegation.<role>`), and an `AGENT`
@@ -134,11 +140,13 @@ point.
 Deliberately not in this change, recorded so it is owned rather than
 implied:
 
-- Normalize `examples/deepagents-solution-accelerator` to the standard the
-  other example projects meet: a README with the lifecycle and release-gate
-  story, registration in `examples/README.md` and `scripts/examples.py`, a
-  Makefile target, tests, and certified `deepagents` and
-  `databricks-langchain` pins in `dependency-policy.toml`.
+- Point the Deep Agents accelerator's continuous-evaluation notebook at the
+  registry's `subagent_routing_accuracy` entry instead of its notebook-local
+  judge definition, now that the registry ships one. The accelerator's
+  README, examples-index entry, and contract tests already exist, and its
+  `deepagents`/`databricks-langchain` pins are a documented,
+  test-cross-checked accelerator-only channel — deliberately outside
+  `aai-core`'s dependency closure.
 - Promote the accelerator's signal taxonomy (subagent exceptions, routing
   score floors, HITL rejections, retry pressure) into a platform monitoring
   vocabulary once more than one application consumes it.
