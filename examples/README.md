@@ -104,6 +104,24 @@ make ops-rag-check
 make ops-rag-notebook
 ```
 
+## Separate Deep Agents multi-agent accelerator
+
+[`deepagents-solution-accelerator/`](deepagents-solution-accelerator/README.md)
+is the repository's multi-agent reference: a supervisor with declarative
+`sql-analyst` and `docs-researcher` sub-agents, explicit todo planning, a
+human-approval interrupt before SQL execution, deterministic delegation
+tracing, Unity Catalog registration with an externally approved serving
+handoff, and a continuous-evaluation loop that synthesizes `SKILL.md`
+guardrails from normalized signals only.
+
+Unlike the workshops above it is connected-only: three Databricks workspace
+notebooks against externally provisioned resources, with an exact-pinned
+runtime stack cross-checked by `tests/test_deepagents_accelerator.py`. Reach
+for it after `templates/agent-app` when one agent with tools is no longer
+enough; the workflow-shape guidance in
+[`docs/langgraph-production.md`](../docs/langgraph-production.md) explains
+when that point is reached.
+
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or

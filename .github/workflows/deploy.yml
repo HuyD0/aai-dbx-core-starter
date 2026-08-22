@@ -191,6 +191,12 @@ jobs:
           BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER || 'CC-1234' }}
           BUNDLE_VAR_team: ${{ vars.TEAM || 'data-platform' }}
           BUNDLE_VAR_owner_group: ${{ vars.OWNER_GROUP || 'group:data-platform-owners' }}
+          # Cost anomaly watch: the group alias that receives alerts, and the
+          # single live schedule. Only this CI dev deployment unpauses it —
+          # system.billing is account-wide, so one schedule covers everything
+          # and laptop/UAT deployments stay paused (databricks.yml default).
+          BUNDLE_VAR_cost_alert_email: ${{ vars.COST_ALERT_EMAIL || 'cost-alerts@example.com' }}
+          BUNDLE_VAR_cost_anomaly_pause_status: UNPAUSED
           AAI_USE_PREBUILT_WHEEL: "1"
         run: |
           databricks bundle validate -t dev
@@ -265,6 +271,10 @@ jobs:
           BUNDLE_VAR_cost_center: ${{ vars.COST_CENTER || 'CC-1234' }}
           BUNDLE_VAR_team: ${{ vars.TEAM || 'data-platform' }}
           BUNDLE_VAR_owner_group: ${{ vars.OWNER_GROUP || 'group:data-platform-owners' }}
+          # No pause override here: the UAT cost anomaly watch stays PAUSED
+          # (databricks.yml default) — the CI dev deployment is the single
+          # live schedule over the account-wide system.billing data.
+          BUNDLE_VAR_cost_alert_email: ${{ vars.COST_ALERT_EMAIL || 'cost-alerts@example.com' }}
           BUNDLE_VAR_hub_lakebase_branch: ${{ vars.HUB_LAKEBASE_BRANCH }}
           BUNDLE_VAR_hub_lakebase_database: ${{ vars.HUB_LAKEBASE_DATABASE }}
           BUNDLE_VAR_hub_lakebase_schema: ${{ vars.HUB_LAKEBASE_SCHEMA }}
