@@ -1,19 +1,21 @@
 """The ``agentkit`` command line.
 
-    agentkit init       scaffold a working evaluation project
-    agentkit compare    THE primary verb - score this version against the last
-    agentkit smoke      fast gate: a sample, seconds, no cluster
-    agentkit eval       the full suite, optionally as a Databricks job
-    agentkit gate       promotion check against thresholds and the baseline
-    agentkit evidence   the release readiness record
-    agentkit scorers ls browse the shared enterprise scorer registry
+    agentkit init               scaffold a working evaluation project
+    agentkit compare            THE primary verb - score this version against the last
+    agentkit smoke              fast gate: a sample, seconds, no cluster
+    agentkit eval               the full suite, optionally as a Databricks job
+    agentkit gate               promotion check against thresholds and the baseline
+    agentkit evidence           the release readiness record
+    agentkit scorers ls         browse the shared enterprise scorer registry
+    agentkit judge calibrate    measure a judge against SME labels (Cohen's kappa)
+    agentkit baseline establish move the baseline to a verified run, via PR
 
 Exit codes are the CI contract: 0 passed, 2 ran but a threshold failed,
 1 runtime or configuration error.
 
 Only the standard library is imported at module load; every command
-imports what it needs so ``smoke``, ``gate``, ``evidence``, ``init`` and
-``scorers ls`` work without MLflow installed.
+imports what it needs so ``smoke``, ``gate``, ``evidence``, ``init``,
+``scorers ls`` and ``judge calibrate`` work without MLflow installed.
 """
 
 from __future__ import annotations
@@ -198,6 +200,79 @@ def _build_parser() -> argparse.ArgumentParser:
         help="resolve judge endpoint and prompt versions from the workspace",
     )
     listing.set_defaults(handler=_cmd_scorers_ls)
+
+    judge = subcommands.add_parser(
+        "judge", help="the judge lifecycle: calibration against SME labels"
+    )
+    judge_commands = judge.add_subparsers(dest="judge_command", required=True)
+    calibrate = judge_commands.add_parser(
+        "calibrate",
+        help=(
+            "measure a registry judge against SME labels (chance-adjusted "
+            "Cohen's kappa) and commit the record"
+        ),
+    )
+    calibrate.add_argument(
+        "--scorer", required=True, help="registry judge scorer to calibrate"
+    )
+    calibrate.add_argument(
+        "--labels",
+        required=True,
+        help=(
+            "JSON list of labelled examples: "
+            '{"example_id", "judge_value", "annotations": '
+            '[{"annotator", "value"}, ...]}'
+        ),
+    )
+    calibrate.add_argument(
+        "--min-kappa",
+        type=float,
+        default=None,
+        dest="min_kappa",
+        help="minimum chance-adjusted agreement to pass (default 0.60)",
+    )
+    calibrate.add_argument(
+        "--decided-by",
+        default=None,
+        dest="decided_by",
+        help="non-personal identity signing the calibration (e.g. group:...)",
+    )
+    calibrate.add_argument("--config", default=None)
+    calibrate.add_argument("--json", action="store_true", dest="as_json")
+    calibrate.set_defaults(handler=_cmd_judge_calibrate)
+
+    baseline = subcommands.add_parser(
+        "baseline",
+        help="move the recorded baseline after a release is verified live",
+    )
+    baseline_commands = baseline.add_subparsers(dest="baseline_command", required=True)
+    establish = baseline_commands.add_parser(
+        "establish",
+        help=(
+            "point the committed baseline at a verified run's recorded "
+            "evidence — run it after deploy + post-deploy smoke, then "
+            "commit the file via a pull request"
+        ),
+    )
+    establish.add_argument(
+        "--from-run",
+        required=True,
+        dest="from_run",
+        help="MLflow run id whose agentkit results become the baseline",
+    )
+    establish.add_argument(
+        "--decided-by",
+        default=None,
+        dest="decided_by",
+        help=(
+            "record the governed adopt decision now, signed by this "
+            "non-personal identity (required unless the run already "
+            "carries an adopt decision)"
+        ),
+    )
+    establish.add_argument("--config", default=None)
+    establish.add_argument("--json", action="store_true", dest="as_json")
+    establish.set_defaults(handler=_cmd_baseline_establish)
 
     return parser
 
@@ -458,6 +533,121 @@ def _cmd_scorers_ls(arguments: argparse.Namespace) -> int:
     return EXIT_PASS
 
 
+def _cmd_judge_calibrate(arguments: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
+    from aai_core.agentkit.calibration import (
+        DEFAULT_MINIMUM_KAPPA,
+        calibrate,
+        calibration_path,
+        load_labels,
+        write_calibration,
+    )
+    from aai_core.agentkit.catalog import get_spec
+    from aai_core.agentkit.errors import ConfigError
+
+    project = _project(arguments)
+    spec = get_spec(arguments.scorer)
+    if spec.judge is None:
+        raise ConfigError(
+            f"{spec.name} is a deterministic code scorer; only judge "
+            "scorers are calibrated",
+            remediation=(
+                "Run `agentkit scorers ls` — calibration applies to the "
+                "scorers whose verdicts come from a judge model."
+            ),
+        )
+    labels = load_labels(Path(arguments.labels))
+    # Best-effort pins: the record should say which judge it measured, but
+    # calibration itself is offline arithmetic and must not require a
+    # workspace connection.
+    judge_model = judge_identity = prompt_uri = None
+    with contextlib.suppress(Exception):
+        judge_model = project.judge_model_uri()
+    with contextlib.suppress(Exception):
+        judge_identity = project.judge_model_identity()
+    if spec.judge.prompt_name:
+        with contextlib.suppress(Exception):
+            manager = project.prompt_manager()
+            prompt = manager.load(spec.judge.prompt_name, alias=spec.judge.prompt_alias)
+            uri = getattr(prompt, "uri", None)
+            prompt_uri = str(uri) if uri else None
+    record = calibrate(
+        scorer=spec.name,
+        scorer_version=spec.version,
+        labels=labels,
+        minimum_kappa=(
+            arguments.min_kappa
+            if arguments.min_kappa is not None
+            else DEFAULT_MINIMUM_KAPPA
+        ),
+        judge_model=judge_model,
+        judge_model_identity=judge_identity,
+        judge_prompt_uri=prompt_uri,
+        recorded_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        decided_by=arguments.decided_by,
+    )
+    path = calibration_path(
+        project.root, project.config.integrity.calibration_dir, spec.name
+    )
+    write_calibration(path, record)
+    if arguments.as_json:
+        print(
+            json.dumps(
+                {"record": record.model_dump(mode="json"), "path": str(path)},
+                indent=2,
+                sort_keys=True,
+                default=str,
+            )
+        )
+        return EXIT_PASS if record.passed else EXIT_THRESHOLD_FAILED
+    verdict = "PASSED" if record.passed else "FAILED"
+    ceiling = (
+        f", human ceiling κ {record.human_ceiling_kappa:.3f}"
+        if record.human_ceiling_kappa is not None
+        else " (single annotator: no human ceiling)"
+    )
+    print(
+        f"calibration {verdict}: {spec.name} κ {record.kappa:.3f} "
+        f"(minimum {record.minimum_kappa:g}{ceiling})\n"
+        f"  agreement {record.percent_agreement:.3f} over "
+        f"{record.sample_size} consensus labels from "
+        f"{record.annotator_count} annotator(s); "
+        f"{record.tie_count} tie(s) excluded\n"
+        f"  written to {path} - commit it with the judge release"
+    )
+    if not record.passed:
+        print(
+            "  a low κ usually means an under-specified rubric, not a bad "
+            "judge: fix the rubric before touching the model.",
+        )
+    return EXIT_PASS if record.passed else EXIT_THRESHOLD_FAILED
+
+
+def _cmd_baseline_establish(arguments: argparse.Namespace) -> int:
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(arguments)
+    messages, code = establish_baseline_from_run(
+        project,
+        arguments.from_run,
+        decided_by=arguments.decided_by,
+    )
+    if arguments.as_json:
+        print(
+            json.dumps(
+                {"exit_code": code, "messages": messages},
+                indent=2,
+                sort_keys=True,
+                default=str,
+            )
+        )
+        return code
+    for message in messages:
+        print(message)
+    return code
+
+
 # --- helpers ---------------------------------------------------------------
 
 
@@ -634,6 +824,8 @@ def _requirements(spec: Any) -> str:
         parts.append("RETRIEVER spans")
     elif spec.needs_trace.value == "tools":
         parts.append("tool-call spans")
+    elif spec.needs_trace.value == "delegation":
+        parts.append("delegation spans (agent.role)")
     elif spec.needs_trace.value == "any":
         parts.append("a live trace")
     return "; ".join(parts) or "outputs"

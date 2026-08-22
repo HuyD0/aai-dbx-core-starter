@@ -204,6 +204,8 @@ COMBOS = {
                 "tests/test_app_endpoint.py",
                 "notebooks/02_enable_monitoring.py",
                 "scripts/create_release.py",
+                "scripts/smoke_deployment.py",
+                "evals/data/live_probes.json",
                 "tests/test_evaluation_config.py",
                 "tests/test_feedback.py",
                 "tests/test_release_evidence.py",

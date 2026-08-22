@@ -59,6 +59,11 @@ class DatasetShape:
     expectation_rows: tuple[tuple[str, ...], ...] = ()
     has_retrieval_spans: bool = False
     has_tool_spans: bool = False
+    # Non-root AGENT spans carrying a non-empty ``agent.role`` attribute —
+    # the platform's delegation marker. Role-less AGENT spans are what
+    # ``record_agent_decision`` writes in single-agent applications, and a
+    # role on only the root labels a single agent; neither counts.
+    has_delegation_spans: bool = False
     # Some rows carry a trace and some do not: the dataset cannot be
     # scored as traces, and saying so beats silently scoring a subset.
     partial_traces: bool = False
@@ -1468,6 +1473,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
     traced_rows = 0
     has_retrieval_spans = False
     has_tool_spans = False
+    has_delegation_spans = False
     has_outputs = bool(rows)
     candidate_strata: dict[str, set[str]] = {}
     for row in rows:
@@ -1494,9 +1500,10 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         expectation_rows.append(tuple(sorted(present)))
         if _is_populated(row.get("trace")):
             traced_rows += 1
-            retrieval, tools = _trace_span_kinds(row["trace"])
+            retrieval, tools, delegation = _trace_span_kinds(row["trace"])
             has_retrieval_spans = has_retrieval_spans or retrieval
             has_tool_spans = has_tool_spans or tools
+            has_delegation_spans = has_delegation_spans or delegation
         if _is_missing(row.get("outputs")):
             has_outputs = False
     strata_values = {
@@ -1518,6 +1525,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         partial_traces=0 < traced_rows < len(rows),
         has_retrieval_spans=has_retrieval_spans,
         has_tool_spans=has_tool_spans,
+        has_delegation_spans=has_delegation_spans,
         strata_values=strata_values,
     )
 
@@ -1550,15 +1558,18 @@ def _is_populated(value: Any) -> bool:
 
 _RETRIEVER_SPAN_TYPE = "RETRIEVER"
 _TOOL_SPAN_TYPE = "TOOL"
+_AGENT_SPAN_TYPE = "AGENT"
 _SPAN_TYPE_KEYS = ("type", "span_type", "spanType")
+_AGENT_ROLE_KEY = "agent.role"
 
 
-def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
+def _trace_span_kinds(trace: Any) -> tuple[bool, bool, bool]:
     """Which span kinds a row's trace carries.
 
-    Retrieval judges need RETRIEVER spans and tool judges need tool spans;
-    selecting both because a trace merely exists spends judge calls on
-    scorers whose contract was never present.
+    Retrieval judges need RETRIEVER spans, tool judges need tool spans,
+    and delegation scorers need delegation spans; selecting any of them
+    because a trace merely exists spends judge calls on scorers whose
+    contract was never present.
 
     The span types are read from the spans, not from the serialized trace
     text. Scanning the payload for "retriever" or "tool" matches an answer
@@ -1568,12 +1579,17 @@ def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
 
     Nesting does not matter here, only presence: MLflow judges top-level
     retriever spans, and a nested retriever always has one above it. A
-    trace whose structure cannot be read reports neither kind — a scorer
-    the toolkit cannot prove is applicable is not auto-selected.
+    trace whose structure cannot be read reports no kind — a scorer the
+    toolkit cannot prove is applicable is not auto-selected.
     """
 
-    types = _span_types(_spans(trace))
-    return _RETRIEVER_SPAN_TYPE in types, _TOOL_SPAN_TYPE in types
+    spans = _spans(trace)
+    types = _span_types(spans)
+    return (
+        _RETRIEVER_SPAN_TYPE in types,
+        _TOOL_SPAN_TYPE in types,
+        _has_delegation_span(spans),
+    )
 
 
 def _span_types(spans: Iterable[Mapping[str, Any]]) -> set[str]:
@@ -1867,6 +1883,139 @@ def _nested(span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]) -> 
 
 def _is_retriever(span: Mapping[str, Any]) -> bool:
     return _RETRIEVER_SPAN_TYPE in _span_types([span])
+
+
+def _is_agent(span: Mapping[str, Any]) -> bool:
+    return _AGENT_SPAN_TYPE in _span_types([span])
+
+
+def _is_tool(span: Mapping[str, Any]) -> bool:
+    return _TOOL_SPAN_TYPE in _span_types([span])
+
+
+def _span_agent_role(span: Mapping[str, Any]) -> str:
+    """The span's declared ``agent.role``, or ``""`` when it has none.
+
+    MLflow stores attribute values JSON-encoded, so the surrounding quotes
+    are part of the stored string, exactly as with ``mlflow.spanType``.
+    """
+
+    attributes = span.get("attributes")
+    candidates = (
+        attributes.get(_AGENT_ROLE_KEY) if isinstance(attributes, Mapping) else None,
+        span.get(_AGENT_ROLE_KEY),
+    )
+    for value in candidates:
+        if isinstance(value, str):
+            role = value.strip().strip('"').strip()
+            if role:
+                return role
+    return ""
+
+
+def _has_delegation_span(spans: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether any non-root AGENT span declares a non-empty ``agent.role``.
+
+    That combination is the platform's delegation marker. Role-less AGENT
+    spans are what ``record_agent_decision`` writes inside single-agent
+    applications, and a role on only the root labels a single agent, so
+    neither may switch the delegation scorers on.
+    """
+
+    return any(
+        _is_agent(span)
+        and _is_populated(_span_parent_identifier(span))
+        and _span_agent_role(span)
+        for span in spans
+    )
+
+
+def _span_label(span: Mapping[str, Any]) -> str:
+    name = span.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return "<unnamed>"
+
+
+def _nearest_agent_ancestor(
+    span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]
+) -> Mapping[str, Any] | None:
+    """The closest AGENT span above ``span``, if the chain reaches one."""
+
+    seen: set[Any] = set()
+    parent_id = _span_parent_identifier(span)
+    while _is_populated(parent_id) and parent_id not in seen:
+        seen.add(parent_id)
+        parent = by_id.get(parent_id)
+        if parent is None:
+            return None
+        if _is_agent(parent):
+            return parent
+        parent_id = _span_parent_identifier(parent)
+    return None
+
+
+def _tool_delegation_violations(
+    spans: Sequence[Mapping[str, Any]],
+    by_id: Mapping[Any, Mapping[str, Any]],
+) -> list[str]:
+    """Every TOOL span must execute under a role-carrying subagent."""
+
+    violations: list[str] = []
+    for span in spans:
+        if not _is_tool(span):
+            continue
+        label = _span_label(span)
+        agent = _nearest_agent_ancestor(span, by_id)
+        if agent is None:
+            violations.append(f"TOOL span '{label}' has no AGENT ancestor")
+        elif not _is_populated(_span_parent_identifier(agent)):
+            violations.append(
+                f"TOOL span '{label}' executes directly under the root agent"
+            )
+        elif not _span_agent_role(agent):
+            violations.append(
+                f"TOOL span '{label}' runs under an AGENT span with no agent.role"
+            )
+    return violations
+
+
+def delegation_structure_violations(trace: Any) -> tuple[str, ...] | None:
+    """Structural violations of the delegation trace convention.
+
+    ``None`` means the row is unscorable rather than failed: the trace is
+    unreadable or carries no delegation span, mirroring how the retrieval
+    scorers skip rows without RETRIEVER spans. Otherwise the tuple lists
+    the violations — empty is a pass.
+
+    The convention verified here is the supervisor shape: exactly one root
+    span and it is an AGENT span, a parent graph that resolves (a chain
+    that cannot be walked cannot be verified, so it is a violation, not a
+    skip), and every TOOL span executing under a delegated subagent — its
+    nearest AGENT ancestor is a non-root span carrying ``agent.role``,
+    because the supervisor never executes operational tools directly.
+    Nearest-ancestor rather than direct-parent keeps frameworks that nest
+    a TOOL under an LLM or CHAIN span inside a subagent turn passing.
+    """
+
+    spans = _spans(trace)
+    if not spans or not _has_delegation_span(spans):
+        return None
+    if not _span_graph_is_resolved(spans):
+        return ("span parent graph does not resolve to a verifiable tree",)
+    violations: list[str] = []
+    roots = [span for span in spans if not _is_populated(_span_parent_identifier(span))]
+    if len(roots) != 1:
+        violations.append(f"expected exactly one root span, found {len(roots)}")
+    elif not _is_agent(roots[0]):
+        violations.append(f"root span '{_span_label(roots[0])}' is not an AGENT span")
+    by_id: dict[Any, Mapping[str, Any]] = {}
+    for span in spans:
+        identifier = _span_identifier(span)
+        if isinstance(identifier, str) and identifier:
+            by_id[identifier] = span
+    violations.extend(_tool_delegation_violations(spans, by_id))
+    return tuple(violations)
 
 
 def _span_outputs(span: Mapping[str, Any]) -> Any | None:

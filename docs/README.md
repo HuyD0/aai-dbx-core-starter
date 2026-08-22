@@ -17,6 +17,7 @@ document is invisible to developers and agents.
 - [Agent evaluation](agent-evaluation.md) — the comparison-first paved road and its gate.
 - [Analytics lifecycle](analytics-lifecycle.md) — self-service LLM analytics, from question to governed result.
 - [Production LangGraph agents](langgraph-production.md) — durable state, interrupts, and long-term memory.
+- [Multi-agent systems](multi-agent-systems.md) — when a second agent pays its way, delegation traces, and coordination scorers.
 - [LLMOps playbook](llmops-playbook.md) — industry practice map and shared terminology.
 - [UAT promotion](uat-promotion.md) — the dev-to-UAT delivery path.
 - [Versioning](versioning.md) — SDK versioning and deprecation policy.

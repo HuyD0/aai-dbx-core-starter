@@ -3,6 +3,7 @@
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from aai_core.agentkit.config import (
     AgentkitConfig,
@@ -356,3 +357,38 @@ def test_an_unreadable_endpoint_yields_no_identity(tmp_path):
     )
 
     assert project.judge_model_identity(client=client) is None
+
+
+def test_integrity_config_defaults_are_inert():
+    config = AgentkitConfig(
+        version=1, agent="src/app.py:respond", dataset="evals/data/cases.json"
+    )
+    assert config.integrity.consistency_sample == 0
+    assert config.integrity.require_anchors is False
+    assert config.integrity.require_calibration is False
+    assert config.integrity.anchors == "evals/judge_anchors.json"
+
+
+def test_integrity_config_parses_and_bounds_the_knobs():
+    config = AgentkitConfig(
+        version=1,
+        agent="src/app.py:respond",
+        dataset="evals/data/cases.json",
+        integrity={
+            "consistency_sample": 8,
+            "max_self_inconsistency": 0.25,
+            "anchors": "evals/frozen.json",
+            "max_anchor_drift": 0.05,
+            "require_anchors": True,
+        },
+    )
+    assert config.integrity.consistency_sample == 8
+    assert config.integrity.max_anchor_drift == 0.05
+    assert config.integrity.anchors == "evals/frozen.json"
+    with pytest.raises(ValidationError):
+        AgentkitConfig(
+            version=1,
+            agent="src/app.py:respond",
+            dataset="evals/data/cases.json",
+            integrity={"unknown_knob": True},
+        )

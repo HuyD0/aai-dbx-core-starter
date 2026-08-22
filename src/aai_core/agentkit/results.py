@@ -40,6 +40,7 @@ from pydantic import (
 
 from aai_core.agentkit.baseline import BaselineDataset, BaselineScope, BaselineVersions
 from aai_core.agentkit.errors import ConfigError
+from aai_core.agentkit.integrity import IntegrityEvidence
 from aai_core.agentkit.statistics import StatisticalEvidence
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.evaluation import MetricRule
@@ -104,6 +105,9 @@ class ResultsRecord(ContractModel):
     # with them; they exist solely to make paired uncertainty reproducible.
     metric_samples: Mapping[str, tuple[float | None, ...]] = Field(default_factory=dict)
     statistics: StatisticalEvidence | None = None
+    # Judge self-consistency and frozen-anchor drift, when the run measured
+    # them. ``None`` keeps records from before the integrity checks readable.
+    integrity: IntegrityEvidence | None = None
     versions: BaselineVersions
     baseline_run_id: str | None = None
     baseline_metrics: Mapping[str, float] = Field(default_factory=dict)
@@ -121,6 +125,10 @@ class ResultsRecord(ContractModel):
     allow_missing_regression_baseline: bool = False
     decision: str = Field(min_length=1)
     change_id: str = Field(min_length=1)
+    # The full release identifier (AAI_RELEASE — the deployed commit) when
+    # the run was scored under one. ``change_id`` truncates to 12 chars;
+    # the gate's release-binding check needs the complete value.
+    release: str | None = None
     gate_passed: bool
     gate_failures: tuple[Mapping[str, str], ...] = ()
     warnings: tuple[str, ...] = ()

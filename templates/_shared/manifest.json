@@ -24,6 +24,7 @@
     "scripts/release_artifact.py",
     "scripts/register_prompt.py",
     "scripts/setup_dev.py.tmpl",
+    "scripts/smoke_deployment.py",
     "scripts/sync_dataset.py",
     "scripts/validate_project.py",
     "tests/test_manifest_dataset.py"

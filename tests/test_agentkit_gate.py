@@ -727,3 +727,270 @@ def test_an_unchanged_selection_is_not_drift(tmp_path):
     )
 
     assert _policy_drift(project, results, None) is None
+
+
+# --- release binding --------------------------------------------------------
+
+
+def _bound_results(**overrides):
+    """Results as a CI release-gate run would record them."""
+
+    values = {
+        "release": "a" * 40,
+        "change_id": ("a" * 40)[:12],
+    }
+    values.update(overrides)
+    return _results(**values)
+
+
+def test_gate_refuses_results_from_another_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAI_RELEASE", "b" * 40)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path)
+
+    report, code = evaluate_gate(
+        project,
+        results=_bound_results(),
+        baseline=_baseline(),
+        plan=_plan(project),
+        check_release_binding=True,
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert not report.passed
+    assert [failure.metric for failure in report.result.failures] == ["release"]
+    assert "scored for commit" in report.message
+    assert ("b" * 40)[:12] in report.message
+
+
+def test_gate_accepts_results_for_the_gated_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAI_RELEASE", "a" * 40)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path)
+
+    report, code = evaluate_gate(
+        project,
+        results=_bound_results(),
+        baseline=_baseline(),
+        plan=_plan(project),
+        check_release_binding=True,
+    )
+
+    assert code == EXIT_PASS
+    assert report.passed
+
+
+def test_gate_accepts_a_change_id_match_without_a_release(tmp_path, monkeypatch):
+    # Older records carry only the 12-char change id; GIT_COMMIT-driven
+    # environments must still bind on it.
+    monkeypatch.delenv("AAI_RELEASE", raising=False)
+    monkeypatch.setenv("GIT_COMMIT", "c" * 40)
+    project = _project(tmp_path)
+
+    report, code = evaluate_gate(
+        project,
+        results=_results(release=None, change_id=("c" * 40)[:12]),
+        baseline=_baseline(),
+        plan=_plan(project),
+        check_release_binding=True,
+    )
+
+    assert code == EXIT_PASS
+
+
+def test_local_dev_skips_the_release_binding(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAI_RELEASE", "local-dev")
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path)
+
+    report, code = evaluate_gate(
+        project,
+        results=_results(),
+        baseline=_baseline(),
+        plan=_plan(project),
+        check_release_binding=True,
+    )
+
+    assert code == EXIT_PASS
+
+
+def test_release_binding_is_off_unless_requested(tmp_path, monkeypatch):
+    # `agentkit evidence --run <id>` renders records from other machines;
+    # only the promotion path (`run_gate`) opts in.
+    monkeypatch.setenv("AAI_RELEASE", "b" * 40)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path)
+
+    report, code = evaluate_gate(
+        project,
+        results=_bound_results(),
+        baseline=_baseline(),
+        plan=_plan(project),
+    )
+
+    assert code == EXIT_PASS
+
+
+def test_run_gate_binds_to_the_release_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAI_RELEASE", "b" * 40)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path)
+    directory = project.results_dir
+    attempt = begin_results_attempt(directory, command="compare")
+    path = write_results(
+        directory, _bound_results(attempt_id=attempt.attempt_id), attempt=attempt
+    )
+    complete_results_attempt(directory, attempt, path)
+
+    report, code, message = run_gate(project)
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert "scored for commit" in message
+
+
+# --- judge-integrity rules --------------------------------------------------
+
+
+def test_integrity_rules_join_the_policy_only_for_judged_runs(tmp_path):
+    from aai_core.agentkit.integrity import (
+        ANCHOR_DRIFT_METRIC,
+        SELF_INCONSISTENCY_METRIC,
+    )
+
+    project = _project(
+        tmp_path,
+        integrity={"consistency_sample": 8, "require_anchors": True},
+    )
+
+    judged = build_policy(
+        project, scorer_names=("keyword_coverage",), judges_enabled=True
+    )
+    judged_metrics = {rule.metric for rule in judged.rules}
+    assert SELF_INCONSISTENCY_METRIC in judged_metrics
+    assert ANCHOR_DRIFT_METRIC in judged_metrics
+
+    unjudged = build_policy(
+        project, scorer_names=("keyword_coverage",), judges_enabled=False
+    )
+    unjudged_metrics = {rule.metric for rule in unjudged.rules}
+    assert SELF_INCONSISTENCY_METRIC not in unjudged_metrics
+    assert ANCHOR_DRIFT_METRIC not in unjudged_metrics
+
+
+def test_a_judged_record_missing_integrity_evidence_fails_closed(tmp_path):
+    from aai_core.agentkit.integrity import SELF_INCONSISTENCY_METRIC
+
+    project = _project(tmp_path, integrity={"consistency_sample": 8})
+    # The record says judges ran, but carries no self-inconsistency metric
+    # and predates recorded gate rules — the current policy applies.
+    results = _results(judges_enabled=True)
+
+    report, code = evaluate_gate(project, results=results, baseline=_baseline())
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert any(
+        failure.metric == SELF_INCONSISTENCY_METRIC and "missing" in failure.reason
+        for failure in report.result.failures
+    )
+
+
+def test_anchor_drift_failure_explains_the_instrument_moved(tmp_path):
+    from aai_core.agentkit.integrity import ANCHOR_DRIFT_METRIC
+
+    project = _project(
+        tmp_path,
+        integrity={"require_anchors": True, "max_anchor_drift": 0.1},
+    )
+    results = _results(
+        judges_enabled=True,
+        metrics={
+            "keyword_coverage/mean": 0.8,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+            ANCHOR_DRIFT_METRIC: 0.4,
+        },
+    )
+
+    report, code = evaluate_gate(project, results=results, baseline=_baseline())
+
+    assert code == EXIT_THRESHOLD_FAILED
+    text = render_report(report)
+    assert "the judge changed, not the agent" in text
+
+
+def test_enabling_integrity_is_policy_drift_for_older_records(tmp_path):
+    from aai_core.agentkit.gate import _policy_drift
+    from aai_core.agentkit.integrity import SELF_INCONSISTENCY_METRIC
+
+    plain = _project(tmp_path)
+    recorded = build_policy(
+        plain, scorer_names=("keyword_coverage",), judges_enabled=True
+    ).rules
+    tightened = _project(tmp_path, integrity={"consistency_sample": 8})
+
+    drift = _policy_drift(
+        tightened,
+        _results(policy_rules=recorded, judges_enabled=True),
+        None,
+    )
+
+    assert drift is not None
+    assert SELF_INCONSISTENCY_METRIC in drift
+
+
+def test_run_gate_requires_calibration_when_configured(tmp_path, monkeypatch):
+    from aai_core.agentkit.calibration import (
+        CalibrationRecord,
+        calibration_path,
+        write_calibration,
+    )
+
+    monkeypatch.delenv("AAI_RELEASE", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    project = _project(tmp_path, integrity={"require_calibration": True})
+    directory = project.results_dir
+    attempt = begin_results_attempt(directory, command="compare")
+    results = _results(
+        attempt_id=attempt.attempt_id,
+        judges_enabled=True,
+        metrics={
+            "keyword_coverage/mean": 0.8,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+            "safety/mean": 1.0,
+        },
+        versions=BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 2, "safety": 1},
+            aai_core="0.4.0",
+        ),
+    )
+    path = write_results(directory, results, attempt=attempt)
+    complete_results_attempt(directory, attempt, path)
+
+    report, code, message = run_gate(project)
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert [failure.metric for failure in report.result.failures] == ["calibration"]
+    assert "agentkit judge calibrate" in message
+
+    write_calibration(
+        calibration_path(tmp_path, "evals/judges", "safety"),
+        CalibrationRecord(
+            scorer="safety",
+            scorer_version=1,
+            labels_digest="0" * 64,
+            sample_size=20,
+            annotator_count=2,
+            percent_agreement=0.9,
+            kappa=0.8,
+            passed=True,
+            recorded_at="2026-08-19T10:00:00Z",
+        ),
+    )
+
+    report, code, message = run_gate(project)
+
+    # The code-scorer keyword_coverage needs no calibration; the judged
+    # safety scorer is now covered, so the ordinary policy applies.
+    assert code == EXIT_PASS

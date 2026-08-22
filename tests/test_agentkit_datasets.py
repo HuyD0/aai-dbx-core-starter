@@ -10,6 +10,7 @@ import pytest
 from aai_core.agentkit.datasets import (
     attach_answer_sheet,
     dataset_digest,
+    delegation_structure_violations,
     effective_dataset,
     evaluation_rows,
     load_dataset,
@@ -2834,3 +2835,195 @@ def test_a_trace_body_is_not_scanned_for_placeholders(tmp_path):
     )
 
     assert failures == []
+
+
+def _delegation_span(sid, span_type, *, parent=None, role=None, name=None):
+    """A minimal span record in the shape `_spans` reads."""
+
+    span = {
+        "context": {"span_id": sid},
+        "parent_id": parent,
+        "type": span_type,
+        "name": name or sid,
+    }
+    if role is not None:
+        span["attributes"] = {"agent.role": role}
+    return span
+
+
+def _delegation_trace(*spans):
+    return {"data": {"spans": list(spans)}}
+
+
+def _supervised_trace():
+    return _delegation_trace(
+        _delegation_span(
+            "root", "AGENT", role='"supervisor"', name="deepagent.supervisor"
+        ),
+        _delegation_span(
+            "d1", "AGENT", parent="root", role='"sql-analyst"', name="delegation"
+        ),
+        _delegation_span("llm", "LLM", parent="d1"),
+        _delegation_span("tool", "TOOL", parent="llm", name="execute_sql_query"),
+    )
+
+
+def test_delegation_spans_set_the_shape_flag(tmp_path):
+    """A non-root AGENT span carrying agent.role is the delegation marker."""
+
+    rows = [{"inputs": {"question": "a"}, "trace": _supervised_trace()}]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_delegation_spans
+    assert shape.has_tool_spans
+
+
+def test_delegation_flag_reads_json_encoded_attribute_values(tmp_path):
+    """MLflow stores attribute values JSON-encoded, quotes included."""
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": _delegation_trace(
+                {
+                    "context": {"span_id": "root"},
+                    "parent_id": None,
+                    "attributes": {"mlflow.spanType": '"AGENT"'},
+                },
+                {
+                    "context": {"span_id": "d1"},
+                    "parent_id": "root",
+                    "attributes": {
+                        "mlflow.spanType": '"AGENT"',
+                        "agent.role": '"docs-researcher"',
+                    },
+                },
+            ),
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_delegation_spans
+
+
+def test_single_agent_traces_do_not_set_the_delegation_flag(tmp_path):
+    """Neither a labeled root nor role-less decision spans count.
+
+    `record_agent_decision` writes role-less AGENT spans inside ordinary
+    single-agent applications, and a role on only the root labels a single
+    agent; selecting multi-agent scorers for either would fail gates that
+    never claimed the delegation convention.
+    """
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            # A labeled single agent: role on the root only.
+            "trace": _delegation_trace(
+                _delegation_span("root", "AGENT", role='"supervisor"'),
+                _delegation_span("tool", "TOOL", parent="root"),
+            ),
+        },
+        {
+            "inputs": {"question": "b"},
+            # Decision evidence: non-root AGENT spans without a role.
+            "trace": _delegation_trace(
+                _delegation_span("root", "CHAIN"),
+                _delegation_span("decision", "AGENT", parent="root"),
+            ),
+        },
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert not shape.has_delegation_spans
+
+
+def test_delegation_structure_accepts_the_supervisor_shape():
+    assert delegation_structure_violations(_supervised_trace()) == ()
+
+
+def test_delegation_structure_skips_rows_outside_the_convention():
+    """No delegation spans or no readable trace: unscorable, not failed."""
+
+    assert delegation_structure_violations("not json") is None
+    assert delegation_structure_violations({"data": {"spans": []}}) is None
+    single_agent = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("tool", "TOOL", parent="root"),
+    )
+    assert delegation_structure_violations(single_agent) is None
+
+
+def test_delegation_structure_rejects_multiple_roots():
+    trace = _delegation_trace(
+        _delegation_span("a", "AGENT", role='"supervisor"'),
+        _delegation_span("b", "AGENT", role='"sql-analyst"', parent="a"),
+        _delegation_span("c", "AGENT"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations is not None
+    assert any("exactly one root" in violation for violation in violations)
+
+
+def test_delegation_structure_rejects_a_non_agent_root():
+    trace = _delegation_trace(
+        _delegation_span("root", "CHAIN", name="pipeline"),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == ("root span 'pipeline' is not an AGENT span",)
+
+
+def test_delegation_structure_rejects_an_unresolvable_graph():
+    """A chain that cannot be walked cannot be verified: violation, not skip."""
+
+    trace = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+        _delegation_span("tool", "TOOL", parent="missing"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == ("span parent graph does not resolve to a verifiable tree",)
+
+
+def test_delegation_structure_rejects_tools_under_the_root_agent():
+    """The supervisor never executes operational tools directly."""
+
+    trace = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+        _delegation_span("tool", "TOOL", parent="root", name="execute_sql_query"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == (
+        "TOOL span 'execute_sql_query' executes directly under the root agent",
+    )
+
+
+def test_delegation_structure_requires_a_role_on_the_executing_agent():
+    trace = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+        _delegation_span("worker", "AGENT", parent="root"),
+        _delegation_span("tool", "TOOL", parent="worker", name="lookup"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == (
+        "TOOL span 'lookup' runs under an AGENT span with no agent.role",
+    )

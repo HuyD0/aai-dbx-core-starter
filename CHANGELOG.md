@@ -19,6 +19,46 @@ All notable changes to `aai-core` are documented here.
   template manifest and asserted through the render matrix. AGENTS.md
   section 11 now points at the decision log and the retained platform audit
   instead of a `docs/archive/` directory that no longer exists.
+- Added per-run judge-integrity checks to AgentKit: an opt-in
+  self-consistency flip-rate over re-judged outputs and a frozen-anchor
+  drift check (`evals/judge_anchors.json`, written by judged
+  `--establish-baseline` runs) that separates judge drift from agent
+  regression, both enforced as gate rules and covered by the judge-call
+  budget. Enabling the `integrity:` block makes older results records
+  refuse with policy drift — re-run `agentkit compare` after adopting it.
+- Bound the AgentKit gate to the commit it runs for: results record the
+  full `AAI_RELEASE` commit (job clusters previously recorded
+  `local-dev`), and `agentkit gate` refuses evidence scored for a
+  different commit than the release identity in its environment.
+- Added `agentkit judge calibrate`: chance-adjusted Cohen's kappa against
+  SME label consensus with a pairwise human ceiling, persisted as a
+  committed per-judge calibration record that evidence reports and —
+  under `integrity.require_calibration` — scoring and the gate demand.
+- Added `agentkit baseline establish --from-run`, moving the committed
+  baseline to an already-verified run's recorded evidence after the
+  deploy and post-deploy smoke pass; adopt evidence is required and may
+  be recorded in the same step with `--decided-by`.
+- Added a post-deploy smoke step to every generated deploy workflow
+  (`scripts/smoke_deployment.py`): the Databricks App must report RUNNING
+  after `bundle run agent_app`, with opt-in golden-prompt probes via
+  `evals/data/live_probes.json`; a red smoke blocks UAT promotion.
+  Template versions: agent-app 1.5.0, analytics-app 1.3.0,
+  evaluation-project 2.2.0, experiment-starter 1.4.0, prompt-app 1.4.0,
+  rag-app 1.4.0.
+- Added multi-agent evaluation to the shared scorer registry:
+  `delegation_structure_ok` deterministically verifies the AGENT-rooted
+  delegation span hierarchy, and `subagent_routing_accuracy` judges the
+  supervisor's routing against the recorded trace on a graded 0-1 rubric.
+  Delegation is detected only from non-root `AGENT` spans carrying an
+  `agent.role` attribute, so single-agent gates never select the new
+  scorers, rows outside the convention are skipped and reported rather
+  than failed, and a trace-reading prompt judge refuses the Guidelines
+  fallback instead of scoring without the trace.
+- Added `docs/multi-agent-systems.md`: when a second agent pays its way,
+  the delegation trace convention, the coordination scorers, the failure
+  modes reported by frontier multi-agent research mapped onto existing
+  platform controls, and the backlog for normalizing the Deep Agents
+  solution accelerator.
 - Added the platform cost anomaly watch: a scheduled bundle job
   (`resources/cost_anomaly_job.yml`) evaluates the previous day's observed
   spend in `system.billing.usage` (list-priced via

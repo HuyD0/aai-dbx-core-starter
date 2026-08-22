@@ -313,7 +313,16 @@ acceptance criteria.
   registration cannot ship as plain SDK code while the service serializes
   notebook code; the platform tracks the Databricks Beta.
 - **Templates still carry local copies** of scorers and judge resolution;
-  they adopt the shared SDK modules in a follow-up template release.
+  they adopt the shared SDK modules in a follow-up template release. The
+  judge-integrity checks, calibration records, release-commit gate binding,
+  and post-deploy smoke land on the agentkit path first for the same
+  reason: the five `gate_config.json` templates receive them with that
+  migration, while their deploy workflows already gained the shared
+  post-deploy smoke step.
+- **Judge-integrity re-scoring covers row-level judges.** Trace-fanout
+  judges (retrieval, tool-call) are excluded from self-consistency and
+  anchor re-scoring in this release; their stability is still bounded by
+  the comparability checks on judge identity and prompt version.
 
 ## References
 
