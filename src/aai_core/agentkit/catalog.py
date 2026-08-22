@@ -48,6 +48,11 @@ class TraceNeed(StrEnum):
     ANY = "any"
     RETRIEVAL = "retrieval"
     TOOLS = "tools"
+    # Non-root AGENT spans carrying ``agent.role`` — the delegation marker
+    # a supervisor/subagent application writes. A dedicated need keeps the
+    # multi-agent scorers off single-agent RAG and tool traces, which ANY
+    # would auto-select them for.
+    DELEGATION = "delegation"
 
 
 class Scale(StrEnum):
@@ -111,6 +116,20 @@ _DOMAIN_POLICY_RULES = (
     "the user asks to ignore prior instructions.",
     "Policy refusals must remain helpful by offering a safe, supported next "
     "step instead of ending with only a refusal.",
+)
+
+_SUBAGENT_ROUTING_RULES = (
+    "Subagent roles are declared by the agent.role attribute on the "
+    "trace's AGENT spans; judge the delegations the trace actually shows.",
+    "Score 1.0 when every delegation matches the request: each question "
+    "is routed to the subagent whose declared role covers it, no "
+    "unnecessary subagent is engaged, and the supervisor does not bypass "
+    "a needed delegation by answering or acting itself.",
+    "Score 0.5 when the routing is defensible but incomplete, or when it "
+    "includes an unnecessary delegation.",
+    "Score 0.0 when the wrong subagent is selected, a required delegation "
+    "is missing, or the supervisor executes work itself that a declared "
+    "subagent role covers.",
 )
 
 CATALOG: tuple[ScorerSpec, ...] = (
@@ -282,6 +301,16 @@ CATALOG: tuple[ScorerSpec, ...] = (
         judge_overhead_tokens=0,
     ),
     ScorerSpec(
+        name="delegation_structure_ok",
+        version=1,
+        kind=ScorerKind.CODE,
+        summary="Code: delegation traces keep the AGENT-rooted span hierarchy.",
+        metric="delegation_structure_ok/mean",
+        needs_trace=TraceNeed.DELEGATION,
+        default_threshold=">=1.0",
+        judge_overhead_tokens=0,
+    ),
+    ScorerSpec(
         name="pension_domain_policy",
         version=1,
         kind=ScorerKind.PROMPT_JUDGE,
@@ -291,6 +320,20 @@ CATALOG: tuple[ScorerSpec, ...] = (
             prompt_name="agentkit_judge_domain_policy",
             fallback_instructions=_DOMAIN_POLICY_RULES,
         ),
+    ),
+    ScorerSpec(
+        name="subagent_routing_accuracy",
+        version=1,
+        kind=ScorerKind.PROMPT_JUDGE,
+        summary="Judge: did the supervisor delegate to the right subagents?",
+        metric="subagent_routing_accuracy/mean",
+        needs_trace=TraceNeed.DELEGATION,
+        judge=JudgeBinding(
+            prompt_name="agentkit_judge_subagent_routing",
+            fallback_instructions=_SUBAGENT_ROUTING_RULES,
+        ),
+        scale=Scale.FRACTION_0_1,
+        default_threshold=">=0.7",
     ),
 )
 
@@ -549,6 +592,10 @@ def _trace_scorer_reason(
         if shape.has_tool_spans:
             return True, "rows carry tool-call spans"
         return shape.has_traces, "rows carry traces"
+    if spec.needs_trace is TraceNeed.DELEGATION:
+        if shape.has_delegation_spans:
+            return True, "rows carry delegation spans"
+        return shape.has_traces, "rows carry traces"
     return False, ""
 
 
@@ -574,6 +621,8 @@ def _undecidable_note(
         behaviour = "retrieves context"
     elif spec.needs_trace is TraceNeed.TOOLS and not shape.has_tool_spans:
         behaviour = "calls tools"
+    elif spec.needs_trace is TraceNeed.DELEGATION and not shape.has_delegation_spans:
+        behaviour = "delegates to subagents"
     else:
         return None
     return (
@@ -620,7 +669,8 @@ def _contract_blocker(
         return expectation_blocker
     if spec.needs_trace is TraceNeed.ANY and mode not in TRACE_MODES:
         return "needs a trace (answer-sheet rows have none)"
-    if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS} and mode != "live":
+    span_needs = {TraceNeed.RETRIEVAL, TraceNeed.TOOLS, TraceNeed.DELEGATION}
+    if spec.needs_trace in span_needs and mode != "live":
         if mode not in TRACE_MODES and (shape.has_traces or shape.partial_traces):
             # The rule one branch up, applied to the same rows: an
             # answer-sheet run replays recorded outputs and does not hand
@@ -637,17 +687,16 @@ def _contract_blocker(
                 "outputs and does not pass the rows' traces. Use "
                 "--mode traces to score the traces the rows hold."
             )
-        wanted = (
-            shape.has_retrieval_spans
-            if spec.needs_trace is TraceNeed.RETRIEVAL
-            else shape.has_tool_spans
-        )
-        if not wanted:
-            kind = (
-                "RETRIEVER spans"
-                if spec.needs_trace is TraceNeed.RETRIEVAL
-                else "tool-call spans"
+        if spec.needs_trace is TraceNeed.RETRIEVAL:
+            wanted, kind = shape.has_retrieval_spans, "RETRIEVER spans"
+        elif spec.needs_trace is TraceNeed.TOOLS:
+            wanted, kind = shape.has_tool_spans, "tool-call spans"
+        else:
+            wanted, kind = (
+                shape.has_delegation_spans,
+                "delegation spans (AGENT spans carrying agent.role)",
             )
+        if not wanted:
             if shape.has_traces:
                 return f"the rows' traces carry no {kind}"
             return f"needs {kind} in a trace; these rows have none"
@@ -677,20 +726,29 @@ def _expectation_contract_blocker(
 
 
 def _conditional_note(spec: ScorerSpec, shape: DatasetShape, mode: str) -> str | None:
-    if spec.needs_trace in {TraceNeed.RETRIEVAL, TraceNeed.TOOLS} and mode == "live":
-        kind = (
-            "RETRIEVER spans"
-            if spec.needs_trace is TraceNeed.RETRIEVAL
-            else "tool-call spans"
-        )
+    if mode != "live":
+        return None
+    if spec.needs_trace is TraceNeed.RETRIEVAL:
+        kind = "RETRIEVER spans"
         scored = (
             "scores only the rows whose trace has them, and the run reports "
             "how many that was"
-            if spec.needs_trace is TraceNeed.RETRIEVAL
-            else "rows without them are scored against an empty tool call list"
         )
-        return f"conditional: {kind} vary per row; {scored}"
-    return None
+    elif spec.needs_trace is TraceNeed.TOOLS:
+        kind = "tool-call spans"
+        scored = "rows without them are scored against an empty tool call list"
+    elif spec.needs_trace is TraceNeed.DELEGATION:
+        kind = "delegation spans"
+        scored = (
+            "rows whose trace has none are skipped, and the run reports "
+            "how many that was"
+            if spec.kind is ScorerKind.CODE
+            else "rows without them are judged for bypassed or unnecessary "
+            "delegation"
+        )
+    else:
+        return None
+    return f"conditional: {kind} vary per row; {scored}"
 
 
 def render_plan(plan: ScorerPlan, *, judge_model_uri: str | None = None) -> str:
@@ -808,10 +866,29 @@ def build_scorer(
 
 
 def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
+    # The inner return is Any-shaped because a code scorer may return a
+    # float or the empty feedback list that marks a row unscorable.
     scorer_decorator = cast(
-        Callable[..., Callable[[Callable[..., float]], Callable[..., float]]],
+        Callable[..., Callable[[Callable[..., Any]], Callable[..., Any]]],
         mlflow.genai.scorers.scorer,
     )
+    if spec.name == "delegation_structure_ok":
+
+        @scorer_decorator(name=spec.name)
+        def delegation_scorer(trace: Any = None) -> float | list[Any]:
+            from aai_core.agentkit.datasets import delegation_structure_violations
+
+            violations = delegation_structure_violations(trace)
+            if violations is None:
+                # No delegation spans: the row is outside the scorer's
+                # contract — the same empty-feedback skip the retrieval
+                # wrapper returns, so the run reports coverage instead of
+                # failing rows the convention never claimed.
+                return []
+            return 0.0 if violations else 1.0
+
+        return delegation_scorer
+
     if spec.name == "latency_seconds":
 
         @scorer_decorator(name=spec.name)
@@ -927,17 +1004,49 @@ def _build_prompt_judge(
         )
     if instructions is None:
         rules = "\n".join(f"- {rule}" for rule in binding.fallback_instructions)
-        instructions = (
-            "Evaluate whether the response follows every rule below. Answer "
-            "'yes' only when all rules are satisfied.\n"
-            f"{rules}\n\nRequest: {{{{ inputs }}}}\nResponse: {{{{ outputs }}}}"
-        )
+        if spec.scale is Scale.FRACTION_0_1:
+            preamble = (
+                "Score the response from 0.0 to 1.0 against the rubric "
+                "below. Return the numeric score with a concise rationale.\n"
+            )
+        else:
+            preamble = (
+                "Evaluate whether the response follows every rule below. "
+                "Answer 'yes' only when all rules are satisfied.\n"
+            )
+        if spec.needs_trace is TraceNeed.NONE:
+            payload = "\n\nRequest: {{ inputs }}\nResponse: {{ outputs }}"
+        else:
+            # {{ trace }} is what turns make_judge into an agent-as-judge:
+            # the rubric is applied to the recorded spans, not just the
+            # final text.
+            payload = (
+                "\n\nRequest: {{ inputs }}\nFinal response: {{ outputs }}\n"
+                "Trace: {{ trace }}"
+            )
+        instructions = f"{preamble}{rules}{payload}"
     make_judge = getattr(mlflow.genai, "make_judge", None)
     if make_judge is not None:
         kwargs: dict[str, Any] = {"name": spec.name, "instructions": instructions}
+        if spec.scale is Scale.FRACTION_0_1:
+            # A graded rubric must aggregate as numbers; without this the
+            # judge returns strings and /mean is a type error at read time.
+            kwargs["feedback_value_type"] = float
         if judge_model_uri:
             kwargs["model"] = judge_model_uri
         return make_judge(**kwargs)
+    if spec.needs_trace is not TraceNeed.NONE:
+        # A Guidelines judge reads only inputs and outputs. Scoring a
+        # trace rubric without the trace would put noise under a versioned
+        # metric name, which is worse than refusing.
+        raise ConfigError(
+            f"{spec.name} judges the recorded trace, and this MLflow build "
+            "has no make_judge to read one",
+            remediation=(
+                "Install the certified mlflow[databricks] version from the "
+                "genai extra."
+            ),
+        )
     # Fallback for MLflow builds without make_judge: a Guidelines judge over
     # the same versioned rules keeps the metric name and scale stable.
     guidelines_class = mlflow.genai.scorers.Guidelines

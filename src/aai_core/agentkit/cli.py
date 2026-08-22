@@ -824,6 +824,8 @@ def _requirements(spec: Any) -> str:
         parts.append("RETRIEVER spans")
     elif spec.needs_trace.value == "tools":
         parts.append("tool-call spans")
+    elif spec.needs_trace.value == "delegation":
+        parts.append("delegation spans (agent.role)")
     elif spec.needs_trace.value == "any":
         parts.append("a live trace")
     return "; ".join(parts) or "outputs"

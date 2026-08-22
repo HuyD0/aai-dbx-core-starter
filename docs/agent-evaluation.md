@@ -101,6 +101,7 @@ has to memorise the contracts:
 | `expectations.guidelines` | per-row guideline adherence |
 | retrieval spans in the trace | groundedness, retrieval relevance, sufficiency |
 | tool-call spans in the trace | tool-call correctness and efficiency |
+| delegation spans in the trace (non-root `AGENT` spans with `agent.role`) | delegation structure, subagent routing accuracy |
 | always | response length; safety on judged runs |
 
 The inferred plan is printed before every run, along with what the judge calls
@@ -627,6 +628,8 @@ on Databricks while the runtime is wherever the application team runs it.
 - `docs/tagging-standard.md` — the governed tag fields every run carries
 - `docs/developer-guide.md` — the end-to-end developer path
 - `docs/cost-estimation.md` — how platform cost attribution works
+- `docs/multi-agent-systems.md` — the delegation trace convention and the
+  coordination scorers for supervisor/subagent applications
 
 ## Notes for the other templates
 

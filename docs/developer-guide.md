@@ -231,7 +231,10 @@ on Databricks Apps as its native deployment path, with async `@invoke` and
 durable graph execution; inject an async persistent checkpointer/store and put
 an interrupt before irreversible work. When to reach for the recipe, how
 review decisions become trace evidence, and the Lakebase persistence wiring
-are covered in [Production LangGraph agents](langgraph-production.md).
+are covered in [Production LangGraph agents](langgraph-production.md). If the
+application grows a supervisor with subagents, the delegation trace
+convention and the coordination scorers it switches on are covered in
+[Multi-agent systems in production](multi-agent-systems.md).
 
 Production applications emit sampled asynchronous traces. Attach end-user and
 expert feedback to the originating trace, monitor quality and operations, and

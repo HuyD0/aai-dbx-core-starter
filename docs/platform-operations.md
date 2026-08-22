@@ -80,6 +80,50 @@ The platform team maintains approved logical resources:
 For each resource publish provider, environment, data-residency classification,
 capabilities, quotas, cost ownership, SLO, and support owner.
 
+## Cost anomaly detection
+
+The bundle deploys a scheduled watch job (`resources/cost_anomaly_job.yml`)
+that evaluates the previous day's observed spend in `system.billing.usage`,
+list-priced via `system.billing.list_prices`, against a per-series robust
+baseline (median plus a MAD multiple over a trailing 28-day window). Series
+are the account total, each workspace, each `billing_origin_product`, and
+each `custom_tags['project']` value — spend with no `project` tag lands in an
+explicit `untagged` bucket, which is itself a governance signal. A series
+never seen before is flagged when its first day exceeds the new-spend floor.
+Amounts are list prices, not negotiated rates; the bias is identical across
+baseline and observation, so detection stays relative, and the delta floors
+are list-price currency units.
+
+- **Exit codes are the alert.** `0` pass, `2` anomaly detected, `1`
+  configuration or runtime error — including an evaluation day with no
+  billing rows, because unknown cost is not zero. Both non-zero codes fail
+  the run, and `email_notifications.on_failure` mails the `COST_ALERT_EMAIL`
+  group alias (never an individual), so a broken or blind monitor alerts
+  exactly like an anomaly.
+- **One live schedule.** `system.billing` is account-wide from any workspace.
+  The schedule's pause state is the bundle variable
+  `cost_anomaly_pause_status` (default `PAUSED`); only CI's dev deployment
+  sets `UNPAUSED`. Laptop deploys and the dispatch-gated UAT target never add
+  a duplicate daily scan or duplicate alerts.
+- **Reading `system.billing` is an external grant.** The job runs as the
+  deploying CI principal, which needs `USE CATALOG` on `system`, `USE SCHEMA`
+  on `system.billing`, and `SELECT` on the two tables — requested and revoked
+  through the approved platform process (`docs/cloud-setup.md`). Until the
+  grant lands, the daily run exits 1 and the failure email proves the alert
+  path end to end.
+- **Tuning is a reviewed change.** Thresholds are task `parameters` in the
+  resource file (`--sensitivity`, `--min-delta`, `--lag-days`, ...), not
+  runtime knobs. Run on demand with
+  `databricks bundle run aai_dbx_base_template_cost_anomaly -t dev`; the
+  human-readable report is in the run output, and `--json` emits one
+  machine-readable document. Offline, the same CLI runs against a JSON
+  fixture: `python -m aai_core.billing.cli detect --input rows.json`.
+- **Complements, not replacements.** Account-console Budgets (static monthly
+  thresholds with email alerts) are an external, admin-managed complement.
+  Materialized aggregates, serving views, and a console cost page follow the
+  governed-telemetry architecture in `docs/ai-platform-hub.md` and remain
+  future work; the console never reads raw system tables.
+
 ## Operational controls
 
 - Keyless identities and least-privilege grants.

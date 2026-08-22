@@ -30,6 +30,33 @@ All notable changes to `aai-core` are documented here.
   Template versions: agent-app 1.5.0, analytics-app 1.3.0,
   evaluation-project 2.2.0, experiment-starter 1.4.0, prompt-app 1.4.0,
   rag-app 1.4.0.
+- Added multi-agent evaluation to the shared scorer registry:
+  `delegation_structure_ok` deterministically verifies the AGENT-rooted
+  delegation span hierarchy, and `subagent_routing_accuracy` judges the
+  supervisor's routing against the recorded trace on a graded 0-1 rubric.
+  Delegation is detected only from non-root `AGENT` spans carrying an
+  `agent.role` attribute, so single-agent gates never select the new
+  scorers, rows outside the convention are skipped and reported rather
+  than failed, and a trace-reading prompt judge refuses the Guidelines
+  fallback instead of scoring without the trace.
+- Added `docs/multi-agent-systems.md`: when a second agent pays its way,
+  the delegation trace convention, the coordination scorers, the failure
+  modes reported by frontier multi-agent research mapped onto existing
+  platform controls, and the backlog for normalizing the Deep Agents
+  solution accelerator.
+- Added the platform cost anomaly watch: a scheduled bundle job
+  (`resources/cost_anomaly_job.yml`) evaluates the previous day's observed
+  spend in `system.billing.usage` (list-priced via
+  `system.billing.list_prices`) against per-series median+MAD baselines —
+  account, workspace, product, and `custom_tags['project']` including an
+  `untagged` bucket — plus a new-spend rule and a fail-loud stale-data guard
+  (unknown cost is never reported as zero). Exit contract `0`/`2`/`1`;
+  failed runs email the `COST_ALERT_EMAIL` group alias. Exactly one live
+  schedule: CI's dev deployment unpauses it while laptop and UAT deployments
+  stay paused. Detection math is pure stdlib in the new `aai_core.billing`
+  module, unit-tested offline; only the loader touches Spark, lazily.
+  Reading `system.billing` is an externally granted read documented in
+  `docs/cloud-setup.md`.
 - Bumped the transitive `sqlparse` pin from 0.5.5 to 0.6.0 (root `uv.lock`,
   both course locks, the classification course's exported model lock, and
   every template's regenerated `requirements.lock`) to clear four published
