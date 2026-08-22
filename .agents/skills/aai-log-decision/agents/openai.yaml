@@ -1,0 +1,4 @@
+interface:
+  display_name: "Log AAI Decision"
+  short_description: "Capture a dated engineering decision record"
+  default_prompt: "Use $aai-log-decision to record this decision."
