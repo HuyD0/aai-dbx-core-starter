@@ -831,3 +831,152 @@ def test_rows_still_narrows_the_scope(project_dir, capsys):
 
     assert main(["smoke", "--rows", "3", *_config_flag(project_dir)]) == 0
     assert "3 rows" in capsys.readouterr().out
+
+
+# --- judge calibrate and baseline establish ---------------------------------
+
+
+def _labels_file(tmp_path, disagreements=0):
+    labels = []
+    for index in range(24):
+        verdict = "yes" if index % 2 == 0 else "no"
+        human = verdict
+        if index < disagreements:
+            human = "no" if verdict == "yes" else "yes"
+        labels.append(
+            {
+                "example_id": f"case-{index}",
+                "judge_value": verdict,
+                "annotations": [
+                    {"annotator": "group:rev-a", "value": human},
+                    {"annotator": "group:rev-b", "value": human},
+                ],
+            }
+        )
+    path = tmp_path / "sme_labels.json"
+    path.write_text(json.dumps(labels))
+    return path
+
+
+def test_judge_calibrate_writes_the_record_and_passes(project_dir, capsys):
+    labels = _labels_file(project_dir)
+
+    code = main(
+        [
+            "judge",
+            "calibrate",
+            "--scorer",
+            "correctness",
+            "--labels",
+            str(labels),
+            "--decided-by",
+            "group:pension-ai-owners",
+        ]
+    )
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "calibration PASSED" in output
+    assert "commit it with the judge release" in output
+    record = json.loads(
+        (project_dir / "evals" / "judges" / "correctness.json").read_text()
+    )
+    assert record["scorer"] == "correctness"
+    assert record["passed"] is True
+    assert record["kappa"] == 1.0
+
+
+def test_judge_calibrate_exits_two_below_the_bar(project_dir, capsys):
+    labels = _labels_file(project_dir, disagreements=10)
+
+    code = main(
+        [
+            "judge",
+            "calibrate",
+            "--scorer",
+            "correctness",
+            "--labels",
+            str(labels),
+        ]
+    )
+
+    assert code == 2
+    output = capsys.readouterr().out
+    assert "calibration FAILED" in output
+    assert "rubric" in output
+
+
+def test_judge_calibrate_refuses_code_scorers(project_dir, capsys):
+    labels = _labels_file(project_dir)
+
+    code = main(
+        ["judge", "calibrate", "--scorer", "keyword_coverage", "--labels", str(labels)]
+    )
+
+    assert code == 1
+    assert "code scorer" in capsys.readouterr().err
+
+
+def test_judge_calibrate_json_emits_the_record(project_dir, capsys):
+    labels = _labels_file(project_dir)
+
+    code = main(
+        [
+            "judge",
+            "calibrate",
+            "--scorer",
+            "correctness",
+            "--labels",
+            str(labels),
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["record"]["kappa"] == 1.0
+    assert document["path"].endswith("evals/judges/correctness.json")
+
+
+def test_baseline_establish_routes_to_the_runner(project_dir, capsys, monkeypatch):
+    seen = {}
+
+    def fake_establish(project, run_id, *, decided_by=None, mlflow_module=None):
+        seen["run_id"] = run_id
+        seen["decided_by"] = decided_by
+        return ["baseline -> run run-7"], 0
+
+    monkeypatch.setattr(
+        "aai_core.agentkit.runner.establish_baseline_from_run", fake_establish
+    )
+
+    code = main(
+        [
+            "baseline",
+            "establish",
+            "--from-run",
+            "run-7",
+            "--decided-by",
+            "group:owners",
+        ]
+    )
+
+    assert code == 0
+    assert seen == {"run_id": "run-7", "decided_by": "group:owners"}
+    assert "baseline -> run run-7" in capsys.readouterr().out
+
+
+def test_baseline_establish_json_carries_the_messages(project_dir, capsys, monkeypatch):
+    monkeypatch.setattr(
+        "aai_core.agentkit.runner.establish_baseline_from_run",
+        lambda project, run_id, *, decided_by=None, mlflow_module=None: (
+            ["refused"],
+            2,
+        ),
+    )
+
+    code = main(["baseline", "establish", "--from-run", "run-8", "--json"])
+
+    assert code == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document == {"exit_code": 2, "messages": ["refused"]}

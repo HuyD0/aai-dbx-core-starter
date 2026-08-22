@@ -1,0 +1,32 @@
+[
+  {
+    "id": "gp-order-lookup",
+    "path": "/invocations",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Where is order A-1001?"
+        }
+      ]
+    },
+    "must_contain": [
+      "A-1001"
+    ],
+    "max_seconds": 30
+  },
+  {
+    "id": "gp-serves-at-all",
+    "path": "/invocations",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Hello - which questions can you help with?"
+        }
+      ]
+    },
+    "must_contain": [],
+    "max_seconds": 30
+  }
+]

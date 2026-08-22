@@ -37,11 +37,22 @@ gh workflow run deploy.yml --ref main -f target=uat \
 ```
 
 The workflow builds one wheel, records its source commit and SHA-256 digest,
-deploys it to dev, runs the dev release gate, applies the manual UAT prerequisite
-gate, verifies the same evidence, deploys to UAT, and reruns the release gate
+deploys it to dev, runs the dev release gate, starts the App and smokes the
+live deployment, applies the manual UAT prerequisite gate, verifies the same
+evidence, deploys to UAT, and reruns the release gate and post-deploy smoke
 there. The UAT runtime receives `environment=uat`, `lifecycle=validation`, and
 the immutable source commit as its release. No artifact is rebuilt between
 environments.
+
+The post-deploy smoke (`scripts/smoke_deployment.py`) always verifies the App
+reports RUNNING; committing `evals/data/live_probes.json` additionally sends
+golden-prompt requests to the live endpoint. Probing requires the CI
+principal to hold `CAN USE` on the App — an external platform grant like the
+others above; without it, keep status-only smoke. A red smoke fails the
+workflow, so an unverified deployment never reaches UAT. Move the recorded
+evaluation baseline only after the smoke is green (for agentkit projects,
+`agentkit baseline establish --from-run <run id>`), committed via pull
+request — CI never commits.
 
 `UAT_DEPLOYMENT_ENABLED` is a reviewed enablement flag, not a substitute for
 branch protection. Do not add a GitHub environment gate until its matching

@@ -90,8 +90,38 @@ whose contract the data cannot satisfy are listed as excluded, with the
 reason, rather than silently skipped.
 
 Judges are LLMs and need calibrating against human labels before you trust
-them in a gate — see `notebooks/01_align_judge.py`. The
-`pension_domain_policy` judge is report-only until that calibration exists.
+them in a gate — see the next section and `notebooks/01_align_judge.py`.
+The `pension_domain_policy` judge is report-only until that calibration
+exists.
+
+## Judge integrity and calibration
+
+A delta between two runs is a statement about the agent only while the
+judge held still. Two per-run checks (the `integrity:` block in
+`agentkit.yaml`) measure the judge as an instrument:
+
+- **Self-consistency** re-judges a small deterministic sample of the run's
+  own outputs. The flip rate gates via
+  `judge/integrity/self_inconsistency`; a noisy judge means the run's
+  deltas cannot be read, and the gate says so instead of blaming the agent.
+- **Anchor drift** re-judges `evals/judge_anchors.json` — frozen baseline
+  outputs with their recorded scores, written by
+  `agentkit compare --establish-baseline`. The agent is not in the loop, so
+  movement here is the judge changing. Commit the anchors with the
+  baseline, then set `require_anchors: true` in the same change so the
+  check gates. A drift failure explicitly says "the judge changed, not the
+  agent".
+
+Out-of-band from commits, `agentkit judge calibrate --scorer <name>
+--labels <sme-labels.json>` measures a judge against reviewer labels:
+chance-adjusted Cohen's κ vs the annotator consensus (target ≥ 0.60) and
+the pairwise human ceiling. It writes `evals/judges/<name>.json`, the
+committed record `agentkit evidence` reports and — once
+`integrity.require_calibration: true` is set — the gate demands.
+`notebooks/01_align_judge.py` walks the collection loop. Judge releases
+(new prompt version, new scorer version, re-calibration, re-established
+baseline and anchors) move in their own change, never in the same commit
+as an agent change.
 
 ## Datasets
 
@@ -129,6 +159,35 @@ deployment-job gate, which adds a human approval step to every new model
 version. They are opt-in — read the comments in those files before enabling
 them, particularly the note that a deployment job's first run always stops
 at the approval task by design.
+
+## Moving the baseline after a release
+
+The reference moves only after the release was verified live — never at
+scoring time on the CI path. The flow:
+
+1. Merge. The deploy workflow deploys the bundle, runs the `release_gate`
+   job (which scores and gates in one process, bound to the deployed
+   commit), and then verifies the deployment post-deploy. A red step blocks
+   promotion.
+2. Once everything is green, a human moves the baseline to that verified
+   run's recorded evidence:
+
+   ```bash
+   agentkit baseline establish --from-run <mlflow run id> \
+       --decided-by {{.owner_group}}
+   ```
+
+   The run id is printed by the gate job and shown in its evidence. The
+   command recomputes the run's own recorded gate, requires adopt evidence
+   (recording the governed adopt decision for you with `--decided-by`),
+   and rewrites `evals/baseline.json`.
+3. Commit the baseline file via a pull request — CI never commits. Judge
+   anchors pin the judge, not the agent, so they are only re-frozen by a
+   judged `agentkit compare --establish-baseline` run after a judge
+   release.
+
+`--establish-baseline` on a CI release run warns for this reason: it would
+record the reference before live verification.
 
 ## CI
 

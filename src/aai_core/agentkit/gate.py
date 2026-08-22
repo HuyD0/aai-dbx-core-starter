@@ -14,6 +14,7 @@ It also fails closed when a thresholded metric is missing from the results
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,11 @@ from aai_core.agentkit.catalog import (
 )
 from aai_core.agentkit.config import ProjectContext, parse_threshold
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
+from aai_core.agentkit.integrity import (
+    ANCHOR_DRIFT_EXPLANATION,
+    ANCHOR_DRIFT_METRIC,
+    extend_rules_with_integrity,
+)
 from aai_core.agentkit.results import ResultsRecord, load_gate_results
 from aai_core.agentkit.statistics import extend_rules_with_statistics
 from aai_core.evaluation import (
@@ -77,6 +83,7 @@ def build_policy(
     plan: ScorerPlan | None = None,
     scorer_names: tuple[str, ...] = (),
     allow_missing_regression_baseline: bool = False,
+    judges_enabled: bool = True,
 ) -> GatePolicy:
     """Compose the gate policy from config thresholds and catalog defaults.
 
@@ -84,7 +91,9 @@ def build_policy(
     contributes its registry default. The scorers come from the live plan
     when scoring, or from the names the results record captured when
     gating an earlier run. ``regression_budget`` adds the maximum
-    tolerated drop against the baseline.
+    tolerated drop against the baseline. ``judges_enabled`` gates the
+    judge-integrity rules: a code-scorer-only run has no judge to measure,
+    so demanding its integrity metrics would fail every smoke run closed.
     """
 
     config = project.config
@@ -148,6 +157,11 @@ def build_policy(
         statistical_config,
         allow_missing_regression_baseline=allow_missing_regression_baseline,
     )
+    governed_rules = extend_rules_with_integrity(
+        governed_rules,
+        config.integrity,
+        judges_enabled=judges_enabled,
+    )
     return GatePolicy(
         rules=governed_rules,
         allow_missing_regression_baseline=allow_missing_regression_baseline,
@@ -161,6 +175,8 @@ def evaluate_gate(
     baseline: BaselineRecord | None,
     plan: ScorerPlan | None = None,
     check_policy_drift: bool = False,
+    check_release_binding: bool = False,
+    check_calibration: bool = False,
 ) -> tuple[GateReport, int]:
     """Apply the policy to an existing results record.
 
@@ -169,7 +185,60 @@ def evaluate_gate(
     evidence is stale, and the answer is to re-score rather than to judge
     old numbers by new rules. Evidence rendering leaves it off — a run
     fetched from another machine is not expected to match this checkout.
+    ``check_release_binding`` is the same shape for commits: when the gate
+    runs under a release identity (``AAI_RELEASE``/``GIT_COMMIT``), the
+    results must have been scored for that exact commit.
+    ``check_calibration`` (with ``integrity.require_calibration``) demands
+    a passing calibration record for every judge the run used. Evidence
+    rendering and remote fetches leave all three off for the same reason.
     """
+
+    if check_release_binding:
+        mismatch = _release_binding_failure(results)
+        if mismatch is not None:
+            refused = GateResult(
+                metrics=dict(results.metrics),
+                failures=(GateFailure(metric="release", reason=mismatch),),
+            )
+            report = GateReport(
+                result=refused,
+                results=results,
+                baseline=baseline,
+                rules=(),
+                message=(
+                    f"{mismatch}.\nThe gate only certifies evidence produced "
+                    "for the commit it is gating. Run the evaluation for this "
+                    "commit:\n    agentkit compare\nthen run `agentkit gate` "
+                    "again."
+                ),
+            )
+            return report, EXIT_THRESHOLD_FAILED
+
+    if check_calibration:
+        uncovered = _calibration_failures(project, results)
+        if uncovered:
+            listed = "\n".join(f"  - {failure}" for failure in uncovered)
+            refused = GateResult(
+                metrics=dict(results.metrics),
+                failures=tuple(
+                    GateFailure(metric="calibration", reason=failure)
+                    for failure in uncovered
+                ),
+            )
+            report = GateReport(
+                result=refused,
+                results=results,
+                baseline=baseline,
+                rules=(),
+                message=(
+                    "integrity.require_calibration is set, and the judges "
+                    "this run used are not covered by passing calibration "
+                    f"records:\n{listed}\nCalibrate each judge (`agentkit "
+                    "judge calibrate`) and commit the records under "
+                    f"{project.config.integrity.calibration_dir}/."
+                ),
+            )
+            return report, EXIT_THRESHOLD_FAILED
 
     if not results.is_comparison:
         # The refusal has to be a failure, not just an exit code: the JSON
@@ -245,6 +314,7 @@ def evaluate_gate(
             scorer_names=tuple(results.versions.scorers),
             allow_missing_regression_baseline=results.established_baseline
             or not baseline_metrics,
+            judges_enabled=results.judges_enabled,
         )
         note = (
             "these results predate recorded gate rules, so the current "
@@ -291,7 +361,12 @@ def run_gate(
         results, _ = found
     baseline, _ = load_baseline(project.baseline_path)
     report, code = evaluate_gate(
-        project, results=results, baseline=baseline, check_policy_drift=True
+        project,
+        results=results,
+        baseline=baseline,
+        check_policy_drift=True,
+        check_release_binding=True,
+        check_calibration=True,
     )
     return report, code, report.message
 
@@ -331,11 +406,35 @@ def render_report(report: GateReport) -> str:
             observed = results.metrics.get(rule.metric)
             observed_text = "missing" if observed is None else f"{observed:g}"
             lines.append(f"    {rule.metric}: {observed_text} " f"({_rule_text(rule)})")
+    lines.extend(_integrity_lines(results))
     for failure in report.result.failures:
         lines.append(f"  FAIL {failure.metric}: {failure.reason}")
+        if failure.metric == ANCHOR_DRIFT_METRIC:
+            lines.append(f"       {ANCHOR_DRIFT_EXPLANATION}")
     if report.policy_note:
         lines.append(f"  note: {report.policy_note}")
     return "\n".join(lines)
+
+
+def _integrity_lines(results: ResultsRecord) -> list[str]:
+    integrity = results.integrity
+    if integrity is None:
+        return []
+    lines = []
+    if integrity.consistency is not None:
+        lines.append(
+            "  judge integrity   self-inconsistency "
+            f"{integrity.consistency.overall:.3f} over "
+            f"{integrity.consistency.sample_size} re-scored row(s)"
+        )
+    if integrity.anchor_drift is not None:
+        lines.append(
+            "  judge integrity   anchor drift "
+            f"{integrity.anchor_drift.overall:.3f} over "
+            f"{integrity.anchor_drift.rows} frozen row(s) "
+            f"({integrity.anchor_drift.anchors_ref})"
+        )
+    return lines
 
 
 def _policy_drift(
@@ -360,6 +459,7 @@ def _policy_drift(
         plan=plan,
         scorer_names=tuple(sorted(selection)),
         allow_missing_regression_baseline=(results.allow_missing_regression_baseline),
+        judges_enabled=results.judges_enabled,
     )
     recorded = {rule.metric: rule for rule in results.policy_rules}
     live = {rule.metric: rule for rule in current.rules}
@@ -378,6 +478,55 @@ def _policy_drift(
     if changed:
         parts.append(f"changed {', '.join(changed)}")
     return "; ".join(parts) if parts else None
+
+
+def _calibration_failures(project: ProjectContext, results: ResultsRecord) -> list[str]:
+    """Calibration coverage for the judges this record says it used."""
+
+    config = project.config.integrity
+    if not config.require_calibration or not results.judges_enabled:
+        return []
+    from aai_core.agentkit.calibration import calibration_failures
+
+    judge_scorers: dict[str, int] = {}
+    for name, version in results.versions.scorers.items():
+        try:
+            spec = get_spec(name)
+        except UnknownScorerError:
+            continue
+        if spec.judge is not None:
+            judge_scorers[name] = int(version)
+    if not judge_scorers:
+        return []
+    return calibration_failures(
+        root=project.root,
+        directory=config.calibration_dir,
+        judge_scorers=judge_scorers,
+    )
+
+
+def _release_binding_failure(results: ResultsRecord) -> str | None:
+    """Whether these results were scored for the commit being gated.
+
+    The attempt pointer binds the gate to exact result *bytes*; this binds
+    them to the *commit*. On a job cluster or CI runner the release
+    identity arrives as ``AAI_RELEASE`` (the deployed commit) or
+    ``GIT_COMMIT``; a laptop with neither set — or with the dev fallback
+    ``local-dev`` — skips the check rather than inventing an identity.
+    """
+
+    expected = (os.getenv("AAI_RELEASE") or os.getenv("GIT_COMMIT") or "").strip()
+    if not expected or expected == "local-dev":
+        return None
+    if results.release == expected:
+        return None
+    if results.change_id == expected[:12]:
+        return None
+    recorded = results.release or results.change_id
+    return (
+        f"these results were scored for commit {recorded}, but this gate is "
+        f"running for {expected[:12]}"
+    )
 
 
 def _rule_text(rule: MetricRule) -> str:
