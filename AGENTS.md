@@ -69,6 +69,7 @@ they stay here:
 | Federated credential | `gh-aai-dbx-core-starter-main` |
 | FIC subject | `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main` |
 | Dev workspace | `dbx-dev` (host in `platform-identifiers.json`) |
+| UAT workspace | `dbx-uat` (host in `platform-identifiers.json` as `databricks_uat_host`); registration is the gate on `UAT_DEPLOYMENT_ENABLED` — see `docs/uat-promotion.md` |
 
 The FIC subject embeds immutable numeric owner and repository ids, so it cannot
 be reused by a clone — see rule 9 and the clone runbook.
@@ -96,8 +97,9 @@ These are non-secret identifiers. Do not classify them as secrets.
    branch-ref subject. Have the platform identity owner add a matching
    environment FIC before introducing an environment gate.
 5. **Least privilege.** The dedicated CI principal has no ARM RBAC, is
-   registered only in `dbx-dev`, is not workspace admin, and uses constrained
-   compute. Wheel publication adds only `READ VOLUME` and `WRITE VOLUME` on the
+   registered only in the workspaces it deploys to (`dbx-dev`, and `dbx-uat`
+   once the external UAT onboarding in `docs/uat-promotion.md` is complete), is
+   not workspace admin, and uses constrained compute. Wheel publication adds only `READ VOLUME` and `WRITE VOLUME` on the
    SDK artifact volume. The cost anomaly watch adds only `USE CATALOG` on
    `system`, `USE SCHEMA` on `system.billing`, and `SELECT` on
    `system.billing.usage` and `system.billing.list_prices`.
@@ -171,8 +173,10 @@ These are non-secret identifiers. Do not classify them as secrets.
 - Every template imports a pinned `aai-core` version.
 - Every template contains unit tests, evaluation data, an evaluation gate,
   bundle resources, cost tags, and keyless setup instructions.
-- Agent templates use MLflow Agent Server on Databricks Apps as the primary
-  HTTP serving path. Models-from-code Model Serving is a compatibility path.
+- Agent templates use MLflow Agent Server on Databricks Apps as their HTTP
+  serving path, generated only when `include_serving` is selected. There is no
+  second serving path: the duplicate synchronous models-from-code path was
+  removed in 0.3.0.
   LangGraph stays an optional, native application recipe with durable state,
   interrupts before side effects, and idempotency.
 - Every job cluster carries `application`, `project`, `environment`, `team`,
@@ -251,31 +255,26 @@ run on their own machine, and reports platform state. Rules:
 
 ## 8. Development workflow
 
-Install:
+The `Makefile` is the workflow; it runs the locked environment CI uses, so
+prefer it over ad-hoc commands:
 
 ```bash
-python -m pip install -e '.[dev]'
-```
-
-The root `Makefile` provides the same workflow as discoverable shortcuts:
-
-```bash
-make help
-make install
+make help              # every target, with descriptions
+make install           # uv sync --extra dev --locked (the environment CI uses)
 make hooks-install
-make check
-make verify
+make check             # before committing
+make verify            # the full credential-free gate CI runs
 ```
 
-Before committing:
+`make check` runs template-scaffold drift, Ruff, Black, mypy, the test suite,
+the wheel build, and the release-contract validation. `make verify` runs
+`scripts/cloud-verify.sh`, which additionally performs the offline locked sync,
+branch coverage, `zizmor` over this repository's and every template's
+workflows, and a Databricks bundle schema check.
 
-```bash
-ruff check .
-black --check .
-pytest -q
-python -m build
-python scripts/validate_release.py --wheel dist
-```
+`python -m pip install -e '.[dev]'` still works for an unlocked editable
+install, but it resolves dependencies afresh rather than using `uv.lock`, so
+`make install` is what reproduces CI.
 
 When changing a runtime dependency, update its supported/certified entry in
 `dependency-policy.toml`, the exact `uv.lock`, regenerate every affected

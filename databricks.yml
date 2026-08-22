@@ -21,6 +21,17 @@ variables:
   owner_group:
     description: Non-personal group that owns this bundle's resources.
     default: group:data-platform-owners
+  project:
+    description: >-
+      Product/repository this bundle's spend is attributed to. The cost anomaly watch
+      buckets usage by this tag, so a clone must own it: it is stamped from
+      platform-identifiers.json by `make sync-templates`.
+    default: aai-dbx-core-starter
+  node_type_id:
+    description: >-
+      Azure VM size for job clusters. Region- and policy-dependent, so a clone overrides
+      it per target or via BUNDLE_VAR_node_type_id without editing resource files.
+    default: Standard_DS3_v2
   # Cost anomaly watch (resources/cost_anomaly_job.yml). system.billing is
   # account-wide, so exactly one live schedule is needed; everything else
   # stays paused to avoid duplicate scans and duplicate alerts.
@@ -174,7 +185,7 @@ targets:
         cost_center: ${var.cost_center}
         team: ${var.team}
         owner_group: ${var.owner_group}
-        project: aai-dbx-core-starter
+        project: ${var.project}
         environment: ${bundle.target}
         data_classification: internal
         lifecycle: ${var.deployment_lifecycle}
@@ -200,7 +211,7 @@ targets:
         cost_center: ${var.cost_center}
         team: ${var.team}
         owner_group: ${var.owner_group}
-        project: aai-dbx-core-starter
+        project: ${var.project}
         environment: ${bundle.target}
         data_classification: internal
         lifecycle: ${var.deployment_lifecycle}

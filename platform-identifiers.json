@@ -8,6 +8,8 @@
   "sdk_artifact_volume": "/Volumes/dbx_dev/dbx_platform/python_packages",
   "app_usage_policy_id": "4c3c39a5-ffb8-4c18-a5e0-7ddb3bb809b8",
   "template_repo": "https://github.com/HuyD0/aai-dbx-core-starter",
+  "$project_comment": "Cost-attribution `project` tag applied to every job cluster and bundle preset. The cost anomaly watch buckets spend by this tag (src/aai_core/billing/usage.py), so a clone that leaves it pointing at another repository attributes its own spend to that repository forever.",
+  "project": "aai-dbx-core-starter",
   "$sdk_pip_source_comment": "Where a generated project's CREDENTIAL-FREE CI installs aai-core from. Runtime jobs always install the checksum-pinned volume wheel instead, so this reaches only PR CI. It MUST resolve to exactly aai_core_version. A clone that leaves this pointing at another org's repository makes every generated project's CI depend on that repository — prefer an internal index ('aai-core=={{.aai_core_version}}') in an enterprise tenant.",
   "sdk_pip_source": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}"
 }

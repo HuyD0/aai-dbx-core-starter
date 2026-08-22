@@ -311,7 +311,10 @@ sync-upstream: ## Merge a reviewed upstream release into a clone: make sync-upst
 	@echo "sync of $(TAG) is staged. Review 'git diff --cached' and 'git log',"
 	@echo "then 'git commit' and open a PR into main."
 
-check: check-templates format-check typecheck test build ## Run standard local checks.
+validate-release: ## Check SDK, template, dependency, and built-wheel release contracts.
+	$(PYTHON) scripts/validate_release.py --wheel dist
+
+check: check-templates format-check typecheck test build validate-release ## Run standard local checks.
 
 verify: ## Run the complete credential-free verification used by CI.
 	./scripts/cloud-verify.sh

@@ -33,8 +33,9 @@ infrastructure provisioning to this repository or its CI.
 
 ## 3. Update repository identifiers
 
-Edit `platform-identifiers.json`, then run the sync. That is the whole
-identifier change — no other file holds these values:
+Edit `platform-identifiers.json`, then run the sync. That covers every value
+the build consumes — `databricks.yml`, the template schema defaults, and the
+package URLs — and tests fail on any copy that disagrees:
 
 ```bash
 $EDITOR platform-identifiers.json
@@ -52,6 +53,7 @@ The keys:
 | `job_compute_policy_id` | |
 | `sdk_artifact_volume` | `/Volumes/<catalog>/<schema>/<volume>`; the dotted form used by app resource bindings is derived from it |
 | `app_usage_policy_id` | Serverless usage policy for the optional console app; stamp the clone's policy even when the app remains disabled |
+| `project` | Cost-attribution `project` tag for every job cluster and preset. The cost anomaly watch buckets spend by this tag, so a clone that leaves it attributes its own usage to this repository |
 | `template_repo` | The clone's own Git URL. Left pointing upstream, the platform console generates `bundle init` commands that initialise projects from the upstream repository |
 | `sdk_pip_source` | PEP 508 direct URL from which a generated project's **credential-free CI** installs `aai-core`. Left pointing upstream, every generated project's CI depends on that repository over the public internet. Prefer an immutable URL in the internal artifact service, such as `https://packages.example/aai_core-{{.aai_core_version}}-py3-none-any.whl`. The sync step projects repository tag placeholders through the reviewed source ref in `compatibility.json`. |
 
@@ -71,6 +73,24 @@ restates an identifier, and on a fixture missing a key this version requires.
 `AZURE_CLIENT_ID` is deliberately *not* in the fixture: it identifies the
 externally provisioned Entra application from section 2, and is set as a GitHub
 repository variable in section 4.
+
+Four things sit outside the fixture and no sync or test can set them for you.
+Do them now, while the fixture edit is fresh:
+
+1. **Record the new identity in prose.** The AGENTS.md section 3 table (app
+   name, client id, service-principal object id, federated-credential name) and
+   the copy-paste grant request in `docs/platform-console.md` still describe the
+   upstream tenant's objects. They are identity objects, not environment
+   fixtures, which is why they live in prose — and why editing them is manual.
+2. **Replace `.github/CODEOWNERS`.** Section 7 covers this; it is listed here
+   because it is an upstream username in a file merges will keep offering back.
+3. **Create the Unity Catalog objects.** Section 2 asks for *access to* the SDK
+   artifact volume; creating the catalog, schema, and volume is a separate step
+   with its SQL in
+   [`docs/platform-operations.md`](platform-operations.md#bootstrap-the-artifact-volume).
+4. **Delete or ignore `docs/platform-audit.md`.** It is a dated historical
+   snapshot, deliberately exempt from the identifier-drift tests, so it keeps
+   quoting the upstream tenant's values forever. Nothing depends on it.
 
 ## 3a. Track upstream without re-resolving the same conflicts
 
@@ -165,11 +185,43 @@ Rehearse it before it matters — change every value in the fixture on a scratch
 branch, merge an upstream tag, and confirm no conflict prompt and a green
 `make verify` with your values intact.
 
+## 3b. Configure the Codex Cloud environment
+
+`scripts/cloud-verify.sh` is the credential-free gate. Its identity and
+forbidden-credential checks run **only** when `AAI_CLOUD_ENV=codex`, and when
+that variable is unset the whole block is skipped without a word — so a clone
+that never sets it loses the check that proves no cloud credential reached the
+agent environment.
+
+In the Codex environment configuration set:
+
+| Variable | Value |
+|---|---|
+| `AAI_CLOUD_ENV` | `codex` |
+| `AZURE_TENANT_ID` | `azure_tenant_id` from the fixture |
+| `AZURE_SUBSCRIPTION_ID` | `azure_subscription_id` from the fixture |
+| `DATABRICKS_HOST` | `databricks_host` from the fixture |
+| `AZURE_CLIENT_ID` | the clone's own client id from section 2 |
+
+The first four must match the fixture exactly; the script compares them and
+fails on any mismatch. Use `scripts/codex-cloud-setup.sh` as the environment's
+setup script and `scripts/codex-cloud-maintenance.sh` as its maintenance
+script. Never add a client secret, PAT, or Databricks token to that
+environment: the same block fails if one is present, and that is deliberate —
+Codex Cloud is offline by design and hands authenticated work to GitHub
+Actions.
+
 ## 4. Configure repository variables
 
-Follow `docs/cloud-setup.md` with the enterprise client ID, tenant,
-subscription, workspace, artifact path, and attribution values. Use GitHub
-repository variables, never secrets.
+Follow `docs/cloud-setup.md` with the enterprise client ID, tenant, workspace,
+and artifact path. Use GitHub repository variables, never secrets.
+
+Do not skip the cost-attribution variables there — `COST_CENTER`, `TEAM`,
+`OWNER_GROUP`, and `COST_ALERT_EMAIL`. `deploy.yml` falls back to placeholders
+when they are unset, so the first deployment succeeds while charging this
+tenant's usage to another organisation's cost center, and the cost-anomaly
+watch — which CI unpauses on that same first deploy — mails its alerts to an
+undeliverable placeholder. Nothing fails; the attribution is simply wrong.
 
 ## 5. Configure model access
 

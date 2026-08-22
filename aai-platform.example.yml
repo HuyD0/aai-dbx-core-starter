@@ -9,7 +9,7 @@ platform:
   lifecycle: experimental
   repository: example-org/example-repo
   release: dev
-  tag_schema_version: "1"
+  tag_schema_version: "2"
   catalog: main
   schema: example_ai
   experiment_name: /Shared/example-ai

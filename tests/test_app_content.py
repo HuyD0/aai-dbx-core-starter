@@ -113,6 +113,14 @@ def test_no_environment_identifier_literal_appears_under_the_app():
         for key, value in IDENTIFIERS.items()
         if not key.startswith("$") and isinstance(value, str) and value
     ]
+    # Unity Catalog components of the volume path: a literal `dbx_dev` is just as
+    # tenant-specific as the full path, and the whole-value scan misses it.
+    volume = str(IDENTIFIERS["sdk_artifact_volume"])
+    values += [part for part in volume.split("/") if part and part != "Volumes"]
+    # Workspace nicknames live only in prose (AGENTS.md section 3), so no fixture
+    # value can catch them, but they are exactly what a clone cannot use.
+    values += ["dbx-dev", "dbx-uat"]
+
     offenders = []
     for path in APP_DIR.rglob("*"):
         if not path.is_file() or path.suffix in {".pyc"}:

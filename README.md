@@ -29,7 +29,8 @@ src/platform_app/           guided onboarding console (a Databricks App)
 templates/                  six AI lifecycle Databricks project templates
 templates/_shared/          canonical scaffold synced into every template
 examples/                   lifecycle examples and standalone sample projects
-resources/                  this repository's bundle smoke job
+resources/                  this repository's own bundle: smoke job and cost anomaly watch
+resources/optional/         opt-in resources, excluded from the default include
 docs/                       developer and platform operating guides
 .github/workflows/          credential-free CI and keyless deployment/release
 ```
@@ -69,8 +70,8 @@ required workspace access. A PAT, client secret, or API key is not a
 prerequisite.
 
 ```bash
-git clone https://github.com/HuyD0/aai-dbx-core-starter
-cd aai-dbx-core-starter
+git clone <this repository's URL>
+cd <repository-name>
 make quickstart
 make local-lifecycle
 ```

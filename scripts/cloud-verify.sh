@@ -52,6 +52,11 @@ uv sync \
   --extra all \
   --locked \
   --offline
+# Generated scaffold and stamped identifier drift. CI runs this script and not
+# `make check`, so without this line nothing in CI ever verified that
+# databricks.yml and the template schema defaults still match
+# platform-identifiers.json.
+uv run --python "${PYTHON_VERSION}" python scripts/sync_template_shared.py --check
 uv run --python "${PYTHON_VERSION}" ruff check .
 uv run --python "${PYTHON_VERSION}" black --check .
 uv run --python "${PYTHON_VERSION}" mypy --config-file pyproject.toml src/aai_core

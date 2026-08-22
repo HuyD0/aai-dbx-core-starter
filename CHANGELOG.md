@@ -4,6 +4,50 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Made the `project` cost-attribution tag a clone-owned identifier. It moves
+  from a literal repeated in `databricks.yml` and both resource jobs into
+  `platform-identifiers.json`, stamped by `make sync-templates` and required by
+  the fixture-key guard. The cost anomaly watch buckets spend by that tag, so a
+  clone previously attributed its own Databricks usage to this repository with
+  a green deploy. Clones merging this release must add `project` to their
+  fixture; `job_clusters` now also take `node_type_id` from a bundle variable.
+- Documented the repository variables `deploy.yml` already read with
+  placeholder fallbacks — `COST_CENTER`, `TEAM`, `OWNER_GROUP`, and
+  `COST_ALERT_EMAIL` — and removed the claim in `docs/cloud-setup.md` and the
+  enterprise adoption guide that those values are not repository variables.
+  `AZURE_SUBSCRIPTION_ID` is no longer documented as a repository variable: no
+  workflow reads it.
+- Extended the enterprise clone runbook with the steps the fixture cannot
+  perform: configuring the Codex Cloud environment (`AAI_CLOUD_ENV=codex` and
+  the four values `scripts/cloud-verify.sh` compares — without them its
+  identity and forbidden-credential checks are skipped silently), recording the
+  new identity in prose, creating the Unity Catalog objects, and replacing
+  `.github/CODEOWNERS`.
+- Corrected the federated-credential subject documented in `auth-smoke.yml`,
+  which showed the name-based form rather than the immutable-id form the
+  credential actually uses, and removed this repository's clone URL from
+  `README.md` and the `dbx-dev` workspace nickname from the platform console's
+  onboarding content. All three are now enforced by tests.
+- Replaced the enumerated credentialed-workflow and pull-request workflow
+  guards with scans over `.github/workflows/*.yml`. A new credentialed workflow
+  could previously add a GitHub `environment:` or a secret reference unchecked,
+  and `codeql.yml` was never covered by the credential-free rule.
+- Extracted the release-immutability logic from `publish-sdk.yml` into
+  `scripts/publish_release.py` with unit tests for every refusal path. Rule 12
+  was the only hard rule with no test, implemented as inline shell in a workflow
+  that has never run.
+- Closed drift gaps: `bundle_identifier_drift()` is now asserted by the test
+  suite and the scaffold drift check runs inside `scripts/cloud-verify.sh` (CI
+  never invoked `make check-templates`); the dependency canary's supported
+  ranges are cross-checked against `dependency-policy.toml`; `deploy.yml`'s
+  build job fetches full history so `validate_release.py` stops silently
+  skipping its digest cross-checks; and `make check` runs that validation.
+- Documentation: removed the models-from-code serving path from AGENTS.md
+  section 6 (deleted in 0.3.0), added the UAT workspace to the section 3
+  identity table and corrected rule 5, reconciled section 8 with the Makefile,
+  added `agentkit`, `scorers`, `decisions`, `monitoring`, and `billing` to
+  `docs/sdk-api.md`, and recorded why the generated-project SDK pin is held.
+
 - Added per-run judge-integrity checks to AgentKit: an opt-in
   self-consistency flip-rate over re-judged outputs and a frozen-anchor
   drift check (`evals/judge_anchors.json`, written by judged
