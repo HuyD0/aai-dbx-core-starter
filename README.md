@@ -455,5 +455,8 @@ comparable with another's, and what the gate refuses.
 - [Cost estimation](docs/cost-estimation.md) — the console's list-price estimator
   and its pricing snapshot
 - [GenAI and RAG lifecycle](docs/genai-lifecycle.md)
+- [Multi-agent systems in production](docs/multi-agent-systems.md) — when a
+  second agent pays its way, the delegation trace convention, and the
+  coordination scorers
 - [Self-service analytics lifecycle](docs/analytics-lifecycle.md)
 - [Platform operations](docs/platform-operations.md)

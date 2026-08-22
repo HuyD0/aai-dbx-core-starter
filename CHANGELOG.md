@@ -4,6 +4,20 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added multi-agent evaluation to the shared scorer registry:
+  `delegation_structure_ok` deterministically verifies the AGENT-rooted
+  delegation span hierarchy, and `subagent_routing_accuracy` judges the
+  supervisor's routing against the recorded trace on a graded 0-1 rubric.
+  Delegation is detected only from non-root `AGENT` spans carrying an
+  `agent.role` attribute, so single-agent gates never select the new
+  scorers, rows outside the convention are skipped and reported rather
+  than failed, and a trace-reading prompt judge refuses the Guidelines
+  fallback instead of scoring without the trace.
+- Added `docs/multi-agent-systems.md`: when a second agent pays its way,
+  the delegation trace convention, the coordination scorers, the failure
+  modes reported by frontier multi-agent research mapped onto existing
+  platform controls, and the backlog for normalizing the Deep Agents
+  solution accelerator.
 - Added the platform cost anomaly watch: a scheduled bundle job
   (`resources/cost_anomaly_job.yml`) evaluates the previous day's observed
   spend in `system.billing.usage` (list-priced via
