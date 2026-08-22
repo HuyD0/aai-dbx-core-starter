@@ -281,6 +281,18 @@ template transitive lock with
 scheduled dependency canary must continue to pass both lower and latest
 supported resolutions on Python 3.11 and 3.12.
 
+### Capture decisions and index documents
+
+- When a change embodies a non-obvious decision — a reversal, a rejected
+  alternative worth remembering, a constraint future work must not quietly
+  undo — add a dated record under `docs/decisions/` (its README states the
+  format; the `aai-log-decision` skill walks through it). Supersede records,
+  never rewrite them.
+- When adding a document under `docs/`, link it from `docs/README.md` in the
+  same change; `tests/test_docs_index.py` fails otherwise.
+- Records and docs restate no identifier values and carry no secrets,
+  personal data, prompts, or user content (section 4, rules 1 and 11).
+
 ### Codex Cloud
 
 The repository has one supported credential-free cloud verification path:
@@ -352,6 +364,7 @@ Use:
   GitHub org and Azure tenant (the identity must be re-minted — the FIC
   subject embeds immutable repo/owner ids).
 - `docs/platform-operations.md` for the SDK volume and platform controls.
-- `docs/archive/` for completed one-time migrations (historical record).
+- `docs/decisions/` for dated engineering decision records, and
+  `docs/platform-audit.md` for the retained historical audit snapshot.
 
 Never delete the shared legacy application or its UAT assignment.
