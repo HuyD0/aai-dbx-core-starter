@@ -637,6 +637,70 @@ def test_standalone_regression_budget_defaults_to_higher_is_better(tmp_path):
     assert code == EXIT_THRESHOLD_FAILED
 
 
+def test_standalone_regression_budget_respects_economics_direction(tmp_path):
+    """Cost is lower-is-better: pricier must fail, cheaper must pass.
+
+    The registry answers "higher" for metrics it does not know, so without
+    the economics direction table a falling cost would read as regression.
+    """
+
+    project = _project(
+        tmp_path, regression_budget={"economics/cost_per_success_usd": 0.01}
+    )
+    versions = BaselineVersions(agent="agent", scorers={}, aai_core="0.4.0")
+
+    pricier = _results(
+        metrics={"economics/cost_per_success_usd": 0.05},
+        baseline_metrics={"economics/cost_per_success_usd": 0.02},
+        versions=versions,
+    )
+    cheaper = _results(
+        metrics={"economics/cost_per_success_usd": 0.005},
+        baseline_metrics={"economics/cost_per_success_usd": 0.02},
+        versions=versions,
+    )
+
+    _, pricier_code = evaluate_gate(project, results=pricier, baseline=_baseline())
+    _, cheaper_code = evaluate_gate(project, results=cheaper, baseline=_baseline())
+
+    assert pricier_code == EXIT_THRESHOLD_FAILED
+    assert cheaper_code == EXIT_PASS
+
+
+def test_configured_economics_thresholds_gate_and_fail_closed(tmp_path):
+    """Economics gating is opt-in through the ordinary threshold grammar."""
+
+    project = _project(
+        tmp_path,
+        thresholds={
+            "cost/coverage": ">=1.0",
+            "economics/cost_per_success_usd": "<=0.03",
+        },
+    )
+    versions = BaselineVersions(agent="agent", scorers={}, aai_core="0.4.0")
+
+    passing = _results(
+        metrics={"cost/coverage": 1.0, "economics/cost_per_success_usd": 0.02},
+        versions=versions,
+    )
+    pricey = _results(
+        metrics={"cost/coverage": 1.0, "economics/cost_per_success_usd": 0.05},
+        versions=versions,
+    )
+    absent = _results(metrics={}, versions=versions)
+
+    assert evaluate_gate(project, results=passing, baseline=_baseline())[1] == EXIT_PASS
+    assert (
+        evaluate_gate(project, results=pricey, baseline=_baseline())[1]
+        == EXIT_THRESHOLD_FAILED
+    )
+    # Coverage the run never produced fails closed, not open.
+    assert (
+        evaluate_gate(project, results=absent, baseline=_baseline())[1]
+        == EXIT_THRESHOLD_FAILED
+    )
+
+
 def test_recorded_rules_survive_a_relaxed_config(tmp_path):
     """Relaxing a threshold must not turn a failed run into evidence.
 

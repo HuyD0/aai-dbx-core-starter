@@ -50,7 +50,7 @@
       "dependency_lock_format": "universal-transitive-v1"
     },
     "evaluation-project": {
-      "version": "2.2.0",
+      "version": "2.3.0",
       "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },

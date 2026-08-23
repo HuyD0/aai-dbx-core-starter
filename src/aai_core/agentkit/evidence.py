@@ -103,6 +103,14 @@ def build_evidence(
             if results.statistics is not None
             else None
         ),
+        # What the run spent, coverage-first: unknown cost stays unknown
+        # rather than reading as zero, and per-success ratios appear only
+        # at complete coverage.
+        "economics": (
+            results.economics.model_dump(mode="json")
+            if results.economics is not None
+            else None
+        ),
         # The judge measured as an instrument: self-consistency on this
         # run's outputs and drift on frozen anchors. A delta is a statement
         # about the agent only while the instrument held still.
@@ -181,6 +189,7 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     ]
     _render_comparison(lines, comparison)
     _render_statistics(lines, document.get("statistics"))
+    _render_economics(lines, document.get("economics"))
     _render_judge_integrity(lines, document.get("judge_integrity"))
     _render_judge_calibration(lines, document.get("judge_calibration"))
     _render_scoring(lines, versions)
@@ -291,6 +300,65 @@ def _render_statistics(lines: list[str], statistics: Mapping[str, Any] | None) -
                 f"{_format(estimate['mean_improvement'])} | "
                 f"{_format(estimate['lower_improvement'])} | "
                 f"{_format(estimate['upper_improvement'])} |"
+            )
+
+
+def _render_economics(lines: list[str], economics: Mapping[str, Any] | None) -> None:
+    if not economics:
+        return
+    rows = economics["rows"]
+    cost_total = economics.get("cost_total_usd")
+    lines.extend(
+        [
+            "",
+            "## Run economics",
+            "",
+            (
+                f"{economics['successes']} of {rows} rows completed "
+                f"successfully. Cost is known for {economics['cost_known']} "
+                f"of {rows} rows and token usage for "
+                f"{economics['tokens_known']} of {rows} "
+                f"(cost source: {economics['cost_source']}). Per-success "
+                "ratios are reported only at complete coverage — unknown "
+                "cost is never counted as zero."
+            ),
+        ]
+    )
+    if cost_total is not None:
+        lines.extend(
+            [
+                "",
+                (
+                    f"Known spend across all rows, failed ones included: "
+                    f"${_format(cost_total)}."
+                ),
+            ]
+        )
+    segments = economics.get("segments") or []
+    if segments:
+        lines.extend(
+            [
+                "",
+                (
+                    "Per-stratum economics — the evidence for routing an "
+                    "intent to a different model:"
+                ),
+                "",
+                (
+                    "| stratum | rows | success rate | cost/success | "
+                    "cost p95 | latency p95 (s) |"
+                ),
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for segment in segments:
+            value = segment["value"] or "(unset)"
+            lines.append(
+                f"| {segment['key']}={value} | {segment['rows']} | "
+                f"{_format(segment['success_rate'])} | "
+                f"{_format(segment.get('cost_per_success_usd'))} | "
+                f"{_format(segment.get('cost_p95_usd'))} | "
+                f"{_format(segment.get('latency_p95_seconds'))} |"
             )
 
 

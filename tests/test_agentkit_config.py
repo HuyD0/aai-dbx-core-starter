@@ -61,6 +61,43 @@ def test_unknown_keys_are_rejected(tmp_path):
     assert "surprise" in str(excinfo.value)
 
 
+def test_economics_defaults_are_report_only(tmp_path):
+    config = load_config(_write(tmp_path))
+
+    assert config.economics.enabled is True
+    assert config.economics.price_per_1m_input_tokens is None
+    assert config.economics.price_per_1m_output_tokens is None
+
+
+def test_economics_price_pair_loads_and_coerces(tmp_path):
+    text = MINIMAL + (
+        "economics:\n"
+        "  price_per_1m_input_tokens: 2.5\n"
+        "  price_per_1m_output_tokens: 10\n"
+    )
+
+    config = load_config(_write(tmp_path, text))
+
+    assert config.economics.price_per_1m_input_tokens == 2.5
+    assert config.economics.price_per_1m_output_tokens == 10.0
+
+
+def test_economics_price_pair_is_both_or_neither(tmp_path):
+    text = MINIMAL + "economics:\n  price_per_1m_input_tokens: 2.5\n"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write(tmp_path, text))
+    assert "pair" in str(excinfo.value)
+
+
+def test_economics_unknown_keys_are_rejected(tmp_path):
+    text = MINIMAL + "economics:\n  price_table: builtin\n"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write(tmp_path, text))
+    assert "price_table" in str(excinfo.value)
+
+
 def test_missing_config_names_the_expected_file(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(tmp_path / "agentkit.yaml")
