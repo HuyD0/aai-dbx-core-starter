@@ -169,10 +169,11 @@ weights are only about **11%** of the total.
 ### How to interpret
 
 The model itself is the smallest problem. Roughly 89% of the bill is
-*training overhead*, and every line of it scales with the number of
-**trainable** parameters — gradients and optimizer state exist only for
-parameters that learn. That observation hands us exactly two levers, and
-they are the next two lessons:
+*training overhead*. Two of its lines — gradients and optimizer state —
+exist only for parameters that learn, so they scale with the number of
+**trainable** parameters; the activation line scales with the batch shape
+instead of the parameter count. That observation hands us exactly two
+levers, and they are the next two lessons:
 
 - **Store the frozen weights in fewer bits** — quantization (lesson 01).
   This shrinks the weights line without touching what the model computes

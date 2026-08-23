@@ -304,9 +304,10 @@ pay-per-token.
 Fine-tuning compute and serving endpoints are provisioned through the approved
 platform process like every other resource change, and training jobs stay
 keyless under the same workspace authentication chain as deployment. The
-standalone course in `examples/fine-tuning/` teaches the mechanics —
-quantization, LoRA, QLoRA, and the PEFT library — from first principles,
-credential-free, before any connected training job.
+standalone course in `examples/fine-tuning/` teaches these mechanics from
+first principles, credential-free — beginning with the memory economics
+above, with later lessons building through quantization, LoRA, QLoRA, and
+the PEFT library — before any connected training job.
 
 ## Prompt promotion
 

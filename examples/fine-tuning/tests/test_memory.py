@@ -38,6 +38,20 @@ def test_activation_estimate_scales_linearly_with_batch():
     assert two == pytest.approx(2 * one)
 
 
+@pytest.mark.parametrize("precision", [Precision.INT8, Precision.NF4])
+def test_full_fine_tuning_a_quantized_base_is_rejected(precision):
+    # A quantized base is frozen storage: it has no gradients or optimizer
+    # state, so pricing a "full fine-tune" of it would teach wrong numbers.
+    with pytest.raises(ValueError, match="training precision"):
+        full_fine_tune_estimate(weight_precision=precision)
+
+
+def test_fp32_training_prices_gradients_at_fp32():
+    estimate = full_fine_tune_estimate(weight_precision=Precision.FP32)
+    assert estimate.weights_gb == pytest.approx(32.0)
+    assert estimate.gradients_gb == pytest.approx(32.0)
+
+
 @pytest.mark.parametrize("value", [0, -1])
 def test_non_positive_shapes_are_rejected(value):
     with pytest.raises(ValueError):

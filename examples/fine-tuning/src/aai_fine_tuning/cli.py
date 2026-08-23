@@ -6,7 +6,11 @@ import argparse
 import json
 from collections.abc import Sequence
 
-from aai_fine_tuning.memory import Precision, full_fine_tune_estimate
+from aai_fine_tuning.memory import (
+    TRAINING_PRECISIONS,
+    Precision,
+    full_fine_tune_estimate,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -20,7 +24,9 @@ def _parser() -> argparse.ArgumentParser:
     memory.add_argument(
         "--weight-precision",
         type=Precision,
-        choices=list(Precision),
+        # Quantized storage precisions are not trainable, so the estimator
+        # rejects them; keep the CLI's advertised choices honest too.
+        choices=sorted(TRAINING_PRECISIONS),
         default=Precision.BF16,
     )
     memory.add_argument("--micro-batch", type=int, default=2)

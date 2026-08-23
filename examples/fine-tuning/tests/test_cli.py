@@ -22,3 +22,9 @@ def test_memory_command_prints_a_complete_estimate(capsys):
 def test_a_command_is_required():
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_quantized_precisions_are_not_offered_for_full_fine_tuning(capsys):
+    with pytest.raises(SystemExit):
+        main(["memory", "--weight-precision", "nf4"])
+    assert "invalid choice" in capsys.readouterr().err

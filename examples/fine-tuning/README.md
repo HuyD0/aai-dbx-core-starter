@@ -1,11 +1,12 @@
 # Learn fine-tuning from first principles, locally
 
-This course teaches how a language model's weights are actually changed:
-what full fine-tuning really costs, how quantization stores the same numbers
-in fewer bits, how LoRA trains a small adapter instead of every weight, and
-how the two combine as QLoRA. It ends where the platform begins — treating a
-fine-tuned adapter as a governed application release with an evaluation gate,
-as defined in [`docs/genai-lifecycle.md`](../../docs/genai-lifecycle.md)
+This course teaches how a language model's weights are actually changed. It
+begins with what full fine-tuning really costs; later lessons build through
+how quantization stores the same numbers in fewer bits, how LoRA trains a
+small adapter instead of every weight, and how the two combine as QLoRA. It
+ends where the platform begins — treating a fine-tuned adapter as a governed
+application release with an evaluation gate, as defined in
+[`docs/genai-lifecycle.md`](../../docs/genai-lifecycle.md)
 ("Model customization").
 
 Everything runs locally on CPU with tiny models built from configuration
@@ -60,7 +61,7 @@ Later lessons extend this course through quantization from first principles,
 LoRA built from scratch, QLoRA and the PEFT library, the SFT training-data
 contract, a real CPU LoRA training run tracked in MLflow, the evaluation
 gate, and finally the guarded, connected Databricks serverless-GPU lab. They
-land as numbered notebooks here; the roadmap lives in the repository plan and
+land as numbered notebooks here as they are completed;
 `docs/genai-lifecycle.md` defines the lifecycle stage they implement.
 
 ## The offline promise

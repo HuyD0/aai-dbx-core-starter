@@ -57,9 +57,10 @@ make classification-notebook
 
 [`fine-tuning/`](fine-tuning/README.md) is a second standalone course with its
 own exact environment. It teaches the model-customization stage of
-`docs/genai-lifecycle.md` — full fine-tuning memory economics, quantization,
-LoRA, QLoRA, and the PEFT library — on tiny CPU-only models built from
-configuration, so it needs no GPU, download, or credential after install.
+`docs/genai-lifecycle.md`, beginning with the memory economics of full
+fine-tuning; later lessons add quantization, LoRA, QLoRA, and the PEFT
+library. Everything runs on tiny CPU-only models built from configuration,
+so the course needs no GPU, download, or credential after install.
 Start with:
 
 ```bash

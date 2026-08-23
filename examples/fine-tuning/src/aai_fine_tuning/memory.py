@@ -44,6 +44,11 @@ PRECISION_BYTES: dict[Precision, float] = {
     Precision.NF4: 0.5,
 }
 
+# Weights can be *stored* at any precision, but training updates them, and
+# gradients only exist at a training precision. A quantized base is frozen
+# storage — that observation is the whole point of QLoRA.
+TRAINING_PRECISIONS = frozenset({Precision.FP32, Precision.BF16, Precision.FP16})
+
 
 class FullFineTuneEstimate(BaseModel, frozen=True, extra="forbid"):
     """One full fine-tuning memory bill, split into its four line items."""
@@ -118,7 +123,18 @@ def full_fine_tune_estimate(
 
     The defaults describe a Llama-style 8B model and reproduce the familiar
     result: about 146 GB, of which the weights are only about 11 percent.
+
+    Quantized precisions are rejected: you cannot fully fine-tune INT8 or
+    NF4 weights, because a quantized base is frozen — training it again at
+    full precision is exactly what this estimate prices, and training only a
+    small adapter on top of it is the QLoRA approach of later lessons.
     """
+    if weight_precision not in TRAINING_PRECISIONS:
+        raise ValueError(
+            "full fine-tuning requires a training precision (fp32, bf16, or "
+            "fp16): a quantized base is frozen storage and has no gradients "
+            "or optimizer state"
+        )
     return FullFineTuneEstimate(
         parameters_billions=parameters_billions,
         weight_precision=weight_precision,

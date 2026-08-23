@@ -163,12 +163,13 @@ keeping sklearn out of the SDK runtime.
 
 ### Learn fine-tuning from first principles
 
-The standalone [fine-tuning course](examples/fine-tuning/README.md) teaches
-quantization, LoRA, and QLoRA on tiny CPU-only models built from
-configuration, with its own exact lock so torch never enters the SDK
-dependency set. Start with `make finetune-install` and `make finetune-check`;
-the model-customization stage it teaches is defined in
-[docs/genai-lifecycle.md](docs/genai-lifecycle.md).
+The standalone [fine-tuning course](examples/fine-tuning/README.md) opens
+with the memory economics of full fine-tuning and grows through
+quantization, LoRA, and QLoRA in later lessons — all on tiny CPU-only
+models built from configuration, with its own exact lock so torch never
+enters the SDK dependency set. Start with `make finetune-install` and
+`make finetune-check`; the model-customization stage it teaches is defined
+in [docs/genai-lifecycle.md](docs/genai-lifecycle.md).
 
 ## Install for SDK development
 
