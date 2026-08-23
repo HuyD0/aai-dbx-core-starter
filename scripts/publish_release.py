@@ -40,13 +40,21 @@ class ReleaseError(RuntimeError):
 class Runner(Protocol):
     """The subset of `databricks fs` this publication needs."""
 
-    def exists(self, remote: str) -> bool: ...
+    def exists(self, remote: str) -> bool:
+        """Whether the remote path is present in the volume."""
+        raise NotImplementedError
 
-    def mkdir(self, remote: str) -> None: ...
+    def mkdir(self, remote: str) -> None:
+        """Create the remote directory, succeeding if it already exists."""
+        raise NotImplementedError
 
-    def upload(self, local: Path, remote: str) -> None: ...
+    def upload(self, local: Path, remote: str) -> None:
+        """Copy a local file to the volume without overwriting."""
+        raise NotImplementedError
 
-    def download(self, remote: str, local: Path) -> None: ...
+    def download(self, remote: str, local: Path) -> None:
+        """Copy a volume file to a local path, overwriting it."""
+        raise NotImplementedError
 
 
 class DatabricksRunner:

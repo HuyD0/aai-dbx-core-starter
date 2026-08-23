@@ -344,15 +344,21 @@ def workflow_pip_requirements(path: Path) -> dict[str, str]:
     moving a bound in the policy left the canary proving the old one, green.
     """
 
-    pattern = re.compile(
-        r'^\s*"(?P<name>[A-Za-z0-9._-]+)(?:\[[^\]]*\])?'
-        r'(?P<spec>(?:[<>=!~]=?[^,"]+)(?:,[<>=!~]=?[^,"]+)*)"\s*\\?\s*$'
+    # Two linear passes rather than one nested pattern: a single regex pairing
+    # `[<>=!~]=?[^,"]+` with a repeat of itself backtracks exponentially on a
+    # line that never matches, because the classes overlap.
+    quoted = re.compile(r'^\s*"([^"]+)"\s*\\?\s*$')
+    requirement = re.compile(
+        r"^(?P<name>[A-Za-z0-9._-]+)(?:\[[^\]]*\])?(?P<spec>[<>=!~][^\s]*)$"
     )
     found: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
-        match = pattern.match(line)
-        if match:
-            found[match.group("name").lower()] = match.group("spec").strip()
+        enclosed = quoted.match(line)
+        if not enclosed:
+            continue
+        parsed = requirement.match(enclosed.group(1).strip())
+        if parsed:
+            found[parsed.group("name").lower()] = parsed.group("spec").strip()
     return found
 
 
