@@ -4,6 +4,15 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Extended the example curriculum to teach the judge-measurement and
+  verified-promotion lifecycle: lesson 12 gains two runnable
+  credential-free sections — per-run judge stability (self-consistency
+  and frozen-anchor drift, with the "judge changed, not the agent"
+  reading) and the committed kappa-vs-SME calibration record behind
+  `agentkit judge calibrate` — and lesson 13 gains the
+  move-the-baseline-only-after-live-verification flow
+  (`agentkit baseline establish --from-run`), demonstrating the gate's
+  deployed-commit binding refusal offline.
 - Added lesson `06_confidence_intervals_for_release_gates` to the agentic
   operations RAG workshop: a credential-free demonstration of the AgentKit
   statistics module on the workshop's fixed cases — normal versus bootstrap
