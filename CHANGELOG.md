@@ -4,6 +4,21 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added the repository's shared knowledge layer: a dated decision log under
+  `docs/decisions/` (date-prefixed entries so upstream and enterprise clones
+  never collide on a name, and deliberately no enumerated index), a
+  documentation map at `docs/README.md` enforced by the new
+  `tests/test_docs_index.py`, a capture obligation in AGENTS.md section 8,
+  and `docs/agent-context-management.md` describing how the layers fit
+  together and what repository memory may never contain. The
+  `aai-log-decision` skill (canonical in `.agents/skills/`, with a thin
+  `.claude/skills/` shim for native Claude Code discovery) walks an agent
+  through writing a record. Every generated project now starts with the same
+  pattern: the shared scaffold ships `AGENTS.md` (rendered with the project
+  name), a `CLAUDE.md` pointer, and `docs/decisions/`, registered in the
+  template manifest and asserted through the render matrix. AGENTS.md
+  section 11 now points at the decision log and the retained platform audit
+  instead of a `docs/archive/` directory that no longer exists.
 - Made the `project` cost-attribution tag a clone-owned identifier. It moves
   from a literal repeated in `databricks.yml` and both resource jobs into
   `platform-identifiers.json`, stamped by `make sync-templates` and required by

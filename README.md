@@ -437,6 +437,8 @@ comparable with another's, and what the gate refuses.
 - [Local classical-classification course](examples/local-classification/README.md)
 - [Offline Apple-silicon fine-tuning sample](examples/local-finetuning/README.md)
 - [Governed batch inference pattern](examples/governed-batch-inference/README.md)
+- [Documentation index](docs/README.md) — every document in `docs/`, one line
+  each
 - [Developer guide](docs/developer-guide.md)
 - [SDK public API](docs/sdk-api.md)
 - [LLMOps playbook](docs/llmops-playbook.md) — industry LLMOps practice map
