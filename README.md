@@ -231,6 +231,18 @@ The course uses the same lifecycle vocabulary as the platform—`baseline ->
 change -> result -> decision`, with `adopt`, `reject`, or `inconclusive`—while
 keeping sklearn out of the SDK runtime.
 
+### Learn fine-tuning from first principles
+
+The standalone [fine-tuning course](examples/fine-tuning/README.md) opens
+with the memory economics of full fine-tuning and grows through
+quantization, LoRA, and QLoRA in later lessons — all on tiny CPU-only
+models built from configuration, with its own exact lock so torch never
+enters the SDK dependency set. It teaches the *mechanics* behind the
+Apple-silicon study pack above, runs on Linux as well, and executes in CI.
+Start with `make finetune-install` and `make finetune-check`; the
+model-customization stage it teaches is defined in
+[docs/genai-lifecycle.md](docs/genai-lifecycle.md).
+
 ### Learn governed agentic operations and RAG
 
 The standalone [agentic operations RAG workshop](examples/agentic-ops-rag/README.md)
