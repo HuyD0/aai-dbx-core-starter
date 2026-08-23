@@ -68,10 +68,17 @@ integrity:
 # enforcement for UAT after the governed suite reaches the minimum size. The
 # gate then uses conservative confidence bounds and paired baseline deltas,
 # rather than treating a small aggregate movement as certain.
+#
+# `method: bootstrap` swaps the normal approximation for seeded percentile
+# resampling — the right interval for 0..1 pass rates and bounded judge
+# scales, and deterministic for a given seed.
 # statistics:
 #   confidence_level: 0.95
 #   minimum_cases: 30
 #   enforce_confidence: true
+#   method: bootstrap
+#   bootstrap_resamples: 1000
+#   bootstrap_seed: 0
 #   minimum_effect:
 #     correctness: 0.02
 

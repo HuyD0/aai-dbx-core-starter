@@ -22,6 +22,18 @@ All notable changes to `aai-core` are documented here.
   trade the integrity evidence made. Rationale and rejected alternatives:
   `docs/decisions/2026-08-23-agentkit-economics-evidence.md`. The
   `evaluation-project` template documents the block and moves to 2.3.0.
+- Added `statistics.method: bootstrap` to AgentKit: confidence bounds around
+  scorer means and paired baseline improvements can now come from seeded
+  percentile bootstrap resampling instead of the normal approximation, which
+  keeps bounds inside the score's feasible range for bounded judge scales and
+  pass/fail rates (a 29/30 routing accuracy no longer reports an upper bound
+  above 100%). The method is a reporting policy, not a gate change — both
+  methods feed the same `*/statistics/*` gate rules — and results records
+  persist the method, resample count, and seed (`bootstrap-percentile-v1` /
+  `paired-bootstrap-percentile-v1` per estimate), so an interval can be
+  reproduced from its record. Records from before this option deserialize as
+  the normal approximation they were computed with; the default is unchanged
+  so enforced gates do not move on upgrade.
 - Added the repository's shared knowledge layer: a dated decision log under
   `docs/decisions/` (date-prefixed entries so upstream and enterprise clones
   never collide on a name, and deliberately no enumerated index), a
