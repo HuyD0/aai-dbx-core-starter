@@ -1808,8 +1808,9 @@ def _render_outcome(
     if results.statistics is not None and results.statistics.estimates:
         level = results.statistics.confidence_level * 100
         lines.append(
-            f"uncertainty: {level:g}% normal-mean intervals; minimum "
-            f"enforceable sample {results.statistics.minimum_cases}"
+            f"uncertainty: {level:g}% {results.statistics.method_label} "
+            f"intervals; minimum enforceable sample "
+            f"{results.statistics.minimum_cases}"
         )
         for estimate in results.statistics.estimates:
             lines.append(
