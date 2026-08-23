@@ -99,6 +99,6 @@ fi
 
 cd "${repo_root}"
 uv lock --check
-uv sync --python "${PYTHON_VERSION}" --extra dev --locked
+uv sync --python "${PYTHON_VERSION}" --extra dev --extra all --locked
 
 ./scripts/cloud-verify.sh

@@ -17,19 +17,20 @@ import argparse
 import asyncio
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Mapping
+from contextvars import copy_context
 from pathlib import Path
 
 import mlflow
 from mlflow.genai.scorers import Correctness, Safety, scorer
 
 from aai_core import bootstrap
-from aai_core.evaluation import GatePolicy, MetricRule, apply_gate
+from aai_core.evaluation import GatePolicy, MetricRule, apply_gate, judge_model_uri
 from aai_core.experiments import record_reproducibility
-from aai_core.providers.types import ProviderConfigurationError
-from aai_core.tracing import TraceIntegration
+from aai_core.tracing import TraceIntegration, traced
 from app.agent import AnalyticsAgent
-from app.config import DEMO_CATALOG, DEMO_SCHEMA, resolve_warehouse_id
+from app.config import DATASET_NAME, DEMO_CATALOG, DEMO_SCHEMA, resolve_warehouse_id
 from app.scorers import CODE_SCORERS
 from app.semantics.executor import DatabricksWarehouseExecutor
 
@@ -84,15 +85,20 @@ def main() -> None:
     args = parser.parse_args()
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     context.configure_tracing(integration=TraceIntegration.SDK)
     warehouse_id = resolve_warehouse_id(args.warehouse_id)
     cases = json.loads(
         (ROOT / "evals" / "data" / "golden_cases.json").read_text(encoding="utf-8")
     )
+    dataset_name = (
+        f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
+    )
+    dataset = _load_release_dataset(dataset_name, cases)
 
     thresholds = load_thresholds()
     baseline = load_baseline()
-    judge_model = _judge_model_uri(context.settings)
+    target_identity, judge_identity = _evaluation_model_identities(context.settings)
     policy = GatePolicy(
         rules=tuple(thresholds),
         # Tokenomics is part of the gate: answers must carry token accounting
@@ -112,33 +118,30 @@ def main() -> None:
     usages: list[dict[str, int | bool]] = []
     with asyncio.Runner() as runner:
         agent = AnalyticsAgent.from_project(ROOT, context, executor=executor)
-
-        def predict_fn(question: str) -> str:
-            answer = runner.run(agent.aanswer(question))
-            usages.append(
-                {
-                    "captured": answer.usage.captured,
-                    "total": answer.usage.total_tokens,
-                    "review": answer.usage.review_tokens,
-                }
-            )
-            return answer.answer
+        predict_fn = _build_predict_fn(agent, runner, usages)
 
         try:
             with manager.run(
                 run_name="analytics-runbook-validation-gate",
                 parameters={
                     "warehouse_id": warehouse_id,
+                    "evaluation_dataset": dataset_name,
+                    "evaluation_dataset_id": dataset.dataset_id,
+                    "evaluation_dataset_digest": dataset.digest,
                     "case_count": len(cases),
                     "adversarial_review": agent.enable_review,
                     "semantic_model_version": _semantic_model_version(),
                     "knowledge_digest": knowledge_digest(),
-                    "judge_model": judge_model,
+                    "target_model": target_identity,
+                    "judge_model": judge_identity,
                 },
-            ):
+            ) as evaluation_run:
+                _validate_dataset_association(
+                    dataset, evaluation_run.info.experiment_id
+                )
                 record_reproducibility()
                 native_result = mlflow.genai.evaluate(
-                    data=cases,
+                    data=dataset,
                     predict_fn=predict_fn,
                     scorers=[
                         *wrapped_code_scorers(),
@@ -154,9 +157,24 @@ def main() -> None:
                     baseline_metrics=baseline,
                 )
                 mlflow.log_metrics(dict(report.metrics))
-                mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
+                mlflow.log_params(
+                    {
+                        "gate_policy_digest": report.policy_digest,
+                        "gate_baseline_digest": report.baseline_digest or "none",
+                    }
+                )
+                mlflow.set_tags(
+                    {
+                        "aai.gate_passed": str(report.passed).lower(),
+                        "aai.target_model": target_identity,
+                        "aai.judge_model": judge_identity,
+                    }
+                )
         finally:
-            runner.run(agent.aclose())
+            try:
+                runner.run(agent.aclose())
+            finally:
+                runner.run(executor.aclose())
 
     report.require_passed()
     if args.update_baseline:
@@ -172,6 +190,28 @@ def main() -> None:
             "baseline_updated": args.update_baseline,
         }
     )
+
+
+def _build_predict_fn(
+    agent: AnalyticsAgent,
+    runner: asyncio.Runner,
+    usages: list[dict[str, int | bool]],
+):
+    """Keep the complete multi-step agent trajectory in one MLflow trace."""
+
+    @traced(name="agent.evaluate", span_type="AGENT")
+    def predict_fn(question: str) -> str:
+        answer = runner.run(agent.aanswer(question), context=copy_context())
+        usages.append(
+            {
+                "captured": answer.usage.captured,
+                "total": answer.usage.total_tokens,
+                "review": answer.usage.review_tokens,
+            }
+        )
+        return answer.answer
+
+    return predict_fn
 
 
 def _finite_metrics(native_result) -> dict[str, float]:
@@ -209,16 +249,93 @@ def _semantic_model_version() -> str:
     return f"{info.get('name', 'unknown')}-v{info.get('version', 0)}"
 
 
-def _judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
+def _evaluation_model_identities(settings) -> tuple[str, str]:
+    target = _model_config(settings, "general-chat")
+    judge = _model_config(settings, "judge-model")
+    if (
+        judge["provider"].casefold() == target["provider"].casefold()
+        and judge["deployment"].casefold() == target["deployment"].casefold()
+    ):
+        raise ValueError(
+            "judge-model must use a deployment distinct from general-chat; "
+            "a release gate cannot rely on the target judging itself"
         )
+    target_identity = f"{target['provider']}:{target['deployment']}"
+    judge_identity = f"{judge['provider']}:{judge['deployment']}"
+    return target_identity, judge_identity
+
+
+def _model_config(settings, logical_name: str) -> dict[str, str]:
+    config = settings.models.get(logical_name)
+    if not isinstance(config, Mapping):
+        raise ValueError(f"{logical_name} must be configured")
+    provider = config.get("provider")
     deployment = config.get("deployment")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError(f"{logical_name} requires a provider")
     if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError("judge-model requires a deployment")
-    return f"endpoints:/{deployment.strip()}"
+        raise ValueError(f"{logical_name} requires a deployment")
+    return {
+        "provider": provider.strip(),
+        "deployment": deployment.strip(),
+    }
+
+
+def _load_release_dataset(name: str, reviewed_cases: list[dict]):
+    """Load the governed suite and fail closed on any unreviewed row drift."""
+
+    dataset = mlflow.genai.datasets.get_dataset(name=name)
+    if not isinstance(dataset.dataset_id, str) or not dataset.dataset_id.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable dataset ID")
+    if not isinstance(dataset.digest, str) or not dataset.digest.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable digest")
+    registered_cases = dataset.to_df().to_dict(orient="records")
+    expected = Counter(_case_key(record) for record in reviewed_cases)
+    actual = Counter(_case_key(record) for record in registered_cases)
+    if actual != expected:
+        missing = sum((expected - actual).values())
+        extra = sum((actual - expected).values())
+        raise RuntimeError(
+            f"Unity Catalog dataset {name!r} differs from the reviewed release "
+            f"suite (missing={missing}, extra={extra}). Run "
+            "scripts/sync_dataset.py; if stale records remain, use a new "
+            "versioned DATASET_NAME rather than evaluating unreviewed rows."
+        )
+    return dataset
+
+
+def _validate_dataset_association(dataset, experiment_id: str) -> None:
+    associated = {str(value) for value in (dataset.experiment_ids or [])}
+    if str(experiment_id) not in associated:
+        raise RuntimeError(
+            "The release dataset is not associated with this application's "
+            "configured experiment"
+        )
+
+
+def _case_key(record: Mapping) -> str:
+    return json.dumps(
+        {
+            "inputs": record.get("inputs"),
+            "expectations": record.get("expectations"),
+            "tags": _review_tags(record),
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _review_tags(record: Mapping) -> dict:
+    tags = record.get("tags") or {}
+    if not isinstance(tags, Mapping):
+        raise TypeError("Evaluation case tags must be an object")
+    return {
+        str(key): value
+        for key, value in tags.items()
+        if not str(key).casefold().startswith("mlflow.")
+    }
 
 
 if __name__ == "__main__":

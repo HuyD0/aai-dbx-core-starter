@@ -37,6 +37,23 @@ def lifecycle_support():
     return module
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("unset", True),
+        ("unknown", True),
+        ("ToDo", True),
+        ("changeme", True),
+        (" ", True),
+        ("replace-with-endpoint", True),
+        ("main", False),
+        ("approved-judge-endpoint", False),
+    ],
+)
+def test_preflight_flags_every_platform_placeholder(runner, value, expected):
+    assert runner._is_placeholder(value) is expected
+
+
 def test_progressive_curriculum_uses_stable_fictional_earnings_cases(
     lifecycle_support,
 ):
@@ -146,7 +163,7 @@ def test_prompt_change_only_adds_exact_source_citation(lifecycle_support):
     decision = lifecycle_support.release_decision(baseline_metrics, change_metrics)
     assert baseline_metrics["citation_rate"] == 0.0
     assert change_metrics["citation_rate"] == 1.0
-    assert decision["decision"] == "release_change"
+    assert decision["decision"] == "adopt"
     assert decision["release"] == "earnings-summary-prompt-v2"
     assert all(decision["checks"].values())
 
@@ -223,14 +240,18 @@ def test_catalog_separates_offline_connected_and_interactive_examples(runner):
         "layered_judges",
         "cost_quality_tradeoff",
         "agent_alignment_optimization",
+        "decision_promotion_lifecycle",
+        "compare_and_select_llms",
     ):
         assert runner.EXAMPLES[name].connected is False
         assert runner.EXAMPLES[name].local is True
         assert runner.EXAMPLES[name].interactive is True
+    assert runner.EXAMPLES["platform_llm_operations"].connected is True
+    assert runner.EXAMPLES["platform_llm_operations"].interactive is True
 
     numbered_paths = [example.path for example in runner.EXAMPLES.values()]
     assert [Path(path).name[:2] for path in numbered_paths] == [
-        f"{number:02d}" for number in range(13)
+        f"{number:02d}" for number in range(16)
     ]
 
 
@@ -334,6 +355,190 @@ providers:
         "Configure `providers.models.general-chat.deployment` in "
         "aai-platform.yml (current value: 'replace-with-serving-endpoint')."
     ]
+
+
+def test_config_preflight_validates_the_effective_experiment(
+    runner, tmp_path, monkeypatch
+):
+    # The connected cell queries effective_experiment_name; a placeholder —
+    # explicit or derived from placeholder components — must fail preflight
+    # before any cloud check, while a properly derived name passes.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: unset
+  team: unset
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "platform.team" in issues[0]
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("team: unset", "team: real-team"),
+        encoding="utf-8",
+    )
+    assert runner._config_issues(runner.EXAMPLES["platform_llm_operations"]) == []
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "experiment_name: unset", "experiment_name: unknown"
+        ),
+        encoding="utf-8",
+    )
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "platform.experiment_name" in issues[0]
+
+    # A non-string name reads as configured once stringified, but strict
+    # PlatformSettings rejects it at bootstrap — fail before cloud checks.
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "experiment_name: unknown", "experiment_name: 123"
+        ),
+        encoding="utf-8",
+    )
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "must be a string" in issues[0]
+
+
+def test_config_preflight_rejects_non_string_configuration(
+    runner, tmp_path, monkeypatch
+):
+    # The placeholder and qualifier checks stringify, so a numeric catalog
+    # passes the qualifier regex as "123" and a numeric declared
+    # experiment name reads as configured — both only fail inside strict
+    # PlatformSettings at bootstrap, after the cloud preflight has run.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: 123
+  catalog: 456
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+
+    # first_trace declares the experiment name; platform_llm_operations
+    # declares the catalog and schema qualifiers.
+    declared_name = runner._config_issues(runner.EXAMPLES["first_trace"])
+    declared_qualifiers = runner._config_issues(
+        runner.EXAMPLES["platform_llm_operations"]
+    )
+
+    assert any("experiment_name` must be a string" in issue for issue in declared_name)
+    assert any("catalog` must be a string" in issue for issue in declared_qualifiers)
+    # A missing key is still reported as unconfigured, not as a type error.
+    config.write_text("platform:\n  schema: example_ai\n", encoding="utf-8")
+    missing = runner._config_issues(runner.EXAMPLES["first_trace"])
+    assert missing == [
+        "Configure `platform.experiment_name` in aai-platform.yml "
+        "(current value: None)."
+    ]
+
+    # The derived path has the same exposure: a numeric component would
+    # read as configured and only fail at bootstrap.
+    config.write_text(
+        """
+platform:
+  experiment_name: unset
+  team: 123
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    derived = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert derived == [
+        "`platform.experiment_name` derives from platform.team, which "
+        "must be strings in aai-platform.yml."
+    ]
+
+    # An experiment name is a path, so a placeholder component must fail
+    # preflight too — otherwise the credentialed checks run and the
+    # notebook queries the placeholder path. This holds whether the example
+    # declares platform.experiment_name in config_fields (first_trace) or
+    # leaves it to the derived check (platform_llm_operations).
+    for placeholder_path in ("/Shared/replace-with-experiment", "/Shared/unset"):
+        config.write_text(
+            f"""
+platform:
+  experiment_name: {placeholder_path}
+  team: real-team
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+            encoding="utf-8",
+        )
+        for example in ("platform_llm_operations", "first_trace"):
+            issues = runner._config_issues(runner.EXAMPLES[example])
+            assert len(issues) == 1, (example, placeholder_path)
+            assert "platform.experiment_name" in issues[0]
+
+    # A real path still passes on both routes.
+    config.write_text(
+        """
+platform:
+  experiment_name: /Shared/earnings-summary
+  team: real-team
+  project: demo
+  application: demo-app
+  catalog: main
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    for example in ("platform_llm_operations", "first_trace"):
+        assert runner._config_issues(runner.EXAMPLES[example]) == []
+
+
+def test_config_preflight_rejects_malformed_qualifiers(runner, tmp_path, monkeypatch):
+    # The SDK helpers reject dotted or invalid-character qualifiers; the
+    # preflight must fail before any cloud check instead of opening the
+    # notebook.
+    config = tmp_path / "aai-platform.yml"
+    config.write_text(
+        """
+platform:
+  experiment_name: /Shared/learning
+  catalog: main.extra
+  schema: example_ai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "CONFIG", config)
+
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert issues == [
+        "`platform.catalog` must be a single Unity Catalog qualifier "
+        "(letters, digits, underscores, and hyphens; no dots) "
+        "(current value: 'main.extra')."
+    ]
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "catalog: main.extra", "catalog: main catalog"
+        ),
+        encoding="utf-8",
+    )
+    issues = runner._config_issues(runner.EXAMPLES["platform_llm_operations"])
+    assert len(issues) == 1
+    assert "'main catalog'" in issues[0]
 
 
 def test_connect_creates_local_config_once(runner, tmp_path, monkeypatch, capsys):
@@ -451,7 +656,9 @@ def test_local_run_never_checks_cloud_and_reports_workspace_path(
     assert "make workspace-connect" in output
 
 
-def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, runner):
+def test_progressive_examples_execute_offline_with_connected_lineage(
+    tmp_path, runner, request
+):
     mlflow = pytest.importorskip("mlflow")
     local_dir = tmp_path / "local"
     tracking_uri = f"sqlite:///{local_dir / 'mlflow.db'}"
@@ -530,7 +737,7 @@ def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, r
     }
     assert payloads["first_evaluation"]["result"]["gate_passed"] is True
     assert all(payloads["first_evaluation"]["result"]["checks"].values())
-    assert payloads["first_evaluation"]["decision"] == "release_change"
+    assert payloads["first_evaluation"]["decision"] == "adopt"
     assert payloads["first_evaluation"]["release"] == "earnings-summary-prompt-v2"
     assert payloads["first_evaluation"]["baseline"]["name"] == (
         "baseline-earnings-summary-prompt-v1"
@@ -555,11 +762,20 @@ def test_progressive_examples_execute_offline_with_connected_lineage(tmp_path, r
         == payloads["first_prompt"]["change"]["prompt_uri"]
     )
 
+    original_tracking_uri = mlflow.get_tracking_uri()
+    original_registry_uri = mlflow.get_registry_uri()
+
+    def restore_mlflow_uris():
+        mlflow.set_tracking_uri(original_tracking_uri)
+        mlflow.set_registry_uri(original_registry_uri)
+
+    request.addfinalizer(restore_mlflow_uris)
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_registry_uri(tracking_uri)
     client = mlflow.MlflowClient(
         tracking_uri=tracking_uri,
         registry_uri=tracking_uri,
     )
-    mlflow.set_registry_uri(tracking_uri)
     production_prompt = mlflow.genai.load_prompt(
         "prompts:/main.example_ai.earnings_summary@production"
     )
@@ -623,6 +839,9 @@ def test_interactive_workspace_example_prints_configured_exports(
     config.write_text(
         """
 platform:
+  application: demo-app
+  project: demo
+  team: demo-team
   catalog: main
   schema: example_ai
 providers:

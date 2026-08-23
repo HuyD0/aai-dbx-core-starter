@@ -4,18 +4,31 @@ name: auth-smoke
 #   GitHub OIDC token  ->  azure/login (federated credential)  ->  az
 #                      ->  Databricks (Azure CLI token, DATABRICKS_AUTH_TYPE=azure-cli)
 # Run it from the `main` branch (Actions tab -> auth-smoke -> Run workflow) so the
-# OIDC subject is repo:<owner>/<repo>:ref:refs/heads/main, matching the FIC.
+# OIDC subject matches the federated credential. That subject embeds immutable
+# numeric owner and repository ids:
+#   repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main
+# Building a name-based credential from an abbreviated form fails with
+# AADSTS700213. AGENTS.md sections 2 and 3 are authoritative.
 on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write   # required for the GitHub OIDC token
   contents: read
+
+concurrency:
+  group: auth-smoke
+  cancel-in-progress: false
 
 jobs:
   smoke:
+    # Off-main dispatch cannot match the branch-ref FIC, so fail before login
+    # rather than reporting an authentication error for a policy decision.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      id-token: write   # required for the GitHub OIDC token
+      contents: read
     steps:
       - name: Azure login (OIDC — no secret)
         uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0

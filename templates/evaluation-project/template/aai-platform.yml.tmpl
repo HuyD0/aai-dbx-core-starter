@@ -7,9 +7,10 @@ platform:
   cost_center: {{.cost_center}}
   data_classification: internal
   lifecycle: experimental
-  repository: replace-with-owner/{{.project_name}}
-  release: dev
-  tag_schema_version: "1"
+  repository: {{.repository_url}}
+  # Bundle jobs override this with the CI-attested source commit.
+  release: local-dev
+  tag_schema_version: "2"
   catalog: {{.catalog}}
   schema: {{.schema}}
   experiment_name: /Shared/{{.application_name}}-quality-cost-evaluation
@@ -18,7 +19,7 @@ platform:
 providers:
   models:
     # The LLM judges run through this gateway-fronted Databricks serving
-    # endpoint (for Foundry models, an external-model endpoint). Judge cost
+    # endpoint (for external models, an external-model endpoint). Judge cost
     # is real cost — budget evaluation like any other workload.
     judge-model:
       provider: databricks

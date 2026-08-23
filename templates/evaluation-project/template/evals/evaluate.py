@@ -1,147 +1,150 @@
-"""Tier-2 gate: full evaluation with code scorers AND LLM judges.
+"""Tier-2 gate: the full suite with code scorers and LLM judges.
 
-Scores the target (recorded answer sheet by default, or a live endpoint with
---mode endpoint) against the golden suite, applies every threshold in
-gate_config.json including baseline regression, and publishes the report to
-the CI step summary. It also prints bounded per-row scorer failures without
-raw input/output columns. Rationale/error details require
---show-triage-details and remain subject to normal log data-handling rules.
-Runs on the credentialed path only.
+Runs on the credentialed path, locally with workspace authentication or as
+the bundle's ``release_gate`` job. AgentKit scores every row, compares the run
+with the recorded baseline, applies every threshold, and writes governed
+evidence to MLflow.
+
+    python evals/evaluate.py                      # score and compare
+    python evals/evaluate.py --update-baseline    # establish this baseline
+
+This wrapper preserves the path used by the bundle and Makefile while routing
+behavior through ``agentkit eval``. Exit codes are stable: 0 passed, 2 a
+threshold failed, and 1 a configuration or runtime error.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import sys
+from importlib.util import find_spec
 from pathlib import Path
 
-import mlflow
-from mlflow.genai.scorers import scorer
-
-from aai_core import bootstrap
-from aai_core.evaluation import (
-    GatePolicy,
-    MetricRule,
-    apply_gate,
-)
-from app import judges, targets
-from app.config import DATASET_NAME
-from app.scorers import CODE_SCORERS
-from app.triage import print_failure_triage
+from aai_core.agentkit.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = ROOT / "evals" / "baseline.json"
 
 
-def load_thresholds() -> list[MetricRule]:
-    config = json.loads((ROOT / "evals" / "gate_config.json").read_text("utf-8"))
-    return [MetricRule(**threshold) for threshold in config["thresholds"]]
+def build_arguments(argv: list[str] | None = None) -> list[str]:
+    """Translate the stable template wrapper flags to AgentKit arguments."""
 
-
-def load_baseline() -> dict[str, float]:
-    if not BASELINE.exists():
-        print(
-            "No evals/baseline.json yet; regression checks activate after the "
-            "first release records one with --update-baseline."
-        )
-        return {}
-    metrics = json.loads(BASELINE.read_text(encoding="utf-8"))["metrics"]
-    return {name: float(value) for name, value in metrics.items()}
-
-
-def wrapped_code_scorers() -> list:
-    wrapped = []
-    for fn in CODE_SCORERS:
-
-        def make(inner):
-            @scorer(name=inner.__name__)
-            def code_scorer(outputs, expectations):
-                return inner(str(outputs), dict(expectations or {}))
-
-            return code_scorer
-
-        wrapped.append(make(fn))
-    return wrapped
-
-
-def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=["answer-sheet", "endpoint"],
-        default="answer-sheet",
-        help="answer-sheet replays recorded answers; endpoint calls the "
-        "target-model logical endpoint from aai-platform.yml.",
+        choices=["answer-sheet", "endpoint", "live"],
+        default=None,
+        help="answer-sheet replays recorded answers; endpoint/live calls the "
+        "agent configured in agentkit.yaml.",
     )
-    parser.add_argument("--update-baseline", action="store_true")
     parser.add_argument(
-        "--show-triage-details",
+        "--update-baseline",
         action="store_true",
-        help="Print bounded judge rationale/error text. Enable only when CI "
-        "logs are approved for the evaluation data classification.",
+        help="record this run as the baseline future runs compare against.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the spend confirmation (for non-interactive jobs).",
+    )
+    parser.add_argument(
+        "--decision",
+        choices=["adopt", "reject", "inconclusive"],
+        default=None,
+        help="the conclusion this comparison supports.",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=None,
+        help="Unity Catalog model to score (supplied by the deployment job).",
+    )
+    parser.add_argument(
+        "--model-version",
+        default=None,
+        help="model version to score (supplied by the deployment job).",
+    )
+    parsed = parser.parse_args(argv)
 
-    context = bootstrap(ROOT / "aai-platform.yml")
-    if args.mode == "endpoint":
-        predict_fn = targets.endpoint_predict_fn(context)
-    else:
-        predict_fn = targets.answer_sheet_predict_fn(
-            ROOT / "evals" / "data" / "answer_sheet.json"
-        )
+    if bool(parsed.model_name) != bool(parsed.model_version):
+        parser.error("--model-name and --model-version must be given together")
 
-    cases = json.loads(
-        (ROOT / "evals" / "data" / "golden_cases.json").read_text(encoding="utf-8")
+    arguments = ["eval"]
+    if parsed.yes:
+        arguments.append("--yes")
+    mode = parsed.mode
+    if parsed.model_name:
+        # Score exactly the version that triggered promotion. Falling back to
+        # the configured agent could approve an unrelated target.
+        arguments += [
+            "--agent",
+            f"models:/{parsed.model_name}/{parsed.model_version}",
+        ]
+        mode = mode or "live"
+    if mode is not None:
+        arguments += [
+            "--mode",
+            "live" if mode in {"endpoint", "live"} else "answer-sheet",
+        ]
+    if parsed.update_baseline:
+        arguments.append("--establish-baseline")
+    if parsed.decision is not None:
+        arguments += ["--decision", parsed.decision]
+    return arguments
+
+
+def validate_bundled_inputs(arguments: list[str]) -> None:
+    """Fail local case and answer-sheet drift before target or judge work."""
+
+    # Imported lazily so tests can exercise this plain wrapper without a
+    # rendered project's ``src`` directory on sys.path.
+    from app.targets import validate_bundled_data
+
+    include_answer_sheet = any(
+        arguments[index : index + 2] == ["--mode", "answer-sheet"]
+        for index in range(len(arguments) - 1)
     )
-    baseline = load_baseline()
-    policy = GatePolicy(
-        rules=tuple(load_thresholds()),
-        allow_missing_regression_baseline=args.update_baseline and not baseline,
-    )
-    dataset_name = (
-        f"{context.settings.catalog}.{context.settings.schema}.{DATASET_NAME}"
-    )
-    # A governed MLflow run: aai.* tags, the registered dataset identity,
-    # gate metrics, verdict tag, and evaluation traces attached.
-    with context.experiments.run(
-        run_name=f"evaluation-{args.mode}-validation-gate",
-        parameters={
-            "mode": args.mode,
-            "evaluation_dataset": dataset_name,
-            "case_count": len(cases),
-        },
-    ):
-        native_result = mlflow.genai.evaluate(
-            data=cases,
-            predict_fn=predict_fn,
-            scorers=[*wrapped_code_scorers(), *judges.judge_scorers(context.settings)],
+    validate_bundled_data(ROOT, include_answer_sheet=include_answer_sheet)
+
+
+def publish_evidence_run_id(root: Path | None = None) -> str | None:
+    """Hand the approval task the exact run this evaluation recorded.
+
+    Searching MLflow for the newest run against a model version can select a
+    concurrent or manual evaluation with different data or policy. A task
+    value preserves the exact evidence identity. Writing it is best effort so
+    local runs outside Databricks remain usable.
+    """
+
+    from aai_core.agentkit.results import load_latest_results
+
+    directory = (root or Path.cwd()) / ".aai" / "agentkit" / "results"
+    loaded = load_latest_results(directory)
+    run_id = loaded[0].run_id if loaded else None
+    if not run_id:
+        return None
+    # ``databricks.sdk.runtime`` creates a remote dbutils client when the
+    # Databricks runtime namespace is absent. Importing it on a developer
+    # machine can therefore authenticate and retry instead of failing fast.
+    # The ``dbruntime`` module is the same boundary the certified SDK uses to
+    # distinguish an in-runtime namespace from its local fallback.
+    if find_spec("dbruntime") is None:
+        return run_id
+    try:
+        from databricks.sdk.runtime import dbutils
+
+        dbutils.jobs.taskValues.set(key="evidence_run_id", value=run_id)
+    except Exception as error:  # noqa: BLE001 - no task values outside a job
+        # Do not echo a provider exception message into job logs; exception
+        # messages are not a trusted redaction boundary.
+        print(
+            "could not hand the run id to the approval task "
+            f"({type(error).__name__})"
         )
-        report = apply_gate(
-            native_result,
-            policy=policy,
-            baseline_metrics=baseline,
-        )
-        mlflow.log_metrics(dict(report.metrics))
-        mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
-    print_failure_triage(
-        native_result,
-        include_details=args.show_triage_details,
-    )
-    report.require_passed()
-    if args.update_baseline:
-        BASELINE.write_text(
-            json.dumps({"metrics": dict(report.metrics)}, indent=2, sort_keys=True)
-            + "\n",
-            encoding="utf-8",
-        )
-    print(
-        {
-            "mode": args.mode,
-            "metrics": report.metrics,
-            "baseline_updated": args.update_baseline,
-        }
-    )
+    return run_id
 
 
 if __name__ == "__main__":
-    main()
+    agentkit_arguments = build_arguments(sys.argv[1:])
+    validate_bundled_inputs(agentkit_arguments)
+    exit_code = main(agentkit_arguments)
+    publish_evidence_run_id()
+    raise SystemExit(exit_code)

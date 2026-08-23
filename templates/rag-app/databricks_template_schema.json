@@ -18,7 +18,7 @@
     "repository_url": {
       "type": "string",
       "description": "Required absolute HTTPS URL of this project's real Git repository; Hub registration rejects example and placeholder URLs",
-      "order": 22,
+      "order": 24,
       "pattern": "^https://[^\\s@/?#]+(?:/[^\\s?#]*)?$",
       "pattern_match_failure_message": "Use an absolute HTTPS repository URL without credentials, spaces, a query string, or a fragment."
     },
@@ -55,31 +55,17 @@
     "model_provider": {
       "type": "string",
       "default": "databricks",
-      "description": "Model provider. Choose `databricks` (recommended default: gateway-ready serving endpoint, no extra auth wiring; the enterprise attaches AI Gateway rate limits and usage tracking) unless your team already operates its own Foundry resource \u2014 then `foundry` calls it directly with Entra tokens. Either way, application code only uses the logical name",
+      "description": "Model provider. `databricks` is a gateway-ready serving endpoint with no extra auth wiring; the enterprise attaches AI Gateway rate limits and usage tracking. Application code only uses the logical name",
       "enum": [
-        "databricks",
-        "foundry"
+        "databricks"
       ],
       "order": 8
     },
     "model_deployment": {
       "type": "string",
       "default": "replace-with-model-endpoint",
-      "description": "Databricks serving endpoint name or Foundry deployment name",
+      "description": "Databricks serving endpoint name",
       "order": 9
-    },
-    "foundry_endpoint": {
-      "type": "string",
-      "default": "https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project",
-      "description": "Foundry project endpoint ending in /api/projects/<project> (only asked for Foundry models)",
-      "order": 10,
-      "skip_prompt_if": {
-        "properties": {
-          "model_provider": {
-            "const": "databricks"
-          }
-        }
-      }
     },
     "judge_deployment": {
       "type": "string",
@@ -117,41 +103,71 @@
     },
     "aai_core_version": {
       "type": "string",
-      "default": "0.3.0",
+      "default": "0.4.0",
       "description": "Pinned aai-core SDK version",
-      "order": 17
+      "order": 19
     },
     "aai_core_volume": {
       "type": "string",
       "default": "/Volumes/dbx_dev/dbx_platform/python_packages",
       "description": "Unity Catalog volume holding aai-core wheels",
-      "order": 18
+      "order": 20
     },
     "workspace_host": {
       "type": "string",
       "default": "https://adb-7405609799238491.11.azuredatabricks.net",
       "description": "Development Azure Databricks workspace",
-      "order": 19
+      "order": 21
+    },
+    "uat_workspace_host": {
+      "type": "string",
+      "default": "https://adb-7405613180844632.12.azuredatabricks.net",
+      "description": "UAT Azure Databricks workspace; its identity, grants, and GitHub environment are provisioned externally",
+      "order": 30
     },
     "compute_policy_id": {
       "type": "string",
       "default": "0005F2031B6D2319",
       "description": "Constrained Job Compute policy",
-      "order": 20
+      "order": 22
+    },
+    "aai_core_source_ref": {
+      "type": "string",
+      "default": "ca467b74d2a2c05375cbc93f6e0b0bcca1dffa24",
+      "description": "Immutable SDK source ref used only by credential-free CI: an exact release-candidate commit, or the annotated v<version> tag after publication",
+      "order": 31,
+      "pattern": "^(?:[0-9a-f]{40}|v[0-9]+\\.[0-9]+\\.[0-9]+(?:[A-Za-z0-9.-]+)?)$"
     },
     "aai_core_pip_source": {
       "type": "string",
-      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
-      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
-      "order": 21
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@{{.aai_core_source_ref}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; its immutable ref is governed by aai_core_source_ref. Runtime jobs never use this source and require the separately published checksum-pinned volume wheel",
+      "order": 32
     },
     "source_table": {
       "type": "string",
       "default": "{{.catalog}}.{{.schema}}.documents",
       "description": "Governed source table of documents (columns: id, content, source_uri). The chunk pipeline writes <source_table>_chunks with Change Data Feed enabled (Databricks retrieval only)",
       "order": 16
+    },
+    "prompt_version": {
+      "type": "string",
+      "default": "1",
+      "description": "Exact immutable Prompt Registry version evaluated by the release job; update this after registering a new prompt",
+      "order": 17,
+      "pattern": "^[1-9][0-9]*$",
+      "pattern_match_failure_message": "Use a positive integer Prompt Registry version."
+    },
+    "knowledge_version": {
+      "type": "string",
+      "default": "replace-with-knowledge-version",
+      "description": "Bounded non-secret immutable identifier for the externally managed knowledge/chunk/index snapshot evaluated by the release gate",
+      "order": 18,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+      "pattern_match_failure_message": "Use 1-128 letters, numbers, dots, underscores, colons, slashes, plus signs, or hyphens."
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py\n  5. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. python evals/evaluate.py --prompt-version <version>  # note decision_run_id\n  6. python scripts/promote_prompt.py --version <version> --decision-run-id <run-id> --to validation\n  7. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
   "min_databricks_cli_version": "v1.6.0"
 }

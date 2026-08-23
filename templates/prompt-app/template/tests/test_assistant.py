@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from aai_core.testing import FakeChatModel
-from app.assistant import Assistant
+from app.assistant import Assistant, PromptLimits
 from app.config import PROMPT_NAME
 
 
@@ -56,6 +56,7 @@ def test_ask_formats_prompt_and_returns_model_reply():
     assert answer == "a concise answer"
     assert prompts.loads == [{"alias": "development"}]
     assert model.requests[0]["messages"][-1]["content"] == "What is an alias?"
+    assert model.requests[0]["max_tokens"] == 1024
 
 
 def test_production_environment_loads_production_alias():
@@ -79,3 +80,29 @@ def test_empty_question_is_rejected():
 
     with pytest.raises(ValueError):
         assistant.ask("   ")
+
+
+def test_question_and_output_bounds_fail_closed():
+    prompts = FakePrompts()
+    model = FakeChatModel(reply="answer")
+    assistant = Assistant(
+        _context(model, prompts),
+        limits=PromptLimits(max_question_chars=5),
+    )
+    with pytest.raises(ValueError, match="character bound"):
+        assistant.ask("123456")
+    assert model.requests == []
+
+    oversized = Assistant(
+        _context(FakeChatModel(reply="12345"), FakePrompts()),
+        limits=PromptLimits(max_output_chars=4),
+    )
+    with pytest.raises(RuntimeError, match="response exceeded"):
+        oversized.ask("hello")
+
+
+def test_empty_model_output_is_rejected():
+    assistant = Assistant(_context(FakeChatModel(reply=" "), FakePrompts()))
+
+    with pytest.raises(RuntimeError, match="empty response"):
+        assistant.ask("hello")

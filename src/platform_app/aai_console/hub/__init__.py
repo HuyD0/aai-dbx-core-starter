@@ -5,7 +5,7 @@ contains versioned, persistence-safe boundaries that can be reused by API and st
 adapters without coupling them to the current server-rendered UI.
 """
 
-from .manifest import (
+from aai_core.manifest import (
     AIApplicationManifest,
     ManifestEnvelope,
     build_manifest_envelope,

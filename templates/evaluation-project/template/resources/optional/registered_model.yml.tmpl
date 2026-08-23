@@ -1,0 +1,19 @@
+# Optional: the Unity Catalog registered model this project promotes into.
+#
+# Opt in with an explicit include (see deployment_job.yml for the full
+# snippet); `resources/*.yml` does not reach this directory.
+#
+# Creating the model is a governance event: the catalog, schema, and grants
+# are provisioned through the platform process, not by this bundle. Deploy
+# this only once your platform owner has confirmed the schema exists and the
+# deploying principal holds CREATE MODEL on it.
+resources:
+  registered_models:
+    agent_model:
+      name: {{.application_name}}
+      catalog_name: {{.catalog}}
+      schema_name: {{.schema}}
+      comment: >-
+        Evaluated by the {{.project_name}} suite. Promotion evidence for each
+        version comes from `agentkit evidence`; the deployment-job approval
+        tag records who approved it.

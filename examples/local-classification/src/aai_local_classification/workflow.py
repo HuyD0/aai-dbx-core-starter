@@ -558,7 +558,7 @@ def run_frozen_test_gate(
         # Native classic evaluation is diagnostic evidence. The explicit gate above
         # remains authoritative because it includes the selected business threshold.
         evaluation_frame = x_test.copy()
-        # MLflow 3.14's classifier inference recognizes boolean and categorical
+        # MLflow 3.15.1's classifier inference recognizes boolean and categorical
         # labels, but reports integer 0/1 labels as an unknown model type. Boolean
         # labels preserve the binary meaning and avoid that false warning.
         evaluation_frame[settings.data.target_column] = y_test.astype(bool).to_numpy()

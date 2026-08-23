@@ -18,13 +18,17 @@ resources:
         - job_cluster_key: default
           new_cluster:
             spark_version: 18.0.x-scala2.13
-            node_type_id: Standard_DS3_v2
+            node_type_id: ${var.node_type_id}
             num_workers: 1
             # The workspace's constrained "Job Compute" policy. The dedicated CI
             # principal receives CAN_USE on this policy instead of unrestricted
             # cluster-create or workspace-admin rights. The id comes from a
             # bundle variable so a clone overrides it without editing this file.
             policy_id: ${var.job_compute_policy_id}
+            spark_env_vars:
+              AAI_ENVIRONMENT: ${var.deployment_environment}
+              AAI_LIFECYCLE: ${var.deployment_lifecycle}
+              AAI_RELEASE: ${var.deployment_release}
             # Cost-attribution tags. Cluster custom_tags propagate to the
             # underlying Azure VMs (Cost Management / chargeback) and to the
             # system.billing.usage `custom_tags` column for DBU attribution. Values
@@ -39,8 +43,8 @@ resources:
               cost_center: ${var.cost_center}
               team: ${var.team}
               owner_group: ${var.owner_group}
-              project: aai-dbx-core-starter
+              project: ${var.project}
               environment: ${bundle.target}
               data_classification: internal
-              lifecycle: experimental
-              tag_schema_version: "1"
+              lifecycle: ${var.deployment_lifecycle}
+              tag_schema_version: "2"

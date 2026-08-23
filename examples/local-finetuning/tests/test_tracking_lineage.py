@@ -1,0 +1,178 @@
+"""Local MLflow lineage tests without starting a real tracking server."""
+
+from __future__ import annotations
+
+import sys
+from contextlib import nullcontext
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+from aai_local_finetuning import tracking, training
+from aai_local_finetuning.evaluation import (
+    GenerationConfig,
+    LocalMLXInferenceConfig,
+)
+
+
+def test_change_tracking_logs_only_snapshot_bound_reloadable_adapter_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter_dir = tmp_path / "artifacts" / "adapters" / "support"
+    adapter_dir.mkdir(parents=True)
+    for name, content in (
+        ("adapters.safetensors", b"weights"),
+        ("adapter_config.json", b'{"rank":8}\n'),
+        ("training-manifest.json", b'{"schema_version":"4.0.0"}\n'),
+    ):
+        (adapter_dir / name).write_bytes(content)
+    training_config = tmp_path / "configs" / "training" / "lora.yaml"
+    training_config.parent.mkdir(parents=True)
+    training_config.write_text("iters: 1\n", encoding="utf-8")
+    dataset_manifest = tmp_path / "data" / "manifest.json"
+    dataset_manifest.parent.mkdir(parents=True)
+    dataset_manifest.write_text("{}\n", encoding="utf-8")
+    predictions = tmp_path / "predictions.jsonl"
+    predictions.write_text("{}\n", encoding="utf-8")
+    unbound_evidence = tmp_path / "artifacts" / "training" / "latest.json"
+    unbound_evidence.parent.mkdir(parents=True)
+    unbound_evidence.write_text('{"training_manifest_sha256":"stale"}\n')
+
+    digest = "a" * 64
+    training_contract_digest = "1" * 64
+    evaluation_contract_digest = "2" * 64
+    training_contract = SimpleNamespace(
+        source_files_sha256="3" * 64,
+        runtime_packages_sha256="4" * 64,
+        model_dump=lambda **_kwargs: {"schema_version": "1.0.0"},
+    )
+    evaluation_contract = SimpleNamespace(
+        model_dump=lambda **_kwargs: {"schema_version": "1.0.0"}
+    )
+    model_files = (
+        training.TrainingFileEvidence(
+            path="LOCAL_REVISION", sha256="5" * 64, size_bytes=41
+        ),
+        training.TrainingFileEvidence(
+            path="config.json", sha256="6" * 64, size_bytes=10
+        ),
+    )
+    base_model = training.BaseModelExecutionContract(
+        repository="local/model",
+        model_path="models/local",
+        model_revision="f" * 40,
+        model_files=model_files,
+        model_files_sha256=training._evidence_sequence_sha256(model_files),
+    )
+    inference_config = LocalMLXInferenceConfig(
+        method="lora-change",
+        prompt_recipe="strong",
+        generation=GenerationConfig(max_tokens=37),
+        base_model=base_model,
+        adapter_manifest_sha256=digest,
+    )
+    evaluation_session = SimpleNamespace(
+        execution_contract=evaluation_contract,
+        execution_contract_sha256=evaluation_contract_digest,
+        base_model_execution_contract=base_model,
+    )
+    snapshot = SimpleNamespace(
+        adapter_path=adapter_dir,
+        config_path=training_config,
+        manifest_sha256=digest,
+        manifest=SimpleNamespace(
+            adapter_sha256="b" * 64,
+            adapter_config_sha256="c" * 64,
+            source_config_sha256="d" * 64,
+            effective_config_sha256="e" * 64,
+            execution_contract=training_contract,
+            execution_contract_sha256=training_contract_digest,
+        ),
+    )
+    settings = SimpleNamespace(
+        model=SimpleNamespace(repo="local/model", revision="f" * 40),
+    )
+
+    artifacts: list[tuple[str, str | None]] = []
+    parameters: dict[str, object] = {}
+    fake_mlflow = ModuleType("mlflow")
+    fake_mlflow.data = SimpleNamespace(  # type: ignore[attr-defined]
+        from_pandas=lambda *_args, **_kwargs: object()
+    )
+    fake_mlflow.set_tags = lambda _tags: None  # type: ignore[attr-defined]
+    fake_mlflow.log_params = parameters.update  # type: ignore[attr-defined]
+    fake_mlflow.log_param = (  # type: ignore[attr-defined]
+        lambda name, value: parameters.__setitem__(name, value)
+    )
+    logged_dicts: list[str] = []
+    fake_mlflow.log_dict = (  # type: ignore[attr-defined]
+        lambda _payload, path: logged_dicts.append(path)
+    )
+    fake_mlflow.log_input = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
+    fake_mlflow.log_metrics = lambda _metrics: None  # type: ignore[attr-defined]
+    fake_mlflow.log_artifact = (  # type: ignore[attr-defined]
+        lambda path, artifact_path=None: artifacts.append(
+            (Path(path).name, artifact_path)
+        )
+    )
+
+    class RunContext:
+        def __enter__(self):
+            return SimpleNamespace(info=SimpleNamespace(run_id="run-1"))
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    fake_mlflow.start_run = lambda **_kwargs: RunContext()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    monkeypatch.setattr(tracking, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tracking, "configure_local_mlflow", lambda _settings: None)
+    monkeypatch.setattr(tracking, "recheck_evaluation_session", lambda _session: None)
+    monkeypatch.setattr(tracking, "recheck_training_snapshot", lambda _snapshot: None)
+    monkeypatch.setattr(
+        tracking,
+        "shared_adapter_lock",
+        lambda _adapter: nullcontext(),
+    )
+
+    run_id = tracking.log_evaluation(
+        settings,  # type: ignore[arg-type]
+        run_name="lora-change",
+        role="change",
+        method="lora-change",
+        metrics={"macro_f1": 0.5},
+        report={
+            "evaluation_execution_contract_sha256": evaluation_contract_digest,
+            "training_manifest_sha256": digest,
+            "training_execution_contract_sha256": training_contract_digest,
+            "inference_config": inference_config.model_dump(mode="json"),
+        },
+        records=({"example_id": "one"},),
+        manifest_path=dataset_manifest,
+        prediction_path=predictions,
+        model_based=True,
+        evaluation_session=evaluation_session,  # type: ignore[arg-type]
+        training_snapshot=snapshot,  # type: ignore[arg-type]
+    )
+
+    assert run_id == "run-1"
+    assert {
+        ("adapters.safetensors", "change"),
+        ("adapter_config.json", "change"),
+        ("training-manifest.json", "change"),
+        ("lora.yaml", "change"),
+    } <= set(artifacts)
+    assert parameters["training_manifest_sha256"] == digest
+    assert parameters["adapter_config_sha256"] == "c" * 64
+    assert parameters["evaluation_execution_contract_sha256"] == (
+        evaluation_contract_digest
+    )
+    assert parameters["training_execution_contract_sha256"] == (
+        training_contract_digest
+    )
+    assert parameters["max_tokens"] == 37
+    assert parameters["model_files_sha256"] == base_model.model_files_sha256
+    assert "runtime/evaluation-execution-contract.json" in logged_dicts
+    assert "evaluation/inference-config.json" in logged_dicts
+    assert "change/training-execution-contract.json" in logged_dicts
+    assert not any(name == "latest.json" for name, _ in artifacts)

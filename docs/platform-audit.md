@@ -1,5 +1,10 @@
 # Platform audit — July 2026
 
+> **Historical snapshot.** This audit is retained for decision history. Its
+> line counts, code references, and backlog status are not current. Use
+> [SDK and template quality standard](quality-standards.md),
+> `compatibility.json`, and the test/CI gates for current acceptance criteria.
+
 A full-repository audit across three lenses (maintainer, first-time developer,
 platform team), plus an upstream/downstream sync review added when the goal of
 cloning this repository into an enterprise Git organisation was confirmed.
@@ -278,21 +283,21 @@ because the Databricks SDK's own auth errors interpolate it verbatim. Both are
 unusually disciplined. Don't regress them.
 
 ## C2. The highest-value enhancement: let the console answer the wizard
-This is the one that matters. Finding **D2** is that the wizard asks 21
-questions and five of them default to `replace-with-*`:
-`model_deployment`, `judge_deployment`, `experiment_id`, `app_usage_policy_id`,
-`foundry_endpoint`. A developer cannot answer any of them, so they cannot
+This is the one that matters. Finding **D2** is that the wizard asks 23
+questions and four of them default to `replace-with-*`:
+`model_deployment`, `judge_deployment`, `experiment_id`,
+`app_usage_policy_id`. A developer cannot answer any of them, so they cannot
 self-serve a working project.
 
 **The console is the only component that can answer them**, because it holds a
 workspace identity and the developer does not. `checks.py` already has the seam
 (`WorkspaceProbe`, a thin testable wrapper). Extending it with list operations —
 serving endpoints, MLflow experiments, catalogs/schemas, usage policies — turns
-five unanswerable free-text fields into pickers of things that actually exist.
+four unanswerable free-text fields into pickers of things that actually exist.
 
 Then extend `generate.py` to emit a populated **`bundle init --config-file`**
 JSON alongside the command, instead of only the bare invocation. The developer's
-experience goes from *"answer 21 prompts, five of which you must file a ticket
+experience goes from *"answer 23 prompts, four of which you must file a ticket
 for"* to *"pick a template, pick from dropdowns, paste two commands."*
 
 `generate.py` is currently 75 lines and already the console's "one genuinely
@@ -500,11 +505,11 @@ conceptual doc, is second-to-last.
 **Recommendation:** one `docs/quickstart.md` that is the only thing linked from
 the top of the README, ending in "you now understand X, go here next."
 
-## D2. The template wizard asks 21 questions, 5 of which you cannot answer
-`templates/agent-app/databricks_template_schema.json` has 21 properties.
-Five carry `replace-with-*` defaults that require the platform team:
-`model_deployment`, `judge_deployment`, `experiment_id`, `app_usage_policy_id`,
-`foundry_endpoint`.
+## D2. The template wizard asks 23 questions, 4 of which you cannot answer
+`templates/agent-app/databricks_template_schema.json` has 23 properties.
+Four carry `replace-with-*` defaults that require the platform team:
+`model_deployment`, `judge_deployment`, `experiment_id`,
+`app_usage_policy_id`.
 
 A first-time developer therefore **cannot generate a working project alone**.
 They generate one, it renders, and it fails at the first cloud call with an
@@ -554,10 +559,10 @@ endpoint) produces the best one. That is backwards.
 
 Three concrete sub-issues:
 - **Inconsistent import guarding.** Only `databricks_openai` gets a friendly
-  error (`resolver.py:119-132`). `foundry`/`azure_apim` (`resolver.py:140,159`),
-  `azure.search.documents` (`:218`), `databricks.ai_search` (`:239`), and both
-  `identity.py` factories raise a raw `ModuleNotFoundError` for the identical
-  class of problem — "you didn't install the extra."
+  error in `resolver.py`. `azure_apim`'s `openai` import,
+  `azure.search.documents`, `databricks.ai_search`, and both `identity.py`
+  factories raise a raw `ModuleNotFoundError` for the identical class of
+  problem — "you didn't install the extra."
 - **`ProviderRequestError` is not exported** from
   `providers/__init__.py:24-39`, while its three siblings are. The one error a
   caller most wants to catch requires reaching into `aai_core.providers.types`.

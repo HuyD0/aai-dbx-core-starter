@@ -16,7 +16,7 @@ failure runbooks are documented in
 | **Guide** | Renders the ladder in `docs/developer-onboarding.md` and `docs/developer-guide.md`. A test asserts every command block is verbatim from the document it cites, so the console cannot drift from the docs. |
 | **Generate** | Builds the `az login` → export → `databricks bundle init` sequence for the chosen template, with this workspace's identifiers already substituted. This is the one thing `scripts/setup_dev.py` cannot do. |
 | **Platform state** | Reports what the *app's own service principal* can reach: its identity, the constrained compute policy, the SDK artifact volume. |
-| **Hub** | Publishes the `ai-platform/v1` schema and registration/workflow API, and renders portfolio, readiness, application detail, cost-optimization, and action-queue surfaces. Hosted stateful and observability capabilities remain gated until the resources in `docs/ai-platform-hub.md` are approved. |
+| **Hub** | Publishes the `ai-platform/v1` schema and registration/workflow API, and renders portfolio, readiness, application detail, cost-optimization, and action-queue surfaces. Durable UAT registry state is available when the optional existing-Lakebase binding is configured; observability and remote workflow capabilities remain gated. |
 | **Estimate** | A cost estimator ([`docs/cost-estimation.md`](cost-estimation.md)): composes multi-workload monthly estimates from a bundled Azure list-price snapshot, entirely stateless and clearly labelled as estimates — never observed billing. |
 
 **The console never verifies your personal access.** On-behalf-of-user authorization is
@@ -70,7 +70,7 @@ The app resource lives at `resources/optional/platform_console.yml`, deliberatel
 the `resources/*.yml` glob in `databricks.yml`, so a clone into a tenant where Apps is
 disabled is unaffected. Enable it with an explicit `include`.
 
-Before any of that can work, three things must be provisioned externally. Creating an app
+Before any of that can work, the base prerequisites must be provisioned externally. Creating an app
 auto-provisions a service principal, and AGENTS.md section 4 rule 8 reserves principal
 registration for the human-run platform process — so **CI must never create the app**, only
 update one that already exists.
@@ -110,6 +110,47 @@ update one that already exists.
 >    Nothing further is required for the original guide and platform-state checks. Hub
 >    registry, serving-view, and Jobs grants are separate opt-ins; request them only
 >    through the ordered enablement checklist in `docs/ai-platform-hub.md`.
+
+### Optional durable Hub state on the existing Lakebase resource
+
+The App resource uses the current Lakebase Autoscaling `postgres` binding. It does not
+create or select a project, branch, database, endpoint, or identity. Before opting the
+resource in, the platform owner must provide these non-secret values:
+
+- `hub_lakebase_branch`: the full
+  `projects/<project>/branches/<branch>` resource path;
+- `hub_lakebase_database`: the full
+  `projects/<project>/branches/<branch>/databases/<database>` resource path; and
+- `hub_lakebase_schema`: a dedicated lowercase PostgreSQL schema name that does not
+  already belong to a developer or another application.
+
+Set `hub_state_mode` to `lakebase`. The resource grants `CAN_CONNECT_AND_CREATE`, and the
+Apps runtime injects the endpoint/host/database/user coordinates. The process uses the
+app service principal to generate OAuth database credentials; no database password or
+connection URL is configured.
+
+Deploy the App before connecting to that schema locally. On first start, the app service
+principal creates and owns the schema, then applies forward-only transactional migrations
+under an advisory lock. If a developer creates it first, the app cannot take ownership
+and intentionally fails closed. Do not drop or reassign an existing schema without a
+reviewed backup and explicit approval: `DROP SCHEMA ... CASCADE` destroys Hub state.
+
+The exact branch and database paths are intentionally required and have no repository
+default. Confirm them with the platform owner; never silently assume a branch named
+`production`. The binding is:
+
+```yaml
+- name: postgres
+  postgres:
+    branch: ${var.hub_lakebase_branch}
+    database: ${var.hub_lakebase_database}
+    permission: CAN_CONNECT_AND_CREATE
+```
+
+Startup fails closed if the binding variables are absent, TLS is not required, the
+endpoint path is not an Autoscaling endpoint path, the app does not own its schema, or
+migration history is inconsistent. Keep `hub_job_mode=unavailable` until durable job
+reconciliation is separately approved.
 
 ### Binding — required, and easy to get wrong
 

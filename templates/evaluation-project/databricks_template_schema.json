@@ -56,7 +56,7 @@
     "model_deployment": {
       "type": "string",
       "default": "replace-with-judge-endpoint",
-      "description": "Databricks serving endpoint used by the LLM judges (gateway-fronted; route Foundry models through an external-model endpoint first)",
+      "description": "Databricks serving endpoint used by the LLM judges (gateway-fronted; route external models through an external-model endpoint first)",
       "order": 9
     },
     "dataset_name": {
@@ -69,7 +69,7 @@
     },
     "aai_core_version": {
       "type": "string",
-      "default": "0.3.0",
+      "default": "0.4.0",
       "description": "Pinned aai-core SDK version",
       "order": 16
     },
@@ -85,17 +85,30 @@
       "description": "Development Azure Databricks workspace",
       "order": 18
     },
+    "uat_workspace_host": {
+      "type": "string",
+      "default": "https://adb-7405613180844632.12.azuredatabricks.net",
+      "description": "UAT Azure Databricks workspace; its identity, grants, and GitHub environment are provisioned externally",
+      "order": 30
+    },
     "compute_policy_id": {
       "type": "string",
       "default": "0005F2031B6D2319",
       "description": "Constrained Job Compute policy",
       "order": 19
     },
+    "aai_core_source_ref": {
+      "type": "string",
+      "default": "ca467b74d2a2c05375cbc93f6e0b0bcca1dffa24",
+      "description": "Immutable SDK source ref used only by credential-free CI: an exact release-candidate commit, or the annotated v<version> tag after publication",
+      "order": 31,
+      "pattern": "^(?:[0-9a-f]{40}|v[0-9]+\\.[0-9]+\\.[0-9]+(?:[A-Za-z0-9.-]+)?)$"
+    },
     "aai_core_pip_source": {
       "type": "string",
-      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@v{{.aai_core_version}}",
-      "description": "pip-installable aai-core source used only by credential-free CI; MUST resolve to exactly aai_core_version (default: the release git tag; for an internal index use 'aai-core=={{.aai_core_version}}'). Runtime jobs always install the checksum-pinned volume wheel",
-      "order": 20
+      "default": "git+https://github.com/HuyD0/aai-dbx-core-starter@{{.aai_core_source_ref}}",
+      "description": "pip-installable aai-core source used only by credential-free CI; its immutable ref is governed by aai_core_source_ref. Runtime jobs never use this source and require the separately published checksum-pinned volume wheel",
+      "order": 32
     }
   },
   "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # deterministic tier, zero credentials\n  4. python scripts/sync_dataset.py      # publish cases to the UC dataset\n  5. make evaluate                       # full judge gate + published report\n\nRun `make help` for every available target."

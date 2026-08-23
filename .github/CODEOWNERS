@@ -1,4 +1,10 @@
 # Every change can influence code that is validated or deployed by CI.
 # This is enforced by `main` protection; Codex opens PRs and the human owner
 # reviews them before merge.
+#
+# CLONES: replace the owner below with a non-personal enterprise team that has
+# at least two eligible reviewers, and confirm GitHub recognises it as a code
+# owner. See docs/enterprise-clone-runbook.md section 7. Merges from upstream
+# will keep offering this line back — it is an upstream username, not a
+# stamped identifier, so no test can catch it for you.
 * @HuyD0

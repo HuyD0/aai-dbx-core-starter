@@ -1,5 +1,8 @@
 # {{.project_name}}
 
+The supported delivery path is dev to UAT; follow
+[`docs/uat-promotion.md`](docs/uat-promotion.md) after the dev release gate passes.
+
 Reproducible MLflow experiment project generated from the AAI platform
 template (`experiment-starter`). No LLMs — this is the foundation rung of the
 template ladder: governed tags, dataset lineage, deterministic metrics,
@@ -29,14 +32,23 @@ resources.
    source commit, and environment freeze are what make a rerun possible.
 2. Run locally: `python jobs/run_experiment.py` (writes a tracked run to
    `{{.experiment_name}}`).
-3. Gate a release: `python evals/evaluate.py` applies the thresholds in
-   `evals/gate_config.json`; after a released run passes, refresh the
-   regression baseline with `--update-baseline`.
-4. Deploy the scheduled job: `databricks bundle validate -t dev` then
+3. Publish the reviewed rows with `python scripts/sync_dataset.py`. This gets
+   or creates the native MLflow EvaluationDataset named in `ai-app.yaml` and
+   associates it with this application's governed experiment.
+4. Gate a release: `python evals/evaluate.py` verifies that registered dataset
+   against `data/sample.csv`, logs its ID/digest as run input, and applies the
+   thresholds in `evals/gate_config.json`. After a released run passes,
+   refresh the regression baseline with `--update-baseline`.
+5. Deploy the scheduled job: `databricks bundle validate -t dev` then
    `databricks bundle deploy -t dev`.
 
 Pull-request CI runs only the deterministic checks
 (`evals/offline_checks.py`) — it never holds credentials.
+
+The identity that publishes or evaluates the governed suite needs these Unity
+Catalog privileges: `USE CATALOG` on `{{.catalog}}`, plus `USE SCHEMA`,
+`CREATE TABLE`, `MODIFY`, and `SELECT` on `{{.catalog}}.{{.schema}}`. Grant
+them through the platform process; the project never grants permissions itself.
 
 The platform team must onboard this repository (main-branch federated
 credential, Databricks service principal, constrained compute permission,

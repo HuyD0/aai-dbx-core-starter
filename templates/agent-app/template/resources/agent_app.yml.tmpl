@@ -18,6 +18,12 @@ resources:
             value: {{.experiment_id}}
           - name: AAI_PLATFORM_CONFIG
             value: aai-platform.yml
+          - name: AAI_ENVIRONMENT
+            value: ${var.deployment_environment}
+          - name: AAI_LIFECYCLE
+            value: ${var.deployment_lifecycle}
+          - name: AAI_RELEASE
+            value: ${var.deployment_release}
           # This is the same immutable version passed to release_gate. App
           # startup refuses to resolve a mutable prompt alias.
           - name: AAI_PROMPT_VERSION

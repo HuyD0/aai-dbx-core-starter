@@ -1,5 +1,8 @@
 # {{.project_name}}
 
+The supported delivery path is dev to UAT; follow
+[`docs/uat-promotion.md`](docs/uat-promotion.md) after the dev release gate passes.
+
 A governed self-service analytics agent over a **neutral, git-versioned
 semantic layer**. The architecture follows the published playbook for
 LLM analytics that actually holds up: collapse ambiguity into one governed
@@ -11,7 +14,7 @@ question
   -> runbook agent (clarify first)
   -> semantic layer FIRST  (semantics/semantic_model.yml, compiled to SQL)
   -> curated references    (knowledge/*.md via the router)
-  -> guarded raw fallback  (read-only, lower provenance tier)
+  -> governed row fallback (`query_rows`, declared fields + typed values)
   -> answer + provenance footer (tier / sources / owner / freshness / SQL)
 ```
 
@@ -28,14 +31,22 @@ SQL (`compiler.py`). It is not a warehouse object, so:
 - the warehouse is a plug-in. Databricks ships in
   `src/app/semantics/executor.py`; any other warehouse (e.g. Snowflake) is
   an application-code implementation of the three-method
-  `WarehouseExecutor` protocol (`run_plan`, `execute`, `latest_loaded_at`)
+`WarehouseExecutor` protocol (`run_plan`, `query_rows`, `latest_loaded_at`)
   — no platform change, same compiled grammar.
+
+The model never receives an SQL tool. The Databricks adapter retains each
+statement ID, limits warehouse concurrency to eight operations, and cancels
+the remote statement when its 60-second tool deadline or the 180-second
+request deadline expires. Questions cap at 8,000 characters, row results at
+100, serialized tool output at 32 KiB, total tool calls at 12, and generated
+output at 2,048 tokens.
 
 ## Lifecycle
 
 ```bash
 python3.12 scripts/setup_dev.py   # preflight + isolated setup
 make check                        # lint, tests, tier-1 offline gate
+python scripts/sync_dataset.py    # publish reviewed cases to UC
 databricks bundle deploy -t dev
 databricks bundle run release_gate -t dev   # seed snapshot, then tier-2 gate
 ```
@@ -49,8 +60,13 @@ deterministic provenance scorers.
 Tier 2 (`evals/evaluate.py`, the `release_gate` job) runs the real agent
 against the live warehouse, adds Correctness/Safety judges, enforces the
 regression baseline (`--update-baseline` records it) and cost coverage,
-and logs telemetry per run: semantic-model version, knowledge digest,
-model + judge identity, git provenance, token usage, verdict.
+and evaluates the native MLflow EvaluationDataset named in `ai-app.yaml`.
+Each run records its dataset ID/digest alongside semantic-model version,
+knowledge digest, model + judge identity, git provenance, token usage, and
+verdict. The gate fails if the registered suite differs from the reviewed
+`evals/data/golden_cases.json` source. The SDK's strict judge resolver runs
+before warehouse resolution or agent construction, so invalid judge
+configuration fails before live target work.
 
 ## External prerequisites (platform-owned, one-time)
 
@@ -60,7 +76,7 @@ Provisioned through the approved platform process, never by this repo:
   deploying identity; its id goes into the `warehouse_id` bundle variable.
 - `USE CATALOG` on the target catalog; `USE SCHEMA`, `CREATE TABLE`,
   `MODIFY`, `SELECT` on the target schema (the seed job writes the demo
-  star schema there).
+  star schema and the dataset sync creates the evaluation dataset there).
 - `CAN_QUERY` on the chat model and judge serving endpoints.
 
 ## Tokenomics

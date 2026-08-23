@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "matplotlib==3.11.1",
-  "mlflow==3.14.0",
+  "mlflow==3.15.1",
   "numpy==2.5.1; python_version >= '3.12'",
   "numpy==1.26.4; python_version < '3.12'",
   "pandas==2.3.3",
@@ -24,7 +24,9 @@ dev = [
   "black[jupyter]==26.5.1",
   "ipykernel==7.3.0",
   "jupyterlab==4.6.2",
+  "pip-audit==2.10.1",
   "pytest==9.1.1",
+  "pytest-cov==7.1.0",
   "ruff==0.16.0",
 ]
 
@@ -38,6 +40,16 @@ packages = ["src/aai_local_classification"]
 addopts = "-ra"
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["aai_local_classification"]
+
+[tool.coverage.report]
+fail_under = 92
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:"]
 
 [tool.ruff]
 target-version = "py311"

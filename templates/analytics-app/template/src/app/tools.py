@@ -1,8 +1,7 @@
 """Application-owned async tools implementing the runbook's search order.
 
-query_metrics is the structurally-first path: it accepts a constrained plan,
-never free SQL. execute_sql is the guarded raw fallback and is always
-recorded at the lower raw_table provenance tier. Every tool feeds the
+query_metrics is the aggregate path and query_rows is the governed row-level
+fallback. Both accept constrained plans, never SQL. Every tool feeds the
 ProvenanceLog so the agent can render an evidence footer the model cannot
 fabricate. Tool outputs are context-budgeted: row sets truncate to
 MAX_RESULT_ROWS_IN_CONTEXT (with the true row count stated) and reference
@@ -15,33 +14,38 @@ import asyncio
 import datetime as dt
 import inspect
 import json
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aai_core.exceptions import AaiCoreError
 from aai_core.tracing import provider_span
 from app.config import MAX_REFERENCE_DOC_CHARS, MAX_RESULT_ROWS_IN_CONTEXT
+from app.controls import DEFAULT_ANALYTICS_LIMITS, AnalyticsLimits
 from app.knowledge import KnowledgeRouter
 from app.provenance import ProvenanceRecord, SourceTier
 from app.semantics.compiler import (
+    OrderDirection,
     QueryFilter,
+    RowFilter,
+    RowOperator,
+    RowOrder,
+    RowQuery,
     SemanticCompileError,
     SemanticQuery,
     TimeGrain,
     compile_query,
+    compile_rows,
 )
 from app.semantics.executor import (
+    AsyncWarehouseExecutor,
     QueryResult,
     WarehouseExecutionError,
     WarehouseExecutor,
 )
 from app.semantics.models import SemanticModel
-
-_FROM_TABLES = re.compile(r"\b(?:FROM|JOIN)\s+([`\w.]+)", re.IGNORECASE)
 
 
 class ToolExecutionError(AaiCoreError):
@@ -109,7 +113,7 @@ class QueryMetricsInput(BaseModel):
     time_grain: str | None = Field(
         default=None, description="Bucket size for time_dimension"
     )
-    limit: int = Field(default=100, description="Maximum rows (1-1000)")
+    limit: int = Field(default=100, ge=1, le=100, description="Maximum rows")
 
 
 class LookupReferenceInput(BaseModel):
@@ -118,12 +122,39 @@ class LookupReferenceInput(BaseModel):
     topic: str = Field(description="Knowledge topic from the index")
 
 
-class ExecuteSqlInput(BaseModel):
+ScalarInput = str | int | float | bool
+
+
+class RowFilterInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    sql: str = Field(description="One read-only SELECT statement")
+    field: str = Field(description="Governed detail field name")
+    operator: Literal["eq", "ne", "lt", "lte", "gt", "gte", "in", "is_null"]
+    value: ScalarInput | list[ScalarInput] | None = Field(
+        default=None,
+        description="Typed value; use a list only with the in operator",
+    )
+
+
+class RowOrderInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    field: str = Field(description="Governed detail field name")
+    direction: Literal["asc", "desc"] = "asc"
+
+
+class QueryRowsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source: str = Field(description="Source name from the semantic model")
+    fields: list[str] = Field(min_length=1, max_length=20)
+    filters: list[RowFilterInput] = Field(default_factory=list, max_length=20)
+    order_by: list[RowOrderInput] = Field(default_factory=list, max_length=5)
+    limit: int = Field(default=100, ge=1, le=100)
     reason: str = Field(
-        description="Why the semantic layer cannot answer this question"
+        min_length=3,
+        max_length=500,
+        description="Why row-level detail is required instead of a metric",
     )
 
 
@@ -140,6 +171,7 @@ class ToolSpec:
     input_model: type[BaseModel]
     handler: Callable[..., Awaitable[Any]]
     timeout_seconds: float = 180.0
+    max_output_chars: int = 32 * 1024
 
     def as_openai_tool(self) -> dict[str, Any]:
         return {
@@ -203,19 +235,85 @@ class AsyncToolRegistry:
             except Exception as error:
                 raise ToolExecutionError(f"Tool {name!r} failed") from error
             serialized = result if isinstance(result, str) else json.dumps(result)
+            if len(serialized) > spec.max_output_chars:
+                raise ToolExecutionError(
+                    f"Tool {name!r} output exceeded its "
+                    f"{spec.max_output_chars}-character bound"
+                )
             if span is not None:
                 span.set_outputs(serialized)
             return serialized
 
 
-def build_registry(
+def build_analytics_registry(
     model: SemanticModel,
     knowledge: KnowledgeRouter,
     executor: WarehouseExecutor,
     log: ProvenanceLog,
+    limits: AnalyticsLimits = DEFAULT_ANALYTICS_LIMITS,
 ) -> AsyncToolRegistry:
-    """Bind the runbook tools to this request's model, docs, and executor."""
+    """Bind the analytics tools to this request's model, docs, and executor."""
 
+    return AsyncToolRegistry(
+        (
+            ToolSpec(
+                name="list_metrics",
+                description="List the governed metric catalog, available "
+                "dimensions, and dimension value encodings. Cheap; call first.",
+                input_model=ListMetricsInput,
+                handler=_list_metrics_handler(model),
+                timeout_seconds=10.0,
+                max_output_chars=limits.max_tool_output_chars,
+            ),
+            ToolSpec(
+                name="query_metrics",
+                description="Answer through the governed semantic layer: "
+                "aggregate declared metrics by declared dimensions with "
+                "structured filters. This is the required first query path.",
+                input_model=QueryMetricsInput,
+                handler=_query_metrics_handler(
+                    model, executor, log, limits.max_result_rows
+                ),
+                timeout_seconds=limits.tool_timeout_seconds,
+                max_output_chars=limits.max_tool_output_chars,
+            ),
+            ToolSpec(
+                name="lookup_reference",
+                description="Load one curated reference doc (grain, scope, "
+                "encodings, gotchas, patterns) by topic from the knowledge "
+                "index in the system prompt.",
+                input_model=LookupReferenceInput,
+                handler=_lookup_reference_handler(knowledge, log),
+                timeout_seconds=10.0,
+                max_output_chars=limits.max_tool_output_chars,
+            ),
+            ToolSpec(
+                name="query_rows",
+                description="Governed row-level fallback. Select only declared "
+                "sources and fields with typed filters and bounded ordering; "
+                "SQL is compiled by the application and cannot be supplied.",
+                input_model=QueryRowsInput,
+                handler=_query_rows_handler(
+                    model, executor, log, limits.max_result_rows
+                ),
+                timeout_seconds=limits.tool_timeout_seconds,
+                max_output_chars=limits.max_tool_output_chars,
+            ),
+            ToolSpec(
+                name="check_freshness",
+                description="Check a source table's loaded_at watermark "
+                "against its freshness SLA; cite the result when staleness "
+                "would change the answer.",
+                input_model=CheckFreshnessInput,
+                handler=_freshness_handler(model, executor, log),
+                timeout_seconds=limits.tool_timeout_seconds,
+                max_output_chars=limits.max_tool_output_chars,
+            ),
+        )
+    )
+
+
+def _list_metrics_handler(model: SemanticModel) -> Callable[..., Awaitable[Any]]:
     async def list_metrics() -> dict[str, Any]:
         encodings = {
             name: dict(dimension.encodings)
@@ -227,11 +325,21 @@ def build_registry(
             "dimension_encodings": encodings,
         }
 
+    return list_metrics
+
+
+def _query_metrics_handler(
+    model: SemanticModel,
+    executor: WarehouseExecutor,
+    log: ProvenanceLog,
+    max_result_rows: int,
+) -> Callable[..., Awaitable[Any]]:
+
     async def query_metrics(**arguments: Any) -> dict[str, Any]:
         try:
-            query = _semantic_query(arguments)
+            query = _semantic_query(arguments, max_result_rows)
             compiled = compile_query(model, query, executor.dialect)
-            result = await asyncio.to_thread(executor.run_plan, model, query)
+            result = await _run_plan(executor, model, query)
         except (SemanticCompileError, ValidationError, ValueError, KeyError) as error:
             return {
                 "error": str(error),
@@ -254,6 +362,14 @@ def build_registry(
         )
         return _bounded_result(result)
 
+    return query_metrics
+
+
+def _lookup_reference_handler(
+    knowledge: KnowledgeRouter,
+    log: ProvenanceLog,
+) -> Callable[..., Awaitable[Any]]:
+
     async def lookup_reference(topic: str) -> dict[str, Any]:
         try:
             doc = knowledge.load(topic)
@@ -271,23 +387,50 @@ def build_registry(
         )
         return {"title": doc.title, "body": body, "truncated": truncated}
 
-    async def execute_sql(sql: str, reason: str) -> dict[str, Any]:
+    return lookup_reference
+
+
+def _query_rows_handler(
+    model: SemanticModel,
+    executor: WarehouseExecutor,
+    log: ProvenanceLog,
+    max_result_rows: int,
+) -> Callable[..., Awaitable[Any]]:
+
+    async def query_rows(**arguments: Any) -> dict[str, Any]:
         try:
-            result = await asyncio.to_thread(executor.execute, sql)
+            query = _row_query(arguments, max_result_rows)
+            compiled = compile_rows(model, query, executor.dialect)
+            result = await _run_rows(executor, model, query)
+        except (SemanticCompileError, ValidationError, ValueError, KeyError) as error:
+            return {
+                "error": str(error),
+                "hint": "call list_metrics for governed sources and row fields",
+            }
         except WarehouseExecutionError as error:
             return {"error": str(error)}
         log.add(
             ProvenanceRecord(
                 tier=SourceTier.RAW_TABLE,
-                sources=_referenced_tables(result.sql),
+                sources=compiled.sources,
+                owner=model.sources[query.source].owner,
                 rows=len(result.rows),
                 value=result.scalar,
                 sql=result.sql,
             )
         )
         payload = _bounded_result(result)
-        payload["reason"] = reason
+        payload["reason"] = query.reason
         return payload
+
+    return query_rows
+
+
+def _freshness_handler(
+    model: SemanticModel,
+    executor: WarehouseExecutor,
+    log: ProvenanceLog,
+) -> Callable[..., Awaitable[Any]]:
 
     async def check_freshness(source: str) -> dict[str, Any]:
         table = model.sources.get(source)
@@ -301,7 +444,7 @@ def build_registry(
                 "loaded_at": None,
                 "note": "source declares no loaded_at_column",
             }
-        loaded_at = await asyncio.to_thread(executor.latest_loaded_at, model, source)
+        loaded_at = await _latest_loaded_at(executor, model, source)
         within = _within_sla(loaded_at, table.freshness_sla_hours)
         status = "within" if within else "OUTSIDE"
         note = f"loaded {loaded_at} ({status} the {table.freshness_sla_hours}h SLA)"
@@ -322,54 +465,12 @@ def build_registry(
             "within_sla": within,
         }
 
-    return AsyncToolRegistry(
-        (
-            ToolSpec(
-                name="list_metrics",
-                description="List the governed metric catalog, available "
-                "dimensions, and dimension value encodings. Cheap; call first.",
-                input_model=ListMetricsInput,
-                handler=list_metrics,
-                timeout_seconds=10.0,
-            ),
-            ToolSpec(
-                name="query_metrics",
-                description="Answer through the governed semantic layer: "
-                "aggregate declared metrics by declared dimensions with "
-                "structured filters. This is the required first query path.",
-                input_model=QueryMetricsInput,
-                handler=query_metrics,
-            ),
-            ToolSpec(
-                name="lookup_reference",
-                description="Load one curated reference doc (grain, scope, "
-                "encodings, gotchas, patterns) by topic from the knowledge "
-                "index in the system prompt.",
-                input_model=LookupReferenceInput,
-                handler=lookup_reference,
-                timeout_seconds=10.0,
-            ),
-            ToolSpec(
-                name="execute_sql",
-                description="Guarded read-only fallback for questions the "
-                "semantic layer cannot express (row-level detail). Recorded "
-                "at the lower raw_table provenance tier; explain the reason.",
-                input_model=ExecuteSqlInput,
-                handler=execute_sql,
-            ),
-            ToolSpec(
-                name="check_freshness",
-                description="Check a source table's loaded_at watermark "
-                "against its freshness SLA; cite the result when staleness "
-                "would change the answer.",
-                input_model=CheckFreshnessInput,
-                handler=check_freshness,
-            ),
-        )
-    )
+    return check_freshness
 
 
-def _semantic_query(arguments: Mapping[str, Any]) -> SemanticQuery:
+def _semantic_query(
+    arguments: Mapping[str, Any], max_result_rows: int = 100
+) -> SemanticQuery:
     filters = tuple(
         QueryFilter(
             dimension=item["dimension"],
@@ -379,13 +480,53 @@ def _semantic_query(arguments: Mapping[str, Any]) -> SemanticQuery:
         for item in arguments.get("filters", ())
     )
     grain = arguments.get("time_grain")
+    limit = int(arguments.get("limit", max_result_rows))
+    if limit > max_result_rows:
+        raise SemanticCompileError(
+            f"query limit exceeds the configured {max_result_rows}-row bound"
+        )
     return SemanticQuery(
         metrics=tuple(arguments.get("metrics", ())),
         dimensions=tuple(arguments.get("dimensions", ())),
         filters=filters,
         time_dimension=arguments.get("time_dimension"),
         time_grain=TimeGrain(grain) if grain else None,
-        limit=int(arguments.get("limit", 100)),
+        limit=limit,
+    )
+
+
+def _row_query(arguments: Mapping[str, Any], max_result_rows: int = 100) -> RowQuery:
+    filters = tuple(
+        RowFilter(
+            field=item["field"],
+            operator=RowOperator(item["operator"]),
+            value=(
+                tuple(item["value"])
+                if isinstance(item.get("value"), list)
+                else item.get("value")
+            ),
+        )
+        for item in arguments.get("filters", ())
+    )
+    orders = tuple(
+        RowOrder(
+            field=item["field"],
+            direction=OrderDirection(item.get("direction", "asc")),
+        )
+        for item in arguments.get("order_by", ())
+    )
+    limit = int(arguments.get("limit", max_result_rows))
+    if limit > max_result_rows:
+        raise SemanticCompileError(
+            f"query limit exceeds the configured {max_result_rows}-row bound"
+        )
+    return RowQuery(
+        source=arguments["source"],
+        fields=tuple(arguments["fields"]),
+        filters=filters,
+        order_by=orders,
+        limit=limit,
+        reason=arguments["reason"],
     )
 
 
@@ -400,13 +541,34 @@ def _bounded_result(result: QueryResult) -> dict[str, Any]:
     }
 
 
-def _referenced_tables(sql: str) -> tuple[str, ...]:
-    tables = []
-    for match in _FROM_TABLES.finditer(sql):
-        cleaned = match.group(1).replace("`", "")
-        if cleaned and cleaned not in tables:
-            tables.append(cleaned)
-    return tuple(tables) if tables else ("ad-hoc",)
+async def _run_plan(
+    executor: WarehouseExecutor,
+    model: SemanticModel,
+    query: SemanticQuery,
+) -> QueryResult:
+    if isinstance(executor, AsyncWarehouseExecutor):
+        return await executor.arun_plan(model, query)
+    return await asyncio.to_thread(executor.run_plan, model, query)
+
+
+async def _run_rows(
+    executor: WarehouseExecutor,
+    model: SemanticModel,
+    query: RowQuery,
+) -> QueryResult:
+    if isinstance(executor, AsyncWarehouseExecutor):
+        return await executor.aquery_rows(model, query)
+    return await asyncio.to_thread(executor.query_rows, model, query)
+
+
+async def _latest_loaded_at(
+    executor: WarehouseExecutor,
+    model: SemanticModel,
+    source: str,
+) -> str | None:
+    if isinstance(executor, AsyncWarehouseExecutor):
+        return await executor.alatest_loaded_at(model, source)
+    return await asyncio.to_thread(executor.latest_loaded_at, model, source)
 
 
 def _within_sla(loaded_at: str | None, sla_hours: int) -> bool:

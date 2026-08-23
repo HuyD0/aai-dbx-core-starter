@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -17,12 +18,14 @@ import mlflow
 from mlflow.genai.scorers import Correctness, RelevanceToQuery, Safety
 
 from aai_core import bootstrap
+from aai_core.decisions import Decision, DecisionRecord, record_decision
 from aai_core.evaluation import (
     GatePolicy,
     MetricRule,
     apply_gate,
+    judge_model_uri,
 )
-from aai_core.providers.types import ProviderConfigurationError
+from aai_core.prompts import prompt_digest
 from app.assistant import Assistant
 from app.config import DATASET_NAME, PROMPT_NAME
 
@@ -65,8 +68,13 @@ def main() -> None:
     )
     parser.add_argument("--update-baseline", action="store_true")
     args = parser.parse_args()
+    # Registry versions start at 1, so a typo must fail here rather than
+    # during the credentialed load inside Assistant.
+    if args.prompt_version is not None and args.prompt_version < 1:
+        parser.error("--prompt-version must be a positive integer")
 
     context = bootstrap(ROOT / "aai-platform.yml")
+    judge_model = judge_model_uri(context.settings)
     version = resolve_version(context, args.prompt_version)
     assistant = Assistant(context, prompt_version=version)
     prompt_uri = f"prompts:/{context.prompts.qualify(PROMPT_NAME)}/{version}"
@@ -76,12 +84,13 @@ def main() -> None:
     cases = json.loads(
         (ROOT / "evals" / "data" / "release_cases.json").read_text(encoding="utf-8")
     )
-    judge_model = _judge_model_uri(context.settings)
+    target_identity, judge_identity = _evaluation_model_identities(context.settings)
     baseline = load_baseline()
     policy = GatePolicy(
         rules=tuple(load_thresholds()),
         allow_missing_regression_baseline=args.update_baseline and not baseline,
     )
+    dataset = _load_release_dataset(dataset_name, cases)
     # A governed MLflow run: aai.* tags, pinned prompt URI + dataset as
     # params, gate metrics, verdict tag, and the evaluation traces attached.
     with context.experiments.run(
@@ -90,11 +99,19 @@ def main() -> None:
             "prompt_version": version,
             "prompt_uri": prompt_uri,
             "evaluation_dataset": dataset_name,
+            "evaluation_dataset_id": dataset.dataset_id,
+            "evaluation_dataset_digest": dataset.digest,
             "case_count": len(cases),
+            "target_model": target_identity,
+            "judge_model": judge_identity,
         },
-    ):
+    ) as evaluation_run:
+        registered = context.prompts.load(
+            PROMPT_NAME, version=version, cache_ttl_seconds=0
+        )
+        _validate_dataset_association(dataset, evaluation_run.info.experiment_id)
         native_result = mlflow.genai.evaluate(
-            data=cases,
+            data=dataset,
             predict_fn=assistant.ask,
             scorers=[
                 Correctness(model=judge_model),
@@ -108,9 +125,46 @@ def main() -> None:
             baseline_metrics=baseline,
         )
         mlflow.log_metrics(dict(report.metrics))
-        mlflow.set_tag("aai.gate_passed", str(report.passed).lower())
-    report.require_passed()
-    if args.update_baseline:
+        mlflow.log_params(
+            {
+                "gate_policy_digest": report.policy_digest,
+                "gate_baseline_digest": report.baseline_digest or "none",
+            }
+        )
+        mlflow.set_tags(
+            {
+                "aai.gate_passed": str(report.passed).lower(),
+                "aai.target_model": target_identity,
+                "aai.judge_model": judge_identity,
+            }
+        )
+        evaluation_run_id = str(evaluation_run.info.run_id)
+    template = getattr(registered, "template", None)
+    if not isinstance(template, (str, list)):
+        raise TypeError(
+            "The evaluated prompt version exposes no template for decision evidence."
+        )
+    decision = Decision.ADOPT if report.passed else Decision.REJECT
+    decision_run_id = record_decision(
+        DecisionRecord(
+            decision=decision,
+            change_id=f"prompt-v{version}",
+            change_summary=f"Evaluate pinned prompt version {version} for release.",
+            rationale=(
+                "The release gate passed for the exact registered prompt version."
+                if report.passed
+                else "The release gate failed for the exact registered prompt version."
+            ),
+            change_run_id=evaluation_run_id,
+            gate=report,
+            prompt_name=context.prompts.qualify(PROMPT_NAME),
+            prompt_version=version,
+            prompt_digest=prompt_digest(template),
+            decided_by="code:release-gate",
+        ),
+        experiments=context.experiments,
+    )
+    if report.passed and args.update_baseline:
         BASELINE.write_text(
             json.dumps({"metrics": dict(report.metrics)}, indent=2, sort_keys=True)
             + "\n",
@@ -120,22 +174,101 @@ def main() -> None:
         {
             "prompt": PROMPT_NAME,
             "prompt_version": version,
+            "evaluation_run": evaluation_run_id,
             "metrics": report.metrics,
             "baseline_updated": args.update_baseline,
+            "decision": decision.value,
+            "decision_run_id": decision_run_id,
         }
+    )
+    report.require_passed()
+
+
+def _evaluation_model_identities(settings) -> tuple[str, str]:
+    target = _model_config(settings, "general-chat")
+    judge = _model_config(settings, "judge-model")
+    if (
+        judge["provider"].casefold() == target["provider"].casefold()
+        and judge["deployment"].casefold() == target["deployment"].casefold()
+    ):
+        raise ValueError(
+            "judge-model must use a deployment distinct from general-chat; "
+            "a release gate cannot rely on the target judging itself"
+        )
+    target_identity = f"{target['provider']}:{target['deployment']}"
+    judge_identity = f"{judge['provider']}:{judge['deployment']}"
+    return target_identity, judge_identity
+
+
+def _model_config(settings, logical_name: str) -> dict[str, str]:
+    config = settings.models.get(logical_name)
+    if not isinstance(config, Mapping):
+        raise ValueError(f"{logical_name} must be configured")
+    provider = config.get("provider")
+    deployment = config.get("deployment")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError(f"{logical_name} requires a provider")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise ValueError(f"{logical_name} requires a deployment")
+    return {
+        "provider": provider.strip(),
+        "deployment": deployment.strip(),
+    }
+
+
+def _load_release_dataset(name: str, reviewed_cases: list[dict]):
+    dataset = mlflow.genai.datasets.get_dataset(name=name)
+    if not isinstance(dataset.dataset_id, str) or not dataset.dataset_id.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable dataset ID")
+    if not isinstance(dataset.digest, str) or not dataset.digest.strip():
+        raise RuntimeError(f"Unity Catalog dataset {name!r} has no stable digest")
+    registered_cases = dataset.to_df().to_dict(orient="records")
+    expected = Counter(_case_key(record) for record in reviewed_cases)
+    actual = Counter(_case_key(record) for record in registered_cases)
+    if actual != expected:
+        missing = sum((expected - actual).values())
+        extra = sum((actual - expected).values())
+        raise RuntimeError(
+            f"Unity Catalog dataset {name!r} differs from the reviewed release "
+            f"suite (missing={missing}, extra={extra}). Run "
+            "scripts/sync_dataset.py; if stale records remain, use a new "
+            "versioned DATASET_NAME rather than evaluating unreviewed rows."
+        )
+    return dataset
+
+
+def _validate_dataset_association(dataset, experiment_id: str) -> None:
+    associated = {str(value) for value in (dataset.experiment_ids or [])}
+    if str(experiment_id) not in associated:
+        raise RuntimeError(
+            "The release dataset is not associated with this application's "
+            "configured experiment"
+        )
+
+
+def _case_key(record: Mapping) -> str:
+    return json.dumps(
+        {
+            "inputs": record.get("inputs"),
+            "expectations": record.get("expectations"),
+            "tags": _review_tags(record),
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
-def _judge_model_uri(settings) -> str:
-    config = settings.models.get("judge-model")
-    if not isinstance(config, Mapping) or config.get("provider") != "databricks":
-        raise ProviderConfigurationError(
-            "judge-model must resolve to a governed Databricks serving endpoint"
-        )
-    deployment = config.get("deployment")
-    if not isinstance(deployment, str) or not deployment.strip():
-        raise ProviderConfigurationError("judge-model requires a deployment")
-    return f"endpoints:/{deployment.strip()}"
+def _review_tags(record: Mapping) -> dict:
+    tags = record.get("tags") or {}
+    if not isinstance(tags, Mapping):
+        raise TypeError("Evaluation case tags must be an object")
+    return {
+        str(key): value
+        for key, value in tags.items()
+        if not str(key).casefold().startswith("mlflow.")
+    }
 
 
 if __name__ == "__main__":

@@ -89,9 +89,10 @@ class ASGIClient:
             (name.lower().encode(), value.encode())
             for name, value in (headers or {}).items()
         )
-        if json is not None:
-            if not any(name == b"content-type" for name, _ in encoded_headers):
-                encoded_headers.append((b"content-type", b"application/json"))
+        if json is not None and not any(
+            name == b"content-type" for name, _ in encoded_headers
+        ):
+            encoded_headers.append((b"content-type", b"application/json"))
 
         scope = {
             "type": "http",

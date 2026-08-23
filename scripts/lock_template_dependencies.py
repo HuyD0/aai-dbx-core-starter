@@ -1,12 +1,12 @@
-"""Generate exact universal transitive locks for every project template.
+"""Generate exact universal transitive locks for generated projects.
 
 The template ``pyproject.toml.tmpl`` files remain the human-edited declaration
 of supported ranges. This script selects their certified direct versions from
 ``dependency-policy.toml`` and asks the pinned uv toolchain to resolve the full
-Python 3.11/3.12 graph. Databricks jobs and Apps both consume the resulting
-plain requirements files, so they intentionally use exact pins without pip's
-global hash mode (the private aai-core wheel is verified separately against
-its release manifest).
+Python 3.11/3.12 graph. It also resolves the exact shared development toolchain.
+Databricks jobs and Apps consume plain requirements files, so the locks use
+exact pins without pip's global hash mode (the private aai-core wheel is
+verified separately against its release manifest).
 """
 
 from __future__ import annotations
@@ -22,6 +22,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "templates"
+SHARED_DEV_INPUT = TEMPLATES / "_shared" / "requirements-dev.in"
+SHARED_DEV_LOCK = TEMPLATES / "_shared" / "files" / "requirements-dev.lock"
+POLICY_FILE = ROOT / "dependency-policy.toml"
 REQUIREMENT = re.compile(r"^(?P<name>[A-Za-z0-9_.-]+)(?P<extras>\[[^\]]+\])?")
 NAME_NORMALIZER = re.compile(r"[-_.]+")
 
@@ -56,14 +59,47 @@ def certified_requirements(
     return tuple(sorted(result, key=str.casefold))
 
 
+def certified_constraints() -> tuple[str, ...]:
+    """Return the repository-wide certified versions as resolver constraints."""
+
+    with POLICY_FILE.open("rb") as stream:
+        policy = tomllib.load(stream)
+    return tuple(
+        sorted(
+            (
+                f"{name}=={details['certified']}"
+                for name, details in policy["packages"].items()
+            ),
+            key=str.casefold,
+        )
+    )
+
+
 def discover_targets() -> list[LockTarget]:
-    with (ROOT / "dependency-policy.toml").open("rb") as stream:
+    with POLICY_FILE.open("rb") as stream:
         policy = tomllib.load(stream)
     certified = {
         normalized_name(name): str(details["certified"])
         for name, details in policy["packages"].items()
     }
-    targets = []
+    shared_dev_requirements = tuple(
+        sorted(
+            (
+                line.strip()
+                for line in SHARED_DEV_INPUT.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ),
+            key=str.casefold,
+        )
+    )
+    targets = [
+        LockTarget(
+            template="_shared",
+            name="development",
+            output=SHARED_DEV_LOCK,
+            requirements=shared_dev_requirements,
+        )
+    ]
     for template in sorted(TEMPLATES.iterdir()):
         project_file = template / "template" / "pyproject.toml.tmpl"
         if not project_file.is_file():
@@ -115,8 +151,12 @@ def render_lock(
     with tempfile.TemporaryDirectory() as scratch:
         scratch_path = Path(scratch)
         inputs = scratch_path / "requirements.in"
+        policy_constraints = scratch_path / "certified-constraints.txt"
         output = scratch_path / "requirements.lock"
         inputs.write_text(direct, encoding="utf-8")
+        policy_constraints.write_text(
+            "\n".join(certified_constraints()) + "\n", encoding="utf-8"
+        )
         command = [
             uv,
             "pip",
@@ -130,6 +170,8 @@ def render_lock(
             "--quiet",
             "--output-file",
             str(output),
+            "--constraints",
+            str(policy_constraints),
         ]
         if existing_lock is None:
             command.append("--upgrade")
@@ -143,8 +185,10 @@ def render_lock(
         subprocess.run(command, cwd=ROOT, check=True)
         resolved = output.read_text(encoding="utf-8")
     direct_display = ", ".join(target.requirements)
+    lock_kind = "development" if target.name == "development" else "runtime"
     return (
-        "# Certified universal transitive runtime lock for Python >=3.11,<3.13.\n"
+        f"# Certified universal transitive {lock_kind} lock for Python "
+        ">=3.11,<3.13.\n"
         "# Exact versions prevent dependency drift; the private aai-core wheel is\n"
         "# checksum-verified separately by its immutable release manifest.\n"
         "# Regenerate: python scripts/lock_template_dependencies.py\n"

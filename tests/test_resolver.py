@@ -3,11 +3,15 @@ clients, exercised hermetically with fake provider modules."""
 
 import builtins
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
 from conftest import install_fake_module
 
+from aai_core.providers.openai_compatible import OpenAICompatibleChatModel
 from aai_core.providers.resolver import ProviderResolver, _capabilities
 from aai_core.providers.types import ProviderConfigurationError
 from aai_core.secrets import SecretResolver
@@ -183,7 +187,7 @@ def test_azure_apim_requires_token_scope_and_secret_reference(monkeypatch):
     assert "keyvault://" in str(excinfo.value.remediation)
 
 
-def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
+def test_same_logical_name_resolves_via_both_providers(monkeypatch):
     recorded = {}
     _install_identity_fakes(monkeypatch, recorded)
     install_fake_module(
@@ -201,13 +205,6 @@ def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
 
     configs = {
         "databricks": {"provider": "databricks", "deployment": "chat-endpoint"},
-        "foundry": {
-            "provider": "foundry",
-            "endpoint": (
-                "https://foundry.services.ai.azure.com/api/projects/project-dev"
-            ),
-            "deployment": "gpt-chat",
-        },
         "azure_apim": {
             "provider": "azure_apim",
             "base_url": "https://gw.azure-api.net/llm",
@@ -234,11 +231,6 @@ def test_same_logical_name_resolves_via_all_three_providers(monkeypatch):
             )
         else:
             assert DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER not in headers
-        if provider == "foundry":
-            assert model.native_client.options["base_url"] == (
-                "https://foundry.services.ai.azure.com/api/projects/"
-                "project-dev/openai/v1/"
-            )
 
 
 def test_databricks_embedding_client_carries_governed_request_tags(monkeypatch):
@@ -329,11 +321,9 @@ def test_resilience_options_come_from_configuration(monkeypatch):
         _context(
             models={
                 "general-chat": {
-                    "provider": "foundry",
-                    "endpoint": (
-                        "https://foundry.services.ai.azure.com/api/projects/"
-                        "project-dev"
-                    ),
+                    "provider": "azure_apim",
+                    "base_url": "https://gw.azure-api.net/llm",
+                    "token_scope": "api://apim-gateway/.default",
                     "deployment": "gpt-chat",
                     "timeout_seconds": 15,
                     "max_retries": 0,
@@ -347,3 +337,77 @@ def test_resilience_options_come_from_configuration(monkeypatch):
     assert model.native_client.options["timeout"] == 15.0
     assert model.native_client.options["max_retries"] == 0
     assert model.create_native_async_client().options == model.native_client.options
+
+
+def test_resolver_constructs_one_owned_model_under_concurrency():
+    calls = 0
+    call_lock = Lock()
+
+    class ClosableClient(FakeOpenAIClient):
+        def close(self):
+            pass
+
+    def factory(logical_name, config):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+        time.sleep(0.02)
+        return OpenAICompatibleChatModel(
+            logical_name=logical_name,
+            provider="fake",
+            model=config["deployment"],
+            client=ClosableClient(),
+        )
+
+    resolver = ProviderResolver(
+        _context(models={"general-chat": {"provider": "fake", "deployment": "m"}})
+    )
+    resolver._model_factories["fake"] = factory
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        models = list(pool.map(lambda _: resolver.model("general-chat"), range(16)))
+
+    assert calls == 1
+    assert all(model is models[0] for model in models)
+
+
+def test_resolver_closes_owned_native_clients_not_registered_models():
+    class ClosableClient(FakeOpenAIClient):
+        def __init__(self):
+            super().__init__()
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    owned_client = ClosableClient()
+    caller_client = ClosableClient()
+    resolver = ProviderResolver(
+        _context(models={"owned": {"provider": "fake", "deployment": "m"}})
+    )
+    resolver._model_factories["fake"] = lambda logical_name, config: (
+        OpenAICompatibleChatModel(
+            logical_name=logical_name,
+            provider="fake",
+            model=config["deployment"],
+            client=owned_client,
+        )
+    )
+    resolver.register_model(
+        "registered",
+        OpenAICompatibleChatModel(
+            logical_name="registered",
+            provider="fake",
+            model="m",
+            client=caller_client,
+        ),
+    )
+
+    resolver.model("owned")
+    resolver.close()
+    resolver.close()
+
+    assert owned_client.close_calls == 1
+    assert caller_client.close_calls == 0
+    with pytest.raises(RuntimeError, match="ProviderResolver is closed"):
+        resolver.model("owned")

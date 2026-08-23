@@ -9,7 +9,7 @@ platform:
   lifecycle: experimental
   repository: example-org/example-repo
   release: dev
-  tag_schema_version: "1"
+  tag_schema_version: "2"
   catalog: main
   schema: example_ai
   experiment_name: /Shared/example-ai
@@ -18,7 +18,7 @@ platform:
 providers:
   models:
     # The same logical name resolves differently per environment file — the
-    # application code never changes. Three supported paths:
+    # application code never changes. Two supported paths:
     #
     # 1. Databricks model serving (default; in the enterprise this endpoint is
     #    AI Gateway-enabled, adding rate limits/usage tracking transparently):
@@ -33,15 +33,7 @@ providers:
       # timeout_seconds: 60
       # max_retries: 2
     #
-    # 2. Direct Microsoft Foundry (personal/dev — enterprises front this with
-    #    a gateway instead):
-    # general-chat:
-    #   provider: foundry
-    #   endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
-    #   deployment: replace-with-model-deployment
-    #   # token_scope defaults to https://ai.azure.com/.default
-    #
-    # 3. Azure APIM AI gateway (enterprise): keyless Entra bearer token for
+    # 2. Azure APIM AI gateway (enterprise): keyless Entra bearer token for
     #    the gateway's audience; subscription key only if the enterprise
     #    mandates one for chargeback — and then always a secret REFERENCE.
     # general-chat:
@@ -54,9 +46,8 @@ providers:
     #   # subscription_key_header: api-key
   embeddings:
     knowledge-embedding:
-      provider: foundry
-      endpoint: https://replace-with-foundry-account.services.ai.azure.com/api/projects/replace-with-project
-      deployment: replace-with-embedding-deployment
+      provider: databricks
+      deployment: replace-with-embedding-endpoint
       dimensions: 1536
   retrievers:
     product-knowledge:

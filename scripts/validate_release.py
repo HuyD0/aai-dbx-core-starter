@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tomllib
 import zipfile
+from collections.abc import Mapping
 from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,9 @@ REQUIREMENT = re.compile(
     r"^(?P<name>[A-Za-z0-9_.-]+)(?:\[[^\]]+\])?(?P<specifier>[^;]*)"
 )
 DIRECT_REQUIREMENT = re.compile(r"^(?P<name>[A-Za-z0-9_.-]+)(?P<extras>\[[^\]]+\])?")
+SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9.-]+)?$")
+GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def normalized_name(value: str) -> str:
@@ -43,6 +47,192 @@ def load_json(path: Path) -> dict[str, Any]:
 def load_toml(path: Path) -> dict[str, Any]:
     with path.open("rb") as stream:
         return tomllib.load(stream)
+
+
+def _sdk_content_sha256(
+    project_document: Mapping[str, Any],
+    sources: list[tuple[str, bytes]],
+) -> str:
+    project = project_document["project"]
+    material = {
+        "build-system": project_document["build-system"],
+        "project": {
+            key: project[key]
+            for key in (
+                "name",
+                "version",
+                "requires-python",
+                "dependencies",
+                "optional-dependencies",
+                "scripts",
+            )
+        },
+        "wheel": project_document["tool"]["hatch"]["build"]["targets"]["wheel"],
+    }
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    digest.update(b"\0")
+    for relative, content in sorted(sources):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def sdk_content_sha256(root: Path = ROOT) -> str:
+    """Hash the wheel-bearing SDK source and package metadata."""
+
+    project_document = load_toml(root / "pyproject.toml")
+    source_root = root / "src" / "aai_core"
+    sources: list[tuple[str, bytes]] = []
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        sources.append((path.relative_to(root).as_posix(), path.read_bytes()))
+    return _sdk_content_sha256(project_document, sources)
+
+
+def sdk_content_sha256_at_commit(commit: str) -> str | None:
+    """Hash a locally available commit, or return None for a shallow checkout."""
+
+    try:
+        project_text = subprocess.run(
+            ["git", "show", f"{commit}:pyproject.toml"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        listing = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", commit, "--", "src/aai_core"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        sources = [
+            (
+                relative,
+                subprocess.run(
+                    ["git", "show", f"{commit}:{relative}"],
+                    cwd=ROOT,
+                    check=True,
+                    capture_output=True,
+                ).stdout,
+            )
+            for relative in listing
+            if "__pycache__" not in Path(relative).parts
+            and Path(relative).suffix != ".pyc"
+        ]
+    except subprocess.CalledProcessError:
+        return None
+    return _sdk_content_sha256(tomllib.loads(project_text), sources)
+
+
+def sdk_version_at_commit(commit: str) -> str | None:
+    """Read the package version from a locally available commit."""
+
+    try:
+        project_text = subprocess.run(
+            ["git", "show", f"{commit}:pyproject.toml"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return None
+    return str(tomllib.loads(project_text)["project"]["version"])
+
+
+def _candidate_source_issues(source: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if source.get("kind") != "git-commit":
+        failures.append("a release-candidate SDK source must be a git-commit")
+    source_ref = source.get("ref")
+    if not isinstance(source_ref, str) or GIT_COMMIT.fullmatch(source_ref) is None:
+        failures.append("release-candidate SDK ref must be a full commit SHA")
+    if source.get("annotated") is not None:
+        failures.append("release-candidate SDK source cannot claim an annotated tag")
+    return failures
+
+
+def _published_source_issues(source: Mapping[str, Any], version: object) -> list[str]:
+    failures: list[str] = []
+    if source.get("kind") != "git-tag":
+        failures.append("a published SDK source must be a git-tag")
+    if isinstance(version, str) and source.get("ref") != f"v{version}":
+        failures.append("published SDK ref must be the exact v<version> tag")
+    if source.get("annotated") is not True:
+        failures.append("published SDK source must declare an annotated tag")
+    return failures
+
+
+def generated_sdk_default_issues(  # noqa: C901 - linear metadata assertions
+    compatibility: Mapping[str, Any],
+    *,
+    current_sdk_version: str,
+    pinned_content_sha256: str | None,
+    pinned_sdk_version: str | None,
+) -> list[str]:
+    """Validate the offline generated-project SDK release-channel contract."""
+
+    failures: list[str] = []
+    if compatibility.get("schema_version") != 2:
+        failures.append("compatibility schema_version must be 2")
+    sdk = compatibility.get("sdk")
+    if isinstance(sdk, Mapping) and sdk.get("development_status") != "unreleased":
+        failures.append("the checkout SDK must be marked as unreleased development")
+    generated = (
+        sdk.get("generated_project_default") if isinstance(sdk, Mapping) else None
+    )
+    if not isinstance(generated, Mapping):
+        return failures + ["sdk.generated_project_default must be a mapping"]
+
+    version = generated.get("version")
+    status = generated.get("status")
+    source = generated.get("source")
+    if not isinstance(version, str) or SEMANTIC_VERSION.fullmatch(version) is None:
+        failures.append("generated-project SDK version must be semantic")
+    if status not in {"release-candidate", "published"}:
+        failures.append(
+            "generated-project SDK status must be release-candidate or published"
+        )
+    if not isinstance(source, Mapping):
+        return failures + ["generated-project SDK source must be a mapping"]
+
+    content_digest = source.get("content_sha256")
+    if not isinstance(content_digest, str) or SHA256.fullmatch(content_digest) is None:
+        failures.append("generated-project SDK content_sha256 must be a SHA-256")
+    if status == "release-candidate":
+        failures.extend(_candidate_source_issues(source))
+    elif status == "published":
+        failures.extend(_published_source_issues(source, version))
+
+    if (
+        isinstance(content_digest, str)
+        and pinned_content_sha256 is not None
+        and content_digest != pinned_content_sha256
+    ):
+        failures.append(
+            "generated-project SDK content digest does not describe its pinned commit"
+        )
+    if isinstance(version, str) and pinned_sdk_version not in {None, version}:
+        failures.append(
+            "generated-project SDK version does not match its pinned commit metadata"
+        )
+    if (
+        isinstance(version, str)
+        and version == current_sdk_version
+        and status == "published"
+    ):
+        failures.append(
+            "the checkout cannot mark its own SDK version both unreleased and published"
+        )
+    return failures
 
 
 def discover_templates() -> list[Path]:
@@ -146,25 +336,125 @@ def requirement_specs(requirements: list[str]) -> dict[str, str]:
     return specs
 
 
-def validate_repository() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def workflow_pip_requirements(path: Path) -> dict[str, str]:
+    """Requirement specifiers the dependency canary installs, as {name: range}.
+
+    The canary pins the *bounds* it proves, so this is a fourth copy of the
+    supported ranges in dependency-policy.toml. Nothing used to compare them:
+    moving a bound in the policy left the canary proving the old one, green.
+    """
+
+    # Two linear passes rather than one nested pattern: a single regex pairing
+    # `[<>=!~]=?[^,"]+` with a repeat of itself backtracks exponentially on a
+    # line that never matches, because the classes overlap.
+    quoted = re.compile(r'^\s*"([^"]+)"\s*\\?\s*$')
+    requirement = re.compile(
+        r"^(?P<name>[A-Za-z0-9._-]+)(?:\[[^\]]*\])?(?P<spec>[<>=!~][^\s]*)$"
+    )
+    found: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        enclosed = quoted.match(line)
+        if not enclosed:
+            continue
+        parsed = requirement.match(enclosed.group(1).strip())
+        if parsed:
+            found[parsed.group("name").lower()] = parsed.group("spec").strip()
+    return found
+
+
+def workflow_matrix_values(path: Path, key: str) -> set[str]:
+    """Read one simple GitHub Actions matrix sequence without a YAML dependency."""
+
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        rf"^        {re.escape(key)}:\s*\n(?P<items>(?:          - .+\n)+)",
+        text,
+        re.MULTILINE,
+    )
+    if match is None:
+        return set()
+    return {
+        line.removeprefix("- ").strip().strip("\"'")
+        for line in (item.strip() for item in match.group("items").splitlines())
+    }
+
+
+def validate_repository() -> (  # noqa: C901 - linear, independent release assertions
+    tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
+):
     failures: list[str] = []
     project = load_toml(ROOT / "pyproject.toml")["project"]
     policy = load_toml(ROOT / "dependency-policy.toml")
     compatibility = load_json(ROOT / "compatibility.json")
     toolchain = load_json(ROOT / "toolchain.json")
     sdk_version = str(project["version"])
+    generated_default = compatibility["sdk"]["generated_project_default"]
+    generated_sdk_version = str(generated_default["version"])
+    generated_source_ref = str(generated_default["source"]["ref"])
 
     if sdk_version != compatibility["sdk"]["version"]:
         failures.append(
             "pyproject SDK version "
             f"{sdk_version} != compatibility SDK {compatibility['sdk']['version']}"
         )
+    failures.extend(
+        generated_sdk_default_issues(
+            compatibility,
+            current_sdk_version=sdk_version,
+            pinned_content_sha256=sdk_content_sha256_at_commit(generated_source_ref),
+            pinned_sdk_version=sdk_version_at_commit(generated_source_ref),
+        )
+    )
     if sorted(compatibility["sdk"]["python"]) != sorted(policy["python"]["supported"]):
         failures.append("Python support differs between compatibility and policy")
     if sorted(compatibility["sdk"]["python"]) != sorted(
         toolchain["python"]["supported"]
     ):
         failures.append("Python support differs between compatibility and toolchain")
+
+    canary = compatibility.get("release_acceptance", {}).get("dependency_canary")
+    if not isinstance(canary, Mapping) or canary.get("required") is not True:
+        failures.append("release acceptance must require the dependency canary")
+    else:
+        green_runs = canary.get("minimum_green_runs")
+        if (
+            not isinstance(green_runs, int)
+            or isinstance(green_runs, bool)
+            or green_runs < 1
+        ):
+            failures.append("dependency canary minimum_green_runs must be at least 1")
+        if sorted(canary.get("python", [])) != sorted(policy["python"]["supported"]):
+            failures.append("dependency canary Python matrix differs from policy")
+        expected_resolutions = {
+            policy["resolution"]["minimum_resolution"],
+            policy["resolution"]["latest_resolution"],
+        }
+        if set(canary.get("resolutions", [])) != expected_resolutions:
+            failures.append("dependency canary resolutions differ from policy")
+        canary_workflow = ROOT / ".github" / "workflows" / "dependency-canary.yml"
+        if workflow_matrix_values(canary_workflow, "python") != set(
+            canary.get("python", [])
+        ):
+            failures.append("dependency canary workflow Python matrix differs")
+        if workflow_matrix_values(canary_workflow, "resolution") != set(
+            canary.get("resolutions", [])
+        ):
+            failures.append("dependency canary workflow resolutions differ")
+        installed = workflow_pip_requirements(canary_workflow)
+        if not installed:
+            failures.append("dependency canary installs no explicit supported bounds")
+        for name, specifier in sorted(installed.items()):
+            supported = policy["packages"].get(name, {}).get("supported")
+            if supported is None:
+                failures.append(
+                    f"dependency canary installs {name}, which dependency-policy.toml "
+                    "does not declare"
+                )
+            elif specifier != supported:
+                failures.append(
+                    f"dependency canary installs {name}{specifier} but "
+                    f"dependency-policy.toml supports {supported}"
+                )
 
     setup = (ROOT / "scripts" / "codex-cloud-setup.sh").read_text(encoding="utf-8")
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
@@ -260,14 +550,28 @@ def validate_repository() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any
             failures.append(
                 f"{name}: schema SDK {configured_sdk} != {expected['aai_core']}"
             )
-        if configured_sdk != sdk_version:
+        if configured_sdk != generated_sdk_version:
             failures.append(
-                f"{name}: default SDK {configured_sdk} != repository SDK {sdk_version}"
+                f"{name}: default SDK {configured_sdk} != generated-project SDK "
+                f"{generated_sdk_version}"
+            )
+        configured_source_ref = schema["properties"]["aai_core_source_ref"]["default"]
+        if configured_source_ref != generated_source_ref:
+            failures.append(
+                f"{name}: SDK source ref {configured_source_ref} != release metadata "
+                f"{generated_source_ref}"
             )
         pip_source = schema["properties"]["aai_core_pip_source"]["default"]
-        if "@v{{.aai_core_version}}" not in pip_source:
+        if (
+            pip_source.startswith("git+")
+            and "@{{.aai_core_source_ref}}" not in pip_source
+        ):
             failures.append(
-                f"{name}: credential-free SDK source is not tied to the SDK version"
+                f"{name}: git SDK source is not tied to the immutable source ref"
+            )
+        if "@v{{.aai_core_version}}" in pip_source:
+            failures.append(
+                f"{name}: SDK source still assumes the version tag already exists"
             )
         stamp = load_json(template / "template" / ".aai-template.json.tmpl")
         if stamp.get("template") != name:
@@ -277,6 +581,11 @@ def validate_repository() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any
                 f"{name}: template version {stamp.get('template_version')} "
                 f"!= {expected['version']}"
             )
+        if (
+            stamp.get("generated_with", {}).get("aai_core_source_ref")
+            != "{{.aai_core_source_ref}}"
+        ):
+            failures.append(f"{name}: provenance stamp omits the SDK source ref")
 
         template_project = load_toml(template / "template" / "pyproject.toml.tmpl")[
             "project"
@@ -502,11 +811,13 @@ def write_manifest(
     wheel: dict[str, str],
     compatibility: dict[str, Any],
 ) -> None:
+    identifiers = load_json(ROOT / "platform-identifiers.json")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "package": "aai-core",
         "version": version,
         "source_commit": commit,
+        "sdk_artifact_volume": identifiers["sdk_artifact_volume"],
         "wheel": wheel,
         "compatibility_sha256": hashlib.sha256(
             (ROOT / "compatibility.json").read_bytes()
@@ -516,6 +827,9 @@ def write_manifest(
         ).hexdigest(),
         "toolchain_sha256": hashlib.sha256(
             (ROOT / "toolchain.json").read_bytes()
+        ).hexdigest(),
+        "dependency_lock_sha256": hashlib.sha256(
+            (ROOT / "uv.lock").read_bytes()
         ).hexdigest(),
         "templates": {
             name: details["version"]
@@ -533,9 +847,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-version")
     parser.add_argument("--require-tag", action="store_true")
     parser.add_argument("--write-manifest", type=Path)
+    parser.add_argument(
+        "--print-sdk-content-sha256",
+        metavar="COMMIT",
+        help="Print the SDK content digest for a locally available commit and exit.",
+    )
     arguments = parser.parse_args(argv)
 
     try:
+        if arguments.print_sdk_content_sha256:
+            digest = sdk_content_sha256_at_commit(arguments.print_sdk_content_sha256)
+            if digest is None:
+                raise ValueError(
+                    "SDK source commit is unavailable locally; fetch/review it before "
+                    "recording release metadata"
+                )
+            print(digest)
+            return 0
         _, compatibility, _ = validate_repository()
         expected_version = compatibility["sdk"]["version"]
         if arguments.release_version and arguments.release_version != expected_version:

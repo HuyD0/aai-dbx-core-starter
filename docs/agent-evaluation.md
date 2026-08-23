@@ -1,0 +1,646 @@
+# Agent evaluation: the comparison-first paved road
+
+This guide is for a software engineer who has shipped plenty of code and has
+never evaluated an LLM. It explains *why* the workflow looks the way it does
+before it explains which commands to run, because the why is the part that
+does not transfer from normal software.
+
+## Why your usual test instinct does not work here
+
+You already know how to test software: assert the output equals the expected
+value. That works because the function is deterministic and there is exactly
+one right answer.
+
+An agent has neither property. Ask it the same question twice and you get two
+different sentences, both arguably correct. There is no single expected string
+to assert against, so `assertEqual` has nothing to hold on to.
+
+The failure mode this creates is subtle and very common. You change a prompt,
+run the agent, read three answers, and they look good — so you ship it. What
+you actually learned is that three answers looked good *to you*, *today*,
+*on the examples you happened to try*. You did not learn whether the change
+made the system better or worse than what was already in production. Reading
+outputs feels like testing and is not.
+
+## The unit of evidence is a comparison
+
+> **An experiment is a comparison, not a log.**
+
+The question worth answering is never "is this good?" — it is **"is this
+better than what we had?"** That question has a real answer, and getting it
+requires exactly three things held still:
+
+1. **The same dataset.** A fixed set of questions with expectations, versioned
+   so you can prove both runs saw identical inputs.
+2. **The same scorers.** Automated graders that turn an answer into a number
+   the same way every time.
+3. **A recorded baseline.** The previous version's scores on that dataset with
+   those scorers.
+
+Change one thing, score it against the baseline, and the delta is your
+evidence. That is why the primary verb is `compare` and why running an
+evaluation with nothing to compare against is treated as an incomplete
+submission rather than a result.
+
+This is also why the tool refuses to be helpful in one specific way: if no
+baseline exists it will not quietly score your agent and print a number. A
+number with nothing beside it is the thing that misleads people. It tells you
+so, and offers to record the current version as the baseline.
+
+## What a scorer actually is
+
+Two kinds, and the difference matters when you read a result:
+
+- **Code scorers** are ordinary Python functions — does the answer contain the
+  expected terms, did it refuse when it should have, is it a sane length.
+  Deterministic, instant, free, no credentials. They catch blunt failures.
+- **LLM judges** are a language model grading another model's answer against
+  written criteria. They catch things code cannot: is this actually correct,
+  is it grounded in the retrieved documents, is it safe. They cost money, take
+  time, and are themselves fallible — which is why a judge must be calibrated
+  against human labels before it gates a release, and why judges you have not
+  calibrated run in report-only mode.
+
+## Why scorers come from a shared registry
+
+This is the part that justifies the whole toolkit.
+
+If every project writes its own `correctness` scorer, then two teams both
+reporting 0.8 means nothing: different judge model, different prompt,
+different scale, different definition of correct. You cannot compare across
+teams, you cannot set a platform-wide bar, and you cannot audit a promotion
+because "0.8" is not a fact about the world.
+
+So scorer name, judge model binding, judge prompt version, input contract and
+scale are **versioned platform assets**, shipped in `aai-core` and pinned by
+every project through its `aai_core_version`. Judge instructions live in the
+Unity Catalog Prompt Registry, so a change to what a judge asks is a governed,
+versioned event.
+
+A project **selects** scorers and **sets thresholds**. It never redefines what
+one means. Browse the registry:
+
+```bash
+agentkit scorers ls
+```
+
+`--live` adds what the workspace currently resolves — the judge endpoint and
+each judge prompt's exact version. It reports a prompt as unregistered only
+when the registry actually says so; a permission error, an expired
+credential or an unreachable registry is reported as the failure it is.
+"Not registered yet" and "I could not ask" look identical from the outside,
+and only one of them is safe to act on.
+
+Which scorers run is inferred from what the dataset rows contain, so nobody
+has to memorise the contracts:
+
+| Row contains | Scorers added |
+|---|---|
+| `expectations.expected_response` | correctness, keyword coverage, refusal compliance |
+| `expectations.expected_facts` | correctness (it accepts either field) |
+| `expectations.guidelines` | per-row guideline adherence |
+| retrieval spans in the trace | groundedness, retrieval relevance, sufficiency |
+| tool-call spans in the trace | tool-call correctness and efficiency |
+| delegation spans in the trace (non-root `AGENT` spans with `agent.role`) | delegation structure, subagent routing accuracy |
+| always | response length; safety on judged runs |
+
+The inferred plan is printed before every run, along with what the judge calls
+will cost, and anything that *cannot* run is listed with the reason. A
+retrieval scorer needs retriever spans in a trace; recorded answers do not
+have those, so it is excluded and says so rather than silently scoring zero.
+
+Two details in that table are per row, not per dataset. A scorer whose
+contract is a *choice* — correctness reads `expected_response` **or**
+`expected_facts` — is satisfied when every row supplies one of them, so a
+suite may mix the two. A scorer that needs one specific field still needs it
+everywhere: a field on only some rows means the others would score as
+vacuously perfect, so the scorer is excluded and names the gap.
+
+**Being excluded and being refused are different**, and which one you get
+depends on who asked. A scorer the toolkit *inferred* is dropped with the
+reason printed — inference is allowed to be conservative. A scorer you put
+in `scorers.add` is a statement that it must run, so an unsatisfied
+contract is a configuration error and the command stops: silently ignoring
+a scorer someone explicitly selected would record promotion evidence
+missing a check the project asked for. That covers the row contract, the
+mode, and the trace requirement alike, and a name appearing in both `add`
+and `remove` is rejected before the dataset is even read.
+
+That inference reads a *malformed* `expectations` — a string, a list — as
+absent, which would drop those scorers and their thresholds without saying
+anything. So dataset validation rejects it, including on a row that carries a
+trace: a trace excuses a row from supplying `inputs`, not from being well
+formed. A null value is different, and stays a missing value: a Unity Catalog
+dataset arrives as dataframe records, where an absent field is `NaN`.
+
+The same rule covers the rest of a traced row. A trace replaces a *missing*
+request, not a malformed authored one — MLflow keeps an explicit `inputs`
+value on the evaluation row, so a scalar or a list there is rejected up front
+instead of failing the row contract after the plan was printed and the spend
+confirmed. Placeholder text is caught on traced rows too, against the
+authored fields, or against the request the trace recorded when the row has
+no `inputs` of its own: a trace means the row was answered, not that it was
+finished, and `expected_response: "TODO"` reaching paid judges produces
+promotion evidence that means nothing. The trace *body* is deliberately not
+scanned — a production answer may legitimately contain the word "todo", and
+failing a real dataset for that would teach you to stop trusting the check.
+
+Retrieval is the other. An agent that retrieves only when a question needs it
+produces rows with nothing to judge, and MLflow's retrieval scorers raise on
+those. The toolkit skips them instead: the row is left out of the mean rather
+than scored zero, which would punish an agent for correctly not retrieving.
+Because that makes the mean cover a subset, the run says so — "groundedness
+judged 8 of 20 rows" — so a partial number is never read as a whole-dataset
+one.
+
+## The commands
+
+```
+agentkit init               scaffold a working project from the governed template
+agentkit compare            THE primary verb - score this version against the last
+agentkit smoke              fast gate: a sample, seconds, no cluster, no judges
+agentkit eval               the full suite, locally or as a Databricks job
+agentkit gate               promotion check against thresholds and the baseline
+agentkit evidence           the release record a reviewer can read
+agentkit scorers ls         browse the shared registry
+agentkit judge calibrate    measure a judge against SME labels (Cohen's kappa)
+agentkit baseline establish move the baseline to a verified run, via PR
+```
+
+The whole configuration is three lines:
+
+```yaml
+version: 1
+agent: src/app/example_agent.py:respond
+dataset: evals/data/golden_cases.json
+```
+
+Everything else — the experiment name, the run tags, which scorers apply, what
+this is compared against, where evidence lands — is inferred or generated. The
+optional keys (thresholds, regression budgets, scorer selection, judge budget,
+statistical confidence, HTTP field mapping) are escape hatches, not the normal
+path.
+
+Every run reports uncertainty around numeric scorer means and, once a baseline
+has recorded the same ordered rows, a paired improvement interval. Only nullable
+numeric scores are persisted for this calculation; prompts, responses, and
+expectations are not copied into the results record. Positive paired improvement
+always means better, including for lower-is-better metrics such as latency.
+
+Confidence starts in report-only mode so an existing five-row teaching dataset
+does not masquerade as production evidence or suddenly become unusable. A UAT
+gate can opt into enforcement after growing its suite:
+
+```yaml
+statistics:
+  confidence_level: 0.95
+  minimum_cases: 30
+  enforce_confidence: true
+  minimum_effect:
+    correctness: 0.02
+```
+
+Enforcement applies absolute thresholds to the conservative confidence bound,
+requires the minimum number of scored rows, and applies regression budgets to
+the lower bound of the paired improvement. `minimum_effect` is optional and
+requires that the paired lower bound show a practically meaningful improvement
+in the metric's native units. Enabling paired enforcement against an older
+baseline without per-row scores fails closed; re-establish the baseline on the
+same governed dataset.
+
+`agent:` resolves by shape, so the same project can evaluate a local Python
+function today and a deployed endpoint tomorrow with a one-line change:
+
+| Value | Resolves to |
+|---|---|
+| `src/app/agent.py:respond` or `pkg.module:respond` | a local Python callable |
+| `endpoints:/my-agent` or a bare endpoint name | a Databricks serving endpoint |
+| `models:/catalog.schema.model/7` or `models:/catalog.schema.model@champion` | a selected Unity Catalog registered-model version or alias |
+| `https://host/score` | any HTTP/JSON endpoint, including a hosted agent elsewhere |
+| a logical name from `aai-platform.yml` | whatever that name is configured to be |
+
+Execution can sit anywhere. The record stays in one place, which is the point.
+
+A three-part Unity Catalog name always needs the `/version` or `@alias`
+selector. In MLflow 3, a suffixless `models:/...` value denotes a logged-model
+ID instead, so AgentKit refuses an ambiguous `models:/catalog.schema.model`
+before it contacts MLflow or asks you to approve spend.
+
+An HTTP target that needs a token — `request_mapping.auth_env` names the
+environment variable, never the value — has to be `https://`. Loopback is the
+exception, because a local stub never puts the credential on a network.
+
+### Where the answers come from
+
+A scoring run needs an answer for every row, and there are three honest ways
+to have one. The toolkit picks by looking at the dataset, and `--mode`
+overrides it:
+
+| Mode | The answers are | Chosen when |
+|---|---|---|
+| `live` | produced now, by calling `agent:` | the rows are questions |
+| `traces` | already in the rows, as recorded traces | the rows carry a `trace` |
+| `answer-sheet` | replayed from a recorded file | `agent:` names a `.json`/`.jsonl` answer sheet |
+
+The `traces` mode matters more than it sounds. A dataset of production traces
+has already been answered — by production. MLflow scores those traces when no
+`predict_fn` is supplied, and *replaces* them when one is. Calling the agent
+again would discard the recorded behaviour and score something else that
+merely shares the questions, so a trace-backed dataset defaults to `traces`
+and `--mode live` says out loud what it is about to overwrite.
+
+Each `trace` value must be a complete MLflow v2/v3 serialized envelope with
+both `info` and `data` (normally the result of `Trace.to_dict()`). AgentKit
+rejects preview-only or hand-rolled shorthand before planning and spend
+confirmation because MLflow cannot deserialize it for evaluation.
+
+A stored trace is therefore **passed to MLflow only in `traces` mode**. A
+live run's answers come from the agent and an answer-sheet run's from the
+file, so in both cases the recorded trace is a different run's answer — and
+MLflow does not treat it as inert baggage. A present trace column participates
+in request/response extraction and root-span validation, and a row whose trace
+is null (which is how a nullable Unity Catalog column arrives) raises before
+your agent is ever called. Two consequences worth knowing:
+
+- Retrieval and tool-call scorers are not available in `answer-sheet` mode.
+  Judging one run's retrieval beside another run's answers is not evidence
+  about either; the plan excludes them and points at `--mode traces`.
+- In `traces` mode, MLflow 3.15 preserves the dataset's authored expectations
+  column. Trace expectation assessments are extracted only when that column is
+  absent. AgentKit mirrors this rule before scorer selection, so its plan and
+  dataset digest describe the evidence MLflow actually evaluates.
+- Dropping the trace does not drop the question with it. A trace-only row
+  keeps the request recovered from its trace, so re-running a production
+  trace dataset with `--mode live` still has something to send the agent.
+  A row whose request cannot be recovered is named and refused before the
+  run rather than failing inside MLflow.
+
+The **cost estimate follows the same rule**: a live run's judge fan-out is
+counted from the traces that run will produce, which do not exist yet, so
+the `budget.retrieved_chunks_per_row` assumption applies rather than the
+recorded agent's count. The scorers still selected are the ones the suite
+was recorded for — a suite built against a retrieving agent stays a
+retrieval suite — but the *number* is never borrowed from the old traces,
+because a budget approved against last month's fan-out is not a budget.
+
+## Two speeds, deliberately
+
+| | Where it runs | When | Why |
+|---|---|---|---|
+| `agentkit smoke` | your laptop, pull-request CI | every commit | Seconds. No cluster, no credentials, no judge spend — spinning up compute would add latency to exactly the loop that needs to be fast. |
+| `agentkit eval` | a Databricks job | pre-merge, pre-promotion | The datasets and production traces already live in Unity Catalog. Compute goes to the data, and results land in the record with no upload step. |
+
+`agentkit eval --submit` runs the bundle's `release_gate` job.
+
+**Smoke does not create an MLflow run.** A code-scorer-only pass over
+recorded answers needs nothing from MLflow, so it does not open one. That is
+deliberate on two counts: it keeps smoke runnable on every commit with no
+credentials and no tracking backend, and it keeps an afternoon of throwaway
+runs out of your experiment. `compare` and `eval` are what record a
+comparison — that is the ontology, and you do not have to decide it.
+
+A note on the machinery: LLM evaluation is **I/O-bound**. You are waiting on
+judge calls, not computing anything. The toolkit uses concurrent requests and
+sets MLflow's judge concurrency from your config; the real ceiling is the judge
+endpoint's rate limit. Spark is the wrong tool for the scoring loop itself,
+though it remains the right tool for the work around it — scanning production
+traces to build a dataset, aggregating across many runs.
+
+## Cost is visible before the run, never after
+
+Every judged run prints the estimate first — how many judge calls, roughly how
+many tokens, and the dollar figure if you have configured your negotiated
+rate — and asks before spending. `budget.max_judge_calls` aborts before the
+first call rather than after the last one. `agentkit smoke` is free by
+construction: it runs only code scorers.
+
+A judge call is **not** one per row for every scorer. MLflow calls the
+retrieval-relevance judge once per *retrieved chunk*, and the groundedness and
+sufficiency judges once per *retriever span*, so a 10-row RAG run with 10
+chunks per query is well over a hundred calls. The registry records each
+scorer's fan-out and the estimate multiplies by it — counted from the rows'
+own traces when they have them, and assumed when they do not (a live run has
+no traces until it runs). Set `budget.retrieved_chunks_per_row` to your
+retriever's `k` so the ceiling matches reality; the estimate says when it is
+guessing. Where the rows carry traces the count is exact, whether they arrive
+as objects, as dicts, or as the JSON strings MLflow puts in a dataframe's
+`trace` column.
+
+The token side reads the trace too. A row scored as a trace may carry no
+`outputs` of its own while the trace holds the response and every retrieved
+chunk — which is exactly what the retrieval judges are shown — so those are
+counted. Span ids, timestamps, and attributes are not: they never reach a
+judge, and counting them would trade an under-estimate for an over-estimate.
+
+**Each call is priced by what that call is shown**, not by a dataset
+average. A retrieval judge only runs on the rows that retrieved, so pricing
+its calls at the mean row size would dilute one large retrieved context
+through every short conversational row and then multiply it back by the
+single call it belonged to — understating exactly the runs that cost the
+most. So groundedness is priced from its span's request, recorded response
+and documents; relevance from the individual chunk; and sufficiency from the
+request, the documents, and the **ground truth** — `expected_facts` or
+`expected_response` — because that is what MLflow's sufficiency prompt
+actually sends, and a long expected answer against a short recorded one is
+otherwise invisible in the number you approve. Per-row scorers still use the
+whole-dataset mean, because they really do see every row. Rows whose trace
+cannot be read keep the conservative per-row assumption.
+
+## What the gate refuses
+
+`agentkit gate` is the promotion check, and it says no in six situations:
+
+1. **No evidence at all.** Nothing has been scored yet.
+2. **Evidence that is not a comparison.** A run that never named a baseline
+   does not answer "what did you compare against", so it does not pass.
+3. **A thresholded metric that never appeared.** If you gate on correctness
+   and the judge failed, the run did not produce the evidence — that fails
+   closed rather than passing by omission. A judge that raised on *some*
+   rows counts too: MLflow reports those in its result table rather than its
+   metrics, so an aggregate over the surviving rows would otherwise look
+   healthy.
+4. **Evidence it cannot trust.** A results record that will not parse, an
+   inconsistent attempt pointer, or an evaluation still in flight is an
+   error, not a reason to read the last record that happened to pass. Every
+   real run supersedes the previous evidence the moment it starts, so a run
+   that then fails, is cancelled, or is still going cannot leave an older
+   pass standing behind it. (`--plan` is inspection rather than an
+   evaluation, so it leaves the current evidence alone.) Reading stale
+   evidence is the same failure as comparing against the wrong baseline: the
+   number is real, it just answers a question nobody asked.
+5. **Evidence for a different commit.** When the gate runs under a release
+   identity (`AAI_RELEASE` on a job cluster, `GIT_COMMIT` in CI), the
+   results must have been scored for that exact commit; a stale results
+   directory from an earlier checkout refuses with both commits named. The
+   attempt pointer binds the gate to exact result *bytes*; this binds them
+   to the *commit*. A laptop with neither variable set skips the check
+   rather than inventing an identity.
+6. **A judge that cannot be trusted as an instrument.** With the
+   `integrity:` block configured, a judged run must carry its
+   self-inconsistency measurement (a re-judged sample of its own outputs)
+   under the configured flip-rate ceiling, and — once anchors are frozen
+   and `require_anchors` is set — its anchor-drift measurement over frozen
+   baseline outputs. An anchor-drift failure says explicitly that **the
+   judge changed, not the agent**: the agent is not in that loop at all, so
+   the fix is to check the judge endpoint and prompt pins (or, after a
+   deliberate judge release, re-establish the baseline and anchors), never
+   to debug the agent. With `integrity.require_calibration` set, every
+   judge the run used must also hold a passing, version-matched
+   calibration record (see `agentkit judge calibrate`).
+
+`compare` and `eval` refuse earlier still, before any judge call, when the
+recorded baseline measured something else. A delta is only evidence when both
+sides scored the same rows with the same scorers, so a changed dataset digest,
+a changed scope (full versus sample), a changed or missing scorer, a changed
+judge model, or a judge prompt whose alias has moved stops the run and asks you
+to re-establish the baseline.
+
+"The judge model changed" means the model, not the name. A governed
+`endpoints:/judge` is a stable name for a mutable thing — the platform team
+can repoint it or promote a new version behind it — so a run records what the
+endpoint actually served when the workspace will say. Reading that needs
+`CAN_VIEW` on the endpoint, which a least-privilege CI principal may not
+have; when it cannot be read the run says so instead of implying it checked.
+
+Two of those are worth spelling out. **Removing a scorer also removes its
+threshold**, so `scorers.remove` would otherwise let a comparison pass without
+that evidence and say nothing — the scorer set has to match, not just the
+versions. A judge-free run is not a mismatch, though: `agentkit smoke` runs
+code scorers only by design, so a baseline's judge scorers are ignored when
+judges are off. And **when the platform team moves a judge prompt's
+`production` alias, every project's next comparison stops** and asks for a new
+baseline. That is the correct answer to "the judge changed" — the old scores
+were produced by different instructions — and it is worth knowing as the cost
+of moving an alias. The same applies when an alias is *deleted*: the judge
+falls back to its bundled instructions without raising, so a prompt the
+baseline used and this run cannot resolve counts as drift in its own right.
+The number would still subtract cleanly; it just would not mean anything,
+which is worse than no comparison because it looks like one. Registering a
+prompt for the *first* time counts too: a baseline scored before the prompt
+existed used the catalog's bundled instructions, so the comparison stops on
+the same reasoning even though the baseline recorded no prompt version at
+all. Only a record that names no scorers — a genuinely legacy baseline —
+cannot be read that way, and there the check stays quiet.
+
+The prompt a judge is given and the prompt version the run records come from
+one resolution. Looking it up a second time to build the scorer could answer
+differently than the lookup whose URI was already recorded and compared
+against the baseline — leaving the evidence describing a judge the run did
+not use. What was recorded and what was executed are therefore one fact, not
+two that can drift apart between two calls.
+
+And only a prompt that is *confirmed absent* falls back to the bundled
+instructions. A permission error, an expired credential, or a transient
+registry failure stops the run instead — before any scorer is built, any
+judge is called, or any baseline is written. Those failures look identical
+to "not registered yet" from the outside, and treating them the same way
+would let a run spend real money and record promotion evidence against
+instructions nobody chose. `--establish-baseline` is where that matters
+most: there is no baseline to compare against, so nothing downstream would
+ever notice the substitution.
+
+**`smoke` is a threshold gate, not a comparison**, and it is not refused.
+It scores a deterministic sample — 20 rows by default, of a suite you are
+told to grow past 150 — so its scope is narrower than the committed baseline
+by design. When the baseline does not describe the sample, `smoke` sets it
+aside, prints every reason, and reports absolute scores, exactly as it does
+on a project that has no baseline yet. Refusing would break the
+credential-free pull-request gate as a suite matures; comparing a 20-row
+mean against a 150-row one would fail pull requests on sampling noise.
+Regression belongs to `compare` and `eval`, which score the whole dataset.
+Below the sample size nothing is sampled, so a small suite keeps its
+regression check in `smoke` too.
+
+The dataset digest identifies the *questions* a dataset asks. Answers are
+excluded — both the `outputs` an answer sheet supplies and the `trace` a
+production run recorded — because those are the behaviour under comparison,
+not the data. Two weeks of production traces over the same questions
+therefore share a digest and compare cleanly, while adding or editing a case
+changes it and asks for a new baseline.
+
+With one exception, and it is the ground truth. In `traces` mode MLflow
+replaces the authored expectations with the assessments recorded on the
+traces, so those assessments *are* what the run is judged against — and the
+identity binds them. Change what a reviewer expects and the comparison asks
+for a new baseline, rather than reusing one that measured something else
+under the same digest. Live and answer-sheet identity stays trace-free, since
+those runs never see a stored assessment.
+
+`--allow-baseline-drift` proceeds anyway and records every reason in the
+results and the evidence pack — an override someone can see, rather than a
+control quietly removed. And a plan that selects no scorers at all is refused
+outright: "evaluated nothing" must never be a passing verdict.
+
+Exit codes are a stable CI contract:
+
+| Code | Meaning |
+|---|---|
+| `0` | every threshold passed |
+| `2` | ran successfully, one or more thresholds failed — CI should treat this as a hard failure |
+| `1` | runtime or configuration error |
+
+These are CI-agnostic. The repository ships GitHub Actions wiring; any system
+that can read an exit code works the same way.
+
+## What lands in the record
+
+Every run writes a governed MLflow run carrying the platform resource tags
+plus the lineage the developer would otherwise have to type: dataset reference
+and version digest, row count, agent target, scorer versions, judge model and
+the model that endpoint actually served, resolved judge prompt versions, the
+baseline it was compared against, the gate verdict, and the decision. A run
+scored under a release identity records the full deployed commit, and a run
+with the integrity checks configured records its judge self-inconsistency
+and anchor-drift evidence alongside the metrics they gate.
+
+Decisions use the platform vocabulary — **adopt**, **reject**, or
+**inconclusive** — and default to `inconclusive`, because a comparison that
+nobody has interpreted has not concluded anything.
+
+`agentkit evidence` renders that into `evidence.md` and `evidence.json`:
+what ran, on which data version, scored how, against what, with which verdict
+and whose approval. Attach it to the promotion request.
+
+A record carries the rules it was judged by. Re-deriving thresholds from the
+current `agentkit.yaml` when reopening a run would mean relaxing one turns a
+failed run into approved evidence with nothing re-scored — so the record
+decides, and the verdict is the same for every reader. If the project's rules
+have changed since a run was scored, `agentkit gate` refuses it and names what
+changed rather than judging old numbers by new rules; re-run `agentkit
+compare`.
+
+Each recorded run also attaches its results record to the MLflow run itself.
+`.aai/agentkit/results/` is whatever filesystem the run happened on, and for
+the deployment-job gate that is an ephemeral job cluster nobody can reach
+afterwards — so `agentkit evidence --run <run id>` builds the same record from
+any machine. The scoring command prints the exact invocation when it finishes.
+
+## Promotion and the approval gate
+
+For projects promoting into a Unity Catalog registered model, the template
+ships an optional deployment-job gate: registering a new model version
+triggers a job that evaluates it, waits for a human approval, then hands off
+to deployment.
+
+Three things about it are worth knowing before you enable it:
+
+- **The first run always fails at the approval task.** That is by design.
+  Approval is recorded as a Unity Catalog tag on the model version, and no tag
+  exists yet. Approving in the UI writes the tag and the run resumes.
+- **The bundle schema cannot express the link** between a registered model and
+  its deployment job, so `scripts/link_deployment_job.py` makes it once through
+  the MLflow client after deployment.
+- **The gate scores the version that triggered it**, not whatever `agent:`
+  happens to be committed. Databricks supplies `model_name` and
+  `model_version` as job parameters; the evaluation task passes them through,
+  and they become `--agent models:/<name>/<version>`. The same `--agent`
+  override is available on `compare`, `smoke`, and `eval` whenever you want to
+  score a specific target without editing the config.
+
+Set `registered_model` in `agentkit.yaml` to have `agentkit evidence` read the
+approval tags off the model version the run actually scored, and `approvals:`
+to name the job's approval tasks. Every named tag must read `Approved`.
+
+Naming them is what makes the report a verdict. A renamed approval task
+leaves `approval_old=Approved` behind while the current `approval_gate` tag
+never appears, and a set discovered from the tags that happen to exist cannot
+see the one that is missing. Without `approvals:`, evidence reports the tags
+it found and states plainly that it could not verify completeness.
+
+**"the version the run actually scored" is literal.** Approval is reported
+only when the run's agent named one — `models:/<name>/<version>`, which is
+what the deployment job passes. An endpoint, a local callable, a different
+model, or an alias identifies no version, and evidence then reports approval
+`unknown` with the reason rather than borrowing the newest version's tags. An
+alias is not resolved even though it could be: it may have moved between the
+run and the evidence, so resolving it now would attribute an approval the run
+never had.
+
+The approver needs `APPLY TAG` on the model and `CAN MANAGE RUN` on the job.
+Use governed tag policies when several groups must sign off, so nobody can
+approve their own change.
+
+## Getting started
+
+```bash
+source scripts/platform-env.sh      # exports the platform identifiers
+agentkit init --name my-agent-eval
+cd my-agent-eval
+python3.12 scripts/setup_dev.py
+make install-ci
+
+agentkit smoke                       # works immediately, no credentials
+agentkit compare --establish-baseline
+# ...change something...
+agentkit compare
+agentkit gate
+agentkit evidence
+```
+
+The generated project contains a real, runnable agent and a real dataset, and
+its gate passes on the first run. Edit `src/app/example_agent.py`, run
+`agentkit compare` again, and watch the numbers move — that loop is the thing
+worth learning.
+
+## Escape hatches
+
+This toolkit wraps ceremony, not capability. Underneath it is ordinary
+MLflow 3 GenAI evaluation, and nothing hides it: `mlflow.genai.evaluate`,
+the native scorers, the runs and traces are all reachable directly, and
+`ExperimentManager.native_client` and `PromptManager.native_client` hand you
+the native module when you need something the toolkit does not wrap. When you
+outgrow a piece of it, drop to the native API for that piece and keep the rest.
+
+## Mapping an external eval-gated CI/CD design onto this platform
+
+Industry write-ups of agent CI/CD converge on one design contract: build one
+artifact per commit, gate the release on *that commit's* eval run against a
+champion with floors and deltas, pin the judge like the code and the data,
+verify the deployment live, and only then move the champion pointer. This
+platform implements that contract — under its own vocabulary and controls.
+The translation, for anyone arriving with those terms:
+
+| External term | Platform mechanism |
+|---|---|
+| champion run / champion promotion | the committed `evals/baseline.json` (+ `aai.baseline_run_id`); promotion is `agentkit baseline establish --from-run` after deploy + post-deploy smoke, committed via pull request |
+| "the gate checks THIS commit's run, never latest" | the attempt pointer binds the gate to exact result bytes, and the release binding refuses evidence scored for a different commit than `AAI_RELEASE`/`GIT_COMMIT` |
+| `eval_dataset_version: golden_v3` | `aai.dataset` (the ref) + `aai.dataset_digest` (a content digest of the questions — it cannot be forgotten when the file changes; encode a human label in the file name if you want one) |
+| `judge_version` | the scorer's catalog version + `aai.judge_model` + `aai.judge_model_identity` (what the endpoint actually served) + the resolved judge prompt URI, all blocking comparability checks |
+| judge self-consistency / canary set | `integrity.consistency_sample` → `judge/integrity/self_inconsistency`, and frozen judge anchors (`evals/judge_anchors.json`) → `judge/integrity/anchor_drift` — "the judge changed, not the agent" |
+| judge release (κ ≥ 0.60 vs SMEs) | `agentkit judge calibrate` → a committed per-judge calibration record with the human ceiling; judge releases move in their own change and end with a re-established baseline and anchors |
+| wheel-per-SHA / deploy by image digest | one wheel per commit bound by `release-evidence.json`, `BUNDLE_VAR_deployment_release=$GITHUB_SHA` into the runtime as `AAI_RELEASE`, and immutable Unity Catalog volume releases |
+| post-deploy smoke on golden prompts | `scripts/smoke_deployment.py` in the deploy workflow: app RUNNING always, golden probes via `evals/data/live_probes.json` |
+| auto-rollback (`rollout undo`) | a deliberate non-goal: rollback is a reviewed re-promotion of a known-good commit (immutable release evidence makes it exact), and prompt aliases roll back by pointer move |
+| GitHub `environment:` approval gates | manual `workflow_dispatch` promotion from protected `main` with the branch-ref federated credential — an `environment:` would change the OIDC subject and break keyless login (AGENTS.md section 4) |
+
+**What deliberately does not transfer:** the container half of such designs
+(a registry, digest-pinned cluster deploys, an in-repo IaC layer). This
+repository does not own infrastructure (AGENTS.md section 10), its CI
+identity holds no ARM RBAC by design, and the serving paths are Databricks
+Apps and Model Serving — the bundle deploy, the immutable volume, and
+workspace permissions are the equivalents. An external runtime can still
+front this gate: `agent:` resolves HTTPS endpoints, so the eval plane stays
+on Databricks while the runtime is wherever the application team runs it.
+
+## Related documents
+
+- `docs/genai-lifecycle.md` — the full evidence chain and lifecycle vocabulary
+- `docs/tagging-standard.md` — the governed tag fields every run carries
+- `docs/developer-guide.md` — the end-to-end developer path
+- `docs/cost-estimation.md` — how platform cost attribution works
+- `docs/multi-agent-systems.md` — the delegation trace convention and the
+  coordination scorers for supervisor/subagent applications
+
+## Notes for the other templates
+
+The five other templates still ship the pre-agentkit `evals/` pattern: a
+hand-written `offline_checks.py` and `evaluate.py` per project, with
+thresholds in `gate_config.json` and judges defined in `src/app/judges.py`.
+They keep working. To adopt the toolkit, add an `agentkit.yaml`, replace those
+two scripts with the shims the `evaluation-project` template uses, and delete
+the local judge definitions in favour of the shared registry.
+
+Azure DevOps pipeline templates are not shipped yet. The exit-code contract is
+CI-agnostic, so wiring `agentkit smoke` to pull requests and `agentkit eval`
+pre-merge works the same way on any runner that can authenticate without a
+stored secret.

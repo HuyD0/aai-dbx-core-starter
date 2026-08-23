@@ -17,6 +17,7 @@ from aai_console.hub.models import (
 from aai_console.hub.readiness import (
     AdministratorEvidence,
     AuthenticationEvidence,
+    CostEvidence,
     EvaluationEvidence,
     JobEvidence,
     ManifestEvidence,
@@ -74,7 +75,11 @@ def _readiness_evidence(**changes) -> ReadinessEvidence:
         "authentication": AuthenticationEvidence(
             mode_declared=True,
             approved_ai_gateway=True,
-            rate_limit_configured=None,
+            rate_limit_configured=True,
+        ),
+        "cost": CostEvidence(
+            budget_policy_configured=True,
+            attribution_verified=True,
         ),
         "tracing": TracingEvidence(
             configured=True,
@@ -302,6 +307,27 @@ def test_unknown_blocking_evidence_prevents_readiness():
         result for result in snapshot.results if result.rule_id == "resource_resolution"
     )
     assert resource.status is ReadinessStatus.UNKNOWN
+    assert snapshot.ready is False
+
+
+def test_production_budget_and_cost_attribution_fail_closed():
+    evidence = _readiness_evidence(
+        cost=CostEvidence(
+            budget_policy_configured=None,
+            attribution_verified=False,
+        )
+    )
+    snapshot = ReadinessEvaluator(
+        ReadinessProfile(
+            profile_id="medium-risk-production",
+            version="1",
+            require_budget_policy=True,
+        )
+    ).evaluate(evidence, evaluated_at=NOW)
+
+    results = {result.rule_id: result for result in snapshot.results}
+    assert results["budget_policy"].status is ReadinessStatus.UNKNOWN
+    assert results["cost_attribution"].status is ReadinessStatus.FAIL
     assert snapshot.ready is False
 
 

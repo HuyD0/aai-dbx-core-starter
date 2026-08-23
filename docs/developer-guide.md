@@ -160,6 +160,57 @@ idempotent and conflicts fail. Never toggle autologging in a request handler.
 Do not enable an autologger on top of SDK spans for the same call; duplicate
 spans also duplicate token and cost evidence.
 
+### Keep trace ownership and assurance evidence explicit
+
+MLflow is the authoritative assurance evidence plane for applications. Its
+traces, runs, versioned EvaluationDatasets, and Feedback / Assessments are the
+records evaluated by the release gate. Operational telemetry backends provide
+a complementary service-operational view; neither backend copies verdicts or
+reviewed datasets into the other.
+
+Tracing ownership determines which privacy controls actually apply:
+
+| Trace source | Owner and privacy boundary | What it proves |
+|---|---|---|
+| SDK-owned application tracing | The application selects one provider/integration, exporters, attributes, and bounded inputs/outputs. Its declared MLflow capture policy applies to these spans. | Client behavior the application directly observed. |
+| Provider-managed or hosted telemetry | The managed runtime owns its server-side instrumentation and export. Its runtime policy—not the SDK trace policy—controls those payloads. | What the managed service observed, subject to sampling and ingestion. |
+
+Do not assume that disabling content in one owner redacts spans produced by
+another. Exception messages, identifiers, tool definitions, and custom span
+attributes can still be sensitive even when prompt/response capture is off.
+Never request or store hidden model chain-of-thought to fill an observability
+gap.
+
+Native OTel GenAI conventions give MLflow a useful execution mapping after
+ingestion: `invoke_agent` is agent activity, `chat` is a model call, and
+`execute_tool` is actual tool execution. A tool call represented only inside a
+model response is intent, not proof that application tool code ran; do not
+teach a TOOL span as nested under the model span that requested it. A hosted
+protocol runtime can add another parent, so validate the deployed platform
+root and managed-backend translation live. Native instrumentation has no
+portable decision-reason, retry/recovery, or human-approval span contract, so
+add small application spans only for those meaningful events. Record failures
+on execution spans and keep evaluator verdicts in Feedback / Assessments.
+
+Debug from the producer outward:
+
+1. Prove the expected span tree and parent IDs with an in-memory exporter.
+2. Confirm exactly one instrumentation owner and the intended content policy.
+3. Confirm exporter flush, endpoint, protocol, routing headers, and renewable
+   authentication without printing credentials.
+4. Confirm ingestion in the MLflow receiver or the configured operational
+   backend.
+5. Confirm backend correlation fields, viewer RBAC, sampling, and ingestion
+   delay.
+6. Confirm MLflow translated the native spans, then run independent scorers.
+
+The production improvement loop is similarly reviewed: sample useful traces,
+redact/minimize them, obtain human review and expert Feedback, promote approved cases into a
+versioned MLflow EvaluationDataset, run deterministic checks before calibrated
+judges, and require the normal regression gate. Do not treat raw production
+traffic as benchmark truth or imply that an agent recovered unless an observed
+span or application event records that recovery.
+
 ## 7. Deploy and monitor
 
 The platform team must first onboard the generated repository with a
@@ -178,7 +229,12 @@ For agent HTTP serving, the generated agent template uses MLflow Agent Server
 on Databricks Apps as its native deployment path, with async `@invoke` and
 `@stream` handlers. LangGraph is an optional application-owned recipe for
 durable graph execution; inject an async persistent checkpointer/store and put
-an interrupt before irreversible work.
+an interrupt before irreversible work. When to reach for the recipe, how
+review decisions become trace evidence, and the Lakebase persistence wiring
+are covered in [Production LangGraph agents](langgraph-production.md). If the
+application grows a supervisor with subagents, the delegation trace
+convention and the coordination scorers it switches on are covered in
+[Multi-agent systems in production](multi-agent-systems.md).
 
 Production applications emit sampled asynchronous traces. Attach end-user and
 expert feedback to the originating trace, monitor quality and operations, and

@@ -1,5 +1,8 @@
 # {{.project_name}}
 
+The supported delivery path is dev to UAT; follow
+[`docs/uat-promotion.md`](docs/uat-promotion.md) after the dev release gate passes.
+
 Prompt application generated from the AAI platform template (`prompt-app`):
 governed prompt lifecycle with pinned-version evaluation and gated alias
 promotion.
@@ -33,21 +36,32 @@ provider integration.
    `python evals/evaluate.py` — explicitly routed LLM judges (Correctness,
    RelevanceToQuery, Safety) against `evals/data/release_cases.json` with the
    thresholds in `evals/gate_config.json`; evaluation always pins an exact
-   version, never an alias. After a released run passes, refresh the
-   regression baseline with `--update-baseline`.
+   version, never an alias. The SDK's strict judge resolver runs before prompt
+   registry access or assistant construction, so invalid configuration fails
+   locally before target work. After a released run passes, refresh the
+   regression baseline with `--update-baseline`. The gate records an adopt or
+   reject decision run and prints its `decision_run_id`.
    After case changes merge, register the ground truth in Unity Catalog:
    `python scripts/sync_dataset.py` — evaluation runs link the dataset
    by name.
 4. Promote only after the gate passes:
-   `python scripts/promote_prompt.py --version <n> --to validation`, then
-   `--to production` at release approval. Production deploys load the
-   `production` alias — promotion must happen before the first prod deploy.
+   `python scripts/promote_prompt.py --version <n> --decision-run-id <run-id>
+   --to validation`, then repeat with `--to production` at release approval.
+   Promotion reloads and verifies the persisted decision artifact, tags, gate
+   metrics, and exact prompt binding before moving the alias. Production
+   deploys load the `production` alias — promotion must happen before the
+   first prod deploy.
 5. Deploy the evaluation job: `databricks bundle validate -t dev` then
    `databricks bundle deploy -t dev`.
 
 Prompt changes are application releases: record them, evaluate them, and
 promote them deliberately. Pull-request CI runs only the deterministic
 checks in `evals/offline_checks.py` — it never holds credentials.
+
+The assistant rejects empty questions and inputs over 8,000 characters,
+requests at most 1,024 output tokens, and fails closed on empty responses or
+responses over 8,192 characters. These are starter defaults; change them only
+with matching evaluation and cost evidence.
 
 The platform team must onboard this repository (main-branch federated
 credential, Databricks service principal, constrained compute permission,

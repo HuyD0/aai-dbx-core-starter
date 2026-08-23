@@ -10,7 +10,7 @@ from app.tools import (
     AsyncToolRegistry,
     ToolExecutionError,
     ToolSpec,
-    build_registry,
+    build_agent_registry,
     lookup_order_status,
 )
 
@@ -21,11 +21,12 @@ def test_lookup_returns_status_or_explicit_not_found():
 
 
 def test_registry_exposes_openai_tool_metadata_and_executes():
-    registry = build_registry()
+    registry = build_agent_registry(timeout_seconds=3.5)
 
     tools = registry.openai_tools()
     assert tools[0]["function"]["name"] == "lookup_order_status"
     assert "order_id" in tools[0]["function"]["parameters"]["properties"]
+    assert registry._specs["lookup_order_status"].timeout_seconds == 3.5
 
     result = json.loads(
         asyncio.run(registry.execute("lookup_order_status", {"order_id": "A-1002"}))
@@ -69,6 +70,29 @@ def test_tool_timeout_is_normalized_and_cancellation_propagates():
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task
 
     asyncio.run(cancel())
+
+
+def test_tool_output_is_bounded_before_it_reenters_the_prompt():
+    class EmptyInput(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+
+    async def oversized():
+        return "12345"
+
+    registry = AsyncToolRegistry(
+        (
+            ToolSpec(
+                name="oversized",
+                description="Return too much content.",
+                input_model=EmptyInput,
+                handler=oversized,
+                max_output_chars=4,
+            ),
+        )
+    )
+
+    with pytest.raises(ToolExecutionError, match="output exceeded"):
+        asyncio.run(registry.execute("oversized", {}))

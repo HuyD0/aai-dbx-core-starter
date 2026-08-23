@@ -1,7 +1,18 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sdk": {
-    "version": "0.3.0",
+    "version": "0.4.0",
+    "development_status": "unreleased",
+    "generated_project_default": {
+      "$comment": "Held deliberately at the reviewed release-candidate commit. Generated projects install this frozen, canary-verified source until 0.4.0 is tagged; the checkout moves ahead of it by design (docs/versioning.md, step 1 of the two-step release). Advance it only with fresh release-acceptance evidence.",
+      "version": "0.4.0",
+      "status": "release-candidate",
+      "source": {
+        "kind": "git-commit",
+        "ref": "ca467b74d2a2c05375cbc93f6e0b0bcca1dffa24",
+        "content_sha256": "fcf5a6558f26e9fde0be8b34d72ec961477764688810c0e80f00f722a34befba"
+      }
+    },
     "python": [
       "3.11",
       "3.12"
@@ -13,35 +24,49 @@
     "dependency_policy": "dependency-policy.toml",
     "lock": "uv.lock"
   },
+  "release_acceptance": {
+    "dependency_canary": {
+      "required": true,
+      "minimum_green_runs": 1,
+      "python": [
+        "3.11",
+        "3.12"
+      ],
+      "resolutions": [
+        "lowest-direct",
+        "highest"
+      ]
+    }
+  },
   "templates": {
     "agent-app": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.5.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "analytics-app": {
-      "version": "1.0.0",
-      "aai_core": "0.3.0",
+      "version": "1.3.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "evaluation-project": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "2.2.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "experiment-starter": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.4.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "prompt-app": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.4.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     },
     "rag-app": {
-      "version": "1.1.0",
-      "aai_core": "0.3.0",
+      "version": "1.4.0",
+      "aai_core": "0.4.0",
       "dependency_lock_format": "universal-transitive-v1"
     }
   },
@@ -53,6 +78,21 @@
     "mlflow_tracing": {
       "support": "stable",
       "owner": "aai-core"
+    },
+    "retrieval_strategies": {
+      "support": "stable",
+      "owner": "aai-core-native-provider-adapter",
+      "note": "Typed text, vector, and hybrid query strategies retain the native Azure AI Search and Databricks AI Search execution paths."
+    },
+    "provider_reranking": {
+      "support": "preview",
+      "owner": "native-provider-with-aai-typed-options",
+      "note": "Azure semantic ranking and Databricks reranking remain provider-native capabilities selected through typed query options."
+    },
+    "agent_decision_observability": {
+      "support": "preview",
+      "owner": "mlflow-native-with-application-records",
+      "note": "Strict provider-neutral decision records use privacy-governed MLflow AGENT spans; observed execution spans remain authoritative and provider reasoning signals remain optional diagnostics."
     },
     "framework_autologging": {
       "support": "preview",
@@ -71,26 +111,6 @@
       "support": "preview",
       "owner": "mlflow-native-with-aai-gates"
     },
-    "foundry_cloud_evaluation": {
-      "support": "native-provider",
-      "owner": "curriculum-opt-in",
-      "note": "Response-ID and agent-target evaluation are current; trace and conversation evaluation remain preview."
-    },
-    "foundry_a2a": {
-      "support": "preview",
-      "owner": "curriculum-opt-in",
-      "note": "New integrations target A2A v1.0; project connections, RBAC, and agent cards are provisioned externally."
-    },
-    "foundry_context_engineering": {
-      "support": "native-provider",
-      "owner": "application",
-      "note": "Agent Framework context providers and Responses compaction are current; managed Memory is preview."
-    },
-    "otel_dual_export": {
-      "support": "preview",
-      "owner": "application-with-platform-telemetry",
-      "note": "One OpenTelemetry provider can fan spans to Application Insights and an MLflow OTLP endpoint; there is no backend-to-backend synchronization."
-    },
     "automatic_evaluations": {
       "support": "preview",
       "owner": "platform-governed"
@@ -104,10 +124,37 @@
       "owner": "application",
       "note": "Supported through MLflow LangChain autologging; graph and state APIs are not wrapped by aai-core."
     },
+    "agent_memory": {
+      "support": "native-framework",
+      "owner": "application",
+      "note": "Durable checkpoints and user-scoped memory through the LangGraph Postgres saver and store against Lakebase; persistence APIs are not wrapped by aai-core."
+    },
+    "decision_records": {
+      "support": "preview",
+      "owner": "aai-core"
+    },
+    "deterministic_scorers": {
+      "support": "preview",
+      "owner": "aai-core"
+    },
+    "production_feedback_curation": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance",
+      "note": "Scorer sampling registration runs from a Databricks notebook; aai-core supplies judge resolution, feedback, and trace curation."
+    },
+    "prompt_promotion_gating": {
+      "support": "preview",
+      "owner": "mlflow-native-with-aai-governance"
+    },
     "self_service_analytics": {
       "support": "preview",
       "owner": "template-owned",
       "note": "Semantic contract, warehouse executor protocol, and provenance discipline are generated application code in analytics-app; aai-core wraps none of it."
+    },
+    "agent_evaluation_toolkit": {
+      "support": "preview",
+      "owner": "aai-core",
+      "note": "agentkit CLI: comparison-first evaluation, shared scorer registry, promotion gate"
     }
   }
 }

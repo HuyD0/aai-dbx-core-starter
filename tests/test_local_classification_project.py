@@ -46,7 +46,7 @@ def test_course_uses_exact_isolated_dependencies():
     with (PROJECT / "pyproject.toml").open("rb") as stream:
         project = tomllib.load(stream)
     dependencies = project["project"]["dependencies"]
-    assert "mlflow==3.14.0" in dependencies
+    assert "mlflow==3.15.1" in dependencies
     assert "pandas==2.3.3" in dependencies
     assert "scikit-learn==1.9.0" in dependencies
     assert all("aai-core" not in dependency for dependency in dependencies)
@@ -54,7 +54,7 @@ def test_course_uses_exact_isolated_dependencies():
     with (PROJECT / "uv.lock").open("rb") as stream:
         lock = tomllib.load(stream)
     versions = {package["name"]: package["version"] for package in lock["package"]}
-    assert versions["mlflow"] == "3.14.0"
+    assert versions["mlflow"] == "3.15.1"
     assert versions["pandas"] == "2.3.3"
     assert versions["scikit-learn"] == "1.9.0"
 

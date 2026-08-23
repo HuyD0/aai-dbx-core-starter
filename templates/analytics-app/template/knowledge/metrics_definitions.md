@@ -50,4 +50,5 @@ region values.
 
 Orders and customers references carry per-table detail. The runbook in the
 system prompt defines the search order: semantic layer first, these
-references second, raw SQL last.
+references second, and governed `query_rows` detail last. The model never
+writes or supplies SQL.
