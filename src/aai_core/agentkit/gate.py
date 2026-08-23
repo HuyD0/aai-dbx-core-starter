@@ -27,6 +27,7 @@ from aai_core.agentkit.catalog import (
     registry_direction,
 )
 from aai_core.agentkit.config import ProjectContext, parse_threshold
+from aai_core.agentkit.economics import economics_direction
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
 from aai_core.agentkit.integrity import (
     ANCHOR_DRIFT_EXPLANATION,
@@ -128,11 +129,14 @@ def build_policy(
             )
         else:
             # With no absolute threshold to imply a direction, take it from
-            # the registry: latency is lower-is-better, so "regression"
-            # must mean slower, not faster.
+            # the metric family: cost and latency are lower-is-better, so
+            # "regression" must mean more expensive or slower, not less.
+            # The registry answers "higher" for any metric it does not
+            # know, so the economics metrics are resolved first.
+            direction = economics_direction(metric) or registry_direction(metric)
             rules[metric] = MetricRule(
                 metric=metric,
-                direction=MetricDirection(registry_direction(metric)),
+                direction=MetricDirection(direction),
                 max_regression=float(allowance),
             )
     minimum_effect = {

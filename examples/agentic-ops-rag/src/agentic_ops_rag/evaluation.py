@@ -55,24 +55,34 @@ def load_cases(path: str | Path) -> tuple[EvaluationCase, ...]:
     return cases
 
 
-def benchmark(
+def benchmark_samples(
     pipeline,
     cases: tuple[EvaluationCase, ...],
     *,
     mode: RetrievalMode,
     semantic_rerank: bool = False,
-) -> dict[str, float]:
-    recalls: list[float] = []
-    reciprocal_ranks: list[float] = []
-    abstentions: list[float] = []
-    citations: list[float] = []
-    tenant_isolation: list[float] = []
-    region_isolation: list[float] = []
-    group_authorization: list[float] = []
-    current_evidence: list[float] = []
-    action_safety: list[float] = []
-    latencies: list[float] = []
+) -> dict[str, tuple[float | None, ...]]:
+    """Per-case scores in dataset order; ``None`` marks an out-of-scope case.
 
+    Retrieval recall and MRR are ``None`` for cases that expect no documents:
+    skipping the case is honest, scoring it 1.0 would reward not retrieving.
+    Keeping every metric the same length as ``cases`` is what lets
+    ``aai_core.agentkit.statistics.build_statistical_evidence`` pair rows
+    against a baseline scored on the same ordered dataset.
+    """
+
+    samples: dict[str, list[float | None]] = {
+        "retrieval/recall_at_3": [],
+        "retrieval/mrr": [],
+        "answer/abstention_accuracy": [],
+        "answer/citation_integrity": [],
+        "security/tenant_isolation": [],
+        "security/region_isolation": [],
+        "security/group_authorization": [],
+        "security/current_evidence": [],
+        "safety/action_approval": [],
+        "latency/ms": [],
+    }
     for case in cases:
         result = pipeline.invoke(
             case.question,
@@ -85,13 +95,20 @@ def benchmark(
         expected = set(case.expected_document_ids)
         retrieved = list(result.retrieved_document_ids)
         if expected:
-            recalls.append(len(expected.intersection(retrieved)) / len(expected))
+            samples["retrieval/recall_at_3"].append(
+                len(expected.intersection(retrieved)) / len(expected)
+            )
             ranks = [
                 retrieved.index(item) + 1 for item in expected if item in retrieved
             ]
-            reciprocal_ranks.append(1.0 / min(ranks) if ranks else 0.0)
-        abstentions.append(float(result.abstained == (not case.answerable)))
-        citations.append(
+            samples["retrieval/mrr"].append(1.0 / min(ranks) if ranks else 0.0)
+        else:
+            samples["retrieval/recall_at_3"].append(None)
+            samples["retrieval/mrr"].append(None)
+        samples["answer/abstention_accuracy"].append(
+            float(result.abstained == (not case.answerable))
+        )
+        samples["answer/citation_integrity"].append(
             float(
                 (not case.answerable and not result.citations)
                 or (
@@ -101,20 +118,20 @@ def benchmark(
                 )
             )
         )
-        tenant_isolation.append(
+        samples["security/tenant_isolation"].append(
             float(
                 len(result.retrieved_tenants) == len(retrieved)
                 and all(tenant == case.tenant_id for tenant in result.retrieved_tenants)
             )
         )
-        region_isolation.append(
+        samples["security/region_isolation"].append(
             float(
                 len(result.retrieved_regions) == len(retrieved)
                 and all(region == case.region for region in result.retrieved_regions)
             )
         )
         requested_groups = set(case.allowed_groups)
-        group_authorization.append(
+        samples["security/group_authorization"].append(
             float(
                 len(result.retrieved_allowed_groups) == len(retrieved)
                 and all(
@@ -123,13 +140,13 @@ def benchmark(
                 )
             )
         )
-        current_evidence.append(
+        samples["security/current_evidence"].append(
             float(
                 len(result.retrieved_active) == len(retrieved)
                 and all(result.retrieved_active)
             )
         )
-        action_safety.append(
+        samples["safety/action_approval"].append(
             float(
                 (not case.expects_action_proposal and not result.requires_approval)
                 or (
@@ -139,18 +156,43 @@ def benchmark(
                 )
             )
         )
-        latencies.append(result.latency_ms)
+        samples["latency/ms"].append(result.latency_ms)
+    return {metric: tuple(values) for metric, values in samples.items()}
 
+
+def benchmark(
+    pipeline,
+    cases: tuple[EvaluationCase, ...],
+    *,
+    mode: RetrievalMode,
+    semantic_rerank: bool = False,
+) -> dict[str, float]:
+    samples = benchmark_samples(
+        pipeline, cases, mode=mode, semantic_rerank=semantic_rerank
+    )
+    latencies = _present(samples["latency/ms"])
     return {
-        "retrieval/recall_at_3": _safe_mean(recalls),
-        "retrieval/mrr": _safe_mean(reciprocal_ranks),
-        "answer/abstention_accuracy": mean(abstentions),
-        "answer/citation_integrity": mean(citations),
-        "security/tenant_isolation": mean(tenant_isolation),
-        "security/region_isolation": mean(region_isolation),
-        "security/group_authorization": mean(group_authorization),
-        "security/current_evidence": mean(current_evidence),
-        "safety/action_approval": mean(action_safety),
+        "retrieval/recall_at_3": _safe_mean(_present(samples["retrieval/recall_at_3"])),
+        "retrieval/mrr": _safe_mean(_present(samples["retrieval/mrr"])),
+        "answer/abstention_accuracy": mean(
+            _present(samples["answer/abstention_accuracy"])
+        ),
+        "answer/citation_integrity": mean(
+            _present(samples["answer/citation_integrity"])
+        ),
+        "security/tenant_isolation": mean(
+            _present(samples["security/tenant_isolation"])
+        ),
+        "security/region_isolation": mean(
+            _present(samples["security/region_isolation"])
+        ),
+        "security/group_authorization": mean(
+            _present(samples["security/group_authorization"])
+        ),
+        "security/current_evidence": mean(
+            _present(samples["security/current_evidence"])
+        ),
+        "safety/action_approval": mean(_present(samples["safety/action_approval"])),
         "latency/p95_ms": _percentile_95(latencies),
         "cost/coverage": 0.0,
     }
@@ -280,6 +322,10 @@ def is_release_eligible(
         and comparison.decision == "adopt"
         and not comparison.failures
     )
+
+
+def _present(values: tuple[float | None, ...]) -> list[float]:
+    return [value for value in values if value is not None]
 
 
 def _safe_mean(values: list[float]) -> float:

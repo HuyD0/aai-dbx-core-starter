@@ -19,6 +19,7 @@ EXPECTED_FILENAMES = (
     "03_hybrid_retrieval_and_reranking.ipynb",
     "04_mlflow_tracing_guardrails_and_evaluation.ipynb",
     "05_capstone_release_decision.ipynb",
+    "06_confidence_intervals_for_release_gates.ipynb",
 )
 
 
@@ -98,7 +99,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     if tuple(sorted(LESSONS)) != EXPECTED_FILENAMES:
-        raise SystemExit("Notebook content must define the ordered 00-05 course")
+        raise SystemExit("Notebook content must define the ordered 00-06 course")
     NOTEBOOKS.mkdir(parents=True, exist_ok=True)
     stale: list[str] = []
     for filename, cells in sorted(LESSONS.items()):

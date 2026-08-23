@@ -19,6 +19,7 @@ EXPECTED = (
     "03_hybrid_retrieval_and_reranking.ipynb",
     "04_mlflow_tracing_guardrails_and_evaluation.ipynb",
     "05_capstone_release_decision.ipynb",
+    "06_confidence_intervals_for_release_gates.ipynb",
 )
 
 
@@ -70,7 +71,7 @@ def main() -> int:
     paths = sorted(NOTEBOOKS.glob("*.ipynb"))
     if tuple(path.name for path in paths) != EXPECTED:
         raise SystemExit(
-            "Expected the complete ordered 00-05 course; found "
+            "Expected the complete ordered 00-06 course; found "
             + ", ".join(path.name for path in paths)
         )
     original = Path.cwd()
