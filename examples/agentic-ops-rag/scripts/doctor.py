@@ -136,7 +136,7 @@ def _check_notebooks(diagnostics: Diagnostics) -> None:
             "rerender with `make ops-rag-render`, then rerun the doctor",
         )
     else:
-        diagnostics.passed("Notebooks", "six clean generated lessons verified")
+        diagnostics.passed("Notebooks", "seven clean generated lessons verified")
 
 
 def main() -> int:

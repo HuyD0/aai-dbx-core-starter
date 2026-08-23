@@ -95,6 +95,7 @@ secret, or raw Key Vault value.
 | `03_hybrid_retrieval_and_reranking` | Text/vector/hybrid/reranked ablation, RRF, candidate budgets, and Azure semantic ranking. |
 | `04_mlflow_tracing_guardrails_and_evaluation` | Retriever spans, deterministic gates, governed runs, and optional MLflow RAG judges. |
 | `05_capstone_release_decision` | Baseline/change/result/decision, immutable release evidence, and template graduation. |
+| `06_confidence_intervals_for_release_gates` | Normal versus bootstrap intervals, width as a retrieval diagnostic, paired improvements, and confidence-bound gates. |
 
 Every lesson has a focused `# YOUR TURN` exercise, a non-destructive check,
 and a reference solution. The notebooks are generated from reviewable Python

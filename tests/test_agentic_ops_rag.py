@@ -28,6 +28,7 @@ EXPECTED_NOTEBOOKS = (
     "03_hybrid_retrieval_and_reranking.ipynb",
     "04_mlflow_tracing_guardrails_and_evaluation.ipynb",
     "05_capstone_release_decision.ipynb",
+    "06_confidence_intervals_for_release_gates.ipynb",
 )
 
 
@@ -61,6 +62,7 @@ from agentic_ops_rag import (  # noqa: E402
 )
 from agentic_ops_rag.evaluation import (  # noqa: E402
     ComparisonRecord,
+    benchmark_samples,
     comparison_record,
     is_release_eligible,
     load_cases,
@@ -1043,6 +1045,53 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert '"comparison": comparison.model_dump(mode="json")' in capstone_source
     assert '"failures": [' in capstone_source
 
+    confidence_notebook = json.loads(
+        (
+            COURSE / "notebooks" / "06_confidence_intervals_for_release_gates.ipynb"
+        ).read_text(encoding="utf-8")
+    )
+    confidence_source = "\n".join(
+        _source(cell) for cell in confidence_notebook["cells"]
+    )
+    assert "benchmark_samples(" in confidence_source
+    assert "build_statistical_evidence(" in confidence_source
+    assert 'StatisticsConfig(method="bootstrap")' in confidence_source
+    assert "extend_rules_with_statistics(" in confidence_source
+    assert "enforce_confidence=True" in confidence_source
+    assert "bootstrap_seed=seed" in confidence_source
+    assert 'missing_runbook = "alpha-payments-503-current"' in confidence_source
+    # The interval evidence must stay reproducible: only the seeded generator
+    # inside aai_core may draw, and the lesson needs no numeric dependency.
+    assert "random.seed" not in confidence_source
+    assert "import numpy" not in confidence_source
+
+
+def test_benchmark_samples_keep_dataset_order_and_reproduce_aggregates():
+    pipeline = session.offline_pipeline()
+    cases = load_cases(COURSE / "data" / "evaluation_cases.jsonl")
+    samples = benchmark_samples(pipeline, cases, mode=RetrievalMode.HYBRID)
+    metrics = benchmark(pipeline, cases, mode=RetrievalMode.HYBRID)
+
+    assert all(len(values) == len(cases) for values in samples.values())
+    for case, recall, reciprocal in zip(
+        cases,
+        samples["retrieval/recall_at_3"],
+        samples["retrieval/mrr"],
+        strict=True,
+    ):
+        assert (recall is None) == (not case.expected_document_ids)
+        assert (reciprocal is None) == (not case.expected_document_ids)
+
+    for metric, aggregate in metrics.items():
+        if metric in {"latency/p95_ms", "cost/coverage"}:
+            continue
+        scored = [value for value in samples[metric] if value is not None]
+        assert aggregate == pytest.approx(sum(scored) / len(scored))
+
+    latencies = sorted(value for value in samples["latency/ms"] if value is not None)
+    index = max(0, -(-95 * len(latencies) // 100) - 1)
+    assert metrics["latency/p95_ms"] == latencies[index]
+
 
 def test_all_default_notebook_paths_execute_without_network_or_credentials():
     result = subprocess.run(
@@ -1054,7 +1103,7 @@ def test_all_default_notebook_paths_execute_without_network_or_credentials():
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("[PASS] executed") == 6
+    assert result.stdout.count("[PASS] executed") == 7
 
 
 def test_documentation_records_clean_room_source_and_current_stack_boundary():

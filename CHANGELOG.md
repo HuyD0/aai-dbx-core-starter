@@ -4,6 +4,16 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added lesson `06_confidence_intervals_for_release_gates` to the agentic
+  operations RAG workshop: a credential-free demonstration of the AgentKit
+  statistics module on the workshop's fixed cases — normal versus bootstrap
+  intervals on a bounded recall scale, interval width localizing a simulated
+  missing-runbook index build, paired per-row improvements deciding what
+  overlapping intervals cannot, confidence-bound gating with the
+  `minimum_cases` guard, and a seed-robustness exercise. Backing it,
+  `agentic_ops_rag.evaluation.benchmark_samples` now exposes the per-case
+  scores in dataset order (`None` for out-of-scope cases) and `benchmark`
+  derives its aggregates from them unchanged.
 - Added `statistics.method: bootstrap` to AgentKit: confidence bounds around
   scorer means and paired baseline improvements can now come from seeded
   percentile bootstrap resampling instead of the normal approximation, which
