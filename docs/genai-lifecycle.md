@@ -314,6 +314,50 @@ without additive provider options, raw `extra_body` payloads, or per-call
 credential headers. Do not combine those adapter spans with OpenAI
 autologging, which duplicates traces and token counts.
 
+## Model customization
+
+Prompting, retrieval, and fine-tuning form one escalation ladder, not three
+competing options. A prompt change alters instructions, a retrieval change
+alters the context the model reads, and fine-tuning alters the weights
+themselves. Escalate only when the cheaper lever is exhausted: fine-tuning is
+justified when repeated prompt versions and retrieval improvements still fail
+a behavioral requirement — output format, tone, citation discipline,
+consistency — on the governed evaluation set.
+
+Parameter-efficient fine-tuning (LoRA and its variants) changes behavior, not
+knowledge. It teaches a model how to respond in the required shape; it is not
+a mechanism for injecting new facts, which remains retrieval's job. A team
+reaching for fine-tuning to fix factual gaps should fix its retrieval and
+evaluation design instead.
+
+A fine-tuned adapter is an application release like every other change in the
+reproducibility manifest. It carries the same falsifiable hypothesis, the same
+baseline/change/result/decision contract, the same fixed ordered evaluation
+dataset, and the same release gate as a prompt change. Training data are
+versioned evidence: record the dataset digest, split membership, filtering
+rules, and pre-training validation results exactly as for evaluation datasets,
+and keep training, validation, and held-out evaluation splits disjoint. The
+adapter artifact, base model identity and revision, hyperparameters (rank,
+alpha, learning rate, epochs), and environment digest all enter the manifest.
+An adapter version is immutable; retraining creates a new version and a new
+comparison, never an overwrite.
+
+Serving cost changes shape at this stage. A pay-per-token endpoint bills
+nothing when idle; a dedicated fine-tuned endpoint bills continuously whether
+or not it serves traffic. A cost-quality comparison between a fine-tuned small
+model and a prompted larger model must therefore use expected request volume,
+not per-request price alone. `docs/cost-estimation.md` prices both shapes:
+GPU model serving, and foundation models as provisioned throughput or
+pay-per-token.
+
+Fine-tuning compute and serving endpoints are provisioned through the approved
+platform process like every other resource change, and training jobs stay
+keyless under the same workspace authentication chain as deployment. The
+standalone course in `examples/fine-tuning/` teaches these mechanics from
+first principles, credential-free — beginning with the memory economics
+above, with later lessons building through quantization, LoRA, QLoRA, and
+the PEFT library — before any connected training job.
+
 ## Prompt promotion
 
 Prompt versions are immutable. Mutable aliases such as `development` and
