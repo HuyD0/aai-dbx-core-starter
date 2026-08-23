@@ -4,6 +4,16 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Extended the example curriculum to teach the judge-measurement and
+  verified-promotion lifecycle: lesson 12 gains two runnable
+  credential-free sections — per-run judge stability (self-consistency
+  and frozen-anchor drift, with the "judge changed, not the agent"
+  reading) and the committed kappa-vs-SME calibration record behind
+  `agentkit judge calibrate` — and lesson 13 gains the
+  move-the-baseline-only-after-live-verification flow
+  (`agentkit baseline establish --from-run`), demonstrating the gate's
+  deployed-commit binding refusal offline.
+
 - Added `statistics.method: bootstrap` to AgentKit: confidence bounds around
   scorer means and paired baseline improvements can now come from seeded
   percentile bootstrap resampling instead of the normal approximation, which
