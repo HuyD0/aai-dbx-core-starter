@@ -920,8 +920,10 @@ def _run_economics(
             None,
             {},
             [
-                "run economics were not recorded: the evaluation result "
-                "carried no per-row traces to read"
+                (
+                    "run economics were not recorded: the evaluation result "
+                    "carried no per-row traces to read"
+                )
             ],
         )
     return build_economics_evidence(
@@ -1963,8 +1965,10 @@ def _economics_outcome_lines(results: ResultsRecord) -> list[str]:
     ]
     for segment in economics.segments:
         parts = [
-            f"  {segment.key}={segment.value or '(unset)'}: "
-            f"{segment.successes}/{segment.rows} ok"
+            (
+                f"  {segment.key}={segment.value or '(unset)'}: "
+                f"{segment.successes}/{segment.rows} ok"
+            )
         ]
         if segment.cost_per_success_usd is not None:
             parts.append(f"cost/success ${segment.cost_per_success_usd:.4g}")

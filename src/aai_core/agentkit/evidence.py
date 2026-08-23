@@ -328,8 +328,10 @@ def _render_economics(lines: list[str], economics: Mapping[str, Any] | None) -> 
         lines.extend(
             [
                 "",
-                f"Known spend across all rows, failed ones included: "
-                f"${_format(cost_total)}.",
+                (
+                    f"Known spend across all rows, failed ones included: "
+                    f"${_format(cost_total)}."
+                ),
             ]
         )
     segments = economics.get("segments") or []
@@ -337,8 +339,10 @@ def _render_economics(lines: list[str], economics: Mapping[str, Any] | None) -> 
         lines.extend(
             [
                 "",
-                "Per-stratum economics — the evidence for routing an "
-                "intent to a different model:",
+                (
+                    "Per-stratum economics — the evidence for routing an "
+                    "intent to a different model:"
+                ),
                 "",
                 (
                     "| stratum | rows | success rate | cost/success | "
