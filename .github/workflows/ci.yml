@@ -63,9 +63,29 @@ jobs:
       - name: Test code and execute every notebook twice
         run: make -C examples/local-classification check
 
+  finetuning-course:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the locked fine-tuning course
+        run: |
+          python -m pip install uv==0.8.23
+          make -C examples/fine-tuning install
+
+      - name: Test code and execute every notebook twice
+        run: make -C examples/fine-tuning check
+
   python-311:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,6 +109,16 @@ jobs:
         run: |
           make -C examples/local-classification test
           make -C examples/local-classification notebook-check
+
+      - name: Install the fine-tuning course on Python 3.11
+        run: make -C examples/fine-tuning install
+
+      - name: Test fine-tuning runtime compatibility on Python 3.11
+        # Python 3.11 resolves the older numpy environment marker, so this job
+        # is what proves the course code on both certified numpy branches.
+        run: |
+          make -C examples/fine-tuning test
+          make -C examples/fine-tuning notebook-check
 
   provider-extras:
     runs-on: ubuntu-24.04

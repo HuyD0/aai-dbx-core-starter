@@ -24,7 +24,9 @@ APP_NAME ?= aai-platform-console-dev
 	pre-commit pre-push hooks-install hooks-run app-run app-start app-stop app-restart \
 	classification-install classification-prepare classification-train \
 	classification-doctor classification-reset classification-check \
-	classification-notebook classification-ui
+	classification-notebook classification-ui \
+	finetune-install finetune-doctor finetune-reset finetune-check \
+	finetune-notebook finetune-ui
 
 help: ## Show the available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [TARGET=dev]\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -104,6 +106,24 @@ classification-notebook: check-uv ## Open the local classification notebook cour
 
 classification-ui: check-uv ## Serve the classification course's local MLflow UI.
 	$(MAKE) -C examples/local-classification mlflow-ui
+
+finetune-install: check-uv ## Install the locked fine-tuning course.
+	$(MAKE) -C examples/fine-tuning install
+
+finetune-doctor: check-uv ## Verify the fine-tuning course setup.
+	$(MAKE) -C examples/fine-tuning doctor
+
+finetune-reset: ## Recoverably archive fine-tuning course-v1 state.
+	$(MAKE) -C examples/fine-tuning course-reset
+
+finetune-check: check-uv ## Test code and execute every fine-tuning notebook.
+	$(MAKE) -C examples/fine-tuning check
+
+finetune-notebook: check-uv ## Open the fine-tuning notebook course.
+	$(MAKE) -C examples/fine-tuning notebook
+
+finetune-ui: check-uv ## Serve the fine-tuning course's local MLflow UI.
+	$(MAKE) -C examples/fine-tuning mlflow-ui
 
 workspace-connect: examples-install ## Prepare and check keyless Databricks workspace access.
 	$(PYTHON) scripts/examples.py connect

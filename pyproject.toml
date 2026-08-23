@@ -79,7 +79,9 @@ packages = ["src/aai_core"]
 [tool.hatch.build.targets.sdist]
 # Standalone study projects own separate environments and are not SDK package data.
 exclude = [
+  "/examples/fine-tuning",
   "/examples/local-classification",
+  "/tests/test_finetuning_project.py",
   "/tests/test_local_classification_project.py",
 ]
 
@@ -94,7 +96,7 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-exclude = ["examples/local-classification"]
+exclude = ["examples/fine-tuning", "examples/local-classification"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -105,4 +107,4 @@ known-first-party = ["aai_core", "aai_console", "app", "jobs"]
 [tool.black]
 target-version = ["py311", "py312"]
 line-length = 88
-extend-exclude = "(^|/)examples/local-classification/"
+extend-exclude = "(^|/)examples/(fine-tuning|local-classification)/"
