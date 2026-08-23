@@ -31,6 +31,8 @@ OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 	classification-install classification-prepare classification-train \
 	classification-doctor classification-reset classification-check \
 	classification-notebook classification-ui \
+	finetune-install finetune-doctor finetune-reset finetune-check \
+	finetune-notebook finetune-ui \
 	ops-rag-install ops-rag-doctor ops-rag-render ops-rag-check \
 	ops-rag-notebook ops-rag-ui
 
@@ -124,6 +126,24 @@ classification-notebook: check-uv ## Open the local classification notebook cour
 
 classification-ui: check-uv ## Serve the classification course's local MLflow UI.
 	$(MAKE) -C examples/local-classification mlflow-ui
+
+finetune-install: check-uv ## Install the locked fine-tuning course.
+	$(MAKE) -C examples/fine-tuning install
+
+finetune-doctor: check-uv ## Verify the fine-tuning course setup.
+	$(MAKE) -C examples/fine-tuning doctor
+
+finetune-reset: ## Recoverably archive fine-tuning course-v1 state.
+	$(MAKE) -C examples/fine-tuning course-reset
+
+finetune-check: check-uv ## Test code and execute every fine-tuning notebook.
+	$(MAKE) -C examples/fine-tuning check
+
+finetune-notebook: check-uv ## Open the fine-tuning notebook course.
+	$(MAKE) -C examples/fine-tuning notebook
+
+finetune-ui: check-uv ## Serve the fine-tuning course's local MLflow UI.
+	$(MAKE) -C examples/fine-tuning mlflow-ui
 
 ops-rag-install: examples-install ## Install the locked agentic operations RAG workshop environment.
 	@$(PYTHON) -c 'import azure.search.documents; import openai; print("Agentic operations RAG provider extras ready")'
