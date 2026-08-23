@@ -99,6 +99,62 @@ def test_evidence_names_versions_baseline_and_decision(tmp_path):
     assert "| metric | current | baseline | delta |" in markdown
 
 
+def test_evidence_renders_run_economics(tmp_path):
+    from aai_core.agentkit.economics import EconomicsEvidence, EconomicsSegment
+
+    project = _project(tmp_path)
+    results = _results(
+        economics=EconomicsEvidence(
+            rows=4,
+            successes=3,
+            tokens_known=4,
+            cost_known=4,
+            duration_known=4,
+            tokens_total=600.0,
+            cost_total_usd=0.08,
+            cost_source="trace",
+            segments=(
+                EconomicsSegment(
+                    key="intent",
+                    value="billing",
+                    rows=2,
+                    successes=1,
+                    success_rate=0.5,
+                    tokens_known=2,
+                    cost_known=2,
+                    duration_known=2,
+                    cost_per_success_usd=0.06,
+                    cost_p95_usd=0.04,
+                    latency_p95_seconds=2.5,
+                ),
+            ),
+        )
+    )
+
+    document, markdown = build_evidence(
+        project, results=results, baseline=_baseline(), gate_report=None
+    )
+
+    assert document["economics"]["successes"] == 3
+    assert document["economics"]["cost_source"] == "trace"
+    assert "## Run economics" in markdown
+    assert "3 of 4 rows completed successfully" in markdown
+    assert "unknown cost is never counted as zero" in markdown
+    assert "intent=billing" in markdown
+
+
+def test_evidence_without_economics_has_no_section(tmp_path):
+    project = _project(tmp_path)
+    results = _results()
+
+    document, markdown = build_evidence(
+        project, results=results, baseline=_baseline(), gate_report=None
+    )
+
+    assert document["economics"] is None
+    assert "Run economics" not in markdown
+
+
 def test_established_baseline_is_explicit_in_the_narrative(tmp_path):
     project = _project(tmp_path)
     results = _results(

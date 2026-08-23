@@ -146,6 +146,60 @@ def test_fetch_results_normalizes_an_embedded_nul_artifact_path():
         fetch_results("run-1", mlflow_module=fake)
 
 
+def _economics_evidence():
+    from aai_core.agentkit.economics import EconomicsEvidence, EconomicsSegment
+
+    return EconomicsEvidence(
+        rows=2,
+        successes=1,
+        tokens_known=2,
+        cost_known=2,
+        duration_known=1,
+        tokens_total=30.0,
+        cost_total_usd=0.5,
+        cost_source="trace",
+        segments=(
+            EconomicsSegment(
+                key="intent",
+                value="billing",
+                rows=2,
+                successes=1,
+                success_rate=0.5,
+                tokens_known=2,
+                cost_known=2,
+                duration_known=1,
+                cost_per_success_usd=0.5,
+            ),
+        ),
+        input_tokens=(10, 10),
+        output_tokens=(5, 5),
+        total_tokens=(15, 15),
+        cost_usd=(0.2, 0.3),
+        duration_ms=(100, None),
+        llm_calls=(1, 2),
+        success=(True, False),
+    )
+
+
+def test_records_round_trip_economics_evidence(tmp_path):
+    record = _record("run-1", economics=_economics_evidence())
+
+    path = write_results(tmp_path, record)
+
+    assert read_results(path) == record
+
+
+def test_records_without_economics_still_load(tmp_path):
+    """A record from before the economics evidence stays readable."""
+
+    document = json.loads(_record("run-1").model_dump_json())
+    document.pop("economics")
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert read_results(path).economics is None
+
+
 def test_read_results_normalizes_io_errors(tmp_path, monkeypatch):
     path = tmp_path / "results.json"
     path.write_text(_record("run-1").model_dump_json(), encoding="utf-8")

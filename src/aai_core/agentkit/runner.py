@@ -54,6 +54,7 @@ from aai_core.agentkit.datasets import (
     smoke_sample,
     validate_dataset,
 )
+from aai_core.agentkit.economics import EconomicsEvidence, build_economics_evidence
 from aai_core.agentkit.errors import (
     BaselineIncomparableError,
     BaselineMissingError,
@@ -173,6 +174,7 @@ class _ScoredRun:
     metric_samples: Mapping[str, tuple[float | None, ...]]
     statistics: StatisticalEvidence | None
     integrity: IntegrityEvidence | None = None
+    economics: EconomicsEvidence | None = None
     anchor_rows: tuple[Any, ...] = ()
 
 
@@ -700,6 +702,7 @@ def _score_prepared_run(
     baseline_samples = dict(baseline.metric_samples) if baseline else {}
     metric_samples: Mapping[str, tuple[float | None, ...]]
     integrity: IntegrityEvidence | None = None
+    economics: EconomicsEvidence | None = None
     anchor_rows: tuple[Any, ...] = ()
     if backend.mlflow is None:
         local_metrics, metric_samples = _score_locally(prepared.dataset, prepared.plan)
@@ -727,6 +730,7 @@ def _score_prepared_run(
             metric_samples,
             statistics,
             integrity,
+            economics,
             anchor_rows,
         ) = _score_with_mlflow(
             project,
@@ -757,6 +761,7 @@ def _score_prepared_run(
         metric_samples=metric_samples,
         statistics=statistics,
         integrity=integrity,
+        economics=economics,
         anchor_rows=anchor_rows,
     )
 
@@ -786,6 +791,7 @@ def _score_with_mlflow(
     Mapping[str, tuple[float | None, ...]],
     StatisticalEvidence | None,
     IntegrityEvidence | None,
+    EconomicsEvidence | None,
     tuple[Any, ...],
 ]:
     mlflow = backend.mlflow
@@ -848,6 +854,13 @@ def _score_with_mlflow(
         )
         metrics.update(integrity_metrics)
         warnings.extend(integrity_warnings)
+        economics, economics_metrics, economics_warnings = _run_economics(
+            project,
+            prepared,
+            native_result=native_result,
+        )
+        metrics.update(economics_metrics)
+        warnings.extend(economics_warnings)
         gate = apply_gate(
             metrics,
             policy=policy,
@@ -874,8 +887,105 @@ def _score_with_mlflow(
         metric_samples,
         statistics,
         integrity,
+        economics,
         anchor_rows,
     )
+
+
+def _run_economics(
+    project: ProjectContext,
+    prepared: _PreparedRun,
+    *,
+    native_result: Any,
+) -> tuple[EconomicsEvidence | None, dict[str, float], list[str]]:
+    """Harvest what this run spent from the traces it just produced.
+
+    Live runs read the ``trace`` column of MLflow's result frame — the
+    execution that was actually scored; traces runs fall back to the
+    stored envelopes the rows carry. Answer-sheet replay is out of
+    contract: the sheet holds no agent trace, and reading the harness's
+    own evaluation traces would record what the judges cost, not what
+    the agent did.
+    """
+
+    if prepared.mode not in ("live", "traces"):
+        return None, {}, []
+    config = project.config.economics
+    if not config.enabled:
+        return None, {}, []
+    rows = prepared.dataset.rows
+    traces = _row_traces(native_result, rows, mode=prepared.mode)
+    if traces is None:
+        return (
+            None,
+            {},
+            [
+                "run economics were not recorded: the evaluation result "
+                "carried no per-row traces to read"
+            ],
+        )
+    return build_economics_evidence(
+        rows,
+        traces,
+        _row_error_flags(native_result, len(rows)),
+        strata=project.config.strata,
+        config=config,
+    )
+
+
+def _row_traces(
+    native_result: Any,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    mode: str,
+) -> list[Any] | None:
+    """Per-row traces in dataset order, or ``None`` when none exist.
+
+    The frame's ``trace`` column is what the run actually executed, so it
+    wins; a traces-mode row keeps its stored envelope when the frame does
+    not carry the column.
+    """
+
+    frame = _result_frame(native_result)
+    columns = getattr(frame, "columns", None)
+    frame_traces: list[Any] | None = None
+    if columns is not None and "trace" in {str(column) for column in columns}:
+        frame_traces = list(frame["trace"])
+    collected: list[Any] = []
+    found = False
+    for index, row in enumerate(rows):
+        value: Any = None
+        if frame_traces is not None and index < len(frame_traces):
+            candidate = frame_traces[index]
+            if not is_missing_scalar(candidate):
+                value = candidate
+        if value is None and mode == "traces":
+            candidate = row.get("trace")
+            if candidate is not None and not is_missing_scalar(candidate):
+                value = candidate
+        if value is not None:
+            found = True
+        collected.append(value)
+    return collected if found else None
+
+
+def _row_error_flags(native_result: Any, row_count: int) -> tuple[bool, ...]:
+    """Which rows produced no answer at all.
+
+    MLflow records a failed ``predict_fn`` invocation in the result
+    table's bare ``error_message`` column. The scorer error columns are
+    deliberately not read here: a failed judge measures the instrument,
+    and it already fails the gate through ``<scorer>/error_count``.
+    """
+
+    frame = _result_frame(native_result)
+    columns = getattr(frame, "columns", None)
+    if columns is None or "error_message" not in {str(c) for c in columns}:
+        return tuple(False for _ in range(row_count))
+    flags = [_is_reported_error(value) for value in frame["error_message"]]
+    flags = flags[:row_count]
+    flags.extend(False for _ in range(row_count - len(flags)))
+    return tuple(flags)
 
 
 def _run_integrity(
@@ -1143,6 +1253,7 @@ def _results_record(
         metric_samples=dict(scored.metric_samples),
         statistics=scored.statistics,
         integrity=scored.integrity,
+        economics=scored.economics,
         versions=versions,
         baseline_run_id=baseline.run_id if baseline else None,
         baseline_metrics=scored.baseline_metrics,
@@ -1824,6 +1935,7 @@ def _render_outcome(
                 f"{paired.upper_improvement:+.4g}]"
             )
         lines.append("")
+    lines.extend(_economics_outcome_lines(results))
     lines.extend(_integrity_outcome_lines(results))
     lines.append("gate: PASSED" if results.gate_passed else "gate: FAILED")
     for failure in results.gate_failures:
@@ -1831,6 +1943,38 @@ def _render_outcome(
     lines.append(f"decision recorded: {results.decision}")
     if results.run_id:
         lines.append(f"MLflow run: {results.run_id} in {results.experiment_name}")
+    return lines
+
+
+def _economics_outcome_lines(results: ResultsRecord) -> list[str]:
+    economics = results.economics
+    if economics is None:
+        return []
+    lines = [
+        "run economics:",
+        (
+            f"  {economics.successes}/{economics.rows} successful "
+            f"completion(s); cost known for {economics.cost_known}/"
+            f"{economics.rows} row(s), tokens for "
+            f"{economics.tokens_known}/{economics.rows} "
+            f"(cost source: {economics.cost_source})"
+        ),
+    ]
+    for segment in economics.segments:
+        parts = [
+            f"  {segment.key}={segment.value or '(unset)'}: "
+            f"{segment.successes}/{segment.rows} ok"
+        ]
+        if segment.cost_per_success_usd is not None:
+            parts.append(f"cost/success ${segment.cost_per_success_usd:.4g}")
+        if segment.cost_p95_usd is not None:
+            parts.append(f"cost p95 ${segment.cost_p95_usd:.4g}")
+        if segment.latency_p95_seconds is not None:
+            parts.append(f"latency p95 {segment.latency_p95_seconds:.4g}s")
+        if segment.llm_calls_p95 is not None:
+            parts.append(f"llm calls p95 {segment.llm_calls_p95:.4g}")
+        lines.append(", ".join(parts))
+    lines.append("")
     return lines
 
 

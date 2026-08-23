@@ -96,6 +96,27 @@ integrity:
 #   judge_price_per_1m_tokens: 5.0
 #   retrieved_chunks_per_row: 5
 
+# Run economics are read from every live or traces run's own traces:
+# success rate, latency/token/cost p50 and p95, and cost per successful
+# completion — total known spend, failed rows included, divided by the
+# rows that completed. Mean cost per call is deliberately not reported:
+# it prices attempts while the money is spent per outcome. Everything is
+# report-only until you add a threshold; a row whose trace records no
+# cost stays unknown (`cost/coverage` says how many), and answer-sheet
+# replay records no economics because the sheet holds no agent trace.
+# With `strata:` set, the same evidence is segmented per stratum value —
+# the input for routing an intent to a different model. The price pair
+# covers rows with token usage but no trace-recorded cost; set both
+# sides or neither, and gate through the ordinary grammar:
+# thresholds:
+#   cost/coverage: ">=1.0"
+#   economics/cost_per_success_usd: "<=0.05"
+# regression_budget:
+#   economics/cost_per_success_usd: 0.01
+# economics:
+#   price_per_1m_input_tokens: 2.5
+#   price_per_1m_output_tokens: 10.0
+
 # The Unity Catalog model this project promotes into. Set it to have
 # `agentkit evidence` report the approval recorded on the model version by
 # the deployment-job gate (see resources/optional/deployment_job.yml).

@@ -301,6 +301,13 @@ gate either requires a declared minimum coverage or explicitly records that
 cost is report-only; it must not silently pass because cost telemetry is
 missing.
 
+The agent-evaluation toolkit implements this rule as recorded evidence:
+every live or traces run captures cost per successful completion, p95 tails,
+and the coverage counts from its own traces — see "Economics: what the run
+actually cost" in `agent-evaluation.md`. Compare on cost per successful
+completion, not mean cost per call: the mean prices attempts while the money
+is spent per outcome, and retries hide in exactly that gap.
+
 Framework autologgers are opt-in because they can capture raw call arguments.
 The stable provider adapters emit bounded spans and canonical token usage
 without additive provider options, raw `extra_body` payloads, or per-call
