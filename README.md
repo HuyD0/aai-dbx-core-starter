@@ -161,6 +161,15 @@ The course uses the same lifecycle vocabulary as the platform—`baseline ->
 change -> result -> decision`, with `adopt`, `reject`, or `inconclusive`—while
 keeping sklearn out of the SDK runtime.
 
+### Learn fine-tuning from first principles
+
+The standalone [fine-tuning course](examples/fine-tuning/README.md) teaches
+quantization, LoRA, and QLoRA on tiny CPU-only models built from
+configuration, with its own exact lock so torch never enters the SDK
+dependency set. Start with `make finetune-install` and `make finetune-check`;
+the model-customization stage it teaches is defined in
+[docs/genai-lifecycle.md](docs/genai-lifecycle.md).
+
 ## Install for SDK development
 
 ```bash

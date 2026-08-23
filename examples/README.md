@@ -53,6 +53,21 @@ make classification-check
 make classification-notebook
 ```
 
+## Separate fine-tuning course
+
+[`fine-tuning/`](fine-tuning/README.md) is a second standalone course with its
+own exact environment. It teaches the model-customization stage of
+`docs/genai-lifecycle.md` — full fine-tuning memory economics, quantization,
+LoRA, QLoRA, and the PEFT library — on tiny CPU-only models built from
+configuration, so it needs no GPU, download, or credential after install.
+Start with:
+
+```bash
+make finetune-install
+make finetune-check
+make finetune-notebook
+```
+
 ## Why this curriculum exists
 
 Calling an LLM is easy; knowing whether a changed AI application is safer or
