@@ -36,6 +36,7 @@ from pydantic import Field, field_validator, model_validator
 
 from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.datasets import _trace_document
+from aai_core.agentkit.statistics import _quantile
 from aai_core.contracts import ContractModel
 
 _ECONOMICS_PREFIX = "economics/"
@@ -456,20 +457,11 @@ def _cost_source(
 def _percentile(values: Sequence[float], quantile: float) -> float:
     """Linear-interpolation percentile — the tail as recorded, not modelled.
 
-    The ``(n - 1) * q`` positional method; a single sample is its own
-    percentile.
+    The same ``(n - 1) * q`` positional arithmetic the statistics module
+    reads bootstrap bounds with; one quantile definition serves both.
     """
 
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * quantile
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return ordered[lower]
-    fraction = position - lower
-    return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
+    return _quantile(sorted(values), quantile)
 
 
 def _observe(trace: Any, config: EconomicsConfig) -> _Observation:
