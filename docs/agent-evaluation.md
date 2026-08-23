@@ -208,6 +208,43 @@ in the metric's native units. Enabling paired enforcement against an older
 baseline without per-row scores fails closed; re-establish the baseline on the
 same governed dataset.
 
+The interval method is a policy choice, not a gate change: either method
+feeds the same `*/statistics/*` rules. The default normal approximation is
+adequate for large, roughly symmetric samples, but judge verdicts and
+pass/fail rates live on bounded, skewed scales — a supervisor that routes 29
+of 30 cases to the right subagent gets a normal upper bound above 100%.
+`method: bootstrap` resamples the recorded per-row scores with replacement
+and reads percentile bounds off the resampled means, so bounds stay inside
+the score's feasible range. Draws come from a generator seeded per metric,
+which makes the interval reproducible — the same rows and configuration
+always produce the same bounds — and re-running with a different
+`bootstrap_seed` is a cheap check that a promotion decision does not hinge
+on resampling noise:
+
+```yaml
+statistics:
+  method: bootstrap        # default: normal
+  bootstrap_resamples: 1000
+  bootstrap_seed: 0
+```
+
+Read the interval as evidence about stability, not just precision. A routing
+accuracy of 0.94 with a lower bound at 0.92 clears a 0.9 autonomy threshold
+on the evidence, not on luck; the same mean with a lower bound at 0.81 is a
+supervisor that still needs a human in the loop, and `enforce_confidence` is
+how the gate says so. A wide interval on a RAG groundedness metric usually
+means retrieval fails on a slice of the dataset — sometimes perfect context,
+sometimes irrelevant chunks — rather than the generator being uniformly
+mediocre.
+
+Two runs are never compared by eyeballing whether their intervals overlap.
+Overlap is the weakest possible test: both versions are scored on the same
+ordered rows, their row-level noise is correlated, and two intervals can
+overlap while the paired difference is reliably positive. The paired
+improvement interval is that stronger test — it is what the regression
+budget and `minimum_effect` enforce — and it is why the baseline records
+per-row scores at all.
+
 `agent:` resolves by shape, so the same project can evaluate a local Python
 function today and a deployed endpoint tomorrow with a one-line change:
 

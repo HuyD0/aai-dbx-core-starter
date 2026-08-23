@@ -244,12 +244,23 @@ def _render_statistics(lines: list[str], statistics: Mapping[str, Any] | None) -
         return
     level = float(statistics["confidence_level"]) * 100
     enforcement = "enabled" if statistics["enforced"] else "report-only"
+    # Records from before the bootstrap option carry no method key; they
+    # were computed with the normal approximation and render as such.
+    method = str(statistics.get("method") or "normal")
+    label = "bootstrap-percentile" if method == "bootstrap" else "normal-mean"
+    reproduction = (
+        f" ({statistics.get('bootstrap_resamples')} resamples, "
+        f"seed {statistics.get('bootstrap_seed')})"
+        if method == "bootstrap"
+        else ""
+    )
     lines.extend(
         [
             "",
             "## Statistical confidence",
             "",
-            f"Intervals use the recorded {level:g}% normal-mean policy. "
+            f"Intervals use the recorded {level:g}% {label} policy"
+            f"{reproduction}. "
             f"The minimum enforceable sample is {statistics['minimum_cases']}; "
             f"confidence enforcement was {enforcement}.",
             "",
