@@ -106,7 +106,7 @@ make finetune-notebook
 
 ## Separate agentic operations and RAG workshop
 
-[`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone six-notebook
+[`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone seven-notebook
 workshop on governed RAG pipelines: trusted routing and access filters,
 structure-aware chunking, embedding/index compatibility, Azure AI Search and
 Databricks AI Search retrieval modes, MLflow 3 tracing and evaluation, human

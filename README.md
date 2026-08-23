@@ -248,7 +248,7 @@ model-customization stage it teaches is defined in
 The standalone [agentic operations RAG workshop](examples/agentic-ops-rag/README.md)
 adapts a progressive public RAG course outline to this platform's MLflow 3,
 Databricks, Azure AI Search, identity, and release contracts.
-Its six generated notebooks use original synthetic runbooks and execute without
+Its seven generated notebooks use original synthetic runbooks and execute without
 credentials by default; real provider calls are explicit opt-ins.
 
 ```bash
