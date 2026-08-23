@@ -39,6 +39,11 @@ the [versioning policy](versioning.md).
 | `aai_core.deployment`, `aai_core.manifest` | Persisted release evidence and validated application manifests | `ApplicationRelease`, `AIApplicationManifest`, `load_manifest` |
 | `aai_core.diagnostics`, `aai_core.testing` | Safe preflight checks and credential-free test doubles | `run_doctor`, `dev_context`, `FakeChatModel`, `FakeRetriever` |
 | `aai_core.contracts`, `aai_core.exceptions` | Strict boundary-model primitives and the stable SDK error base | `ContractModel`, `AaiCoreError` |
+| `aai_core.agentkit` | Agent-evaluation ontology, the shared scorer registry, and the promotion gate CLI | `AgentkitConfig`, `ProjectContext`, `ScorerSpec`, `CATALOG`, `get_spec`, `load_config` |
+| `aai_core.scorers` | Deterministic scorer implementations and their registry bindings | `score_all`, `keyword_coverage`, `refusal_compliance`, `response_length_ok`, `as_mlflow_scorers` |
+| `aai_core.decisions` | Provider-neutral decision records and their persisted evidence | `Decision`, `DecisionRecord`, `record_decision`, `load_decision`, `decision_digest` |
+| `aai_core.monitoring` | Production feedback capture and trace curation over MLflow | `log_feedback`, `traces_with_feedback`, `FeedbackSourceKind` |
+| `aai_core.billing` | Cost anomaly detection over `system.billing` usage | `detect_anomalies`, `AnomalyReport`, `DailySpend`, `DetectionConfig`, `Dimension` |
 
 ## Lifecycle and evidence
 

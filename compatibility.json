@@ -4,6 +4,7 @@
     "version": "0.4.0",
     "development_status": "unreleased",
     "generated_project_default": {
+      "$comment": "Held deliberately at the reviewed release-candidate commit. Generated projects install this frozen, canary-verified source until 0.4.0 is tagged; the checkout moves ahead of it by design (docs/versioning.md, step 1 of the two-step release). Advance it only with fresh release-acceptance evidence.",
       "version": "0.4.0",
       "status": "release-candidate",
       "source": {

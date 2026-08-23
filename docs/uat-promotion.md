@@ -19,9 +19,10 @@ all of the following outside this repository:
    the non-secret repository variable `DATABRICKS_UAT_HOST` to the exact
    `databricks_uat_host` value in `platform-identifiers.json`. Keep the existing
    repository-level `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` values for the
-   dedicated CI identity registered in both workspaces. The fixture preserves
-   the repository's recorded `dbx-uat` identifier; the platform owner must
-   reconfirm that mapping before enablement. CI's exact-match check prevents
+   dedicated CI identity registered in both workspaces. The fixture records that workspace as
+   `databricks_uat_host`, and `dbx-uat` is only its human-readable name in
+   AGENTS.md section 3; the platform owner must reconfirm that mapping before
+   enablement. CI's exact-match check prevents
    drift but does not claim live workspace verification.
 4. Set the non-secret repository variables `HUB_LAKEBASE_BRANCH`,
    `HUB_LAKEBASE_DATABASE`, and `HUB_LAKEBASE_SCHEMA` to reviewed references

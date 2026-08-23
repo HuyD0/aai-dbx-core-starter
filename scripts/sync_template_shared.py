@@ -132,6 +132,7 @@ def planned_schema_defaults() -> list[tuple[Path, str, str]]:
 BUNDLE_VARIABLE_DEFAULTS = {
     "app_usage_policy_id": "app_usage_policy_id",
     "job_compute_policy_id": "job_compute_policy_id",
+    "project": "project",
     "sdk_artifact_volume": "sdk_artifact_volume",
     "template_repo": "template_repo",
 }
@@ -175,7 +176,7 @@ def _apply_bundle_identifiers(check: bool) -> list[str]:
     lines = original.splitlines(keepends=True)
     drift: list[str] = []
 
-    def replace_scalar(index: int, value: str) -> None:
+    def replace_scalar(index: int, value: str, label: str) -> None:
         line = lines[index]
         prefix, _, current = line.partition(":")
         current_value = current.strip()
@@ -184,8 +185,10 @@ def _apply_bundle_identifiers(check: bool) -> list[str]:
         if line == rendered:
             return
         if check:
+            # Name the setting, not just the line: this message is what a clone
+            # acts on when `make sync-templates` has not been run.
             drift.append(
-                f"databricks.yml:{index + 1} {prefix.strip()} is "
+                f"databricks.yml:{index + 1} {label} is "
                 f"{current_value} != platform-identifiers.json {quote}{value}{quote}"
             )
         else:
@@ -208,7 +211,9 @@ def _apply_bundle_identifiers(check: bool) -> list[str]:
             and re.match(r"^    default:", line)
             and current_key in expected
         ):
-            replace_scalar(index, expected[current_key])
+            replace_scalar(
+                index, expected[current_key], f"variables.{current_key}.default"
+            )
             current_key = None
         elif section == "targets" and re.match(r"^      host:", line):
             identifier_key = {
@@ -219,7 +224,11 @@ def _apply_bundle_identifiers(check: bool) -> list[str]:
                 # Authentication fields cannot use bundle-variable interpolation,
                 # so both governed workspace hosts remain literal values stamped
                 # from the clone-owned identifier fixture.
-                replace_scalar(index, identifiers[identifier_key])
+                replace_scalar(
+                    index,
+                    identifiers[identifier_key],
+                    f"targets.{current_key}.workspace.host",
+                )
 
     if not check and "".join(lines) != original:
         BUNDLE_FILE.write_text("".join(lines), encoding="utf-8")

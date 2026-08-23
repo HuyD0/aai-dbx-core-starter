@@ -37,11 +37,24 @@ git config merge.keepours.name "always keep this clone's value"
 Consume reviewed upstream release tags rather than tracking upstream `main`:
 
 ```bash
+make sync-upstream TAG=<reviewed-release-tag>
+```
+
+That fetches tags, merges the tag staged and un-committed, resolves the
+generated stamped files, re-stamps this clone's identifiers, and runs the
+credential-free gate. Bootstrap the very first sync by hand — the target only
+exists once the clone has merged the release that introduced it:
+
+```bash
 git fetch upstream --tags
-git merge <reviewed-release-tag>
+git merge --no-commit --no-ff <reviewed-release-tag>
 make sync-templates
 make verify
 ```
+
+Either way the merge stays staged: review `git diff --cached`, then commit and
+open a pull request into `main`. `docs/enterprise-clone-runbook.md` section 3a
+covers conflict resolution.
 
 ## 2. Request external platform prerequisites
 
@@ -51,9 +64,15 @@ Ask the enterprise identity and platform owners to provide:
 - a `main` branch federated credential using the clone's immutable GitHub IDs;
 - registration of the principal in the target Databricks workspace;
 - `CAN_USE` on an approved, constrained job-compute policy;
-- the required Unity Catalog catalog and schema access; and
+- the required Unity Catalog catalog and schema access;
 - least-privilege `READ VOLUME` and `WRITE VOLUME` access to the SDK artifact
-  volume.
+  volume;
+- for the scheduled cost anomaly watch: `USE CATALOG` on `system`, `USE SCHEMA`
+  on `system.billing`, and `SELECT` on `system.billing.usage` and
+  `system.billing.list_prices` — read-only, nothing broader; and
+- a serverless usage policy id, if the optional platform console is deployed. An
+  app resource has no `tags` field, so that policy is its only cost-attribution
+  surface.
 
 The identity should have no client secret, no workspace-administrator role, no
 unrestricted cluster-creation capability, and no Azure ARM role unless a
@@ -91,14 +110,20 @@ Configure these as GitHub **repository variables**, not secrets:
 
 - `AZURE_CLIENT_ID`
 - `AZURE_TENANT_ID`
-- `AZURE_SUBSCRIPTION_ID`
 - `DATABRICKS_HOST`
 - `SDK_ARTIFACT_VOLUME`
+- `COST_CENTER`, `TEAM`, `OWNER_GROUP`, `COST_ALERT_EMAIL`
 
-The team, non-personal owner group, cost center, and constrained compute policy
-are rendered, non-overridable project contract values. Update them through a
-reviewed template/project change rather than repository variables. Keep prompts,
-user content, and secret material out of tags and variables.
+The cost-attribution four are what `deploy.yml` reads when tagging this
+repository's own bundle; leave them unset and it deploys successfully with
+placeholder attribution. `AZURE_SUBSCRIPTION_ID` is not in the list because no
+workflow reads it — the CI principal holds no ARM RBAC.
+
+Inside a *generated* project the equivalent values are different: team, owner
+group, cost center, and the constrained compute policy are rendered project
+contract values, so update those through a reviewed template/project change
+rather than a variable. Keep prompts, user content, and secret material out of
+tags and variables.
 
 ## 4. Integrate enterprise model access
 
@@ -157,6 +182,15 @@ For each staging or production target:
 Adding a GitHub `environment:` changes the OIDC subject. Never reuse the
 branch-ref credential without first arranging a matching environment
 credential with the enterprise identity owner.
+
+Two tests encode today's policy and will fail on the steps above, by design:
+`tests/test_smoke.py::test_uat_target_is_pinned_to_uat_workspace_and_validation_lifecycle`
+asserts no `prod` bundle target exists, and
+`tests/test_smoke.py::test_credentialed_jobs_have_no_github_environment_and_no_secrets`
+asserts no credentialed job carries an `environment:`. Change them in the same
+reviewed pull request that introduces the environment-subject federated
+credential, so the policy and its enforcement move together — never ahead of
+the credential.
 
 ## Optional platform console
 

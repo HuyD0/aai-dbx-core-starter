@@ -319,11 +319,50 @@ def test_sdk_content_digest_command_uses_the_local_candidate_commit(capsys):
 
 
 def test_release_validation_jobs_fetch_candidate_commit_history():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    """validate_release.py hashes the pinned release-candidate commit to confirm
+    the digest in compatibility.json describes it. On a shallow checkout that
+    lookup returns None and both cross-checks are skipped *silently*, so any job
+    running it needs full history — deploy.yml's build job did not have it.
+    """
 
-    for job_name in ("lint-test", "python-311"):
-        checkout = workflow["jobs"][job_name]["steps"][0]
-        assert checkout["with"]["fetch-depth"] == 0
+    # Both entry points reach sdk_content_sha256_at_commit(): the script directly,
+    # and cloud-verify.sh through the suite it runs.
+    signals = ("validate_release.py", "cloud-verify.sh")
+    checked = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text())
+        for job_name, job in workflow.get("jobs", {}).items():
+            steps = job.get("steps", [])
+            if not any(
+                signal in (step.get("run") or "")
+                for step in steps
+                for signal in signals
+            ):
+                continue
+            checkouts = [
+                step
+                for step in steps
+                if str(step.get("uses", "")).startswith("actions/checkout@")
+            ]
+            assert checkouts, f"{path.name}:{job_name} validates without a checkout"
+            for checkout in checkouts:
+                assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
+                    f"{path.name}:{job_name} runs validate_release.py on a "
+                    "shallow checkout, which skips the digest cross-checks"
+                )
+            checked.append(f"{path.name}:{job_name}")
+
+    assert {
+        "ci.yml:lint-test",
+        "deploy.yml:build",
+        "publish-sdk.yml:build",
+    } <= set(checked), f"release-validation job detection regressed: {checked}"
+
+    # python-311 runs the repository suite, which hashes the pinned commit through
+    # test_release_validation_reports_the_pinned_candidate_digest.
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    checkout = ci["jobs"]["python-311"]["steps"][0]
+    assert checkout["with"]["fetch-depth"] == 0
 
 
 def test_dependency_canary_workflow_matches_release_acceptance_metadata():

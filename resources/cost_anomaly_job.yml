@@ -61,7 +61,7 @@ resources:
         - job_cluster_key: default
           new_cluster:
             spark_version: 18.0.x-scala2.13
-            node_type_id: Standard_DS3_v2
+            node_type_id: ${var.node_type_id}
             num_workers: 1
             # The workspace's constrained "Job Compute" policy. The dedicated CI
             # principal receives CAN_USE on this policy instead of unrestricted
@@ -86,7 +86,7 @@ resources:
               cost_center: ${var.cost_center}
               team: ${var.team}
               owner_group: ${var.owner_group}
-              project: aai-dbx-core-starter
+              project: ${var.project}
               environment: ${bundle.target}
               data_classification: internal
               lifecycle: ${var.deployment_lifecycle}

@@ -85,11 +85,25 @@ jobs:
       id-token: write
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config on a runner that later runs
+          # third-party actions (defense-in-depth for the credentialed job).
+          persist-credentials: false
+
       - name: Download staged release
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: aai-core-release
           path: dist
+
+      - name: Verify the publication script is the reviewed one
+        # This job holds a live credential, so the code that decides whether a
+        # release may be overwritten must come from the protected commit under
+        # review — not from the build artifact, and not from a dirty tree.
+        run: |
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=normal)"
 
       - name: Verify the externally configured publication target
         env:
@@ -125,58 +139,18 @@ jobs:
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
       - name: Publish immutable release
+        # The refusal, resume, and verification rules live in a unit-tested
+        # script (tests/test_publish_release.py). This step must stay a thin
+        # call: rule 12 is the most expensive rule to get wrong, and inline
+        # shell here would again be untestable and unexecuted until a real
+        # release ran it for the first time.
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_AUTH_TYPE: azure-cli
           SDK_ARTIFACT_VOLUME: ${{ vars.SDK_ARTIFACT_VOLUME }}
           PACKAGE_VERSION: ${{ inputs.version }}
         run: |
-          test -n "$SDK_ARTIFACT_VOLUME"
-          WHEEL="aai_core-${PACKAGE_VERSION}-py3-none-any.whl"
-          DESTINATION="dbfs:${SDK_ARTIFACT_VOLUME}/aai_core/${PACKAGE_VERSION}"
-          databricks fs mkdir "$DESTINATION"
-          if databricks fs ls \
-            "${DESTINATION}/release-manifest.json" >/dev/null 2>&1; then
-            echo "Version ${PACKAGE_VERSION} is complete; releases are immutable."
-            exit 1
-          fi
-
-          VERIFY_DIR="$(mktemp -d)"
-          trap 'rm -rf "${VERIFY_DIR}"' EXIT
-
-          publish_or_resume() {
-            local filename="$1"
-            local remote="${DESTINATION}/${filename}"
-            if databricks fs ls "$remote" >/dev/null 2>&1; then
-              databricks fs cp --overwrite "$remote" "${VERIFY_DIR}/${filename}"
-              if ! cmp "dist/${filename}" "${VERIFY_DIR}/${filename}"; then
-                echo "Partial release contains different ${filename}; refusing overwrite."
-                exit 1
-              fi
-              echo "Resuming matching partial release: ${filename}"
-            else
-              databricks fs cp "dist/${filename}" "$remote"
-            fi
-          }
-
-          publish_or_resume "$WHEEL"
-          publish_or_resume "${WHEEL}.sha256"
-          databricks fs cp --overwrite \
-            "${DESTINATION}/${WHEEL}" "${VERIFY_DIR}/${WHEEL}"
-          databricks fs cp --overwrite \
-            "${DESTINATION}/${WHEEL}.sha256" "${VERIFY_DIR}/${WHEEL}.sha256"
-          (
-            cd "$VERIFY_DIR"
-            sha256sum --check "${WHEEL}.sha256"
-          )
-
-          # The manifest is the completion marker and is always published last.
-          databricks fs cp \
-            "dist/release-manifest.json" \
-            "${DESTINATION}/release-manifest.json"
-          databricks fs cp --overwrite \
-            "${DESTINATION}/release-manifest.json" \
-            "${VERIFY_DIR}/release-manifest.json"
-          cmp \
-            "dist/release-manifest.json" \
-            "${VERIFY_DIR}/release-manifest.json"
+          python3 scripts/publish_release.py \
+            --artifact-dir dist \
+            --volume "$SDK_ARTIFACT_VOLUME" \
+            --version "$PACKAGE_VERSION"

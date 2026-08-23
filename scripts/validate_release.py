@@ -336,6 +336,32 @@ def requirement_specs(requirements: list[str]) -> dict[str, str]:
     return specs
 
 
+def workflow_pip_requirements(path: Path) -> dict[str, str]:
+    """Requirement specifiers the dependency canary installs, as {name: range}.
+
+    The canary pins the *bounds* it proves, so this is a fourth copy of the
+    supported ranges in dependency-policy.toml. Nothing used to compare them:
+    moving a bound in the policy left the canary proving the old one, green.
+    """
+
+    # Two linear passes rather than one nested pattern: a single regex pairing
+    # `[<>=!~]=?[^,"]+` with a repeat of itself backtracks exponentially on a
+    # line that never matches, because the classes overlap.
+    quoted = re.compile(r'^\s*"([^"]+)"\s*\\?\s*$')
+    requirement = re.compile(
+        r"^(?P<name>[A-Za-z0-9._-]+)(?:\[[^\]]*\])?(?P<spec>[<>=!~][^\s]*)$"
+    )
+    found: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        enclosed = quoted.match(line)
+        if not enclosed:
+            continue
+        parsed = requirement.match(enclosed.group(1).strip())
+        if parsed:
+            found[parsed.group("name").lower()] = parsed.group("spec").strip()
+    return found
+
+
 def workflow_matrix_values(path: Path, key: str) -> set[str]:
     """Read one simple GitHub Actions matrix sequence without a YAML dependency."""
 
@@ -414,6 +440,21 @@ def validate_repository() -> (  # noqa: C901 - linear, independent release asser
             canary.get("resolutions", [])
         ):
             failures.append("dependency canary workflow resolutions differ")
+        installed = workflow_pip_requirements(canary_workflow)
+        if not installed:
+            failures.append("dependency canary installs no explicit supported bounds")
+        for name, specifier in sorted(installed.items()):
+            supported = policy["packages"].get(name, {}).get("supported")
+            if supported is None:
+                failures.append(
+                    f"dependency canary installs {name}, which dependency-policy.toml "
+                    "does not declare"
+                )
+            elif specifier != supported:
+                failures.append(
+                    f"dependency canary installs {name}{specifier} but "
+                    f"dependency-policy.toml supports {supported}"
+                )
 
     setup = (ROOT / "scripts" / "codex-cloud-setup.sh").read_text(encoding="utf-8")
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")

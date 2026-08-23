@@ -1160,6 +1160,22 @@ def test_generated_schema_defaults_have_canonical_sources():
         ), "cloud-verify.sh must read the fixture, not inline ids"
 
 
+def test_bundle_identifier_defaults_follow_the_clone_fixture():
+    """databricks.yml is the second copy of every identifier, stamped by
+    `make sync-templates`.
+
+    The drift check lived only in `sync_template_shared.py --check`, which
+    `make check-templates` runs — but the clone runbook tells a clone to verify
+    with `pytest -q tests/test_smoke.py`, and CI runs neither. So the same check
+    belongs here. It covers app_usage_policy_id and template_repo, which nothing
+    else asserts, alongside the project tag, the volume, the compute policy, and
+    both workspace hosts.
+    """
+
+    drift = sync_module.bundle_identifier_drift()
+    assert not drift, "run `make sync-templates`: " + "; ".join(drift)
+
+
 #: Every key the fixture must carry. A downstream clone keeps its own copy of
 #: platform-identifiers.json (docs/enterprise-clone-runbook.md recommends a
 #: `merge=keepours` driver so upstream merges never prompt on it) — and the cost
@@ -1173,6 +1189,7 @@ REQUIRED_IDENTIFIER_KEYS = {
     "databricks_host",
     "databricks_uat_host",
     "job_compute_policy_id",
+    "project",
     "sdk_artifact_volume",
     "sdk_pip_source",
     "template_repo",
@@ -1202,6 +1219,9 @@ _MARKDOWN_FORBIDDEN = (
     "databricks_uat_host",
     "job_compute_policy_id",
     "sdk_artifact_volume",
+    # A documented clone URL is the one that sends every new developer to the
+    # wrong repository, and README.md carried it in a copy-pasteable block.
+    "template_repo",
 )
 # The audit report deliberately quotes the drift it found, and the clone runbook
 # needs to name the fixture keys it walks you through.
@@ -1277,6 +1297,12 @@ def test_bundle_and_compute_use_required_platform_tags():
         assert bundle_tags["environment"] == "${bundle.target}"
         assert bundle_tags["lifecycle"] == "${var.deployment_lifecycle}"
     assert required.issubset(compute_tags)
+    assert compute_tags["project"] == "${var.project}"
+    assert bundle["variables"]["project"]["default"] == IDENTIFIERS["project"]
+    for target_name in ("dev", "uat"):
+        assert bundle["targets"][target_name]["presets"]["tags"]["project"] == (
+            "${var.project}"
+        )
     assert compute_tags["environment"] == "${bundle.target}"
     assert compute_tags["lifecycle"] == "${var.deployment_lifecycle}"
     assert compute_tags["tag_schema_version"] == "2"
@@ -1293,42 +1319,97 @@ def test_all_github_actions_are_commit_pinned():
         ), f"{workflow.name} contains a mutable action reference"
 
 
-def test_pr_ci_is_credential_free():
-    text = (WORKFLOWS / "ci.yml").read_text()
-    workflow = yaml.safe_load(text)
-    assert workflow["permissions"] == {"contents": "read"}
-    assert all(
-        not reference.lower().startswith("azure/login@")
-        for reference in USES.findall(text)
-    )
-    assert "${{ secrets." not in text
+def _workflows():
+    """(name, raw text, parsed) for every workflow. Derived, never enumerated:
+    a hardcoded list is how a newly added credentialed workflow silently
+    escapes the rules below."""
+
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        yield path.name, path.read_text(), yaml.safe_load(path.read_text())
+
+
+def _triggers(workflow):
+    """PyYAML resolves the `on:` key to the boolean True, so read both."""
+
+    return workflow.get("on", workflow.get(True)) or {}
+
+
+def _grants_id_token(workflow, job):
+    return (workflow.get("permissions") or {}).get("id-token") == "write" or (
+        job.get("permissions") or {}
+    ).get("id-token") == "write"
+
+
+def credentialed_workflows():
+    for name, text, workflow in _workflows():
+        jobs = workflow.get("jobs", {})
+        if any(_grants_id_token(workflow, job) for job in jobs.values()):
+            yield name, text, workflow
+
+
+def pull_request_workflows():
+    for name, text, workflow in _workflows():
+        if "pull_request" in _triggers(workflow):
+            yield name, text, workflow
+
+
+def test_pull_request_workflows_are_credential_free():
+    """Rule 3 covers every workflow a pull request can start, not just ci.yml.
+    codeql.yml is also pull_request-triggered and was checked by nothing."""
+
+    scanned = list(pull_request_workflows())
+    names = {name for name, _, _ in scanned}
+    assert {
+        "ci.yml",
+        "codeql.yml",
+    } <= names, "pull_request detection regressed; found " + repr(sorted(names))
+    for name, text, workflow in scanned:
+        permissions = workflow.get("permissions") or {}
+        assert permissions.get("id-token") != "write", name
+        jobs = workflow.get("jobs", {})
+        for job_name, job in jobs.items():
+            assert (job.get("permissions") or {}).get(
+                "id-token"
+            ) != "write", f"{name}:{job_name}"
+        assert all(
+            not reference.lower().startswith("azure/login@")
+            for reference in USES.findall(text)
+        ), name
+        assert "${{ secrets." not in text, name
+
+    # ci.yml carries no elevated scope at all; codeql.yml needs
+    # security-events: write to upload its SARIF, which is not a cloud credential.
+    ci = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
+    assert ci["permissions"] == {"contents": "read"}
 
 
 def test_credentialed_jobs_have_no_github_environment_and_no_secrets():
-    for name in ("auth-smoke.yml", "deploy.yml", "publish-sdk.yml"):
-        text = (WORKFLOWS / name).read_text()
-        workflow = yaml.safe_load(text)
-        workflow_permissions = workflow.get("permissions", {})
-        credentialed_jobs = [
-            job
-            for job in workflow["jobs"].values()
-            if (
-                workflow_permissions.get("id-token") == "write"
-                or job.get("permissions", {}).get("id-token") == "write"
-            )
-        ]
-        assert credentialed_jobs
-        assert "${{ secrets." not in text
+    """A GitHub `environment:` changes the OIDC subject, so it cannot appear on a
+    job that logs in with the branch-ref FIC. Scanned rather than enumerated."""
+
+    scanned = list(credentialed_workflows())
+    names = {name for name, _, _ in scanned}
+    assert {
+        "auth-smoke.yml",
+        "deploy.yml",
+        "publish-sdk.yml",
+    } <= names, "credentialed-workflow detection regressed; found " + repr(
+        sorted(names)
+    )
+    for name, text, workflow in scanned:
+        assert "${{ secrets." not in text, name
         environment_jobs = {
             job_name: job["environment"]
             for job_name, job in workflow["jobs"].items()
             if "environment" in job
         }
-        assert not environment_jobs
+        assert not environment_jobs, f"{name}: {environment_jobs}"
+        # Every credentialed workflow must be reachable only from protected main,
+        # so the branch-ref subject is the only one that can ever be minted.
+        assert "refs/heads/main" in text, name
         if name == "deploy.yml":
             assert "UAT_DEPLOYMENT_ENABLED" in text
             assert "DATABRICKS_UAT_HOST" in text
-            assert "refs/heads/main" in text
 
 
 def test_cloud_environment_is_reproducible_and_credential_free():
@@ -1337,7 +1418,10 @@ def test_cloud_environment_is_reproducible_and_credential_free():
     verify = (ROOT / "scripts" / "cloud-verify.sh").read_text()
     ci = (WORKFLOWS / "ci.yml").read_text()
 
-    for version in ("0.8.23", "2.88.0"):
+    # toolchain.json is the pin; restating versions here made every bump a
+    # two-file edit. scripts/validate_release.py already compares them properly.
+    toolchain = json.loads((ROOT / "toolchain.json").read_text(encoding="utf-8"))
+    for version in (toolchain["uv"], toolchain["azure_cli"]):
         assert version in setup
 
     assert "sha256sum --check" in setup
@@ -1419,6 +1503,12 @@ def test_every_bundle_job_cluster_meets_platform_contract():
         "lifecycle",
         "tag_schema_version",
     }
+    bundle = load_yaml("databricks.yml")
+    node_type = bundle["variables"]["node_type_id"]["default"]
+    assert re.fullmatch(
+        r"Standard_[A-Za-z0-9_]+", node_type
+    ), f"node_type_id default must be an Azure VM size; got {node_type!r}"
+
     jobs = _bundle_jobs()
     assert jobs, "no jobs declared under resources/*.yml"
     for name, job in jobs.items():
@@ -1430,7 +1520,10 @@ def test_every_bundle_job_cluster_meets_platform_contract():
             assert cluster["policy_id"] == "${var.job_compute_policy_id}", name
             assert cluster["num_workers"] == 1, name
             assert cluster["spark_version"] == "18.0.x-scala2.13", name
-            assert cluster["node_type_id"] == "Standard_DS3_v2", name
+            # The SKU is a bundle variable: it is region- and policy-dependent, so a
+            # clone overrides it without editing resource files. What stays governed
+            # is that every cluster takes it from the one declared default.
+            assert cluster["node_type_id"] == "${var.node_type_id}", name
             assert "spark_conf" not in cluster, name
             environment_keys = {"AAI_ENVIRONMENT", "AAI_LIFECYCLE", "AAI_RELEASE"}
             assert environment_keys <= cluster["spark_env_vars"].keys(), name
@@ -1439,6 +1532,9 @@ def test_every_bundle_job_cluster_meets_platform_contract():
             assert tags["environment"] == "${bundle.target}", name
             assert tags["lifecycle"] == "${var.deployment_lifecycle}", name
             assert tags["tag_schema_version"] == "2", name
+            # The cost anomaly watch buckets spend by `project`, so a literal here
+            # would attribute a clone's usage to this repository forever.
+            assert tags["project"] == "${var.project}", name
         for task in job["tasks"]:
             assert {"whl": "../dist/*.whl"} in task.get("libraries", []), name
 
