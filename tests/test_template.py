@@ -41,7 +41,7 @@ REQUIRED_TAGS = {
 CURRENT_TEMPLATE_VERSIONS = {
     "agent-app": "1.5.0",
     "analytics-app": "1.3.0",
-    "evaluation-project": "2.2.0",
+    "evaluation-project": "2.3.0",
     "experiment-starter": "1.4.0",
     "prompt-app": "1.4.0",
     "rag-app": "1.4.0",
