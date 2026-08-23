@@ -1265,11 +1265,13 @@ width_report = {
 width_report
 """),
         m("""
-The recall interval tripled in width because the three payments-503 cases now
-score zero while every other case still scores well. Abstention accuracy and
-citation integrity stayed perfect on both indexes — the damage is invisible to
-them. Width localized the failure to retrieval before anyone read a single
-transcript.
+The recall interval tripled in width because every case that expected the
+missing runbook lost ground — two rows fell to zero, and the approval case
+kept only its second expected document — while every other row held its
+score. Read `degraded_samples["retrieval/recall_at_3"]` to see exactly which
+rows moved. Abstention accuracy and citation integrity stayed perfect on both
+indexes — the damage is invisible to them. Width localized the failure to
+retrieval before anyone read a single transcript.
 """),
         m("""
 ## Paired improvement beats interval overlap
@@ -1337,8 +1339,9 @@ strict_gate = apply_gate(
 The lower bound clears 0.8, and the gate still refuses: eight scored rows are
 below the default `minimum_cases` of 30. That refusal is the correct verdict
 for this dataset, not an obstacle. The cell below lowers the minimum to the
-suite's actual size purely as a teaching allowance — a production suite grows
-to the minimum before enforcing, it never lowers the bar to its own size.
+eight rows the recall metric actually scores, purely as a teaching allowance —
+a production suite grows to the minimum before enforcing, it never lowers the
+bar to its own size.
 """),
         c("""
 teaching_config = StatisticsConfig(

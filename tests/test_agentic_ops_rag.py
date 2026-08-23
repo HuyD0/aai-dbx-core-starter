@@ -1062,8 +1062,10 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert 'missing_runbook = "alpha-payments-503-current"' in confidence_source
     # The interval evidence must stay reproducible: only the seeded generator
     # inside aai_core may draw, and the lesson needs no numeric dependency.
+    assert "numpy" not in confidence_source
     assert "random.seed" not in confidence_source
-    assert "import numpy" not in confidence_source
+    assert "random.Random" not in confidence_source
+    assert "from random import" not in confidence_source
 
 
 def test_benchmark_samples_keep_dataset_order_and_reproduce_aggregates():
@@ -1073,14 +1075,40 @@ def test_benchmark_samples_keep_dataset_order_and_reproduce_aggregates():
     metrics = benchmark(pipeline, cases, mode=RetrievalMode.HYBRID)
 
     assert all(len(values) == len(cases) for values in samples.values())
-    for case, recall, reciprocal in zip(
-        cases,
-        samples["retrieval/recall_at_3"],
-        samples["retrieval/mrr"],
-        strict=True,
-    ):
-        assert (recall is None) == (not case.expected_document_ids)
-        assert (reciprocal is None) == (not case.expected_document_ids)
+    for metric, values in samples.items():
+        # Only the retrieval metrics may skip a case; a None anywhere else
+        # would silently shrink or misalign the rows handed to paired
+        # statistics.
+        if metric in {"retrieval/recall_at_3", "retrieval/mrr"}:
+            continue
+        assert all(value is not None for value in values), metric
+    for position, case in enumerate(cases):
+        # Each row must carry its own case's score: paired baseline
+        # comparisons break silently if rows are shuffled, so recompute the
+        # scores independently and compare element-wise.
+        result = pipeline.invoke(
+            case.question,
+            tenant_id=case.tenant_id,
+            region=case.region,
+            allowed_groups=case.allowed_groups,
+            mode=RetrievalMode.HYBRID,
+        )
+        expected = set(case.expected_document_ids)
+        retrieved = list(result.retrieved_document_ids)
+        recall = samples["retrieval/recall_at_3"][position]
+        reciprocal = samples["retrieval/mrr"][position]
+        assert (recall is None) == (not expected)
+        assert (reciprocal is None) == (not expected)
+        if expected:
+            assert recall == len(expected.intersection(retrieved)) / len(expected)
+            ranks = [
+                retrieved.index(item) + 1 for item in expected if item in retrieved
+            ]
+            assert reciprocal == (1.0 / min(ranks) if ranks else 0.0)
+        assert samples["latency/ms"][position] == result.latency_ms
+        assert samples["answer/abstention_accuracy"][position] == float(
+            result.abstained == (not case.answerable)
+        )
 
     for metric, aggregate in metrics.items():
         if metric in {"latency/p95_ms", "cost/coverage"}:
