@@ -85,6 +85,25 @@ make study-prepare-flight
 make study-offline-check
 ```
 
+## Separate fine-tuning mechanics course
+
+[`fine-tuning/`](fine-tuning/README.md) is a standalone course with its own
+exact environment that teaches the model-customization stage of
+`docs/genai-lifecycle.md`, beginning with the memory economics of full
+fine-tuning; later lessons add quantization, LoRA, QLoRA, and the PEFT
+library. It complements the Apple-silicon study above from the other side:
+that project practices the governed *workflow* around one LoRA change, while
+this course builds the *mechanics* — what the bits, adapters, and memory
+actually do — on tiny CPU-only torch models built from configuration, so it
+runs on Linux and Apple Silicon alike and executes in CI. It needs no GPU,
+download, or credential after install. Start with:
+
+```bash
+make finetune-install
+make finetune-check
+make finetune-notebook
+```
+
 ## Separate agentic operations and RAG workshop
 
 [`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone six-notebook
