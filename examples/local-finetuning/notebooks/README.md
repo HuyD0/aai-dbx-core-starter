@@ -50,7 +50,11 @@ artifact paths and cannot overwrite the canonical change.
 
 Notebook `07` is the frozen-test boundary. Do not use its errors to revise the
 same prompt, adapter, response policy, or thresholds. A follow-up remediation is
-a new change and needs a new untouched evaluation version.
+a new change and needs a new untouched evaluation version. Its default
+evaluation scope is a deterministic stratified subsample (two frozen records
+per intent) whose reports notebook `08` reads by default, so the course reaches
+a real adopt/reject decision at course scale; promotion-grade evidence requires
+rerunning both notebooks on the `complete` scope.
 
 The generated notebooks are tracked. Maintainers can reproduce them after
 editing the executable narrative in `scripts/render_notebooks.py` or the

@@ -1,0 +1,133 @@
+{
+  "total_examples": 6,
+  "inference_config": {
+    "schema_version": "1.0.0",
+    "mode": "deterministic",
+    "method": "majority"
+  },
+  "evaluation_fingerprint": "268b4039bd123b0aa2dd586adf12984b25213be417a256ab4670ed4ff9cbc52e",
+  "evaluation_execution_contract_sha256": "75b3d170d31f990b60be46b4e25e04c47667ae8ef92c00ade4b63e2422e92ccd",
+  "training_manifest_sha256": null,
+  "training_execution_contract_sha256": null,
+  "supported_intents": [
+    "demo_ask_invoice",
+    "demo_recover_access",
+    "demo_track_parcel"
+  ],
+  "classification": {
+    "intent_accuracy": 0.3333333333333333,
+    "macro_precision": 0.16666666666666666,
+    "macro_recall": 0.16666666666666666,
+    "macro_f1": 0.16666666666666666,
+    "weighted_f1": 0.16666666666666666,
+    "per_intent_f1": {
+      "demo_ask_invoice": 0.5,
+      "demo_recover_access": 0.0,
+      "demo_track_parcel": 0.0
+    },
+    "category_accuracy": 0.3333333333333333,
+    "escalation_accuracy": 1.0
+  },
+  "output_quality": {
+    "json_parse_rate": 1.0,
+    "json_schema_validity_rate": 1.0,
+    "unsupported_intent_rate": 0.0,
+    "response_policy_compliance_rate": 1.0
+  },
+  "performance": {
+    "latency_ms": {
+      "count": 6,
+      "minimum": 0.04000000000000001,
+      "mean": 0.05,
+      "median": 0.05,
+      "p95": 0.06,
+      "maximum": 0.0625
+    },
+    "output_tokens": {
+      "count": 6,
+      "minimum": 19.200000000000003,
+      "mean": 24.0,
+      "median": 24.0,
+      "p95": 28.799999999999997,
+      "maximum": 30.0
+    },
+    "peak_memory_mb": {
+      "count": 6,
+      "minimum": 51.2,
+      "mean": 64.0,
+      "median": 64.0,
+      "p95": 76.8,
+      "maximum": 80.0
+    }
+  },
+  "by_intent": {
+    "demo_ask_invoice": {
+      "count": 2,
+      "intent_accuracy": 0.5,
+      "category_accuracy": 0.5,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    },
+    "demo_recover_access": {
+      "count": 2,
+      "intent_accuracy": 0.0,
+      "category_accuracy": 0.0,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    },
+    "demo_track_parcel": {
+      "count": 2,
+      "intent_accuracy": 0.0,
+      "category_accuracy": 0.0,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    }
+  },
+  "by_flag": {
+    "__none__": {
+      "count": 6,
+      "intent_accuracy": 0.3333333333333333,
+      "category_accuracy": 0.3333333333333333,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    }
+  },
+  "by_difficulty": {
+    "unspecified": {
+      "count": 6,
+      "intent_accuracy": 0.3333333333333333,
+      "category_accuracy": 0.3333333333333333,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    }
+  },
+  "error_analysis": {
+    "total_errors": 4,
+    "counts": {
+      "json_parse": 0,
+      "json_schema": 0,
+      "unsupported_intent": 0,
+      "intent": 4,
+      "category": 0,
+      "escalation": 0,
+      "response_policy": 0
+    },
+    "examples": [],
+    "truncated": false
+  }
+}

@@ -218,6 +218,19 @@ def evaluate_predictions(
     )
 
 
+def evaluation_fingerprint(records: Sequence[EvaluationRecord]) -> str:
+    """Return the deterministic fingerprint reports carry for these records.
+
+    This is the same digest ``evaluate_predictions`` stores, exposed so a
+    decision notebook can verify that persisted reports were scored on exactly
+    the record set its declared evaluation scope reconstructs.
+    """
+
+    if not records:
+        raise ValueError("records must not be empty")
+    return _evaluation_fingerprint(records)
+
+
 def _require_session_model_contract(
     evaluation_session: EvaluationSession,
     inference_config: InferenceConfig,

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .data import require_valid_manifest
 from .evaluation import (
@@ -22,6 +22,8 @@ from .evaluation import (
 )
 from .modeling import LocalGeneration, PromptStrategy, build_messages
 from .settings import ProjectSettings, load_settings
+
+COMPLETE_EVALUATION_SCOPE = "complete"
 
 
 class SupportPredictor(Protocol):
@@ -96,6 +98,45 @@ def support_contract(
                 f"training records map intent {intent!r} to multiple categories"
             )
     return tuple(sorted(categories)), dict(sorted(categories.items()))
+
+
+def _validate_per_intent(per_intent: object) -> int:
+    if isinstance(per_intent, bool) or not isinstance(per_intent, int):
+        raise ValueError("per_intent must be an integer")
+    if per_intent < 1:
+        raise ValueError("per_intent must be positive")
+    return per_intent
+
+
+def stratified_evaluation_scope(per_intent: int) -> str:
+    """Name the deterministic course-scale evaluation scope for report files."""
+
+    return f"stratified-subsample-{_validate_per_intent(per_intent)}-per-intent"
+
+
+def stratified_subsample(
+    records: Sequence[EvaluationRecord],
+    *,
+    per_intent: int,
+) -> tuple[EvaluationRecord, ...]:
+    """Keep the first ``per_intent`` records of every intent, in frozen order.
+
+    The selection is deterministic given the frozen split order: it walks the
+    records once and keeps each record until its intent has ``per_intent``
+    representatives.  Every intent present in ``records`` therefore keeps
+    support, so macro-F1 is defined for each of them, unlike a first-N slice
+    that leaves most intents with zero support.
+    """
+
+    limit = _validate_per_intent(per_intent)
+    taken: dict[str, int] = {}
+    selected: list[EvaluationRecord] = []
+    for record in records:
+        count = taken.get(record.target.intent, 0)
+        if count < limit:
+            taken[record.target.intent] = count + 1
+            selected.append(record)
+    return tuple(selected)
 
 
 def select_few_shots(
@@ -220,3 +261,129 @@ def report_inventory(directory: str | Path) -> Mapping[str, Path]:
         path.name.removesuffix("-report.json"): path
         for path in sorted(source.glob("*-report.json"))
     }
+
+
+@dataclass(frozen=True)
+class LoraParameterBudget:
+    """Trainable-versus-frozen parameter arithmetic for the pinned LoRA change."""
+
+    total_parameters: int
+    lora_trainable_parameters: int
+    trainable_fraction: float
+    adapted_layers: int
+    adapted_projections: tuple[str, ...]
+    rank: int
+
+
+def _positive_config_int(config: Mapping[str, Any], key: str, label: str) -> int:
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} {key} must be a positive integer")
+    return value
+
+
+def lora_parameter_budget(
+    model_config: Mapping[str, Any],
+    lora_config: Mapping[str, Any],
+) -> LoraParameterBudget:
+    """Compute total and LoRA-trainable parameter counts for the pinned model.
+
+    ``model_config`` is the local checkpoint's ``config.json`` and
+    ``lora_config`` is the parsed training YAML.  The arithmetic implements the
+    Qwen2 layout used by this course exactly — embeddings, biased q/k/v
+    projections, bias-free o/MLP projections, RMSNorms, and tied or untied
+    output embeddings — and fails closed on any other architecture rather than
+    reporting a plausible wrong number.  Quantization changes storage bytes,
+    not the parameter count.
+    """
+
+    model_type = model_config.get("model_type")
+    if model_type != "qwen2":
+        raise ValueError(
+            "lora_parameter_budget implements the qwen2 layout only; "
+            f"got model_type {model_type!r}"
+        )
+    hidden = _positive_config_int(model_config, "hidden_size", "model")
+    layers = _positive_config_int(model_config, "num_hidden_layers", "model")
+    intermediate = _positive_config_int(model_config, "intermediate_size", "model")
+    vocabulary = _positive_config_int(model_config, "vocab_size", "model")
+    heads = _positive_config_int(model_config, "num_attention_heads", "model")
+    kv_heads = (
+        _positive_config_int(model_config, "num_key_value_heads", "model")
+        if "num_key_value_heads" in model_config
+        else heads
+    )
+    if "head_dim" in model_config:
+        head_dim = _positive_config_int(model_config, "head_dim", "model")
+    else:
+        if hidden % heads:
+            raise ValueError(
+                "hidden_size is not divisible by num_attention_heads and "
+                "config.json provides no head_dim"
+            )
+        head_dim = hidden // heads
+    tied_embeddings = bool(model_config.get("tie_word_embeddings", False))
+
+    attention_dim = heads * head_dim
+    kv_dim = kv_heads * head_dim
+    per_layer = (
+        (hidden * attention_dim + attention_dim)  # q_proj weight + bias
+        + 2 * (hidden * kv_dim + kv_dim)  # k_proj and v_proj weight + bias
+        + attention_dim * hidden  # o_proj, no bias
+        + 3 * hidden * intermediate  # gate_proj, up_proj, down_proj, no bias
+        + 2 * hidden  # input and post-attention RMSNorm weights
+    )
+    total = vocabulary * hidden + layers * per_layer + hidden
+    if not tied_embeddings:
+        total += vocabulary * hidden
+
+    lora_parameters = lora_config.get("lora_parameters")
+    if not isinstance(lora_parameters, Mapping):
+        raise ValueError("training configuration must provide lora_parameters")
+    rank = lora_parameters.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+        raise ValueError("lora_parameters.rank must be a positive integer")
+    keys = lora_parameters.get("keys")
+    if (
+        not isinstance(keys, Sequence)
+        or isinstance(keys, (str, bytes))
+        or not keys
+        or any(not isinstance(key, str) for key in keys)
+    ):
+        raise ValueError("lora_parameters.keys must be a non-empty list of strings")
+    adapted_layers = lora_config.get("num_layers")
+    if isinstance(adapted_layers, bool) or not isinstance(adapted_layers, int):
+        raise ValueError("training configuration num_layers must be an integer")
+    if adapted_layers == -1:
+        adapted_layers = layers
+    if not 1 <= adapted_layers <= layers:
+        raise ValueError(
+            f"num_layers must be -1 or between 1 and {layers}; got {adapted_layers}"
+        )
+
+    projection_dims = {
+        "self_attn.q_proj": (hidden, attention_dim),
+        "self_attn.k_proj": (hidden, kv_dim),
+        "self_attn.v_proj": (hidden, kv_dim),
+        "self_attn.o_proj": (attention_dim, hidden),
+        "mlp.gate_proj": (hidden, intermediate),
+        "mlp.up_proj": (hidden, intermediate),
+        "mlp.down_proj": (intermediate, hidden),
+    }
+    per_layer_trainable = 0
+    for key in keys:
+        if key not in projection_dims:
+            raise ValueError(f"unsupported LoRA projection key: {key!r}")
+        in_features, out_features = projection_dims[key]
+        # One adapter is two low-rank matrices: (in x rank) and (rank x out).
+        per_layer_trainable += rank * (in_features + out_features)
+    trainable = adapted_layers * per_layer_trainable
+
+    return LoraParameterBudget(
+        total_parameters=total,
+        lora_trainable_parameters=trainable,
+        trainable_fraction=trainable / total,
+        adapted_layers=adapted_layers,
+        adapted_projections=tuple(keys),
+        rank=rank,
+    )
