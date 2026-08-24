@@ -503,6 +503,36 @@ def test_eval_submit_rejects_plan_before_running_the_bundle_job(
     assert "--submit cannot carry" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("target", ["dev", "prod"], ids=("default", "selected"))
+def test_eval_submit_remediation_names_the_target_the_job_will_use(
+    project_dir, capsys, monkeypatch, target
+):
+    """A bare `bundle deploy` goes to the default target, but the submission
+    runs `release_gate -t <target>`. A remediation that omits the selected
+    target sends a developer to deploy one environment and then score a
+    stale other one -- the exact staleness the refusal exists to prevent."""
+
+    def fail_project(arguments):
+        raise AssertionError("the refusal must fire before project loading")
+
+    monkeypatch.setattr("aai_core.agentkit.cli._project", fail_project)
+
+    code = main(
+        [
+            "eval",
+            "--submit",
+            "--target",
+            target,
+            "--decision",
+            "adopt",
+            *_config_flag(project_dir),
+        ]
+    )
+
+    assert code == 1
+    assert f"databricks bundle deploy -t {target}" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "override",
     [

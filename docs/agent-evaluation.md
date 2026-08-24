@@ -267,6 +267,20 @@ An HTTP target that needs a token — `request_mapping.auth_env` names the
 environment variable, never the value — has to be `https://`. Loopback is the
 exception, because a local stub never puts the credential on a network.
 
+An HTTP endpoint is sent **every field the row's `inputs` object carries**,
+not just a recognisable one like `question`. The single-value shorthand
+applies only when `inputs` genuinely has one field. This matters because the
+failure it prevents is invisible: an endpoint handed the question without the
+`context` or `history` beside it still answers, and that answer still becomes
+promotion evidence — for an invocation the dataset never described. Write
+`request_mapping` for the whole `inputs` object, and a field the endpoint
+cannot accept is a configuration error rather than a silent omission.
+
+Only `inputs` travels. A row's `expectations`, `outputs` and `trace` are what
+the answer is scored *against*, so they never reach the agent — and copying
+one of them into `inputs` to make it arrive hands the agent its own answer
+sheet, which turns the comparison into evidence of nothing.
+
 ### Where the answers come from
 
 A scoring run needs an answer for every row, and there are three honest ways
@@ -328,6 +342,24 @@ because a budget approved against last month's fan-out is not a budget.
 | `agentkit eval` | a Databricks job | pre-merge, pre-promotion | The datasets and production traces already live in Unity Catalog. Compute goes to the data, and results land in the record with no upload step. |
 
 `agentkit eval --submit` runs the bundle's `release_gate` job.
+
+The submitted job scores the project's **deployed** configuration — the
+bundle files already uploaded to the workspace, not the ones in your working
+tree and not the ones in the last commit. `--submit` runs
+`databricks bundle validate` and `databricks bundle run`; it does **not**
+deploy. So change `agentkit.yaml`, a dataset, or a scorer and you must
+`databricks bundle deploy -t <target>` before submitting, or `release_gate`
+will score the previous version and record that as the evidence for your
+change.
+
+That is also why anything which would change what gets scored locally has
+nowhere to travel, and `--submit` refuses it up front rather than running
+something other than what you asked for: `--agent`, `--mode`, `--decision`,
+`--plan`, the baseline selection and establishment flags, the drift
+override, and a `--config` (or `AGENTKIT_CONFIG`) pointing anywhere but the
+project's own `agentkit.yaml`. Run those locally without `--submit`, or
+deploy the change and submit the deployed version. Only `--target`, which
+selects the bundle target rather than the evaluation, travels.
 
 **Smoke does not create an MLflow run.** A code-scorer-only pass over
 recorded answers needs nothing from MLflow, so it does not open one. That is
