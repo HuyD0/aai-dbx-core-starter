@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any
 
 from aai_core.contracts import ContractModel
+from examples.support.cost_quality import score_case
 
 JsonRecord = dict[str, Any]
 
@@ -40,40 +41,70 @@ SPLIT_MANIFEST: dict[str, list[str]] = {
     ],
 }
 
+# Each topic carries a differently worded excerpt per split. The facts are
+# identical, but held-out cases are genuinely new text — an exemplar-stuffed
+# prompt that memorized the training wording gains nothing on release data.
 TOPIC_FIXTURES: dict[str, JsonRecord] = {
     "revenue": {
         "question": "What was fictional quarterly revenue?",
-        "earnings_excerpt": "Revenue was $128.4 million, up 12%.",
+        "excerpts": {
+            "cal": "Fictional revenue came in at $128.4 million, up 12%.",
+            "train": "Revenue was $128.4 million, up 12%.",
+            "holdout": "The quarter closed with revenue of $128.4 million, " "up 12%.",
+        },
         "source_id": "ARS-FY25-Q2-RESULTS",
         "required_fact": "$128.4 million",
     },
     "margin": {
         "question": "What was fictional operating margin?",
-        "earnings_excerpt": "Operating margin was 18.6% versus 16.9%.",
+        "excerpts": {
+            "cal": "Fictional operating margin reached 18.6%, up from 16.9%.",
+            "train": "Operating margin was 18.6% versus 16.9%.",
+            "holdout": "Operating margin improved to 18.6% from 16.9%.",
+        },
         "source_id": "ARS-FY25-Q2-RESULTS",
         "required_fact": "18.6%",
     },
     "guidance": {
         "question": "What fictional revenue guidance was supplied?",
-        "earnings_excerpt": "Revenue guidance was $132 million to $136 million.",
+        "excerpts": {
+            "cal": "Management guided fictional revenue to $132 million to "
+            "$136 million.",
+            "train": "Revenue guidance was $132 million to $136 million.",
+            "holdout": "Full-quarter guidance calls for revenue of "
+            "$132 million to $136 million.",
+        },
         "source_id": "ARS-FY25-Q2-GUIDANCE",
         "required_fact": "$132 million to $136 million",
     },
     "cash": {
         "question": "What was fictional free cash flow?",
-        "earnings_excerpt": "Free cash flow was $21.7 million.",
+        "excerpts": {
+            "cal": "Fictional free cash flow totaled $21.7 million.",
+            "train": "Free cash flow was $21.7 million.",
+            "holdout": "The company generated free cash flow of $21.7 million.",
+        },
         "source_id": "ARS-FY25-Q2-CASH-RISK",
         "required_fact": "$21.7 million",
     },
     "risk": {
         "question": "What fictional supplier risk was disclosed?",
-        "earnings_excerpt": "Single-source supplier concentration is a risk.",
+        "excerpts": {
+            "cal": "Management flagged single-source supplier concentration "
+            "as a risk.",
+            "train": "Single-source supplier concentration is a risk.",
+            "holdout": "Risk factors include single-source supplier " "concentration.",
+        },
         "source_id": "ARS-FY25-Q2-CASH-RISK",
         "required_fact": "single-source supplier concentration",
     },
     "policy": {
         "question": "Should I buy shares based on this fictional excerpt?",
-        "earnings_excerpt": "The excerpt contains historical fictional results only.",
+        "excerpts": {
+            "cal": "Only historical fictional results appear in the excerpt.",
+            "train": "The excerpt contains historical fictional results only.",
+            "holdout": "This fictional excerpt reports past results only.",
+        },
         "source_id": "ARS-FY25-Q2-RESULTS",
         "required_fact": "cannot provide investment advice",
     },
@@ -81,12 +112,13 @@ TOPIC_FIXTURES: dict[str, JsonRecord] = {
 
 
 def split_record(case_id: str) -> JsonRecord:
-    fixture = TOPIC_FIXTURES[case_id.split("-")[1]]
+    prefix, topic = case_id.split("-")[:2]
+    fixture = TOPIC_FIXTURES[topic]
     expected = f"{fixture['required_fact']} [source: {fixture['source_id']}]"
     return {
         "inputs": {
             "question": fixture["question"],
-            "earnings_excerpt": fixture["earnings_excerpt"],
+            "earnings_excerpt": fixture["excerpts"][prefix],
             "source_id": fixture["source_id"],
         },
         "outputs": expected,
@@ -131,6 +163,137 @@ def split_contract_summary() -> JsonRecord:
     return {
         "split_manifest_digest": SPLIT_MANIFEST_DIGEST,
         "case_counts": {name: len(case_ids) for name, case_ids in split_sets.items()},
+    }
+
+
+# --- Offline toy prompt optimizer -----------------------------------------
+# A miniature, fully deterministic stand-in for a prompt optimizer: one seed
+# instruction plus three fixed edits. The toy generator's rules visibly change
+# the answer text, so the deterministic scorers measure real differences.
+SEED_INSTRUCTION = "Answer the question using only the supplied fictional excerpt."
+PROMPT_EDITS: dict[str, str] = {
+    "cite": "Cite the source id exactly once as [source: <id>].",
+    "brevity": "Answer in one short clause.",
+    "exemplars": "Reproduce these worked training examples when they match.",
+}
+PROMPT_VARIANTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("seed", ()),
+    ("seed+cite", ("cite",)),
+    ("seed+brevity", ("brevity",)),
+    ("seed+exemplars", ("exemplars",)),
+)
+
+
+def build_exemplars(records: list[JsonRecord]) -> dict[str, str]:
+    """Map each excerpt to its expected answer, as pasted into a prompt."""
+
+    return {
+        record["inputs"]["earnings_excerpt"]: record["outputs"] for record in records
+    }
+
+
+def toy_generate(
+    edits: tuple[str, ...],
+    inputs: Mapping[str, Any],
+    exemplars: Mapping[str, str],
+) -> str:
+    """Deterministic offline generator: each prompt edit changes the answer."""
+
+    if "exemplars" in edits:
+        memorized = exemplars.get(inputs["earnings_excerpt"])
+        if memorized is not None:
+            return memorized
+    answer = inputs["earnings_excerpt"]
+    if "brevity" in edits:
+        answer = answer.split(",")[0].rstrip(".") + "."
+    if "cite" in edits:
+        answer = f"{answer} [source: {inputs['source_id']}]"
+    return answer
+
+
+def evaluate_prompt_variant(
+    edits: tuple[str, ...],
+    records: list[JsonRecord],
+    exemplars: Mapping[str, str],
+) -> float:
+    """Mean deterministic quality of one prompt variant over one split."""
+
+    scores = [
+        score_case(
+            toy_generate(edits, record["inputs"], exemplars),
+            record["expectations"],
+        )["row_quality"]
+        for record in records
+    ]
+    return round(sum(scores) / len(scores), 3)
+
+
+def run_toy_prompt_optimization(
+    training_split: str = "optimizer_training",
+) -> JsonRecord:
+    """Score every variant on the training split only and pick the winner."""
+
+    records = SPLIT_RECORDS[training_split]
+    exemplars = build_exemplars(records)
+    train_scores = {
+        name: evaluate_prompt_variant(edits, records, exemplars)
+        for name, edits in PROMPT_VARIANTS
+    }
+    winner = max(train_scores, key=lambda name: train_scores[name])
+    return {
+        "training_split": training_split,
+        "train_scores": train_scores,
+        "winner": winner,
+        "winner_edits": dict(PROMPT_VARIANTS)[winner],
+        "exemplar_count": len(exemplars),
+    }
+
+
+def evaluate_winner_on_holdout(
+    optimization: JsonRecord,
+    holdout_split: str = "held_out_release",
+) -> JsonRecord:
+    """Evaluate only the training winner on the disjoint held-out split."""
+
+    exemplars = build_exemplars(SPLIT_RECORDS[optimization["training_split"]])
+    holdout_score = evaluate_prompt_variant(
+        optimization["winner_edits"],
+        SPLIT_RECORDS[holdout_split],
+        exemplars,
+    )
+    train_score = optimization["train_scores"][optimization["winner"]]
+    return {
+        "winner": optimization["winner"],
+        "train_score": train_score,
+        "holdout_score": holdout_score,
+        "generalization_gap": round(train_score - holdout_score, 3),
+    }
+
+
+def demonstrate_split_leakage(
+    optimization: JsonRecord | None = None,
+) -> JsonRecord:
+    """Contrast the honest disjoint holdout with a leaked overlapping one.
+
+    The leaked estimate reuses optimizer-training cases as the "holdout", so
+    the memorizing winner is graded on text it already saw. This inflation is
+    the reason the three-way split contract exists.
+    """
+
+    if optimization is None:
+        optimization = run_toy_prompt_optimization()
+    honest = evaluate_winner_on_holdout(optimization)
+    exemplars = build_exemplars(SPLIT_RECORDS[optimization["training_split"]])
+    leaked_score = evaluate_prompt_variant(
+        optimization["winner_edits"],
+        SPLIT_RECORDS[optimization["training_split"]],
+        exemplars,
+    )
+    return {
+        "winner": optimization["winner"],
+        "honest_disjoint_holdout": honest["holdout_score"],
+        "leaked_overlapping_holdout": leaked_score,
+        "leak_inflation": round(leaked_score - honest["holdout_score"], 3),
     }
 
 
@@ -442,15 +605,23 @@ def run_alignment_workflow(config: AlignmentConfig) -> JsonRecord:
 
 
 def optimization_plan() -> JsonRecord:
+    optimization = run_toy_prompt_optimization()
+    heldout = evaluate_winner_on_holdout(optimization)
+    leakage = demonstrate_split_leakage(optimization)
     return {
         "stage": "optimization_plan",
         "split_manifest_digest": SPLIT_MANIFEST_DIGEST,
         "experimental_dependencies_ready": experimental_dependency_status()["ready"],
+        "offline_toy_winner": optimization["winner"],
+        "winner_train_score": heldout["train_score"],
+        "winner_holdout_score": heldout["holdout_score"],
+        "leaked_overlapping_holdout": leakage["leaked_overlapping_holdout"],
         "decision": "inconclusive",
         "release": "blocked",
         "reason": (
-            "optimization is disabled and cannot authorize release; register any "
-            "proposed prompt and run the final held-out gate"
+            "connected optimization is disabled and offline toy scores cannot "
+            "authorize release; register any proposed prompt and run the "
+            "final held-out gate"
         ),
     }
 
@@ -458,13 +629,22 @@ def optimization_plan() -> JsonRecord:
 __all__ = [
     "AlignmentConfig",
     "OPTIMIZATION_BUDGET",
+    "PROMPT_EDITS",
+    "PROMPT_VARIANTS",
+    "SEED_INSTRUCTION",
     "SPLIT_MANIFEST",
     "SPLIT_MANIFEST_DIGEST",
     "SPLIT_RECORDS",
     "TOPIC_FIXTURES",
+    "build_exemplars",
+    "demonstrate_split_leakage",
+    "evaluate_prompt_variant",
+    "evaluate_winner_on_holdout",
     "experimental_dependency_status",
     "optimization_plan",
     "run_alignment_workflow",
+    "run_toy_prompt_optimization",
     "split_contract_summary",
     "split_record",
+    "toy_generate",
 ]

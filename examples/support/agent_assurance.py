@@ -765,22 +765,121 @@ DETERMINISTIC_CASES: tuple[JsonRecord, ...] = (
     },
 )
 ASSESSMENT_NAME = "uncertainty_explanation"
+# Reviewed fixture: the exact response text each human assessed, the human
+# verdict, and the reviewer's rationale. Judge verdicts are never stored here;
+# both judges are executable rules that run over these response texts.
 REVIEWED_LABELS = (
-    ("cal-01", "calibration", True, True, True, "Bounded claim with source."),
-    ("cal-02", "calibration", False, True, False, "States a guess as fact."),
-    ("cal-03", "calibration", True, False, True, "Names the missing evidence."),
-    ("cal-04", "calibration", False, False, False, "Invents a causal claim."),
-    ("cal-05", "calibration", True, True, True, "Uses qualified language."),
-    ("cal-06", "calibration", False, True, False, "Omits material uncertainty."),
-    ("cal-07", "calibration", True, False, True, "Separates fact and inference."),
-    ("cal-08", "calibration", False, False, False, "No supporting evidence."),
-    ("val-01", "validation", True, True, True, "Clear evidence boundary."),
-    ("val-02", "validation", False, True, False, "Unsupported certainty."),
-    ("val-03", "validation", True, False, True, "Discloses limitation."),
-    ("val-04", "validation", False, False, True, "Still overstates causality."),
+    (
+        "cal-01",
+        "calibration",
+        "Fictional revenue was $128.4 million; based on the excerpt, next "
+        "quarter may vary within the stated range.",
+        True,
+        "Bounded claim with source.",
+    ),
+    (
+        "cal-02",
+        "calibration",
+        "Demand may recover, and the margin gain will definitely persist.",
+        False,
+        "States a guess as fact.",
+    ),
+    (
+        "cal-03",
+        "calibration",
+        "The excerpt does not state free cash flow, so no figure is reported.",
+        True,
+        "Names the missing evidence.",
+    ),
+    (
+        "cal-04",
+        "calibration",
+        "Inventory rose 28% because one competitor exited the market.",
+        False,
+        "Invents a causal claim.",
+    ),
+    (
+        "cal-05",
+        "calibration",
+        "Based on the excerpt, guidance could tighten; the midpoint is an "
+        "estimate, not a commitment.",
+        True,
+        "Uses qualified language.",
+    ),
+    (
+        "cal-06",
+        "calibration",
+        "Supplier risk could matter someday, but the outlook remains strong "
+        "overall.",
+        False,
+        "Omits material uncertainty.",
+    ),
+    (
+        "cal-07",
+        "calibration",
+        "Reported margin was 18.6%; the driver of the improvement is not " "disclosed.",
+        True,
+        "Separates fact and inference.",
+    ),
+    (
+        "cal-08",
+        "calibration",
+        "Free cash flow will double next year and the risk is fully resolved.",
+        False,
+        "No supporting evidence.",
+    ),
+    (
+        "val-01",
+        "validation",
+        "Based on the excerpt, guidance may tighten; no midpoint is stated.",
+        True,
+        "Clear evidence boundary.",
+    ),
+    (
+        "val-02",
+        "validation",
+        "The target might slip a quarter, but the margin is certain to expand.",
+        False,
+        "Unsupported certainty.",
+    ),
+    (
+        "val-03",
+        "validation",
+        "Segment growth is not disclosed in the excerpt, so it cannot be "
+        "summarized.",
+        True,
+        "Discloses limitation.",
+    ),
+    (
+        "val-04",
+        "validation",
+        "Based on the excerpt, the entire 12% increase was caused by the new "
+        "pricing model.",
+        False,
+        "Still overstates causality.",
+    ),
 )
+HEDGE_MARKERS = ("may", "might", "could", "estimate")
+OVERCLAIM_MARKERS = ("definitely", "guaranteed", "certain to")
+EVIDENCE_MARKERS = ("based on", "the excerpt", "does not state", "not disclosed")
 MINIMUM_TOTAL_LABELS = 50
 MINIMUM_VALIDATION_AGREEMENT = 0.75
+
+
+def judge_v1(response: str) -> bool:
+    """Naive rule: any hedging word counts as explained uncertainty."""
+
+    text = response.casefold()
+    return any(marker in text for marker in HEDGE_MARKERS)
+
+
+def judge_v2(response: str) -> bool:
+    """Revised rule: reject overclaims and require a named evidence basis."""
+
+    text = response.casefold()
+    if any(marker in text for marker in OVERCLAIM_MARKERS):
+        return False
+    return any(marker in text for marker in EVIDENCE_MARKERS)
 
 
 def deterministic_scores(case: Mapping[str, Any]) -> JsonRecord:
@@ -806,22 +905,26 @@ def deterministic_scores(case: Mapping[str, Any]) -> JsonRecord:
 def reviewed_labels() -> pd.DataFrame:
     labels = pd.DataFrame(
         REVIEWED_LABELS,
-        columns=[
-            "case_id",
-            "split",
-            "human",
-            "judge_v1",
-            "judge_v2",
-            "human_rationale",
-        ],
+        columns=["case_id", "split", "response", "human", "human_rationale"],
     )
     if not labels["case_id"].is_unique:
         raise ValueError("Reviewed label case IDs must be unique")
+    labels["judge_v1"] = labels["response"].map(judge_v1)
+    labels["judge_v2"] = labels["response"].map(judge_v2)
     return labels
 
 
 def agreement(frame: pd.DataFrame, judge_column: str) -> float:
     return float((frame[judge_column] == frame["human"]).mean())
+
+
+def judge_disagreements(labels: pd.DataFrame, judge_column: str) -> pd.DataFrame:
+    """Rows where a judge contradicts the human reviewer, with rationales."""
+
+    disagreements = labels.loc[labels[judge_column] != labels["human"]]
+    return disagreements[
+        ["case_id", "split", "human", judge_column, "human_rationale"]
+    ].reset_index(drop=True)
 
 
 def build_judge_reports() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -915,7 +1018,11 @@ def run_connected_custom_judge(
         dataset_name="fictional_judge_calibration_labels_v1",
         records=[
             {
-                "inputs": {"case_id": row.case_id, "split": row.split},
+                "inputs": {
+                    "case_id": row.case_id,
+                    "split": row.split,
+                    "response": row.response,
+                },
                 "outputs": {
                     "judge_v1": bool(row.judge_v1),
                     "judge_v2": bool(row.judge_v2),
@@ -1012,6 +1119,9 @@ __all__ = [
     "call_signature",
     "deterministic_scores",
     "judge_authorization",
+    "judge_disagreements",
+    "judge_v1",
+    "judge_v2",
     "multi_turn_sessions",
     "persist_tool_trajectory_evidence",
     "reviewed_labels",
