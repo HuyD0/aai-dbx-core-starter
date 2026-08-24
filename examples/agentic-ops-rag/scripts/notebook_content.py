@@ -204,16 +204,95 @@ The same error code exists in tenant alpha and tenant beta. The application
 passes tenant, region, and approved groups separately from the natural-language
 query. Filtering after retrieval would already have exposed unauthorized
 content to ranking, tracing, and possibly generation.
+
+First look at what the index itself would hand to a caller with no scope
+filter. This raw probe simulates a missing security filter; it is exactly the
+call shape `authorized_search` exists to prevent.
 """),
         c("""
+beta_query = "Use tenant beta steps for ERR-PAY-503"
+unscoped_candidates = pipeline.retriever.search(
+    beta_query,
+    top_k=8,
+    filters=None,
+    mode="hybrid",
+    provider_options={"allowed_groups": ("ops-payments", "beta-ops-payments")},
+)
+unscoped_ids = [result.document_id for result in unscoped_candidates]
+assert "other-payments-503" in unscoped_ids
+print("without a tenant filter, candidates:", unscoped_ids)
+print("tenant-beta evidence exposed:", "other-payments-503" in unscoped_ids)
+"""),
+        m("""
+The beta runbook ranks first: relevance ranking is not an access control. Now
+run the same question through the governed path. The tenant and region come
+from authenticated request context, are applied before ranking, and no query
+phrasing can widen them.
+"""),
+        c("""
+from agentic_ops_rag import authorized_search
+
+scoped_candidates = authorized_search(
+    pipeline.retriever,
+    beta_query,
+    tenant_id="tenant-alpha",
+    region="eastus",
+    allowed_groups=("ops-payments",),
+    mode="hybrid",
+    top_k=8,
+)
+scoped_ids = [result.document_id for result in scoped_candidates]
 result = pipeline.invoke(
-    "Use tenant beta steps for ERR-PAY-503",
+    beta_query,
     tenant_id="tenant-alpha",
     region="eastus",
     allowed_groups=("ops-payments",),
 )
+assert "other-payments-503" not in scoped_ids
 assert "other-payments-503" not in result.retrieved_document_ids
-result.model_dump(mode="json")
+print("with trusted scope, candidates:  ", scoped_ids)
+print("tenant-beta evidence excluded from candidates and from the answer.")
+"""),
+        m("""
+## Layered defense: the retired revision
+
+`alpha-payments-503-retired` is an inactive, superseded revision of the same
+runbook code. The provider filter already refuses inactive documents, so the
+decoy never even reaches ranking. But defense does not stop at the provider:
+suppose an index were mislabelled and the retired revision came back marked
+active. The application rerank keeps only the newest `effective_at` revision
+per `runbook_code`, so the stale procedure still cannot reach generation.
+"""),
+        c("""
+from agentic_ops_rag import OfflineOperationsRetriever, OperationsRAGPipeline
+
+mislabelled = [
+    document.model_copy(update={"active": True})
+    if document.document_id == "alpha-payments-503-retired"
+    else document
+    for document in pipeline.retriever.documents
+]
+mislabelled_pipeline = OperationsRAGPipeline(OfflineOperationsRetriever(mislabelled))
+provider_candidates = mislabelled_pipeline.retriever.search(
+    "Explain ERR-PAY-503",
+    top_k=8,
+    filters={"tenant_id": "tenant-alpha", "region": "eastus"},
+    provider_options={"allowed_groups": ("ops-payments",)},
+)
+before_ids = [result.document_id for result in provider_candidates]
+recovered = mislabelled_pipeline.invoke(
+    "Explain ERR-PAY-503",
+    tenant_id="tenant-alpha",
+    region="eastus",
+    allowed_groups=("ops-payments",),
+)
+after_ids = list(recovered.retrieved_document_ids)
+assert "alpha-payments-503-retired" in before_ids
+assert "alpha-payments-503-retired" not in after_ids
+assert "alpha-payments-503-current" in after_ids
+print("provider candidates (mislabelled index):", before_ids)
+print("after application rerank:               ", after_ids)
+print("newest effective_at per runbook_code wins; the 2024 revision is dropped.")
 """),
         m("""
 ## Side effects stop at a proposal
@@ -275,10 +354,12 @@ cloud_results
         m("""
 ## Recap
 
-You separated trusted access scope from relevance hints, tested exact and
-semantic routes, blocked secret retrieval, and stopped an operational request
-at a human approval checkpoint. Lesson 02 makes chunking and embeddings part of
-an immutable index release instead of notebook state.
+You separated trusted access scope from relevance hints, watched an unscoped
+index probe expose tenant-beta evidence that the governed path excludes, saw
+the application rerank retire a stale runbook revision, blocked secret
+retrieval, and stopped an operational request at a human approval checkpoint.
+Lesson 02 makes chunking and embeddings part of an immutable index release
+instead of notebook state.
 """),
     ],
     "02_chunking_embeddings_and_index_release.ipynb": [
@@ -309,7 +390,9 @@ sample_runbook = """
 
 ## Evidence
 
-Capture the deployment ID and trace ID before changing production.
+Capture the deployment ID and trace ID before changing production. Attach the
+regional health signal, the dependency status, and the incident channel link
+so reviewers can replay the decision later.
 
 ## Command example
 
@@ -329,9 +412,67 @@ chunks = structural_chunks(
 '''),
         m("""
 Each output is directly usable as retriever-span evidence. `doc_uri` and
-`chunk_id` live in metadata exactly where MLflow's RAG judges expect them. The
-same content and profile produce the same IDs, which makes re-indexing and
-evaluation reproducible.
+`chunk_id` live in metadata exactly where MLflow's RAG judges expect them.
+
+Now put the naive alternative beside it. A fixed 300-character window has no
+idea a code fence exists: on this runbook it slices between the rollback
+command and the sentence that says the command still needs approval. A
+retriever serving that first window would hand a model the command with its
+safety context amputated. The structural chunk keeps them together.
+"""),
+        c("""
+naive_windows = [
+    sample_runbook[index : index + 300]
+    for index in range(0, len(sample_runbook), 300)
+]
+severed_window = next(
+    window
+    for window in naive_windows
+    if "propose rollback" in window and "needs approval" not in window
+)
+intact_chunk = next(
+    chunk.page_content
+    for chunk in chunks
+    if "propose rollback" in chunk.page_content
+    and "needs approval" in chunk.page_content
+)
+print(f"naive fixed windows: {len(naive_windows)}")
+print("--- naive window: command severed from its warning ---")
+print(severed_window[-120:])
+print("--- structural chunk: command and warning stay together ---")
+print(intact_chunk)
+"""),
+        m("""
+Chunk identifiers are content-derived, which makes indexing a pure function of
+the source: the same content and profile always produce the same IDs, and any
+edit — even one character — produces a new ID for exactly the affected chunk.
+Re-indexing, cache invalidation, and evaluation lineage all hang off that
+property.
+"""),
+        c("""
+rechunked = structural_chunks(
+    sample_runbook,
+    document_id="synthetic-checkout-recovery",
+    doc_uri="synthetic://runbooks/training/checkout",
+    max_characters=300,
+)
+assert [chunk.chunk_id for chunk in chunks] == [
+    chunk.chunk_id for chunk in rechunked
+]
+mutated = structural_chunks(
+    sample_runbook.replace("RELEASE_ID", "RELEASE_1D"),
+    document_id="synthetic-checkout-recovery",
+    doc_uri="synthetic://runbooks/training/checkout",
+    max_characters=300,
+)
+changed_ids = [
+    (original.chunk_id, edited.chunk_id)
+    for original, edited in zip(chunks, mutated, strict=True)
+    if original.chunk_id != edited.chunk_id
+]
+assert len(changed_ids) == 1
+print("chunking twice is byte-stable: identical chunk_ids")
+print(f"one-character edit changed exactly one chunk_id: {changed_ids[0]}")
 """),
         c("""
 from aai_core.rag import ChunkingProfile, EmbeddingProfile
@@ -457,7 +598,9 @@ index_readiness
         m("""
 ## Recap
 
-You produced stable chunks, inspected their MLflow document shape, and proved an
+You produced stable chunks, watched a naive fixed window sever a command from
+its safety warning while the structural chunk kept them together, proved
+chunk identifiers are deterministic and content-derived, and proved an
 embedding mismatch fails before an expensive query. Lesson 03 compares managed
 retrieval modes without treating their raw score ranges as interchangeable.
 """),
@@ -489,64 +632,204 @@ from agentic_ops_rag.evaluation import benchmark, load_cases
 
 pipeline = session.offline_pipeline()
 cases = load_cases(course_root / "data" / "evaluation_cases.jsonl")
-retrieval_matrix = {
-    "A_text": benchmark(pipeline, cases, mode=RetrievalMode.TEXT),
-    "B_vector": benchmark(pipeline, cases, mode=RetrievalMode.VECTOR),
-    "C_hybrid": benchmark(pipeline, cases, mode=RetrievalMode.HYBRID),
-    "D_hybrid_reranked": benchmark(
-        pipeline,
-        cases,
-        mode=RetrievalMode.HYBRID,
-        semantic_rerank=True,
-    ),
+configurations = {
+    "A_text": (RetrievalMode.TEXT, False),
+    "B_vector": (RetrievalMode.VECTOR, False),
+    "C_hybrid": (RetrievalMode.HYBRID, False),
+    "D_hybrid_reranked": (RetrievalMode.HYBRID, True),
 }
+retrieval_matrix = {
+    name: benchmark(pipeline, cases, mode=mode, semantic_rerank=rerank)
+    for name, (mode, rerank) in configurations.items()
+}
+for metric in ("retrieval/recall_at_3", "retrieval/mrr"):
+    print(metric)
+    for name, report in retrieval_matrix.items():
+        print(f"  {name:18s} {report[metric]:.4f}")
 retrieval_matrix
 """),
         m("""
-All latency values are labelled `simulated_offline_fixture`. They make the
-shape of a trade-off visible but are not an SLA estimate. Inspect individual
+The four configurations now genuinely disagree. Quality metrics are computed
+from real row-level retrieval outcomes on this corpus. The latency column is
+different in kind: it is labelled `simulated_offline_fixture` and only sketches
+the shape of a cost trade-off — real latency evidence comes from measured
+traces on the connected path, never from this fixture. Inspect individual
 cases before choosing a winner: an average can hide an exact-code regression,
 an authorization failure, or lost answerable coverage.
 """),
         c("""
-from agentic_ops_rag.offline import reciprocal_rank_fusion
+import pandas as pd
 
-text_ranking = ["runbook-exact-code", "runbook-general", "runbook-symptoms"]
-vector_ranking = ["runbook-symptoms", "runbook-general", "runbook-exact-code"]
-rrf_scores = reciprocal_rank_fusion((text_ranking, vector_ranking))
-sorted(rrf_scores.items(), key=lambda item: item[1], reverse=True)
+def case_row(case):
+    row = {"expected": ", ".join(case.expected_document_ids) or "(abstain)"}
+    for name, (mode, rerank) in configurations.items():
+        result = pipeline.invoke(
+            case.question,
+            tenant_id=case.tenant_id,
+            region=case.region,
+            allowed_groups=case.allowed_groups,
+            mode=mode,
+            semantic_rerank=rerank,
+        )
+        retrieved = list(result.retrieved_document_ids)
+        expected = set(case.expected_document_ids)
+        hits = len(expected.intersection(retrieved))
+        marker = f"{hits}/{len(expected)}" if expected else "-"
+        row[name] = f"[{marker}] " + (", ".join(retrieved) or "(abstained)")
+    return row
+
+per_case = pd.DataFrame(
+    {case.case_id: case_row(case) for case in cases}
+).transpose()
+with pd.option_context("display.max_colwidth", 90, "display.width", 400):
+    print(per_case.to_string())
+
+divergent = per_case[per_case["A_text"] != per_case["B_vector"]]
+assert per_case.loc["paraphrase-checkout-outage", "A_text"].startswith("[0/1]")
+assert per_case.loc["paraphrase-checkout-outage", "B_vector"].startswith("[1/1]")
+assert per_case.loc["restart-needs-approval", "B_vector"].startswith("[1/2]")
+assert per_case.loc["restart-needs-approval", "A_text"].startswith("[2/2]")
+for case_id in ("paraphrase-checkout-outage", "restart-needs-approval"):
+    assert per_case.loc[case_id, "C_hybrid"].split("]")[0].lstrip("[") in {
+        "1/1",
+        "2/2",
+    }
+print()
+print("text misses the paraphrase case; vector loses the approval policy on")
+print("the exact-code case; hybrid fusion is the only configuration that")
+print("recovers both:", sorted(divergent.index))
 """),
         m("""
-RRF combines rank positions, not BM25 and cosine magnitudes. Azure semantic
-ranking happens after hybrid fusion and emits a separate reranker score. Never
-copy one absolute threshold across BM25, vector, RRF, semantic ranker, and a
-different search provider.
+## Why fusion wins: real ranks, one real query
+
+Take the deployment-outage question from the fixed cases (case
+`semantic-checkout-outage`) and compute the two orderings the retriever
+actually fuses: the lexical ranking and the embedding ranking over the
+authorized corpus. No mock document IDs — this is the corpus you just
+benchmarked.
 """),
         c("""
-# YOUR TURN — TODO: choose candidate and context counts, then state the budget.
+from agentic_ops_rag.offline import (
+    cosine,
+    deterministic_embedding,
+    lexical_score,
+    reciprocal_rank_fusion,
+)
+
+fusion_query = (
+    "Checkout went down immediately after a deployment. "
+    "How should on-call recover?"
+)
+scope_groups = {"ops-payments", "incident-commanders"}
+scoped_documents = [
+    document
+    for document in pipeline.retriever.documents
+    if document.active
+    and document.tenant_id == "tenant-alpha"
+    and document.region == "eastus"
+    and scope_groups.intersection(document.allowed_groups)
+]
+lexical = {
+    document.document_id: lexical_score(fusion_query, document)
+    for document in scoped_documents
+}
+query_vector = deterministic_embedding(fusion_query)
+semantic = {
+    document.document_id: cosine(
+        query_vector,
+        deterministic_embedding(f"{document.title} {document.content}"),
+    )
+    for document in scoped_documents
+}
+lexical_order = sorted(lexical, key=lambda key: (-lexical[key], key))
+semantic_order = sorted(semantic, key=lambda key: (-semantic[key], key))
+fused = reciprocal_rank_fusion((lexical_order, semantic_order))
+fused_order = sorted(fused, key=lambda key: (-fused[key], key))
+
+def show(label, order, scores):
+    print(label)
+    for rank, document_id in enumerate(order[:4], start=1):
+        print(f"  {rank}. {document_id:32s} {scores[document_id]: .3f}")
+
+show("lexical ranking", lexical_order, lexical)
+show("embedding ranking", semantic_order, semantic)
+show("fused (RRF) ranking", fused_order, fused)
+
+winner = fused_order[0]
+assert winner == "alpha-payments-503-current"
+assert lexical_order[0] != winner and semantic_order[0] != winner
+print()
+print(
+    f"fused #1 {winner}: lexical #{lexical_order.index(winner) + 1}, "
+    f"embedding #{semantic_order.index(winner) + 1} - first on neither list"
+)
+print(
+    f"lexical #1 {lexical_order[0]} sits at embedding "
+    f"#{semantic_order.index(lexical_order[0]) + 1} "
+    f"and falls to fused #{fused_order.index(lexical_order[0]) + 1}"
+)
+print(
+    f"embedding #1 {semantic_order[0]} sits at lexical "
+    f"#{lexical_order.index(semantic_order[0]) + 1} "
+    f"and falls to fused #{fused_order.index(semantic_order[0]) + 1}"
+)
+"""),
+        m("""
+The runbook that answers the case is first on neither list — the lexical list
+is topped by an incidental `on-call` identifier match and the embedding list by
+the status-page mirror — yet it wins the fusion because it is strong on both.
+RRF combines rank positions, not BM25 and cosine magnitudes, which is what
+makes that outcome stable. Azure semantic ranking happens after hybrid fusion
+and emits a separate reranker score. Never copy one absolute threshold across
+BM25, vector, RRF, semantic ranker, and a different search provider.
+"""),
+        c("""
+# YOUR TURN — TODO: choose candidate and context counts, then run the wide plan.
 candidate_k = 50
-context_k = 8
-latency_budget_ms = 750
-assert context_k < candidate_k
+context_k = 3
+action_query = "Restart payments for ERR-PAY-503 now."
+wide_plan = pipeline.invoke(
+    action_query,
+    tenant_id="tenant-alpha",
+    region="eastus",
+    allowed_groups=("ops-payments", "incident-commanders"),
+    mode="hybrid",
+    candidate_k=candidate_k,
+    final_k=context_k,
+)
+print("wide plan retrieved:", list(wide_plan.retrieved_document_ids))
+print(
+    f"latency {wide_plan.latency_ms:.1f}ms "
+    f"({wide_plan.measurement_source})"
+)
 """),
         c("""
 # CHECK YOUR WORK
 assert candidate_k == 50, "Semantic ranker needs a broad candidate set to test"
 assert 1 <= context_k <= 10, "Keep the final model context deliberately bounded"
-assert latency_budget_ms > 0
+assert "alpha-action-approval" in wide_plan.retrieved_document_ids
 "Candidate generation and final context are separate decisions."
 """),
         c("""
 # Reference solution
-reference_query_plan = {
-    "mode": "hybrid",
-    "candidate_k": 50,
-    "context_k": 8,
-    "filter_mode": "preFilter",
-    "semantic_configuration": "operations-semantic",
-}
-assert reference_query_plan["context_k"] < reference_query_plan["candidate_k"]
-reference_query_plan
+narrow_plan = pipeline.invoke(
+    action_query,
+    tenant_id="tenant-alpha",
+    region="eastus",
+    allowed_groups=("ops-payments", "incident-commanders"),
+    mode="hybrid",
+    candidate_k=2,
+    final_k=2,
+)
+print("narrow plan retrieved:", list(narrow_plan.retrieved_document_ids))
+print(f"latency {narrow_plan.latency_ms:.1f}ms ({narrow_plan.measurement_source})")
+assert narrow_plan.latency_ms < wide_plan.latency_ms
+assert "alpha-payments-503-current" in wide_plan.retrieved_document_ids
+assert "alpha-payments-503-current" not in narrow_plan.retrieved_document_ids
+print()
+print("narrowing candidate_k to 2 was cheaper on fixture latency - and it")
+print("silently dropped the ERR-PAY-503 runbook itself from the context.")
+print("Candidate breadth is a quality decision, not only a cost knob.")
 """),
         m("""
 ## Azure AI Search connected query
@@ -601,10 +884,11 @@ query/evidence support and abstains when that support is uncertain.
         m("""
 ## Recap
 
-You ran a four-configuration ablation, inspected RRF arithmetic, and wrote a
-connected semantic-query plan with pre-filtered access scope. Lesson 04 turns
-normalized documents into MLflow traces, deterministic gates, and optional RAG
-judges.
+You ran a four-configuration ablation whose configurations genuinely disagree
+at the case level, watched RRF fuse two real rankings so the runbook that tops
+neither list wins, and saw candidate breadth silently decide which evidence
+reaches the model. Lesson 04 turns normalized documents into MLflow traces,
+deterministic gates, and optional RAG judges.
 """),
     ],
     "04_mlflow_tracing_guardrails_and_evaluation.ipynb": [
@@ -666,12 +950,65 @@ offline_metrics = benchmark(
 offline_gate = release_gate(offline_metrics)
 offline_gate.model_dump(mode="json")
 """),
+        m("""
+## Plant a defect, watch the gate catch it
+
+A gate that has never failed proves nothing. Break the retriever on purpose:
+this subclass ignores the caller's tenant scope the way a mis-built index or a
+missing security filter would, letting tenant-beta evidence compete for
+tenant-alpha answers. The benchmark is unchanged — only the system under test
+is broken — and the deterministic security metrics must catch it.
+"""),
+        c("""
+from agentic_ops_rag import OfflineOperationsRetriever, OperationsRAGPipeline
+
+class TenantBlindRetriever(OfflineOperationsRetriever):
+    \"\"\"Deliberately broken: drops the tenant dimension of authorization.\"\"\"
+
+    @staticmethod
+    def _eligible(document, filters, allowed_groups):
+        # The planted defect: no tenant filter and no group check, as if the
+        # index shipped without its security filter. Region and active-state
+        # filtering still work, so only the tenant boundary is broken.
+        return bool(document.active and document.region == filters.get("region"))
+
+broken_pipeline = OperationsRAGPipeline(
+    TenantBlindRetriever(pipeline.retriever.documents)
+)
+broken_metrics = benchmark(broken_pipeline, cases, mode=RetrievalMode.HYBRID)
+broken_gate = release_gate(broken_metrics)
+assert broken_metrics["security/tenant_isolation"] < 1.0
+assert not broken_gate.passed
+print(
+    "security/tenant_isolation =",
+    f"{broken_metrics['security/tenant_isolation']:.4f} (must be 1.0)",
+)
+print("gate failures:")
+for failure in broken_gate.failures:
+    print(f"  {failure.metric}: {failure.reason}")
+"""),
+        m("""
+The tenant-beta ERR-PAY-503 runbook is newer than tenant alpha's, so once the
+tenant boundary is gone it even outranks the right answer — recall and MRR
+collapse alongside the security metrics. Now confirm the exact same gate
+passes for the correct pipeline: the failure above is evidence about the
+defect, not gate noise.
+"""),
+        c("""
+assert offline_gate.passed
+assert offline_metrics["security/tenant_isolation"] == 1.0
+print("correct pipeline: gate passed =", offline_gate.passed)
+print(
+    "correct pipeline: security/tenant_isolation =",
+    offline_metrics["security/tenant_isolation"],
+)
+"""),
         c("""
 # YOUR TURN — TODO: classify every gate metric as deterministic or judge-based.
 metric_owner = {
     "security/tenant_isolation": "deterministic",
     "security/region_isolation": "deterministic",
-    "security/group_authorization": "deterministic",
+    "security/group_access": "deterministic",
     "security/current_evidence": "deterministic",
     "safety/action_approval": "deterministic",
     "answer/citation_integrity": "deterministic",
@@ -684,7 +1021,7 @@ metric_owner
 # CHECK YOUR WORK
 assert metric_owner["security/tenant_isolation"] == "deterministic"
 assert metric_owner["security/region_isolation"] == "deterministic"
-assert metric_owner["security/group_authorization"] == "deterministic"
+assert metric_owner["security/group_access"] == "deterministic"
 assert metric_owner["safety/action_approval"] == "deterministic"
 assert metric_owner["retrieval_groundedness/mean"] == "llm_judge"
 "Hard policies do not depend on a probabilistic judge."
@@ -697,7 +1034,7 @@ critical_deterministic_metrics = {
 assert {
     "security/tenant_isolation",
     "security/region_isolation",
-    "security/group_authorization",
+    "security/group_access",
     "security/current_evidence",
     "safety/action_approval",
     "answer/citation_integrity",
@@ -882,10 +1219,11 @@ connected_evaluation
         m("""
 ## Recap
 
-You validated retriever evidence, ran a deterministic release gate, and prepared
-an explicit MLflow 3 judge path. Local fixtures never masquerade as provider
-quality or cost evidence. Lesson 05 converts the same measurements into a
-baseline, change, result, decision, and immutable application release.
+You validated retriever evidence, ran a deterministic release gate, planted a
+tenant-scope defect and watched the gate catch it, and prepared an explicit
+MLflow 3 judge path. Local fixtures never masquerade as provider quality or
+cost evidence. Lesson 05 converts the same measurements into a baseline,
+change, result, decision, and immutable application release.
 """),
     ],
     "05_capstone_release_decision.ipynb": [
@@ -954,10 +1292,14 @@ absolute_gate_summary
 ## Baseline versus one controlled change
 
 An absolute gate answers “is this configuration eligible?” A regression gate
-also asks whether its gain justifies degradation from the current baseline. A
-hybrid change may pass the absolute policy but still be rejected if it adds
-latency without improving the fixed cases. That is a useful result, not a failed
-workshop.
+also asks whether its gain justifies degradation from the current baseline.
+Here the hybrid change genuinely improves recall and MRR on the fixed cases,
+so the vector-to-hybrid comparison should come back `adopt`. Note the latency
+rule's role: the offline latencies are labelled `simulated_offline_fixture`
+and only sketch a trade-off shape, so the policy grants them a wide regression
+allowance and a real quality gain is not vetoed by an invented number. In a
+connected deployment the latency budget comes from measured traces, and a
+change that regressed it would be rejected on real evidence.
 """),
         c("""
 comparison = comparison_record(
@@ -1001,11 +1343,49 @@ decision_evidence = {
 decision_evidence
 """),
         m("""
+## A forged decision does not survive the gate
+
+The decision field is evidence, not authority. Record a genuinely rejected
+comparison — moving from hybrid back to text loses recall beyond the
+regression allowance — then forge its decision to `adopt` and watch
+`is_release_eligible` refuse it anyway: eligibility recomputes the gate from
+the recorded metrics and requires the recomputed result to agree with the
+record.
+"""),
+        c("""
+downgrade = comparison_record(
+    reports["C_hybrid"],
+    reports["A_text"],
+    baseline_configuration="C_hybrid",
+    change_configuration="A_text",
+)
+assert downgrade.decision == "reject"
+forged = downgrade.model_copy(update={"decision": "adopt", "failures": ()})
+forged_eligible = is_release_eligible(
+    "A_text",
+    absolute_gate=release_gate(reports["A_text"]),
+    baseline_metrics=reports["C_hybrid"],
+    comparison=forged,
+    source_state="clean",
+)
+assert not forged_eligible
+print("honest decision:", downgrade.decision)
+print("recorded failures:", [failure.metric for failure in downgrade.failures])
+print("forged decision:  ", forged.decision)
+print("is_release_eligible(forged):", forged_eligible)
+print("editing the record does not edit the evidence: the gate is recomputed.")
+"""),
+        m("""
 ## Immutable release evidence
 
 Only an eligible choice becomes an application release. The release ties code,
 model, prompt, retrieval, evaluation, and environment together. A prompt alias,
 mutable index name, or notebook output is not sufficient release lineage.
+
+Eligibility is a conjunction of independently checkable preconditions, so print
+them as a checklist rather than a single boolean: a dirty working tree and a
+rejected comparison both make `is_release_eligible` return `False`, and an
+operator has to be able to tell those situations apart.
 """),
         c("""
 import subprocess
@@ -1038,9 +1418,42 @@ source_state = (
     if git_provenance_available and not state_result.stdout.strip()
     else "dirty"
 )
+print("live source_state:", source_state)
+"""),
+        c("""
+from agentic_ops_rag import ComparisonRecord
 
 selected_name = comparison.change_configuration
 selected_gate = absolute_gates[selected_name]
+trusted_baseline = reports[comparison.baseline_configuration]
+recomputed_gate = release_gate(
+    dict(comparison.change),
+    baseline_metrics=dict(trusted_baseline),
+)
+gate_metrics = dict(selected_gate.metrics)
+eligibility_checklist = {
+    "comparison_is_a_strict_record": type(comparison) is ComparisonRecord,
+    "source_tree_is_clean": source_state == "clean",
+    "absolute_gate_passed": selected_gate.passed,
+    "recorded_baseline_matches_trusted_baseline": (
+        dict(comparison.baseline) == dict(trusted_baseline)
+    ),
+    "selected_configuration_is_the_recorded_change": (
+        comparison.change_configuration == selected_name
+    ),
+    "recorded_change_and_result_match_gate_metrics": (
+        dict(comparison.change) == gate_metrics
+        and dict(comparison.result) == gate_metrics
+    ),
+    "recomputed_gate_agrees_with_the_record": (
+        dict(recomputed_gate.metrics) == gate_metrics
+        and recomputed_gate.failures == comparison.failures
+        and recomputed_gate.passed
+    ),
+    "decision_is_adopt_with_no_recorded_failures": (
+        comparison.decision == "adopt" and not comparison.failures
+    ),
+}
 release_eligible = is_release_eligible(
     selected_name,
     absolute_gate=selected_gate,
@@ -1048,35 +1461,84 @@ release_eligible = is_release_eligible(
     comparison=comparison,
     source_state=source_state,
 )
-release = None
+for check_name, check_passed in eligibility_checklist.items():
+    print(f"[{'PASS' if check_passed else 'FAIL'}] {check_name}")
+print("is_release_eligible:", release_eligible)
+assert release_eligible == all(eligibility_checklist.values())
+"""),
+        m("""
+## The digest demonstration and the honest checklist
+
+This notebook also runs in automated verification, where the working tree
+legitimately contains the notebook execution itself — so `source_tree_is_clean`
+can honestly be `FAIL` while every evidence check passes. The checklist above
+always reports the live tree. To keep the mechanism teachable in both worlds,
+the cell below first re-verifies that the recorded comparison is adopt-grade
+under an explicit `demonstration_source_state`, then builds the release record
+and prints its digest. The record itself carries both values: the
+demonstration state it was built under and the live state observed at render
+time. A publishable release is only ever cut when the live checklist passes
+end-to-end from a committed tree.
+"""),
+        c("""
 if release_eligible:
-    release = ApplicationRelease(
-        application="operations-rag-assistant",
-        release="workshop-hybrid-v1",
-        source_commit=source_commit,
-        core_sdk_version=aai_core_version,
-        model={"logical_name": "operations-chat", "version": "configured"},
-        prompt={"name": "operations-system", "version": 1},
-        retrieval={
-            "logical_name": "operations-knowledge",
-            "mode": "hybrid",
-            "chunking_profile": "markdown-structural-v1",
-            "embedding_profile": "operations-embedding-v1",
-        },
-        evaluation={
-            "dataset": "synthetic-operations-regression-v1",
-            "gate_passed": selected_gate.passed,
-            "comparison": comparison.model_dump(mode="json"),
-            "metrics": reports[selected_name],
-            "source_state": source_state,
-        },
-        environment="dev",
+    provenance_note = (
+        "live tree is clean: this digest is real, publishable release evidence"
     )
-{
-    "eligible": release_eligible,
-    "source_state": source_state,
-    "release_digest": release.digest if release is not None else None,
-}
+else:
+    provenance_note = (
+        "live tree is dirty (normal while editing or during automated "
+        "notebook execution): the digest below demonstrates the mechanism "
+        "under an explicit demonstration source_state and must not ship"
+    )
+demonstration_source_state = "clean"
+adopt_grade_evidence = is_release_eligible(
+    selected_name,
+    absolute_gate=selected_gate,
+    baseline_metrics=reports[comparison.baseline_configuration],
+    comparison=comparison,
+    source_state=demonstration_source_state,
+)
+assert adopt_grade_evidence, "never demonstrate a digest from rejected evidence"
+release = ApplicationRelease(
+    application="operations-rag-assistant",
+    release="workshop-hybrid-v1",
+    source_commit=source_commit if git_provenance_available else "unavailable",
+    core_sdk_version=aai_core_version,
+    model={"logical_name": "operations-chat", "version": "configured"},
+    prompt={"name": "operations-system", "version": 1},
+    retrieval={
+        "logical_name": "operations-knowledge",
+        "mode": "hybrid",
+        "chunking_profile": "markdown-structural-v1",
+        "embedding_profile": "operations-embedding-v1",
+    },
+    evaluation={
+        "dataset": "synthetic-operations-regression-v1",
+        "gate_passed": selected_gate.passed,
+        "comparison": comparison.model_dump(mode="json"),
+        "metrics": reports[selected_name],
+        "source_state": demonstration_source_state,
+        "source_state_at_render": source_state,
+    },
+    environment="dev",
+)
+print(provenance_note)
+print("decision:", comparison.decision)
+print("release digest:", release.digest)
+"""),
+        m("""
+The digest is a canonical hash over the whole record, which is what makes the
+release immutable in practice: any change to any field — a different release
+name, one edited metric, a swapped comparison — produces a different digest,
+so evidence cannot drift silently after the fact.
+"""),
+        c("""
+release_variant = release.model_copy(update={"release": "workshop-hybrid-v2"})
+assert release.digest != release_variant.digest
+print("workshop-hybrid-v1 digest:", release.digest)
+print("workshop-hybrid-v2 digest:", release_variant.digest)
+print("one changed field, a different digest: evidence cannot drift silently.")
 """),
         m("""
 ## Graduation into the stack
@@ -1118,10 +1580,11 @@ connected_capstone
         m("""
 ## Recap
 
-You completed the full lifecycle: baseline, controlled change, result, decision,
-and release evidence. The result stays reproducible offline, while every real
-model, judge, search, trace, and deployment operation is explicit, keyless, and
-governed by the surrounding platform.
+You completed the full lifecycle: baseline, controlled change, result, an
+`adopt` decision earned on row-level evidence, and a digest-sealed release
+record that refuses forged decisions. The result stays reproducible offline,
+while every real model, judge, search, trace, and deployment operation is
+explicit, keyless, and governed by the surrounding platform.
 """),
     ],
 }

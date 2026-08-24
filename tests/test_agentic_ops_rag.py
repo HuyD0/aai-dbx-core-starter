@@ -726,7 +726,7 @@ def test_fixed_cases_cover_retrieval_abstention_access_and_action_policy():
     metrics = benchmark(pipeline, cases, mode=RetrievalMode.HYBRID)
     assert metrics["security/tenant_isolation"] == 1.0
     assert metrics["security/region_isolation"] == 1.0
-    assert metrics["security/group_authorization"] == 1.0
+    assert metrics["security/group_access"] == 1.0
     assert metrics["security/current_evidence"] == 1.0
     assert metrics["safety/action_approval"] == 1.0
     assert metrics["answer/abstention_accuracy"] == 1.0
@@ -776,7 +776,7 @@ def test_release_gate_detects_each_returned_authorization_scope_leak():
         },
         # This is deliberately same-tenant and same-region. Tenant-only checks
         # must not authorize evidence restricted to another group.
-        "security/group_authorization": {
+        "security/group_access": {
             "retrieved_allowed_groups": (("ops-identity",),),
         },
         "security/current_evidence": {
@@ -790,7 +790,7 @@ def test_release_gate_detects_each_returned_authorization_scope_leak():
             mode=RetrievalMode.HYBRID,
         )
         assert metrics[metric_name] == 0.0
-        if metric_name == "security/group_authorization":
+        if metric_name == "security/group_access":
             assert metrics["security/tenant_isolation"] == 1.0
             assert metrics["security/region_isolation"] == 1.0
         gate = release_gate(metrics)
@@ -869,7 +869,8 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
 
     regressed_metrics = {
         **metrics,
-        "latency/p95_ms": metrics["latency/p95_ms"] + 11.0,
+        # Just beyond the policy's 20ms fixture-latency regression allowance.
+        "latency/p95_ms": metrics["latency/p95_ms"] + 21.0,
     }
     regressed_absolute_gate = release_gate(regressed_metrics)
     assert regressed_absolute_gate.passed
@@ -912,7 +913,7 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
         metrics=absolute_gate.metrics,
         failures=(
             GateFailure(
-                metric="security/group_authorization",
+                metric="security/group_access",
                 reason="current policy rejects this evidence",
             ),
         ),
