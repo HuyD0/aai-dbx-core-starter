@@ -245,14 +245,14 @@ only that store at `http://127.0.0.1:5000`.
 | 05 | [`05_connected_setup.ipynb`](05_connected_setup.ipynb) | Why kernel/config readiness and cloud authorization are separate checkpoints. It makes no LLM request. |
 | 06 | [`06_connected_first_call.py`](06_connected_first_call.py) | How to call a real configured LLM through stable synchronous `model.generate()` while recording bounded trace and run evidence. |
 | 07 | [`07_first_llm_call.ipynb`](07_first_llm_call.ipynb) | Native async streaming, readable chat traces, exact prompt lineage, and an optional UC EvaluationDataset linked to described A/B runs. |
-| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer and internally consistent decision can still choose an inappropriate tool, with optional governed dataset/run evidence but no fabricated trace. |
-| 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope real traces, retain their IDs, register the session contract, and gate complete conversations. |
-| 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | How deterministic checks and human calibration become separate UC datasets linked to a report-only judge run. |
-| 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality comes before cost, with actual synthetic cases registered separately from simulated measurement artifacts. |
-| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | How disjoint UC datasets, immutable prompt versions, readable real-call traces, and held-out runs prevent optimizer-to-production shortcuts. |
+| 08 | [`08_tool_trajectory_evaluation.ipynb`](08_tool_trajectory_evaluation.ipynb) | Why a correct answer and internally consistent decision can still choose an inappropriate tool; the offending case prints its decision record beside the observed trajectory. |
+| 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope real traces, retain their IDs, and gate complete conversations: every reply passes a turn-level check while the session gate still rejects two of three conversations. |
+| 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | Why a judge you have not calibrated is not a gate: two runnable rules are scored against human labels, agreement is computed per split, and the better judge stays report-only on 12 labels. |
+| 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality comes before cost: fixture models actually run over the synthetic cases, so quality, tokens, and coverage are derived, and the model tying for best quality still cannot win without cost evidence. |
+| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | Why optimizer evidence is never release evidence: a toy optimizer picks the edit scoring 1.00 on its training split and 0.61 on the disjoint held-out split, and a leaked overlapping split would have certified it. |
 | 13 | [`13_decision_and_promotion_lifecycle.ipynb`](13_decision_and_promotion_lifecycle.ipynb) | Why every comparison ends in a recorded `adopt`/`reject`/`inconclusive` decision, and why the `production` prompt alias moves only on adopt-grade evidence. |
 | 14 | [`14_platform_llm_operations.ipynb`](14_platform_llm_operations.ipynb) | The platform team's operating loop: judge governance, gateway request tags, cost-by-tag queries, fleet provenance, monitoring adoption, and rollback levers. |
-| 15 | [`15_compare_and_select_llms.ipynb`](15_compare_and_select_llms.ipynb) | A complete reference for same-case model A/B accuracy, blinded judge win rates, session TCO, and fail-closed governance checks with SDK-compatible offline fixtures. |
+| 15 | [`15_compare_and_select_llms.ipynb`](15_compare_and_select_llms.ipynb) | A complete reference for same-case model A/B accuracy, blinded judge win rates, session TCO where the cheaper-per-token model loses on cost per resolved session, and fail-closed governance checks. |
 
 Open any advanced lab through the stable runner name, for example:
 
