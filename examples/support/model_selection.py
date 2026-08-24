@@ -493,21 +493,25 @@ SIMULATED_SESSION_OBSERVATIONS: dict[str, list[JsonRecord]] = {
             "quality_passed": True,
         },
     ],
+    # Cheaper per token than the baseline, but its longer answers draw extra
+    # follow-up turns, and every turn resends the grown context.  The session
+    # totals therefore invert the per-token price ranking, which is the whole
+    # lesson of the TCO section.
     "change-chat": [
         {
             "session_id": "c-01",
-            "turns": 4,
-            "input_tokens": 3500,
-            "output_tokens": 900,
-            "latency_ms": 4300,
+            "turns": 7,
+            "input_tokens": 9800,
+            "output_tokens": 2600,
+            "latency_ms": 7400,
             "quality_passed": True,
         },
         {
             "session_id": "c-02",
-            "turns": 5,
-            "input_tokens": 4400,
-            "output_tokens": 1120,
-            "latency_ms": 5000,
+            "turns": 8,
+            "input_tokens": 11600,
+            "output_tokens": 3100,
+            "latency_ms": 8600,
             "quality_passed": True,
         },
     ],

@@ -372,8 +372,8 @@ The repository examples implement this contract in order:
     metrics and critical-case gates.
 11. `10_layered_judges.ipynb` keeps exact rules deterministic and measures a
     nuanced judge against balanced human feedback on a held-out split.
-12. `11_cost_quality_tradeoff.ipynb` filters logical model candidates through
-    quality and policy gates before comparing known, covered cost.
+12. `11_cost_quality_tradeoff.ipynb` filters logical models through quality
+    and policy gates before comparing known, covered cost.
 13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
     training, and final held-out release evidence separate; it is disabled by
     default and cannot move a production alias.
