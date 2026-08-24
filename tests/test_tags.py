@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from aai_core.tags import (
     DATABRICKS_AI_GATEWAY_REQUEST_TAGS_HEADER,
     DatabricksAIRequestTags,
+    DataClassification,
     ResourceContext,
     databricks_ai_gateway_request_headers,
 )
@@ -55,10 +56,33 @@ def test_resource_context_is_strict_and_forbids_unknown_fields():
 
 
 def test_lifecycle_uses_a_small_descriptive_vocabulary():
-    assert context(lifecycle="CANDIDATE").lifecycle.value == "candidate"
+    assert context(lifecycle="VALIDATION").lifecycle.value == "validation"
+    assert context().tag_schema_version == "2"
 
-    with pytest.raises(ValidationError, match="lifecycle must be one of"):
-        context(lifecycle="validation")
+    with pytest.raises(ValidationError, match="not 'candidate'"):
+        context(lifecycle="candidate")
+
+
+def test_schema_v1_candidate_remains_readable_without_normalization():
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        historical = context(lifecycle="candidate", tag_schema_version="1")
+
+    assert historical.lifecycle.value == "candidate"
+    assert historical.tag_schema_version == "1"
+    assert historical.model_dump()["lifecycle"] == "candidate"
+
+    with pytest.raises(ValidationError, match="schema version 1"):
+        context(lifecycle="validation", tag_schema_version="1")
+
+
+def test_data_classification_uses_a_closed_information_handling_vocabulary():
+    assert (
+        context(data_classification="CONFIDENTIAL").data_classification
+        is DataClassification.CONFIDENTIAL
+    )
+
+    with pytest.raises(ValidationError, match="data_classification must be one of"):
+        context(data_classification="customer-data")
 
 
 def test_ai_gateway_request_tags_are_exact_immutable_context_projection():

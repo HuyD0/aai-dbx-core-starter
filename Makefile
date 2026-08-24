@@ -20,7 +20,8 @@ OPS_RAG_KERNEL := aai-agentic-ops-rag
 OPS_RAG_MLFLOW_DIR := $(OPS_RAG_DIR)/.aai
 OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 
-.PHONY: help check-uv install lint format format-check test build check verify \
+.PHONY: help check-uv install lint format format-check typecheck test coverage audit \
+	build check verify \
 	sync-templates check-templates lock-templates check-template-locks \
 	sync-upstream resolve-upstream bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
@@ -30,6 +31,8 @@ OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 	classification-install classification-prepare classification-train \
 	classification-doctor classification-reset classification-check \
 	classification-notebook classification-ui \
+	finetune-install finetune-doctor finetune-reset finetune-check \
+	finetune-notebook finetune-ui \
 	ops-rag-install ops-rag-doctor ops-rag-render ops-rag-check \
 	ops-rag-notebook ops-rag-ui
 
@@ -60,7 +63,7 @@ hooks-install: install ## Install the repository's pre-commit and pre-push hooks
 hooks-run: pre-commit pre-push ## Run both Git hook stages now.
 
 examples-install: check-uv ## Install locked Databricks, GenAI, and interactive example dependencies.
-	$(UV) sync --extra dev --extra foundry --extra azure-search --extra databricks --extra genai --extra examples --locked
+	$(UV) sync --extra dev --extra azure-apim --extra azure-search --extra databricks --extra genai --extra examples --locked
 	@$(PYTHON) -c 'import sys; import databricks.sdk; import ipykernel; import jupyterlab; import mlflow; print(f"Example dependencies ready in {sys.executable} (MLflow {mlflow.__version__})")'
 
 quickstart: install ## Prove a fresh clone works without credentials.
@@ -124,6 +127,24 @@ classification-notebook: check-uv ## Open the local classification notebook cour
 classification-ui: check-uv ## Serve the classification course's local MLflow UI.
 	$(MAKE) -C examples/local-classification mlflow-ui
 
+finetune-install: check-uv ## Install the locked fine-tuning course.
+	$(MAKE) -C examples/fine-tuning install
+
+finetune-doctor: check-uv ## Verify the fine-tuning course setup.
+	$(MAKE) -C examples/fine-tuning doctor
+
+finetune-reset: ## Recoverably archive fine-tuning course-v1 state.
+	$(MAKE) -C examples/fine-tuning course-reset
+
+finetune-check: check-uv ## Test code and execute every fine-tuning notebook.
+	$(MAKE) -C examples/fine-tuning check
+
+finetune-notebook: check-uv ## Open the fine-tuning notebook course.
+	$(MAKE) -C examples/fine-tuning notebook
+
+finetune-ui: check-uv ## Serve the fine-tuning course's local MLflow UI.
+	$(MAKE) -C examples/fine-tuning mlflow-ui
+
 ops-rag-install: examples-install ## Install the locked agentic operations RAG workshop environment.
 	@$(PYTHON) -c 'import azure.search.documents; import openai; print("Agentic operations RAG provider extras ready")'
 
@@ -181,11 +202,33 @@ format-check: ## Check Ruff and Black formatting without changing files.
 	$(PYTHON) -m ruff check .
 	$(PYTHON) -m black --check .
 
+typecheck: ## Type-check the public SDK and provider boundaries.
+	$(PYTHON) -m mypy --config-file pyproject.toml src/aai_core
+
 test: ## Run the credential-free test suite.
 	$(PYTHON) -m pytest -q
 
-build: ## Build the SDK source distribution and wheel.
-	$(PYTHON) -m build
+coverage: check-uv ## Run SDK tests with branch coverage and the release quality floor.
+	$(UV) sync --extra dev --extra all --locked
+	$(PYTHON) -m pytest -q \
+		--cov=aai_core --cov-branch --cov-report=term-missing \
+		--cov-report=xml
+
+audit: ## Audit the locked environment for published dependency advisories.
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml --uv-project .
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--uv-project examples/local-classification
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--uv-project examples/local-finetuning
+	$(PYTHON) templates/_shared/files/scripts/audit_dependencies.py \
+		--policy templates/_shared/files/security-audit.toml \
+		--requirement examples/local-classification/src/aai_local_classification/model-requirements.lock
+
+build: ## Build the SDK wheel used by downstream templates.
+	$(PYTHON) -m build --wheel
 
 sync-templates: ## Copy the canonical shared scaffold into every template.
 	$(PYTHON) scripts/sync_template_shared.py
@@ -288,7 +331,10 @@ sync-upstream: ## Merge a reviewed upstream release into a clone: make sync-upst
 	@echo "sync of $(TAG) is staged. Review 'git diff --cached' and 'git log',"
 	@echo "then 'git commit' and open a PR into main."
 
-check: check-templates format-check test build ## Run the standard pre-commit checks.
+validate-release: ## Check SDK, template, dependency, and built-wheel release contracts.
+	$(PYTHON) scripts/validate_release.py --wheel dist
+
+check: check-templates format-check typecheck test build validate-release ## Run standard local checks.
 
 verify: ## Run the complete credential-free verification used by CI.
 	./scripts/cloud-verify.sh

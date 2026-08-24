@@ -110,13 +110,61 @@ def test_staging_is_a_strict_environment():
             owner_group="group:owners",
             cost_center="CC-1",
             data_classification="internal",
-            lifecycle="candidate",
+            lifecycle="validation",
             repository="org/repo",
             release="1.0.0",
         )
     )
 
     assert settings.strict
+
+
+@pytest.mark.parametrize("environment", ["prod-east", "preview", "prd"])
+def test_unknown_environments_fail_safe(environment):
+    from aai_core.runtime import PlatformSettings
+    from aai_core.tags import ResourceContext
+
+    settings = PlatformSettings(
+        resource=ResourceContext(
+            application="app",
+            project="proj",
+            environment=environment,
+            team="team",
+            owner_group="group:owners",
+            cost_center="CC-1",
+            data_classification="internal",
+            lifecycle="validation",
+            repository="org/repo",
+            release="1.0.0",
+        )
+    )
+
+    assert settings.strict
+    with pytest.raises(ValueError, match="Production platform settings are missing"):
+        settings.validate()
+
+
+@pytest.mark.parametrize("environment", ["dev", "development", "local", "sandbox"])
+def test_only_known_development_environments_relax_strict_checks(environment):
+    from aai_core.runtime import PlatformSettings
+    from aai_core.tags import ResourceContext
+
+    settings = PlatformSettings(
+        resource=ResourceContext(
+            application="app",
+            project="proj",
+            environment=environment,
+            team="team",
+            owner_group="group:owners",
+            cost_center="CC-1",
+            data_classification="internal",
+            lifecycle="experimental",
+            repository="org/repo",
+            release="dev",
+        )
+    )
+
+    assert not settings.strict
 
 
 def test_default_experiment_is_one_application_comparison_space():

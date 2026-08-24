@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aai_core.agentkit._values import is_missing_scalar
 from aai_core.agentkit.errors import ConfigError, missing_extra
@@ -59,6 +59,11 @@ class DatasetShape:
     expectation_rows: tuple[tuple[str, ...], ...] = ()
     has_retrieval_spans: bool = False
     has_tool_spans: bool = False
+    # Non-root AGENT spans carrying a non-empty ``agent.role`` attribute —
+    # the platform's delegation marker. Role-less AGENT spans are what
+    # ``record_agent_decision`` writes in single-agent applications, and a
+    # role on only the root labels a single agent; neither counts.
+    has_delegation_spans: bool = False
     # Some rows carry a trace and some do not: the dataset cannot be
     # scored as traces, and saying so beats silently scoring a subset.
     partial_traces: bool = False
@@ -305,6 +310,18 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
     """
 
     sheet_path = Path(sheet_path)
+    located_records = _load_answer_sheet_records(sheet_path)
+    answers = _answers_by_input(located_records, sheet_path)
+    rows = _rows_with_answers(dataset, answers, sheet_path)
+    return _build_dataset(
+        dataset.ref,
+        f"{dataset.source}+answers",
+        rows,
+        sampled_from=dataset.sampled_from,
+    )
+
+
+def _load_answer_sheet_records(sheet_path: Path) -> list[tuple[Any, str]]:
     try:
         text = sheet_path.read_text(encoding="utf-8")
     except FileNotFoundError as error:
@@ -329,15 +346,16 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             raise ConfigError(
                 f"answer sheet {sheet_path} must contain at least one JSON object"
             )
-        located_records = [(record, f"line {line}") for line, record in parsed]
-    else:
-        records = _load_json_value(text, subject=f"answer sheet {sheet_path}")
-        if not isinstance(records, list):
-            raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
-        located_records = [
-            (record, f"row {index}") for index, record in enumerate(records)
-        ]
+        return [(record, f"line {line}") for line, record in parsed]
+    records = _load_json_value(text, subject=f"answer sheet {sheet_path}")
+    if not isinstance(records, list):
+        raise ConfigError(f"answer sheet {sheet_path} must contain a JSON list")
+    return [(record, f"row {index}") for index, record in enumerate(records)]
 
+
+def _answers_by_input(
+    located_records: Sequence[tuple[Any, str]], sheet_path: Path
+) -> dict[str, Any]:
     answers: dict[str, Any] = {}
     answer_locations: dict[str, str] = {}
     for record, location in located_records:
@@ -345,33 +363,7 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             raise ConfigError(
                 f"answer sheet {sheet_path} {location} must be a JSON object"
             )
-        if "question" in record and "answer" in record:
-            if not _is_populated(record["question"]):
-                raise ConfigError(
-                    f"answer sheet {sheet_path} {location} needs a populated question"
-                )
-            inputs = {"question": record["question"]}
-            output = record["answer"]
-            output_name = "answer"
-        elif "inputs" in record and "outputs" in record:
-            inputs = record["inputs"]
-            if not isinstance(inputs, Mapping) or not inputs:
-                raise ConfigError(
-                    f"answer sheet {sheet_path} {location} needs a non-empty "
-                    "inputs object"
-                )
-            output = record["outputs"]
-            output_name = "outputs"
-        else:
-            raise ConfigError(
-                f"answer sheet {sheet_path} {location} needs question/answer "
-                "or inputs/outputs fields"
-            )
-        if not _is_populated(output):
-            raise ConfigError(
-                f"answer sheet {sheet_path} {location} needs populated "
-                f"{output_name}"
-            )
+        inputs, output, output_name = _answer_record(record, sheet_path, location)
         output = _bounded_plain(
             output,
             subject=f"answer sheet {sheet_path} {location} {output_name}",
@@ -388,7 +380,43 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             )
         answers[key] = output
         answer_locations[key] = location
+    return answers
 
+
+def _answer_record(
+    record: Mapping[str, Any], sheet_path: Path, location: str
+) -> tuple[Any, Any, str]:
+    if "question" in record and "answer" in record:
+        if not _is_populated(record["question"]):
+            raise ConfigError(
+                f"answer sheet {sheet_path} {location} needs a populated question"
+            )
+        inputs: Any = {"question": record["question"]}
+        output = record["answer"]
+        output_name = "answer"
+    elif "inputs" in record and "outputs" in record:
+        inputs = record["inputs"]
+        if not isinstance(inputs, Mapping) or not inputs:
+            raise ConfigError(
+                f"answer sheet {sheet_path} {location} needs a non-empty inputs object"
+            )
+        output = record["outputs"]
+        output_name = "outputs"
+    else:
+        raise ConfigError(
+            f"answer sheet {sheet_path} {location} needs question/answer "
+            "or inputs/outputs fields"
+        )
+    if not _is_populated(output):
+        raise ConfigError(
+            f"answer sheet {sheet_path} {location} needs populated {output_name}"
+        )
+    return inputs, output, output_name
+
+
+def _rows_with_answers(
+    dataset: LoadedDataset, answers: Mapping[str, Any], sheet_path: Path
+) -> list[Mapping[str, Any]]:
     rows: list[Mapping[str, Any]] = []
     missing: list[str] = []
     for index, row in enumerate(dataset.rows):
@@ -406,12 +434,7 @@ def attach_answer_sheet(dataset: LoadedDataset, sheet_path: Path) -> LoadedDatas
             f"row(s): {listed}",
             remediation=("Re-record the answer sheet so it covers every dataset row."),
         )
-    return _build_dataset(
-        dataset.ref,
-        f"{dataset.source}+answers",
-        rows,
-        sampled_from=dataset.sampled_from,
-    )
+    return rows
 
 
 def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
@@ -429,11 +452,11 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     **A stored trace travels only in ``traces`` mode.** It is the recorded
     answer, so in ``live`` the answer comes from ``predict_fn`` and in
     ``answer-sheet`` from the sheet. It is not inert baggage either:
-    ``_convert_to_eval_set`` pipes any present trace column through
-    ``_extract_request_response_from_trace``, which calls
-    ``trace.data._get_root_span()`` on every value — one ``NaN`` raises
-    before the agent is called — and through
-    ``_extract_expectations_from_trace``, which overwrites expectations.
+    ``_convert_to_eval_set`` pipes any present trace column through root-span
+    validation, which calls ``trace.data._get_root_span()`` on every value —
+    one ``NaN`` raises before the agent is called. MLflow 3.15 preserves
+    authored inputs, outputs, and expectations, filling those columns from
+    traces only when each column is absent.
     MLflow's own validation agrees the column is unwanted here: it adds
     ``trace`` to the satisfied columns whenever a ``predict_fn`` is given.
 
@@ -442,14 +465,10 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     digest recovers it, because otherwise removing the trace would leave a
     row MLflow cannot evaluate at all.
 
-    **In ``traces`` mode, expectations come from the traces** whenever any
-    one of them carries an expectation assessment — MLflow replaces the
-    whole column, so a row whose trace has no assessment ends up with
-    *none*, whatever the dataset wrote. Mirroring that here is what stops
-    a scorer being selected against a curated field the run will not have:
-    `keyword_coverage` reads an absent expected response as a vacuous
-    1.0, and a gate passing on that is the exact failure this toolkit
-    exists to prevent.
+    **In ``traces`` mode, authored expectations win.** MLflow 3.15 extracts
+    expectation assessments only when the dataset has no expectations column.
+    Mirroring that rule here keeps scorer planning and dataset identity aligned
+    with the payload MLflow evaluates.
 
     **A missing value is an absent key.** A Unity Catalog dataset arrives
     through ``to_dict("records")``, where an absent field is ``NaN``; only
@@ -459,17 +478,18 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
     — which is why the mode rule exists as well.
 
     The digest is recomputed from the effective rows. That makes identity
-    mode-aware: ``traces`` binds the expectation assessments MLflow actually
-    scores, while live and answer-sheet modes discard the trace and retain
-    authored expectations. The digest still excludes trace outputs, ids, and
+    mode-aware: ``traces`` binds trace expectation assessments only when no
+    authored expectations column exists, while live and answer-sheet modes
+    discard the trace. The digest still excludes trace outputs, ids, and
     timestamps through ``dataset_digest``. Ref and sampling provenance stay
     attached to the source dataset.
     """
 
     keep_trace = mode in STORED_TRACE_MODES
-    # MLflow replaces the column wholesale, or not at all.
-    replace_expectations = keep_trace and any(
-        _trace_expectation_names(row.get("trace")) for row in dataset.rows
+    # MLflow 3.15 extracts trace assessments only when the dataframe has no
+    # authored expectations column at all.
+    extract_trace_expectations = keep_trace and not any(
+        not _is_missing(row.get("expectations")) for row in dataset.rows
     )
     rows: list[Mapping[str, Any]] = []
     for row in dataset.rows:
@@ -484,7 +504,7 @@ def effective_dataset(dataset: LoadedDataset, *, mode: str) -> LoadedDataset:
             request = _trace_inputs(row.get("trace"))
             if request is not None:
                 kept["inputs"] = request
-        if replace_expectations:
+        if extract_trace_expectations:
             kept["expectations"] = _trace_expectations(row.get("trace"))
         rows.append(kept)
     frozen = tuple(rows)
@@ -830,7 +850,7 @@ def _complete_trace_info(info: Mapping[str, Any], *, schema: str) -> bool:
 
     assessments = info.get("assessments", [])
     return isinstance(assessments, list) and all(
-        _complete_assessment(item, expected_request_id=request_id)
+        _complete_assessment(item, expected_request_id=cast(str, request_id))
         for item in assessments
     )
 
@@ -959,7 +979,9 @@ def _complete_span(
     attributes = span.get("attributes")
     if not (
         _otel_attributes(attributes)
-        and _request_id_attribute_matches(attributes, expected_request_id)
+        and _request_id_attribute_matches(
+            cast(Mapping[str, Any], attributes), expected_request_id
+        )
         and _non_empty_string(span.get("name"))
     ):
         return False
@@ -1348,38 +1370,11 @@ def _malformed_trace_expectation(name: str, detail: str) -> ConfigError:
     return ConfigError(
         f"trace expectation {name!r} is malformed: {detail}",
         remediation=(
-            "Re-record the trace expectation with MLflow 3.14 or provide a "
+            "Re-record the trace expectation with MLflow 3.15 or provide a "
             "direct scalar value; do not run a gate after ground truth could "
             "not be decoded."
         ),
     )
-
-
-def trace_expectation_overrides(dataset: LoadedDataset) -> tuple[str, ...]:
-    """Rows whose curated expectations MLflow will replace with the trace's.
-
-    ``_extract_expectations_from_trace`` documents itself as filling the
-    column "if it is not already present", but it has no such check: any
-    trace carrying an expectation assessment rewrites the whole column. In
-    ``traces`` mode that is MLflow's behaviour and may be what the project
-    wants — so this reports rather than refuses, naming the expectations
-    whose value comes from the trace instead of the dataset.
-    """
-
-    overridden: set[str] = set()
-    for row in dataset.rows:
-        if not _is_populated(row.get("expectations")):
-            continue
-        overridden.update(_trace_expectation_names(row.get("trace")))
-    return tuple(sorted(overridden))
-
-
-def _trace_expectation_names(trace: Any) -> tuple[str, ...]:
-    # Use the same strict reader as `_trace_expectations`: a malformed value
-    # must not count as an override here and then disappear when the effective
-    # rows are built. `Trace.to_dict()` writes `assessment_name`; the
-    # in-memory entity attribute is `name`, and the shared reader accepts both.
-    return tuple(name for name, _ in _trace_expectation_items(trace))
 
 
 def validate_dataset(
@@ -1478,6 +1473,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
     traced_rows = 0
     has_retrieval_spans = False
     has_tool_spans = False
+    has_delegation_spans = False
     has_outputs = bool(rows)
     candidate_strata: dict[str, set[str]] = {}
     for row in rows:
@@ -1504,9 +1500,10 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         expectation_rows.append(tuple(sorted(present)))
         if _is_populated(row.get("trace")):
             traced_rows += 1
-            retrieval, tools = _trace_span_kinds(row["trace"])
+            retrieval, tools, delegation = _trace_span_kinds(row["trace"])
             has_retrieval_spans = has_retrieval_spans or retrieval
             has_tool_spans = has_tool_spans or tools
+            has_delegation_spans = has_delegation_spans or delegation
         if _is_missing(row.get("outputs")):
             has_outputs = False
     strata_values = {
@@ -1528,6 +1525,7 @@ def _infer_shape(rows: Sequence[Mapping[str, Any]]) -> DatasetShape:
         partial_traces=0 < traced_rows < len(rows),
         has_retrieval_spans=has_retrieval_spans,
         has_tool_spans=has_tool_spans,
+        has_delegation_spans=has_delegation_spans,
         strata_values=strata_values,
     )
 
@@ -1560,15 +1558,18 @@ def _is_populated(value: Any) -> bool:
 
 _RETRIEVER_SPAN_TYPE = "RETRIEVER"
 _TOOL_SPAN_TYPE = "TOOL"
+_AGENT_SPAN_TYPE = "AGENT"
 _SPAN_TYPE_KEYS = ("type", "span_type", "spanType")
+_AGENT_ROLE_KEY = "agent.role"
 
 
-def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
+def _trace_span_kinds(trace: Any) -> tuple[bool, bool, bool]:
     """Which span kinds a row's trace carries.
 
-    Retrieval judges need RETRIEVER spans and tool judges need tool spans;
-    selecting both because a trace merely exists spends judge calls on
-    scorers whose contract was never present.
+    Retrieval judges need RETRIEVER spans, tool judges need tool spans,
+    and delegation scorers need delegation spans; selecting any of them
+    because a trace merely exists spends judge calls on scorers whose
+    contract was never present.
 
     The span types are read from the spans, not from the serialized trace
     text. Scanning the payload for "retriever" or "tool" matches an answer
@@ -1578,12 +1579,17 @@ def _trace_span_kinds(trace: Any) -> tuple[bool, bool]:
 
     Nesting does not matter here, only presence: MLflow judges top-level
     retriever spans, and a nested retriever always has one above it. A
-    trace whose structure cannot be read reports neither kind — a scorer
-    the toolkit cannot prove is applicable is not auto-selected.
+    trace whose structure cannot be read reports no kind — a scorer the
+    toolkit cannot prove is applicable is not auto-selected.
     """
 
-    types = _span_types(_spans(trace))
-    return _RETRIEVER_SPAN_TYPE in types, _TOOL_SPAN_TYPE in types
+    spans = _spans(trace)
+    types = _span_types(spans)
+    return (
+        _RETRIEVER_SPAN_TYPE in types,
+        _TOOL_SPAN_TYPE in types,
+        _has_delegation_span(spans),
+    )
 
 
 def _span_types(spans: Iterable[Mapping[str, Any]]) -> set[str]:
@@ -1879,6 +1885,139 @@ def _is_retriever(span: Mapping[str, Any]) -> bool:
     return _RETRIEVER_SPAN_TYPE in _span_types([span])
 
 
+def _is_agent(span: Mapping[str, Any]) -> bool:
+    return _AGENT_SPAN_TYPE in _span_types([span])
+
+
+def _is_tool(span: Mapping[str, Any]) -> bool:
+    return _TOOL_SPAN_TYPE in _span_types([span])
+
+
+def _span_agent_role(span: Mapping[str, Any]) -> str:
+    """The span's declared ``agent.role``, or ``""`` when it has none.
+
+    MLflow stores attribute values JSON-encoded, so the surrounding quotes
+    are part of the stored string, exactly as with ``mlflow.spanType``.
+    """
+
+    attributes = span.get("attributes")
+    candidates = (
+        attributes.get(_AGENT_ROLE_KEY) if isinstance(attributes, Mapping) else None,
+        span.get(_AGENT_ROLE_KEY),
+    )
+    for value in candidates:
+        if isinstance(value, str):
+            role = value.strip().strip('"').strip()
+            if role:
+                return role
+    return ""
+
+
+def _has_delegation_span(spans: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether any non-root AGENT span declares a non-empty ``agent.role``.
+
+    That combination is the platform's delegation marker. Role-less AGENT
+    spans are what ``record_agent_decision`` writes inside single-agent
+    applications, and a role on only the root labels a single agent, so
+    neither may switch the delegation scorers on.
+    """
+
+    return any(
+        _is_agent(span)
+        and _is_populated(_span_parent_identifier(span))
+        and _span_agent_role(span)
+        for span in spans
+    )
+
+
+def _span_label(span: Mapping[str, Any]) -> str:
+    name = span.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return "<unnamed>"
+
+
+def _nearest_agent_ancestor(
+    span: Mapping[str, Any], by_id: Mapping[Any, Mapping[str, Any]]
+) -> Mapping[str, Any] | None:
+    """The closest AGENT span above ``span``, if the chain reaches one."""
+
+    seen: set[Any] = set()
+    parent_id = _span_parent_identifier(span)
+    while _is_populated(parent_id) and parent_id not in seen:
+        seen.add(parent_id)
+        parent = by_id.get(parent_id)
+        if parent is None:
+            return None
+        if _is_agent(parent):
+            return parent
+        parent_id = _span_parent_identifier(parent)
+    return None
+
+
+def _tool_delegation_violations(
+    spans: Sequence[Mapping[str, Any]],
+    by_id: Mapping[Any, Mapping[str, Any]],
+) -> list[str]:
+    """Every TOOL span must execute under a role-carrying subagent."""
+
+    violations: list[str] = []
+    for span in spans:
+        if not _is_tool(span):
+            continue
+        label = _span_label(span)
+        agent = _nearest_agent_ancestor(span, by_id)
+        if agent is None:
+            violations.append(f"TOOL span '{label}' has no AGENT ancestor")
+        elif not _is_populated(_span_parent_identifier(agent)):
+            violations.append(
+                f"TOOL span '{label}' executes directly under the root agent"
+            )
+        elif not _span_agent_role(agent):
+            violations.append(
+                f"TOOL span '{label}' runs under an AGENT span with no agent.role"
+            )
+    return violations
+
+
+def delegation_structure_violations(trace: Any) -> tuple[str, ...] | None:
+    """Structural violations of the delegation trace convention.
+
+    ``None`` means the row is unscorable rather than failed: the trace is
+    unreadable or carries no delegation span, mirroring how the retrieval
+    scorers skip rows without RETRIEVER spans. Otherwise the tuple lists
+    the violations — empty is a pass.
+
+    The convention verified here is the supervisor shape: exactly one root
+    span and it is an AGENT span, a parent graph that resolves (a chain
+    that cannot be walked cannot be verified, so it is a violation, not a
+    skip), and every TOOL span executing under a delegated subagent — its
+    nearest AGENT ancestor is a non-root span carrying ``agent.role``,
+    because the supervisor never executes operational tools directly.
+    Nearest-ancestor rather than direct-parent keeps frameworks that nest
+    a TOOL under an LLM or CHAIN span inside a subagent turn passing.
+    """
+
+    spans = _spans(trace)
+    if not spans or not _has_delegation_span(spans):
+        return None
+    if not _span_graph_is_resolved(spans):
+        return ("span parent graph does not resolve to a verifiable tree",)
+    violations: list[str] = []
+    roots = [span for span in spans if not _is_populated(_span_parent_identifier(span))]
+    if len(roots) != 1:
+        violations.append(f"expected exactly one root span, found {len(roots)}")
+    elif not _is_agent(roots[0]):
+        violations.append(f"root span '{_span_label(roots[0])}' is not an AGENT span")
+    by_id: dict[Any, Mapping[str, Any]] = {}
+    for span in spans:
+        identifier = _span_identifier(span)
+        if isinstance(identifier, str) and identifier:
+            by_id[identifier] = span
+    violations.extend(_tool_delegation_violations(spans, by_id))
+    return tuple(violations)
+
+
 def _span_outputs(span: Mapping[str, Any]) -> Any | None:
     """What a span returned, wherever this serialization put it.
 
@@ -2066,14 +2205,15 @@ def _looks_like_uc_dataset(reference: str, root: Path) -> bool:
 
 
 def _load_uc_rows(reference: str, mlflow_module: Any | None) -> list[Mapping[str, Any]]:
-    mlflow = mlflow_module
-    if mlflow is None:
+    if mlflow_module is None:
         try:
-            import mlflow  # type: ignore[no-redef]
+            import mlflow
         except ImportError as error:
             raise missing_extra(
                 f"Loading the Unity Catalog dataset {reference!r}", "genai"
             ) from error
+    else:
+        mlflow = mlflow_module
     try:
         dataset = mlflow.genai.datasets.get_dataset(name=reference)
         frame = dataset.to_df()

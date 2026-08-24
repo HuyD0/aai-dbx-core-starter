@@ -85,7 +85,7 @@ tracks:
           never need WRITE VOLUME, workspace admin, a PAT, or a client secret.
         source: docs/developer-onboarding.md
         checklist:
-          - Access to the dbx-dev Databricks workspace
+          - Access to your platform's Databricks workspace
           - READ VOLUME on the SDK artifact volume
           - CAN_USE on the constrained job compute policy
           - The catalog, schema, endpoint and search permissions your template needs

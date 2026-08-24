@@ -1,5 +1,8 @@
 # {{.project_name}}
 
+The supported delivery path is dev to UAT; follow
+[`docs/uat-promotion.md`](docs/uat-promotion.md) after the dev release gate passes.
+
 Governed RAG application generated from the AAI platform template
 (`rag-app`, successor of `agentic-rag`): chunking pipeline over governed
 source data, a declared retrieval index, traced grounded generation, and a
@@ -31,38 +34,83 @@ a provider integration.
    orchestration.
 2. Put tested application code under `src/app`; the chunking pipeline lives
    in `jobs/build_chunks.py` (Databricks retrieval) and writes a
-   CDF-enabled chunk table. The vector search index itself is human-run
+   CDF-enabled chunk table. It uses stable chunk IDs and Delta `MERGE` so
+   reruns update changed chunks and remove deleted ones without full-table
+   overwrite. The vector search index itself is human-run
    platform bootstrap over that chunk table (AGENTS.md rule 8) — this
    bundle only references it by name in `aai-platform.yml`. For Azure AI
    Search, index and ingestion are likewise managed outside this bundle.
-3. Register prompts with `python scripts/register_prompt.py`; promote with
-   `python scripts/promote_prompt.py --version <n> --decision-run-id <run-id>
-   --to validation|production` after the gate passes (production loads the
-   `production` alias). The run ID comes from the release gate; promotion
-   reloads and verifies its persisted decision evidence before moving an alias.
+3. Register prompts with `python scripts/register_prompt.py`. Record the exact
+   returned version and set `variables.prompt_version.default` in
+   `databricks.yml` to it. Aliases are deployment pointers only; evaluation
+   never resolves one.
 4. Grow `evals/data/release_cases.json` with your domain's golden and
    failure cases (the seeded cases show the shape). Keep at least 10.
-5. Configure the approved `judge-model`, then run the release gate:
-   `python evals/evaluate.py` — explicitly routed groundedness, relevance,
-   and safety judges with the thresholds in `evals/gate_config.json`,
-   publishing the report to the CI summary and recording an adopt or reject
-   decision run whose ID is printed for promotion.
-   The SDK's strict judge resolver runs before prompt registry or RAG-agent
-   target work, so missing, placeholder, or malformed endpoints fail locally.
-   After a released run passes: `--update-baseline`.
-   After case changes merge, register the ground truth in Unity Catalog:
-   `python scripts/sync_dataset.py` — evaluation runs link the dataset
-   by name.
-6. Record the evaluated code, prompt, model, and retrieval configuration
-   with `python scripts/create_release.py`.
-7. Deploy: `databricks bundle validate -t dev` then
-   `databricks bundle deploy -t dev`.
+5. After case changes merge, register the reviewed ground truth in Unity
+   Catalog with `python scripts/sync_dataset.py`. Evaluation joins the exact
+   governed dataset name, ID, digest, and experiment association.
+6. Obtain a bounded, non-secret immutable identifier for the knowledge state
+   being evaluated, for example `knowledge-v002`. It must identify the
+   externally managed document/chunk/index snapshot; never use a timestamp,
+   alias, credential, query string, or mutable name as a substitute. Set
+   `variables.knowledge_version.default` in `databricks.yml` to that value.
+7. Configure the approved `judge-model`, then run the release gate with both
+   immutable inputs explicit:
+
+   ```bash
+   make evaluate \
+     PROMPT_VERSION=<prompt-version> \
+     KNOWLEDGE_VERSION=<knowledge-version>
+   ```
+
+   This runs routed groundedness, relevance, and safety judges with the
+   thresholds in `evals/gate_config.json`. It records the run ID plus the exact
+   source state, SDK, prompt URI, dataset, target/judge identities, provider
+   configuration digests, RAG limits, and knowledge version. It also persists
+   an adopt or reject decision and prints both the evaluation run ID and
+   `decision_run_id`. The SDK's strict judge resolver runs before prompt
+   loading or RAG-agent construction, so missing, placeholder,
+   non-Databricks, or malformed judge endpoints fail locally. After a released
+   run passes, add `EVALUATE_ARGS=--update-baseline`.
+8. From the same clean commit and unchanged configuration, materialize the v2
+   World/Learning/Control evidence printed by the passing gate:
+
+   ```bash
+   python scripts/create_release.py \
+     --prompt-version <prompt-version> \
+     --knowledge-version <knowledge-version> \
+     --evaluation-run <run-id>
+   ```
+
+   The command fails closed if any join differs, the run is not `FINISHED`,
+   the gate did not pass, the dataset is not associated with this experiment,
+   or the local tree is dirty/unknown.
+9. Promote the prompt with the decision evidence from the same gate:
+   `python scripts/promote_prompt.py --version <prompt-version>
+   --decision-run-id <decision-run-id> --to validation|production`. The script
+   reloads and verifies the persisted decision artifact, tags, gate metrics,
+   and exact prompt binding before moving either alias. Production loads only
+   the `production` alias.
+10. Deploy with `databricks bundle validate -t dev --strict` then
+   `databricks bundle deploy -t dev`. The bundle passes the exact prompt and
+   knowledge versions to the job; the included main-branch workflow also
+   attests the full Git object ID and clean checkout before the remote gate.
+
+Runtime retrieval is bounded: questions cap at 8,000 characters; hybrid
+retrieval requests 20 candidates (50 for Azure AI Search), deduplicates and
+selects at most eight context documents; each document caps at 4,000
+characters and total context at 24,000 characters; generation caps at 1,024
+tokens. Security filters are fixed by trusted application construction and
+passed to both text and vector portions of hybrid retrieval. Retrieved text
+is serialized as untrusted JSON evidence, and citations are emitted only for
+documents actually selected into the prompt.
 
 **Index, embeddings, and chunking change together as one release.** To
 rebuild: point `search_index`/chunk table at a version-suffixed successor
 (e.g. `knowledge_v002`), run the pipeline and the evaluation gate against
-it, then switch `aai-platform.yml` to the new index and keep the previous
-one for rollback.
+it with a new `knowledge_version`, then switch `aai-platform.yml` to the new
+index and keep the previous one for rollback. The version is a join key, not
+a replacement for the governed source, chunk, or index controls.
 
 Pull-request CI runs only the deterministic checks
 (`evals/offline_checks.py`) — it never holds credentials. The platform team

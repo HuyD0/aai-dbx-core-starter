@@ -4,8 +4,265 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Extended the example curriculum to teach the judge-measurement and
+  verified-promotion lifecycle: lesson 12 gains two runnable
+  credential-free sections — per-run judge stability (self-consistency
+  and frozen-anchor drift, with the "judge changed, not the agent"
+  reading) and the committed kappa-vs-SME calibration record behind
+  `agentkit judge calibrate` — and lesson 13 gains the
+  move-the-baseline-only-after-live-verification flow
+  (`agentkit baseline establish --from-run`), demonstrating the gate's
+  deployed-commit binding refusal offline.
+- Added lesson `06_confidence_intervals_for_release_gates` to the agentic
+  operations RAG workshop: a credential-free demonstration of the AgentKit
+  statistics module on the workshop's fixed cases — normal versus bootstrap
+  intervals on a bounded recall scale, interval width localizing a simulated
+  missing-runbook index build, paired per-row improvements deciding what
+  overlapping intervals cannot, confidence-bound gating with the
+  `minimum_cases` guard, and a seed-robustness exercise. Backing it,
+  `agentic_ops_rag.evaluation.benchmark_samples` now exposes the per-case
+  scores in dataset order (`None` for out-of-scope cases) and `benchmark`
+  derives its aggregates from them unchanged.
+- Added run-economics evidence to AgentKit: every live or traces run reads
+  its own traces and records success rate, p50/p95 tails for cost, tokens,
+  and latency, and cost per successful completion — total known spend,
+  failed rows included, over the rows that completed — plus per-stratum
+  segments driven by the existing `strata` configuration. Coverage-first
+  throughout (`cost/coverage`/`tokens/coverage`; unknown cost is never
+  zero, and per-success ratios appear only at complete coverage), with
+  cost taken from trace-recorded values or an opt-in
+  `economics.price_per_1m_input_tokens`/`..._output_tokens` pair — never a
+  shipped price table, and deliberately no mean-cost-per-call metric.
+  Report-only by default; gate through the ordinary
+  `thresholds`/`regression_budget` grammar (economics directions resolve
+  lower-is-better before the registry fallback). The evidence persists on
+  `ResultsRecord` as an optional field, so older records stay readable
+  while pre-economics readers cannot parse new ones — the same preview-tier
+  trade the integrity evidence made. Rationale and rejected alternatives:
+  `docs/decisions/2026-08-23-agentkit-economics-evidence.md`. The
+  `evaluation-project` template documents the block and moves to 2.3.0.
+- Added `statistics.method: bootstrap` to AgentKit: confidence bounds around
+  scorer means and paired baseline improvements can now come from seeded
+  percentile bootstrap resampling instead of the normal approximation, which
+  keeps bounds inside the score's feasible range for bounded judge scales and
+  pass/fail rates (a 29/30 routing accuracy no longer reports an upper bound
+  above 100%). The method is a reporting policy, not a gate change — both
+  methods feed the same `*/statistics/*` gate rules — and results records
+  persist the method, resample count, and seed (`bootstrap-percentile-v1` /
+  `paired-bootstrap-percentile-v1` per estimate), so an interval can be
+  reproduced from its record. Records from before this option deserialize as
+  the normal approximation they were computed with; the default is unchanged
+  so enforced gates do not move on upgrade.
+- Added the repository's shared knowledge layer: a dated decision log under
+  `docs/decisions/` (date-prefixed entries so upstream and enterprise clones
+  never collide on a name, and deliberately no enumerated index), a
+  documentation map at `docs/README.md` enforced by the new
+  `tests/test_docs_index.py`, a capture obligation in AGENTS.md section 8,
+  and `docs/agent-context-management.md` describing how the layers fit
+  together and what repository memory may never contain. The
+  `aai-log-decision` skill (canonical in `.agents/skills/`, with a thin
+  `.claude/skills/` shim for native Claude Code discovery) walks an agent
+  through writing a record. Every generated project now starts with the same
+  pattern: the shared scaffold ships `AGENTS.md` (rendered with the project
+  name), a `CLAUDE.md` pointer, and `docs/decisions/`, registered in the
+  template manifest and asserted through the render matrix. AGENTS.md
+  section 11 now points at the decision log and the retained platform audit
+  instead of a `docs/archive/` directory that no longer exists.
+- Made the `project` cost-attribution tag a clone-owned identifier. It moves
+  from a literal repeated in `databricks.yml` and both resource jobs into
+  `platform-identifiers.json`, stamped by `make sync-templates` and required by
+  the fixture-key guard. The cost anomaly watch buckets spend by that tag, so a
+  clone previously attributed its own Databricks usage to this repository with
+  a green deploy. Clones merging this release must add `project` to their
+  fixture; `job_clusters` now also take `node_type_id` from a bundle variable.
+- Documented the repository variables `deploy.yml` already read with
+  placeholder fallbacks — `COST_CENTER`, `TEAM`, `OWNER_GROUP`, and
+  `COST_ALERT_EMAIL` — and removed the claim in `docs/cloud-setup.md` and the
+  enterprise adoption guide that those values are not repository variables.
+  `AZURE_SUBSCRIPTION_ID` is no longer documented as a repository variable: no
+  workflow reads it.
+- Extended the enterprise clone runbook with the steps the fixture cannot
+  perform: configuring the Codex Cloud environment (`AAI_CLOUD_ENV=codex` and
+  the four values `scripts/cloud-verify.sh` compares — without them its
+  identity and forbidden-credential checks are skipped silently), recording the
+  new identity in prose, creating the Unity Catalog objects, and replacing
+  `.github/CODEOWNERS`.
+- Corrected the federated-credential subject documented in `auth-smoke.yml`,
+  which showed the name-based form rather than the immutable-id form the
+  credential actually uses, and removed this repository's clone URL from
+  `README.md` and the `dbx-dev` workspace nickname from the platform console's
+  onboarding content. All three are now enforced by tests.
+- Replaced the enumerated credentialed-workflow and pull-request workflow
+  guards with scans over `.github/workflows/*.yml`. A new credentialed workflow
+  could previously add a GitHub `environment:` or a secret reference unchecked,
+  and `codeql.yml` was never covered by the credential-free rule.
+- Extracted the release-immutability logic from `publish-sdk.yml` into
+  `scripts/publish_release.py` with unit tests for every refusal path. Rule 12
+  was the only hard rule with no test, implemented as inline shell in a workflow
+  that has never run.
+- Closed drift gaps: `bundle_identifier_drift()` is now asserted by the test
+  suite and the scaffold drift check runs inside `scripts/cloud-verify.sh` (CI
+  never invoked `make check-templates`); the dependency canary's supported
+  ranges are cross-checked against `dependency-policy.toml`; `deploy.yml`'s
+  build job fetches full history so `validate_release.py` stops silently
+  skipping its digest cross-checks; and `make check` runs that validation.
+- Documentation: removed the models-from-code serving path from AGENTS.md
+  section 6 (deleted in 0.3.0), added the UAT workspace to the section 3
+  identity table and corrected rule 5, reconciled section 8 with the Makefile,
+  added `agentkit`, `scorers`, `decisions`, `monitoring`, and `billing` to
+  `docs/sdk-api.md`, and recorded why the generated-project SDK pin is held.
+
+- Added per-run judge-integrity checks to AgentKit: an opt-in
+  self-consistency flip-rate over re-judged outputs and a frozen-anchor
+  drift check (`evals/judge_anchors.json`, written by judged
+  `--establish-baseline` runs) that separates judge drift from agent
+  regression, both enforced as gate rules and covered by the judge-call
+  budget. Enabling the `integrity:` block makes older results records
+  refuse with policy drift — re-run `agentkit compare` after adopting it.
+- Bound the AgentKit gate to the commit it runs for: results record the
+  full `AAI_RELEASE` commit (job clusters previously recorded
+  `local-dev`), and `agentkit gate` refuses evidence scored for a
+  different commit than the release identity in its environment.
+- Added `agentkit judge calibrate`: chance-adjusted Cohen's kappa against
+  SME label consensus with a pairwise human ceiling, persisted as a
+  committed per-judge calibration record that evidence reports and —
+  under `integrity.require_calibration` — scoring and the gate demand.
+- Added `agentkit baseline establish --from-run`, moving the committed
+  baseline to an already-verified run's recorded evidence after the
+  deploy and post-deploy smoke pass; adopt evidence is required and may
+  be recorded in the same step with `--decided-by`.
+- Added a post-deploy smoke step to every generated deploy workflow
+  (`scripts/smoke_deployment.py`): the Databricks App must report RUNNING
+  after `bundle run agent_app`, with opt-in golden-prompt probes via
+  `evals/data/live_probes.json`; a red smoke blocks UAT promotion.
+  Template versions: agent-app 1.5.0, analytics-app 1.3.0,
+  evaluation-project 2.2.0, experiment-starter 1.4.0, prompt-app 1.4.0,
+  rag-app 1.4.0.
+- Added multi-agent evaluation to the shared scorer registry:
+  `delegation_structure_ok` deterministically verifies the AGENT-rooted
+  delegation span hierarchy, and `subagent_routing_accuracy` judges the
+  supervisor's routing against the recorded trace on a graded 0-1 rubric.
+  Delegation is detected only from non-root `AGENT` spans carrying an
+  `agent.role` attribute, so single-agent gates never select the new
+  scorers, rows outside the convention are skipped and reported rather
+  than failed, and a trace-reading prompt judge refuses the Guidelines
+  fallback instead of scoring without the trace.
+- Added `docs/multi-agent-systems.md`: when a second agent pays its way,
+  the delegation trace convention, the coordination scorers, the failure
+  modes reported by frontier multi-agent research mapped onto existing
+  platform controls, and the backlog for normalizing the Deep Agents
+  solution accelerator.
+- Added the platform cost anomaly watch: a scheduled bundle job
+  (`resources/cost_anomaly_job.yml`) evaluates the previous day's observed
+  spend in `system.billing.usage` (list-priced via
+  `system.billing.list_prices`) against per-series median+MAD baselines —
+  account, workspace, product, and `custom_tags['project']` including an
+  `untagged` bucket — plus a new-spend rule and a fail-loud stale-data guard
+  (unknown cost is never reported as zero). Exit contract `0`/`2`/`1`;
+  failed runs email the `COST_ALERT_EMAIL` group alias. Exactly one live
+  schedule: CI's dev deployment unpauses it while laptop and UAT deployments
+  stay paused. Detection math is pure stdlib in the new `aai_core.billing`
+  module, unit-tested offline; only the loader touches Spark, lazily.
+  Reading `system.billing` is an externally granted read documented in
+  `docs/cloud-setup.md`.
+- Bumped the transitive `sqlparse` pin from 0.5.5 to 0.6.0 (root `uv.lock`,
+  both course locks, the classification course's exported model lock, and
+  every template's regenerated `requirements.lock`) to clear four published
+  advisories (CVE-2026-59893/-59894/-54284/-71491). `sqlparse` is pulled in
+  by `mlflow-skinny` (`sqlparse<1,>=0.4.0`); no certified direct dependency
+  changed, so `dependency-policy.toml` and `compatibility.json` needed no
+  edit. Template locks were regenerated with
+  `scripts/lock_template_dependencies.py`, which also picked up unrelated
+  transitive patch/minor bumps already eligible under existing certified
+  ranges.
+- Made the Deep Agents solution accelerator discoverable: a README stating
+  its supervisor/sub-agent shape, connected-only boundaries, and guardrails;
+  an entry in the examples index; and credential-free contract tests that
+  keep every standalone example linked with a README, keep the accelerator
+  notebooks output-free and compilable, keep its workspace `%pip` stack
+  exact-pinned to the certified dependency line, and keep the notebooks free
+  of environment identifiers.
+- Extended `docs/langgraph-production.md` with workflow-shape guidance: a
+  ten-question design checklist to answer before the first node, recurring
+  shapes with their guardrails (fan-out with code-owned reduction,
+  independent verification, bounded loops and budgets including a deliberate
+  `recursion_limit`, per-node failure policy, typed state with plain
+  checkpoints), and when to move from one agent with tools to supervised
+  delegation.
+- Upgraded the agent template's LangGraph recipe so a review decision is
+  evidence, not a bare boolean: strict `ApprovalDecision` resume payloads
+  with a reason vocabulary, re-interrupt on malformed payloads instead of
+  poisoning the durable thread, bounded replanning with reviewer feedback on
+  `ambiguous_intent`, and rejection results that carry reason, note, and
+  attempt count.
+- Added the `langgraph-lakebase` agent-template recipe: production
+  checkpointer/store wiring for the LangGraph recipe using the native
+  Postgres saver/store against Lakebase, a fail-closed OAuth credential
+  provider that mints a fresh token for every new pooled connection, and
+  user-scoped memory tools with decision lineage. A required validated
+  `LAKEBASE_SCHEMA` pins every pooled connection's `search_path` to the
+  app-owned schema, and `run_setup` verifies schema ownership before the
+  one-time DDL. Certified `langgraph-checkpoint-postgres`, `psycopg`, and
+  `psycopg-pool`; CI exercises the recipe against a local PostgreSQL server
+  and the dependency canary covers both resolution bounds. No Lakebase
+  resource is provisioned.
+- Added `docs/langgraph-production.md`: when to reach for the LangGraph
+  recipes, how review decisions become trace evidence and regression cases,
+  the Lakebase persistence contract, and the MCP tool-recipe deferral
+  rationale.
+- Removed Microsoft Foundry support: the `foundry` model provider, the
+  `foundry` and `foundry-labs` extras, the Foundry notebook curriculum, and
+  every Foundry template option. Model configuration now targets Databricks
+  serving endpoints or an Azure APIM gateway (`azure_apim`, installable via
+  the new `azure-apim` extra); external models reach judges and serving
+  through governed Databricks external-model endpoints.
+- Added an existing-resource-only Lakebase Autoscaling repository for the Hub,
+  including checksumed schema migrations, OAuth connection pooling, bounded
+  transient-connect retries, optimistic concurrency, and fail-closed hosted
+  configuration. No Lakebase, App, or identity resource is provisioned.
+- Added an explicit dev-to-UAT delivery contract with immutable wheel evidence,
+  manual enablement, lifecycle `validation`, and no production target. UAT keeps
+  the protected-main branch-ref OIDC subject and requires external workspace and
+  existing-Lakebase onboarding before deployment.
+- Added report-only statistical confidence evidence to AgentKit, with optional
+  conservative confidence-bound and paired minimum-effect enforcement.
+- Added typed retrieval modes plus Azure AI Search semantic ranking and
+  Databricks AI Search hybrid reranking controls; provider-specific options stay
+  explicit and validated.
+- Separated the SDK under development from the SDK default offered to generated
+  projects. Release candidates now use a reviewed full Git commit and content
+  digest for credential-free CI; only a completed immutable publication may
+  transition the default to the annotated version tag. Runtime/UAT remains
+  blocked until the volume wheel, checksum, and release manifest exist.
+
 ## 0.4.0
 
+- Hardened SDK-owned logging, secret resolution, provider caching, and resource
+  cleanup. Registered secrets are redacted from formatted messages,
+  tracebacks, and stack text; cold loads are single-flight; owned Databricks,
+  Azure, and provider clients close deterministically under races.
+- Added tag schema v2 with canonical `validation` lifecycle values while
+  retaining a warning-only reader for historical schema-v1 `candidate`
+  evidence. Generated templates now emit schema v2 consistently.
+- Centralized the application-manifest contract in `aai_core.manifest` and made
+  generated project validation fail closed on ownership, cost, lifecycle,
+  compute-policy, dataset, and resource drift.
+- Replaced model-authored analytics SQL with typed, allowlisted semantic query
+  plans and parameterized values. Warehouse work now has bounded concurrency,
+  request and statement deadlines, explicit remote cancellation, and
+  deterministic executor cleanup.
+- Bounded agent streaming output and deadlines, preserved native backpressure,
+  and added shared-agent concurrency, slow-consumer, cancellation, provider
+  failure, and cleanup coverage.
+- Upgraded agent and RAG release evidence to fail-closed schema-v2 joins across
+  clean source, exact prompt and dataset versions, gate status, target/judge,
+  tool or retrieval configuration, control limits, and policy digests.
+- Added full rendered-project quality gates for every supported template
+  combination, strict SDK/template typing, branch-coverage ratchets, exact dev
+  locks, dependency auditing, and SHA-pinned CodeQL Python/Actions workflows.
+- Expanded the credential-free Foundry and lifecycle curriculum with executable
+  offline labs, typed support modules, a separate learner workshop, and
+  repository-local Codex skills for SDK, template, example, and release work.
 - Added `docs/llmops-playbook.md`, mapping industry LLMOps practice areas onto
   the platform's AI application lifecycle for application teams and the
   platform team, with a maturity checklist and an honest gap roadmap.

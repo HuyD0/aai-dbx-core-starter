@@ -88,12 +88,14 @@ def test_experiment_manager_refuses_secret_parameters():
         mlflow_module=FakeMlflow(),
     )
 
-    with pytest.raises(ValueError, match="sensitive"):
-        with manager.run(
+    with (
+        pytest.raises(ValueError, match="sensitive"),
+        manager.run(
             run_name="unsafe",
             parameters={"vendor_api_key": SecretValue("do-not-log")},
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_prompt_manager_qualifies_registers_and_loads_versions():

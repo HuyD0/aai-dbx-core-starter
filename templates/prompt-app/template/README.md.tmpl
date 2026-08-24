@@ -1,5 +1,8 @@
 # {{.project_name}}
 
+The supported delivery path is dev to UAT; follow
+[`docs/uat-promotion.md`](docs/uat-promotion.md) after the dev release gate passes.
+
 Prompt application generated from the AAI platform template (`prompt-app`):
 governed prompt lifecycle with pinned-version evaluation and gated alias
 promotion.
@@ -54,6 +57,11 @@ provider integration.
 Prompt changes are application releases: record them, evaluate them, and
 promote them deliberately. Pull-request CI runs only the deterministic
 checks in `evals/offline_checks.py` — it never holds credentials.
+
+The assistant rejects empty questions and inputs over 8,000 characters,
+requests at most 1,024 output tokens, and fails closed on empty responses or
+responses over 8,192 characters. These are starter defaults; change them only
+with matching evaluation and cost evidence.
 
 The platform team must onboard this repository (main-branch federated
 credential, Databricks service principal, constrained compute permission,

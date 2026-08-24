@@ -30,6 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
+from aai_core.manifest import load_manifest, manifest_json_schema
+
 from . import __version__
 from .checks import (
     PLATFORM_STATE_HEADING,
@@ -37,7 +39,7 @@ from .checks import (
     assert_platform_state,
     run_checks,
 )
-from .config import ConfigError, ConsoleConfig, HubJobMode, load_config
+from .config import ConfigError, ConsoleConfig, HubJobMode, HubStateMode, load_config
 from .content import Track, inline_code, resolve_placeholders
 from .estimator import (
     EstimateError,
@@ -73,7 +75,7 @@ from .hub.jobs import (
     RecordingJobRunner,
     UnavailableJobRunner,
 )
-from .hub.manifest import load_manifest, manifest_json_schema
+from .hub.lakebase import LakebaseHubRepository
 from .hub.models import (
     AuthorizationContext,
     EvaluationRunRecord,
@@ -232,7 +234,6 @@ class ContainExceptions:
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _APPLICATION_ID = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
-_METRIC_KEY = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class ProblemError(RuntimeError):
@@ -312,8 +313,14 @@ def _validation_errors(error: ValidationError | RequestValidationError) -> list[
 
 
 def _repository_for(config: ConsoleConfig) -> HubRepository:
-    if config.hub_state_mode.value == "memory":
+    if config.hub_state_mode is HubStateMode.MEMORY:
         return InMemoryHubRepository()
+    if config.hub_state_mode is HubStateMode.LAKEBASE:
+        if config.hub_lakebase is None:
+            return UnavailableHubRepository(
+                "Lakebase mode is selected without a complete resource binding."
+            )
+        return LakebaseHubRepository.from_runtime(config.hub_lakebase)
     return UnavailableHubRepository(
         "No approved durable Hub store is bound. Hosted registry and workflow "
         "writes remain disabled."
@@ -941,6 +948,10 @@ def create_app(
         job_runner=job_runner or _job_runner_for(app.state.config),
     )
 
+    repository_close = getattr(app.state.hub_repository, "close", None)
+    if callable(repository_close):
+        app.add_event_handler("shutdown", repository_close)
+
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
     # Starlette's select_autoescape keys off the template extension, and every
     # console template ends in .j2 — so without this, user-shaped values (search
@@ -1090,8 +1101,8 @@ def create_app(
         return _problem_response(
             request,
             status=409,
-            title="Production readiness is blocked",
-            detail="Blocking production-readiness evidence has not passed.",
+            title="Release readiness is blocked",
+            detail="Blocking release-readiness evidence has not passed.",
             problem_type="urn:aai:problem:readiness-blocked",
             errors=failed,
         )
@@ -1207,7 +1218,7 @@ def create_app(
         }
 
     @app.get("/", response_class=HTMLResponse)
-    async def index(
+    def index(
         request: Request,
         search: str = Query(default="", max_length=200),
         lifecycle: str | None = None,
@@ -1466,7 +1477,7 @@ def create_app(
         )
 
     @app.get("/admin/actions", response_class=HTMLResponse)
-    async def admin_actions_page(request: Request) -> HTMLResponse:
+    def admin_actions_page(request: Request) -> HTMLResponse:
         actor = _actor_for(request)
         context = common_context(
             request,
@@ -1521,7 +1532,7 @@ def create_app(
         )
 
     @app.get("/applications/{application_id}", response_class=HTMLResponse)
-    async def application_detail_page(
+    def application_detail_page(
         request: Request,
         application_id: str,
         environment: str | None = None,
@@ -1554,14 +1565,10 @@ def create_app(
             manifest.spec.resources.promotion_job_id is not None
             and service.workflow_preview_enabled
         )
-        promotion_target = next(
-            (
-                candidate
-                for candidate in ("prod", "production")
-                if candidate in manifest.spec.environments
-                and candidate != version.environment
-            ),
-            None,
+        promotion_target = (
+            "uat"
+            if version.environment == "dev" and "uat" in manifest.spec.environments
+            else None
         )
         app_view = {
             "application_id": application.application_id,
@@ -1618,10 +1625,10 @@ def create_app(
             ),
             "promotion_target": promotion_target,
             "promotion_disabled_reason": (
-                "Blocking production-readiness checks must pass."
+                "Blocking UAT-readiness checks must pass."
                 if not readiness.ready
                 else (
-                    "A distinct prod or production target must be declared."
+                    "A distinct UAT target must be declared and selected from dev."
                     if promotion_target is None
                     else (
                         "Contributor access and an approved promotion job are required."

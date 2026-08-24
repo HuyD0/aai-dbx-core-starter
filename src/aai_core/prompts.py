@@ -13,6 +13,14 @@ from aai_core.evaluation import _NAME_COMPONENT
 from aai_core.exceptions import AaiCoreError
 from aai_core.tags import ResourceContext
 
+__all__ = [
+    "PromptManager",
+    "PromptPromotionError",
+    "PromptReference",
+    "is_missing_prompt_error",
+    "prompt_digest",
+]
+
 
 class PromptPromotionError(AaiCoreError):
     """A prompt alias move was refused for lack of release evidence."""
@@ -27,6 +35,8 @@ _GOVERNED_ALIASES = {"development", "validation", "candidate", "production"}
 
 @dataclass(frozen=True)
 class PromptReference:
+    """Immutable version-or-alias reference to an MLflow registered prompt."""
+
     name: str
     version: int | None = None
     alias: str | None = None
@@ -41,6 +51,8 @@ class PromptReference:
 
 
 class PromptManager:
+    """Govern prompt naming, tagging, registration, loading, and aliases."""
+
     def __init__(
         self,
         *,
@@ -61,7 +73,9 @@ class PromptManager:
         *,
         commit_message: str,
         tags: dict[str, str] | None = None,
-    ):
+    ) -> Any:
+        """Register a new immutable prompt version through native MLflow."""
+
         qualified = self.qualify(name)
         metadata = self.context.merged(tags)
         return self._client().genai.register_prompt(
@@ -80,7 +94,9 @@ class PromptManager:
         version: int | None = None,
         alias: str | None = None,
         cache_ttl_seconds: float | None = None,
-    ):
+    ) -> Any:
+        """Load a prompt by exact version or governed alias."""
+
         reference = PromptReference(self.qualify(name), version=version, alias=alias)
         kwargs = (
             {"cache_ttl_seconds": cache_ttl_seconds}
@@ -96,7 +112,7 @@ class PromptManager:
         *,
         commit_message: str,
         tags: dict[str, str] | None = None,
-    ):
+    ) -> Any:
         """Reuse an identical immutable prompt version or register it once.
 
         Idempotency is by content digest: an existing version with the same
@@ -272,6 +288,8 @@ class PromptManager:
         self.set_alias(name, alias=alias, version=version)
 
     def set_alias(self, name: str, *, alias: str, version: int) -> None:
+        """Point a governed lifecycle alias at an immutable prompt version."""
+
         if alias == "candidate":
             warnings.warn(
                 "The 'candidate' prompt alias is deprecated; use the more "
@@ -289,6 +307,8 @@ class PromptManager:
         )
 
     def qualify(self, name: str) -> str:
+        """Return a three-part Unity Catalog prompt name."""
+
         from aai_core.evaluation import _is_placeholder
 
         # str() would make None the component "None" and 123 the component
@@ -325,7 +345,7 @@ class PromptManager:
             return cleaned
         raise ValueError("Prompt names must be unqualified or catalog.schema.name")
 
-    def _client(self):
+    def _client(self) -> Any:
         if self._mlflow is not None:
             return self._mlflow
         try:

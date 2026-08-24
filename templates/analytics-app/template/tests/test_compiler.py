@@ -4,11 +4,17 @@ import pytest
 from pydantic import ValidationError
 
 from app.semantics.compiler import (
+    OrderDirection,
     QueryFilter,
+    RowFilter,
+    RowOperator,
+    RowOrder,
+    RowQuery,
     SemanticCompileError,
     SemanticQuery,
     TimeGrain,
     compile_query,
+    compile_rows,
     normalize_time_value,
     truncate_date,
 )
@@ -114,3 +120,90 @@ def test_truncate_date_matches_sql_semantics():
     assert truncate_date(TimeGrain.WEEK, "2024-03-15") == "2024-03-11"
     assert truncate_date(TimeGrain.QUARTER, "2024-05-20") == "2024-04-01"
     assert truncate_date(TimeGrain.YEAR, "2024-05-20") == "2024-01-01"
+
+
+def test_row_query_uses_only_declared_identifiers_and_typed_parameters(model):
+    compiled = compile_rows(
+        model,
+        RowQuery(
+            source="orders",
+            fields=("order_id", "order_amount"),
+            filters=(
+                RowFilter(
+                    field="order_status",
+                    operator=RowOperator.IN,
+                    value=("S", "P"),
+                ),
+                RowFilter(
+                    field="order_amount",
+                    operator=RowOperator.GTE,
+                    value=100,
+                ),
+            ),
+            order_by=(
+                RowOrder(
+                    field="order_amount",
+                    direction=OrderDirection.DESC,
+                ),
+            ),
+            limit=10,
+            reason="show governed order details",
+        ),
+    )
+
+    assert compiled.sql == (
+        "SELECT `order_id` AS `order_id`, `amount` AS `order_amount` "
+        "FROM `demo`.`sales`.`analytics_orders` "
+        "WHERE `status` IN (:r0_0, :r0_1) AND `amount` >= :r1 "
+        "ORDER BY `amount` DESC LIMIT 10"
+    )
+    assert [(item.value, item.type) for item in compiled.parameters] == [
+        ("S", "STRING"),
+        ("P", "STRING"),
+        ("100", "DECIMAL"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        RowQuery(
+            source="orders",
+            fields=("customer_region",),
+            reason="cross-source field",
+        ),
+        RowQuery(
+            source="orders",
+            fields=("order_id",),
+            filters=(
+                RowFilter(
+                    field="order_status",
+                    operator=RowOperator.GT,
+                    value="S",
+                ),
+            ),
+            reason="invalid string comparison",
+        ),
+    ],
+)
+def test_row_query_rejects_cross_source_and_type_unsafe_plans(model, query):
+    with pytest.raises(SemanticCompileError):
+        compile_rows(model, query)
+
+
+def test_row_query_rejects_non_finite_numeric_values(model):
+    query = RowQuery(
+        source="orders",
+        fields=("order_id",),
+        filters=(
+            RowFilter(
+                field="order_amount",
+                operator=RowOperator.EQ,
+                value=float("nan"),
+            ),
+        ),
+        reason="invalid numeric value",
+    )
+
+    with pytest.raises(SemanticCompileError, match="finite"):
+        compile_rows(model, query)

@@ -1007,6 +1007,64 @@ def min_labelled_rows_for_tolerance(
 # ---------------------------------------------------------------------------
 
 
+def _validate_sample_allocation(
+    population: Mapping[str, int],
+    labelling_budget: int,
+    min_per_stratum: int,
+) -> None:
+    """Validate the capacity inputs before allocating any rows."""
+
+    if labelling_budget <= 0:
+        raise ValueError("labelling_budget must be positive")
+    if min_per_stratum <= 0:
+        raise ValueError("min_per_stratum must be positive")
+    if not population:
+        raise ValueError("population must contain at least one stratum")
+    for stratum, count in population.items():
+        if count < 0:
+            raise ValueError(f"stratum {stratum!r} has negative population")
+
+
+def _distribute_remaining_sample(
+    population: Mapping[str, int],
+    allocation: dict[str, int],
+    remaining_budget: int,
+) -> None:
+    """Distribute remaining rows deterministically by largest remainder."""
+
+    spare = {
+        stratum: population[stratum] - allocation[stratum] for stratum in population
+    }
+    spare_total = sum(spare.values())
+    if not remaining_budget or not spare_total:
+        return
+    quotas = {
+        stratum: remaining_budget * spare[stratum] / spare_total
+        for stratum in population
+    }
+    for stratum in population:
+        extra = min(int(quotas[stratum]), spare[stratum])
+        allocation[stratum] += extra
+        spare[stratum] -= extra
+        remaining_budget -= extra
+    by_remainder = sorted(
+        population,
+        key=lambda stratum: (-(quotas[stratum] % 1.0), stratum),
+    )
+    while remaining_budget > 0:
+        progressed = False
+        for stratum in by_remainder:
+            if remaining_budget == 0:
+                break
+            if spare[stratum] > 0:
+                allocation[stratum] += 1
+                spare[stratum] -= 1
+                remaining_budget -= 1
+                progressed = True
+        if not progressed:  # pragma: no cover - guarded by budget cap above
+            break
+
+
 def allocate_stratified_sample(
     population: Mapping[str, int],
     labelling_budget: int,
@@ -1026,15 +1084,7 @@ def allocate_stratified_sample(
     a real capacity conversation (label more, relax the tolerance, or merge
     strata), not something to paper over silently.
     """
-    if labelling_budget <= 0:
-        raise ValueError("labelling_budget must be positive")
-    if min_per_stratum <= 0:
-        raise ValueError("min_per_stratum must be positive")
-    if not population:
-        raise ValueError("population must contain at least one stratum")
-    for stratum, count in population.items():
-        if count < 0:
-            raise ValueError(f"stratum {stratum!r} has negative population")
+    _validate_sample_allocation(population, labelling_budget, min_per_stratum)
 
     total_population = sum(population.values())
     if labelling_budget >= total_population:
@@ -1054,36 +1104,7 @@ def allocate_stratified_sample(
 
     allocation = dict(floors)
     remaining_budget = labelling_budget - floor_total
-    spare = {
-        stratum: population[stratum] - allocation[stratum] for stratum in population
-    }
-    spare_total = sum(spare.values())
-    if remaining_budget and spare_total:
-        quotas = {
-            stratum: remaining_budget * spare[stratum] / spare_total
-            for stratum in population
-        }
-        for stratum in population:
-            extra = min(int(quotas[stratum]), spare[stratum])
-            allocation[stratum] += extra
-            spare[stratum] -= extra
-            remaining_budget -= extra
-        by_remainder = sorted(
-            population,
-            key=lambda stratum: (-(quotas[stratum] % 1.0), stratum),
-        )
-        while remaining_budget > 0:
-            progressed = False
-            for stratum in by_remainder:
-                if remaining_budget == 0:
-                    break
-                if spare[stratum] > 0:
-                    allocation[stratum] += 1
-                    spare[stratum] -= 1
-                    remaining_budget -= 1
-                    progressed = True
-            if not progressed:  # pragma: no cover - guarded by budget cap above
-                break
+    _distribute_remaining_sample(population, allocation, remaining_budget)
     return allocation
 
 
@@ -1177,79 +1198,79 @@ class FieldStratumScore(BaseModel):
         weights it carries, in `require_matching_evidence`; that is why
         those weights are persisted rather than discarded after scoring.
         """
-        # Bounding the counts by the sample comes first, and applies to
-        # every row: tying an interval to its counts is worth nothing if
-        # the counts themselves are impossible. A row claiming one
-        # sampled document and two hundred correct answers, with matching
-        # 200/200 intervals, was internally consistent all the way to an
-        # adopting gate. On the WEIGHTED row these are sums of the
-        # physical rows, so the same inequalities hold.
-        if self.n_gold > self.n_rows or self.n_asserted > self.n_rows:
-            raise ValueError(
-                f"stratum {self.stratum!r} sampled {self.n_rows} row(s) but "
-                f"reports {self.n_gold} gold and {self.n_asserted} asserted "
-                "value(s); a row cannot carry more than one of either"
-            )
-        if self.n_correct > min(self.n_asserted, self.n_gold):
-            raise ValueError(
-                "n_correct cannot exceed the values asserted or the values "
-                "that exist"
-            )
+        _validate_score_counts(self)
         if self.stratum == WEIGHTED:
-            if not self.stratum_population:
-                raise ValueError(
-                    "the population-weighted row must carry the weights it "
-                    "was computed from, so the gate can recompute it"
-                )
-            # Same reasoning as `SourcePreflight`: these pairs are read
-            # as a mapping, so duplicate names collapse and the weights
-            # would no longer describe what they appear to.
-            weight_names = [name for name, _ in self.stratum_population]
-            if len(weight_names) != len(set(weight_names)):
-                raise ValueError(
-                    "the weighted row names a stratum more than once in its "
-                    "population weights"
-                )
-            if tuple(sorted(name for name, _ in self.stratum_population)) != tuple(
-                sorted(self.sample_strata)
-            ):
-                raise ValueError(
-                    "the weighted row's population weights must cover exactly "
-                    "the strata the sample covered"
-                )
+            _validate_weighted_score(self)
             return self
-        if self.stratum_population:
-            raise ValueError(
-                f"stratum {self.stratum!r} is a physical stratum and carries "
-                "no population weights; only the aggregate row does"
-            )
-        for metric, interval, denominator in (
-            ("precision", self.precision, self.n_asserted),
-            ("recall", self.recall, self.n_gold),
-        ):
-            if denominator == 0:
-                if interval is not None:
-                    raise ValueError(
-                        f"{metric} has no denominator in stratum "
-                        f"{self.stratum!r}, so it must be absent, not an "
-                        "interval"
-                    )
-                continue
-            if interval is None:
-                raise ValueError(
-                    f"{metric} in stratum {self.stratum!r} has "
-                    f"{denominator} observations but no interval"
-                )
-            if (interval.successes, interval.trials) != (
-                self.n_correct,
-                denominator,
-            ):
-                raise ValueError(
-                    f"the {metric} interval in stratum {self.stratum!r} "
-                    f"reports {interval.successes}/{interval.trials}, but "
-                    f"this score counted {self.n_correct}/{denominator}"
-                )
+        _validate_physical_score(self)
         return self
+
+
+def _validate_score_counts(score: FieldStratumScore) -> None:
+    """Bind every score's event counts to its sampled row count."""
+
+    if score.n_gold > score.n_rows or score.n_asserted > score.n_rows:
+        raise ValueError(
+            f"stratum {score.stratum!r} sampled {score.n_rows} row(s) but "
+            f"reports {score.n_gold} gold and {score.n_asserted} asserted "
+            "value(s); a row cannot carry more than one of either"
+        )
+    if score.n_correct > min(score.n_asserted, score.n_gold):
+        raise ValueError(
+            "n_correct cannot exceed the values asserted or the values that exist"
+        )
+
+
+def _validate_weighted_score(score: FieldStratumScore) -> None:
+    """Validate the population weights carried by an aggregate score."""
+
+    if not score.stratum_population:
+        raise ValueError(
+            "the population-weighted row must carry the weights it was "
+            "computed from, so the gate can recompute it"
+        )
+    weight_names = [name for name, _ in score.stratum_population]
+    if len(weight_names) != len(set(weight_names)):
+        raise ValueError(
+            "the weighted row names a stratum more than once in its population weights"
+        )
+    if tuple(sorted(weight_names)) != tuple(sorted(score.sample_strata)):
+        raise ValueError(
+            "the weighted row's population weights must cover exactly the "
+            "strata the sample covered"
+        )
+
+
+def _validate_physical_score(score: FieldStratumScore) -> None:
+    """Bind physical-stratum intervals to their raw observations."""
+
+    if score.stratum_population:
+        raise ValueError(
+            f"stratum {score.stratum!r} is a physical stratum and carries "
+            "no population weights; only the aggregate row does"
+        )
+    for metric, interval, denominator in (
+        ("precision", score.precision, score.n_asserted),
+        ("recall", score.recall, score.n_gold),
+    ):
+        if denominator == 0:
+            if interval is not None:
+                raise ValueError(
+                    f"{metric} has no denominator in stratum {score.stratum!r}, "
+                    "so it must be absent, not an interval"
+                )
+            continue
+        if interval is None:
+            raise ValueError(
+                f"{metric} in stratum {score.stratum!r} has {denominator} "
+                "observations but no interval"
+            )
+        if (interval.successes, interval.trials) != (score.n_correct, denominator):
+            raise ValueError(
+                f"the {metric} interval in stratum {score.stratum!r} reports "
+                f"{interval.successes}/{interval.trials}, but this score counted "
+                f"{score.n_correct}/{denominator}"
+            )
 
 
 def apply_abstention_policy(
@@ -1903,77 +1924,46 @@ def _gate_field(
     )
 
 
-def require_matching_evidence(
+def _require_score_matches_spec(
     spec: BatchInferenceSpec,
-    scores: Sequence[FieldStratumScore],
+    score: FieldStratumScore,
 ) -> None:
-    """Refuse evidence that was not produced for exactly this release, or
-    that does not cover everything the gate is supposed to judge.
+    """Bind one persisted score to the release and confidence it claims."""
 
-    Without the release check, ``evaluate_gate(spec_v2, scores_from_v1)``
-    would stamp v2's digest onto v1's numbers and ``require_executable``
-    would then happily accept it — an unvalidated release executing on an
-    earlier release's evidence.
-
-    Without the completeness check, a filtered score list would quietly
-    weaken the gate instead of failing it: drop the failing stratum's rows
-    and the worst-stratum rule has nothing bad left to find. Evidence must
-    therefore cover every field in the spec and every stratum the sample
-    measured.
-    """
-    if not scores:
-        raise EvidenceMismatch("no scores supplied; a gate needs evidence")
     expected = spec.release
-    for score in scores:
-        if score.release != expected:
+    if score.release != expected:
+        raise EvidenceMismatch(
+            f"score for {score.field!r}/{score.stratum!r} was produced for "
+            f"prompt {score.release.prompt_version} / model "
+            f"{score.release.model_version} (spec digest "
+            f"{score.release.spec_digest[:12]}…), but this gate is for prompt "
+            f"{expected.prompt_version} / model {expected.model_version} "
+            f"(spec digest {expected.spec_digest[:12]}…). Re-score the sample "
+            "against the release being gated."
+        )
+    if score.confidence != spec.confidence_level:
+        raise EvidenceMismatch(
+            f"score for {score.field!r}/{score.stratum!r} was computed at "
+            f"confidence {score.confidence}, but the spec declares "
+            f"{spec.confidence_level}. Re-score at the declared level."
+        )
+    for metric, interval in (
+        ("precision", score.precision),
+        ("recall", score.recall),
+    ):
+        if interval is not None and interval.confidence != spec.confidence_level:
             raise EvidenceMismatch(
-                f"score for {score.field!r}/{score.stratum!r} was produced for "
-                f"prompt {score.release.prompt_version} / model "
-                f"{score.release.model_version} (spec digest "
-                f"{score.release.spec_digest[:12]}…), but this gate is for "
-                f"prompt {expected.prompt_version} / model "
-                f"{expected.model_version} (spec digest "
-                f"{expected.spec_digest[:12]}…). Re-score the sample against "
-                "the release being gated."
+                f"the {metric} interval for {score.field!r}/{score.stratum!r} "
+                f"was computed at confidence {interval.confidence}, but the "
+                f"spec declares {spec.confidence_level}. Its bounds do not "
+                "mean what the score claims; re-score at the declared level."
             )
-        if score.confidence != spec.confidence_level:
-            raise EvidenceMismatch(
-                f"score for {score.field!r}/{score.stratum!r} was computed at "
-                f"confidence {score.confidence}, but the spec declares "
-                f"{spec.confidence_level}. Re-score at the declared level."
-            )
-        # The intervals are what the gate actually reads, and they carry
-        # their own confidence. Checking only the score's outer label would
-        # let evidence relabelled to 99% be gated on bounds computed at
-        # 95% — the very substitution the outer check exists to stop.
-        for metric, interval in (
-            ("precision", score.precision),
-            ("recall", score.recall),
-        ):
-            if interval is not None and interval.confidence != spec.confidence_level:
-                raise EvidenceMismatch(
-                    f"the {metric} interval for {score.field!r}/"
-                    f"{score.stratum!r} was computed at confidence "
-                    f"{interval.confidence}, but the spec declares "
-                    f"{spec.confidence_level}. Its bounds do not mean what "
-                    "the score claims; re-score at the declared level."
-                )
-        # The intervals are what the gate actually reads, and each carries
-        # its own confidence. Checking only the score's outer label would
-        # let relabelled or hand-assembled evidence present 95% bounds as
-        # 99% ones — the same false adoption the release check closes.
-        for metric, interval in (
-            ("precision", score.precision),
-            ("recall", score.recall),
-        ):
-            if interval is not None and interval.confidence != spec.confidence_level:
-                raise EvidenceMismatch(
-                    f"the {metric} interval for {score.field!r}/"
-                    f"{score.stratum!r} was computed at confidence "
-                    f"{interval.confidence}, but the spec declares "
-                    f"{spec.confidence_level}. Its bounds do not mean what "
-                    "the score claims; re-score at the declared level."
-                )
+
+
+def _single_evidence_manifest(
+    scores: Sequence[FieldStratumScore],
+) -> tuple[str, ...]:
+    """Return the one sample manifest shared by every score."""
 
     manifests = {score.sample_strata for score in scores}
     if len(manifests) != 1:
@@ -1981,14 +1971,22 @@ def require_matching_evidence(
             f"scores disagree about which strata the sample covered: "
             f"{sorted(manifests)}. They did not come from one scoring run."
         )
-    (manifest,) = manifests
+    return next(iter(manifests))
+
+
+def _require_evidence_coverage(
+    spec: BatchInferenceSpec,
+    scores: Sequence[FieldStratumScore],
+    manifest: tuple[str, ...],
+) -> None:
+    """Require every declared field and sampled stratum to be represented."""
+
     required_groups = set(manifest) | {WEIGHTED}
     present: dict[str, set[str]] = {}
     for score in scores:
         present.setdefault(score.field, set()).add(score.stratum)
     for field in spec.fields:
-        groups = present.get(field.name, set())
-        missing = sorted(required_groups - groups)
+        missing = sorted(required_groups - present.get(field.name, set()))
         if missing:
             raise EvidenceMismatch(
                 f"evidence for field {field.name!r} is incomplete: no scores "
@@ -1996,22 +1994,15 @@ def require_matching_evidence(
                 "worst-stratum gate cannot be applied to a filtered set."
             )
 
-    # The aggregate row is the one a medium- or low-criticality field is
-    # gated on, and unlike a physical row its intervals cannot be checked
-    # against a row count — which makes it precisely the row worth
-    # forging: a 200/200 interval with an honest release stamp would win
-    # the gate over failing physical strata. So it is not read as
-    # evidence at all until it has been rebuilt from the physical rows
-    # and the weights it carries, and found identical.
-    # One score per (field, stratum). Indexing by that key silently kept
-    # the last row, so a payload could retain the real failing score,
-    # append a passing duplicate of it plus a matching weighted row, and
-    # adopt: the recomputation would use the duplicate and agree with
-    # itself. Scoring refuses duplicate *documents*, but that check runs
-    # before persistence and cannot see a reconstructed report.
-    by_field_stratum: dict[str, dict[str, FieldStratumScore]] = {}
+
+def _index_score_evidence(
+    scores: Sequence[FieldStratumScore],
+) -> dict[str, dict[str, FieldStratumScore]]:
+    """Index one unambiguous score per field and stratum."""
+
+    indexed: dict[str, dict[str, FieldStratumScore]] = {}
     for score in scores:
-        group = by_field_stratum.setdefault(score.field, {})
+        group = indexed.setdefault(score.field, {})
         if score.stratum in group:
             raise EvidenceMismatch(
                 f"two scores describe {score.field!r} in stratum "
@@ -2020,14 +2011,27 @@ def require_matching_evidence(
                 "whichever happens to be last."
             )
         group[score.stratum] = score
+    return indexed
+
+
+def _require_weighted_evidence(
+    spec: BatchInferenceSpec,
+    indexed: Mapping[str, Mapping[str, FieldStratumScore]],
+    manifest: tuple[str, ...],
+) -> None:
+    """Recompute every claimed population-weighted aggregate."""
+
     for field in spec.fields:
-        group = by_field_stratum.get(field.name, {})
+        group = indexed.get(field.name, {})
         claimed = group.get(WEIGHTED)
         if claimed is None:
             continue
         physical = [group[stratum] for stratum in manifest if stratum in group]
-        weights = dict(claimed.stratum_population)
-        recomputed = _weighted_row(field.name, physical, weights)
+        recomputed = _weighted_row(
+            field.name,
+            physical,
+            dict(claimed.stratum_population),
+        )
         if recomputed != claimed:
             raise EvidenceMismatch(
                 f"the population-weighted row for {field.name!r} does not "
@@ -2035,6 +2039,21 @@ def require_matching_evidence(
                 "rows and the weights it carries gives different evidence, "
                 "so the aggregate was not produced by this sample."
             )
+
+
+def require_matching_evidence(
+    spec: BatchInferenceSpec,
+    scores: Sequence[FieldStratumScore],
+) -> None:
+    """Require complete evidence from exactly the release being gated."""
+
+    if not scores:
+        raise EvidenceMismatch("no scores supplied; a gate needs evidence")
+    for score in scores:
+        _require_score_matches_spec(spec, score)
+    manifest = _single_evidence_manifest(scores)
+    _require_evidence_coverage(spec, scores, manifest)
+    _require_weighted_evidence(spec, _index_score_evidence(scores), manifest)
 
 
 def evaluate_gate(
@@ -2167,49 +2186,24 @@ def approve_gate(report: GateReport, approver: str) -> GateReport:
     )
 
 
-def require_executable(
+def _require_report_matches_spec(
     spec: BatchInferenceSpec,
-    report: GateReport | None,
-    preflight: SourcePreflight,
+    report: GateReport,
 ) -> None:
-    """Refuse to execute without an adopting gate (tiers 1 and 2).
+    """Bind a self-consistent report to the policy it authorises."""
 
-    ``preflight`` is required, not optional, because two of the checks
-    below compare the report against numbers only the warehouse can
-    supply. An optional guard is the failure mode rounds of review here
-    have found over and over: it holds for the caller who passes it and
-    silently does nothing for the one who does not.
-    """
-    if not spec.gate_required:
-        return
-    if report is None:
-        raise GateNotPassed(f"tier {spec.use_tier} runs require a gate report")
-    revalidated(report, GateNotPassed)
     if report.spec_digest != spec.spec_digest:
         raise GateNotPassed(
             "gate report was produced for a different spec revision; "
             "re-evaluate against the current spec"
         )
-    # The report's own tier decides which invariants its validator
-    # enforced — most importantly whether a source snapshot was required
-    # at all. Relabelling an operational report exploratory therefore
-    # switches off the pin and lets the run read the live table, with the
-    # operational digest and real scores still attached. The spec says
-    # what tier this run is; the report only claims one.
     if report.use_tier != spec.use_tier:
         raise GateNotPassed(
             f"the gate report claims tier {report.use_tier}, but this run is "
             f"tier {spec.use_tier}. Tier selects which controls apply, so a "
             "report from another tier cannot authorise it."
         )
-    # The report proved internally that its verdicts follow from its
-    # scores; it could not prove those scores are about *this* release,
-    # because it holds no spec. That is this function's to check, and it
-    # is what closes the loop from raw counts to authorisation.
     require_matching_evidence(spec, report.scores)
-    # A matching digest says the report describes this spec; it does not
-    # say the report judged all of it. Verify the coverage too, so a
-    # report missing a field cannot authorise a run over that field.
     judged = {result.field for result in report.fields}
     unjudged = sorted(field.name for field in spec.fields if field.name not in judged)
     if unjudged:
@@ -2217,13 +2211,6 @@ def require_executable(
             f"gate report does not judge {unjudged}; it cannot authorise a "
             "run that writes those fields"
         )
-    # The report derives each verdict from its scores, but the *policy*
-    # that derivation applies — the bar, and which strata must clear it —
-    # is recorded in the report and would otherwise be whatever the
-    # artifact says. Lower a high field's required rate and the
-    # recomputation honestly reaches 'adopt' on real evidence; relabel it
-    # medium and the gate quietly stops being worst-stratum. The spec owns
-    # policy, the report owns outcomes, and this is where they meet.
     by_name = {result.field: result for result in report.fields}
     for field in spec.fields:
         result = by_name[field.name]
@@ -2238,19 +2225,16 @@ def require_executable(
                 f"{field.required_rate}. It certifies a policy this run does "
                 "not run under."
             )
-    # The weighted row is recomputed from the physical rows and the
-    # weights the report carries — which shows the report agrees with
-    # itself, and nothing about whether those weights are the population.
-    # Evidence from a 50/50 good/failing sample adopts if the artifact
-    # claims a million good rows and one bad one. Only the measured
-    # counts settle it.
+
+
+def _require_report_population(
+    report: GateReport,
+    preflight: SourcePreflight,
+) -> None:
+    """Bind persisted population weights to warehouse-measured counts."""
+
     measured = dict(preflight.stratum_population)
     weighted_rows = [score for score in report.scores if score.stratum == WEIGHTED]
-    # An empty measurement is not permission to skip the check — it is the
-    # absence of the only thing that makes weighted evidence mean
-    # anything. Guarding this with `if measured:` re-created, inside the
-    # very change that made the preflight a required argument, exactly the
-    # optional-guard failure that argument existed to remove.
     if weighted_rows and not measured:
         raise GateNotPassed(
             "the preflight carries no measured stratum counts, and this "
@@ -2275,6 +2259,22 @@ def require_executable(
                     f"weighted evidence for {score.field!r} does not cover; "
                     "the population estimate omits part of the population."
                 )
+
+
+def require_executable(
+    spec: BatchInferenceSpec,
+    report: GateReport | None,
+    preflight: SourcePreflight,
+) -> None:
+    """Refuse to execute without an adopting gate (tiers 1 and 2)."""
+
+    if not spec.gate_required:
+        return
+    if report is None:
+        raise GateNotPassed(f"tier {spec.use_tier} runs require a gate report")
+    revalidated(report, GateNotPassed)
+    _require_report_matches_spec(spec, report)
+    _require_report_population(report, preflight)
     if report.decision != GateDecision.ADOPT:
         raise GateNotPassed(
             f"gate decision is {report.decision.value!r}; execution requires " "'adopt'"

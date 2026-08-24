@@ -7,9 +7,10 @@ platform:
   cost_center: {{.cost_center}}
   data_classification: internal
   lifecycle: experimental
-  repository: replace-with-owner/{{.project_name}}
-  release: dev
-  tag_schema_version: "1"
+  repository: {{.repository_url}}
+  # Bundle jobs and Apps override this with the CI-attested source commit.
+  release: local-dev
+  tag_schema_version: "2"
   catalog: {{.catalog}}
   schema: {{.schema}}
   experiment_name: /Shared/{{.application_name}}-quality-cost-release
@@ -22,13 +23,12 @@ providers:
     # with base_url/token_scope) — application code never changes.
     general-chat:
       provider: {{.model_provider}}
-      endpoint: {{.foundry_endpoint}}
       deployment: {{.model_deployment}}
       capabilities:
         tool_calling: true
         structured_output: true
     # Evaluation judges always use an approved gateway-fronted Databricks
-    # endpoint, including an external-model endpoint for Foundry judges.
+    # endpoint, including an external-model endpoint for external judges.
     judge-model:
       provider: databricks
       deployment: {{.judge_deployment}}

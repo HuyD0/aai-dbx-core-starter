@@ -35,7 +35,7 @@ from aai_console.hub.repository import (
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 
 
-def _application(application_id="analyst", *, updated_at=NOW):
+def _application(application_id="analyst", *, created_at=NOW, updated_at=NOW):
     return ApplicationRecord(
         application_id=application_id,
         name="Analyst",
@@ -46,7 +46,7 @@ def _application(application_id="analyst", *, updated_at=NOW):
         cost_center="technology",
         risk_tier="medium",
         lifecycle_state="development",
-        created_at=NOW,
+        created_at=created_at,
         updated_at=updated_at,
     )
 
@@ -155,6 +155,36 @@ def test_registration_is_idempotent_and_moves_environment_pointer_atomically():
     assert repository.get_current_version("analyst", "dev").version_id == "version-2"
     assert [version.is_current for version in versions] == [False, True]
     assert repository.get_application("analyst").row_version == 2
+
+
+def test_delayed_registration_preserves_monotonic_application_time():
+    repository = InMemoryHubRepository()
+    later = NOW + timedelta(minutes=2)
+    repository.register_application(
+        _application(created_at=later, updated_at=later),
+        _version(registered_at=later),
+    )
+
+    delayed = repository.register_application(
+        _application(updated_at=NOW),
+        _version(
+            "version-2",
+            git_commit_sha="b" * 40,
+            manifest_hash="b" * 64,
+            registered_at=NOW,
+        ),
+    )
+
+    assert delayed.application.created_at == later
+    assert delayed.application.updated_at == later
+    assert delayed.application.row_version == 2
+    assert repository.get_application("analyst") == delayed.application
+    # Persisted evidence must remain valid under the same strict JSON round trip used
+    # by the Lakebase adapter.
+    assert (
+        ApplicationRecord.model_validate_json(delayed.application.model_dump_json())
+        == delayed.application
+    )
 
 
 def test_idempotent_registration_cannot_retarget_the_same_version():

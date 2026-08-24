@@ -1,0 +1,12 @@
+schema_version = 1
+
+[[exceptions]]
+id = "PYSEC-2026-3552"
+package = "cryptography"
+expires = "2026-09-30"
+reason = "MLflow 3.15.1 requires cryptography<50; this repository never calls the affected PKCS#7 EnvelopedData decryption APIs. Remove when MLflow permits cryptography 50."
+forbidden_symbols = [
+  "pkcs7_decrypt_der",
+  "pkcs7_decrypt_pem",
+  "pkcs7_decrypt_smime",
+]

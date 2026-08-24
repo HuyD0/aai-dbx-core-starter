@@ -95,6 +95,7 @@ secret, or raw Key Vault value.
 | `03_hybrid_retrieval_and_reranking` | Text/vector/hybrid/reranked ablation, RRF, candidate budgets, and Azure semantic ranking. |
 | `04_mlflow_tracing_guardrails_and_evaluation` | Retriever spans, deterministic gates, governed runs, and optional MLflow RAG judges. |
 | `05_capstone_release_decision` | Baseline/change/result/decision, immutable release evidence, and template graduation. |
+| `06_confidence_intervals_for_release_gates` | Normal versus bootstrap intervals, width as a retrieval diagnostic, paired improvements, and confidence-bound gates. |
 
 Every lesson has a focused `# YOUR TURN` exercise, a non-destructive check,
 and a reference solution. The notebooks are generated from reviewable Python
@@ -108,8 +109,8 @@ under `scripts/`; edit that source and rerender instead of hand-editing JSON.
   `mlflow.genai.evaluate()`, built-in judges, and feedback.
 - Azure AI Search or Databricks AI Search owns managed indexing and retrieval.
   The application asks for `operations-knowledge`, not a physical index name.
-- Microsoft Foundry or a Databricks endpoint supplies models through configured
-  logical resources. Enterprises can place a governed gateway in front without
+- A Databricks endpoint supplies models through configured logical
+  resources. Enterprises can place a governed gateway in front without
   changing application architecture.
 - Production code graduates into [`rag-app`](../../templates/rag-app/) or
   [`agent-app`](../../templates/agent-app/). The primary custom-agent HTTP path

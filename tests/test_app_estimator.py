@@ -540,7 +540,7 @@ def test_snapshot_scalars_are_strict():
 
 def test_shipped_snapshot_loads_and_covers_every_calculator_sku():
     snapshot = load_snapshot()
-    assert REQUIRED_SKU_KEYS <= set(snapshot.skus)
+    assert set(snapshot.skus) >= REQUIRED_SKU_KEYS
     assert snapshot.metadata.as_of <= date.today()
     sources = snapshot.metadata.sources
     for name in type(sources).model_fields:

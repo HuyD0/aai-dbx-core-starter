@@ -2,14 +2,79 @@
   "$comment": "Canonical shared-scaffold manifest consumed by scripts/sync_template_shared.py. Every path under files/ is copied byte-for-byte into each template's template/ directory, and every library/*.tmpl into each template's library/. A template listed in opt_out for a path does not receive it. CI runs the sync in --check mode, so editing a copy inside a template without editing the canonical file here fails the drift test.",
   "files": [
     ".github/workflows/ci.yml",
+    ".github/workflows/codeql.yml",
     ".github/workflows/deploy.yml",
     ".gitignore",
+    "AGENTS.md.tmpl",
+    "CLAUDE.md",
     "Makefile",
+    "aai-platform.yml.tmpl",
     "ai-app.yaml.tmpl",
+    "databricks.yml.tmpl",
+    "docs/decisions/README.md",
+    "docs/uat-promotion.md",
+    "pyproject.toml.tmpl",
     "requirements-ci.txt.tmpl",
+    "requirements-dev.lock",
+    "security-audit.toml",
+    "scripts/audit_dependencies.py",
     "scripts/build_application.py",
     "scripts/install_core.py.tmpl",
-    "scripts/setup_dev.py.tmpl"
+    "scripts/promote_prompt.py",
+    "scripts/release_artifact.py",
+    "scripts/register_prompt.py",
+    "scripts/setup_dev.py.tmpl",
+    "scripts/smoke_deployment.py",
+    "scripts/sync_dataset.py",
+    "scripts/validate_project.py",
+    "tests/test_manifest_dataset.py"
   ],
-  "opt_out": {}
+  "opt_out": {
+    "aai-platform.yml.tmpl": [
+      "evaluation-project",
+      "experiment-starter",
+      "prompt-app",
+      "rag-app"
+    ],
+    "Makefile": [
+      "agent-app",
+      "rag-app"
+    ],
+    "ai-app.yaml.tmpl": [
+      "analytics-app",
+      "evaluation-project",
+      "experiment-starter"
+    ],
+    "databricks.yml.tmpl": [
+      "agent-app",
+      "analytics-app",
+      "rag-app"
+    ],
+    "pyproject.toml.tmpl": [
+      "agent-app",
+      "analytics-app",
+      "experiment-starter",
+      "rag-app"
+    ],
+    "scripts/promote_prompt.py": [
+      "analytics-app",
+      "evaluation-project",
+      "experiment-starter",
+      "rag-app"
+    ],
+    "scripts/register_prompt.py": [
+      "analytics-app",
+      "evaluation-project",
+      "experiment-starter",
+      "rag-app"
+    ],
+    "scripts/sync_dataset.py": [
+      "analytics-app",
+      "evaluation-project",
+      "experiment-starter"
+    ],
+    "tests/test_manifest_dataset.py": [
+      "evaluation-project"
+    ]
+  }
 }

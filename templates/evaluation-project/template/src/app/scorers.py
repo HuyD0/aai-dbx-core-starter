@@ -1,13 +1,11 @@
-"""Deterministic code scorers — from the shared enterprise registry.
+"""Deterministic code scorers from the shared enterprise registry.
 
 These are pure functions: same inputs, same score, no network. They run in
 pull-request CI (tier 1) and inside the full judge evaluation (tier 2).
 
-They live in `aai_core.agentkit.catalog`, not here, because a scorer is a
-versioned platform asset: when two teams report `keyword_coverage/mean` of
-0.8 it has to mean the same thing. This module re-exports them so project
-code and tests have a stable local name. Run `agentkit scorers ls` to see
-the whole registry.
+Scorers live in :mod:`aai_core.agentkit.catalog` because their name, behavior,
+and version are platform contracts. This module re-exports the selected code
+scorers so project code and tests retain stable local imports.
 """
 
 from __future__ import annotations

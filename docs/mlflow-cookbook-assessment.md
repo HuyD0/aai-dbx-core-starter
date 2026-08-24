@@ -1,7 +1,7 @@
 # MLflow cookbook relevance assessment
 
-Reviewed on 2026-07-26 against the repository's minimum MLflow 3.14 API and
-current MLflow 3.14 lock.
+Reviewed on 2026-08-10 against the repository's certified MLflow 3.15.1 API and
+current MLflow 3.15.1 lock.
 
 The seven cookbooks describe a useful evaluation-driven lifecycle, but they
 are examples rather than platform policy. Adopt the durable trace, evaluation,
@@ -47,6 +47,10 @@ The stable SDK should not provide:
 
 Those capabilities move faster than the SDK contract. Templates may pin and
 exercise them while still exposing the underlying native MLflow objects.
+Durable LangGraph persistence follows the same rule: it ships as the
+certified `recipes/langgraph-lakebase/` template recipe against Lakebase
+(see [Production LangGraph agents](langgraph-production.md)), never as SDK
+checkpoint or store wrappers.
 
 OpenAI and LangChain autologging are opt-in because they can capture raw
 framework arguments. Stable `model.generate()` emits one bounded SDK LLM span.
@@ -99,7 +103,7 @@ Prefer exact matching for deterministic release gates. Fuzzy matching is an
 LLM-judge decision and is appropriate only when several trajectories are
 semantically interchangeable. See MLflow's
 [ToolCallCorrectness requirements](https://mlflow.org/docs/latest/genai/eval-monitor/scorers/llm-judge/tool-call/correctness/).
-The template adds a narrow MLflow 3.14 compatibility layer because the native
+The template adds a narrow MLflow 3.15.1 compatibility layer because the native
 unordered exact scorer treats an empty expected list as missing and does not
 fully preserve duplicate-call multiplicity. The layer compares a multiset of
 normalized name/argument signatures, then delegates matching non-empty cases
@@ -130,7 +134,7 @@ Compare the baseline and each proposed change on the same cases and record:
 - usage/cost coverage, since not every provider reports it;
 - quality per unit cost only as a decision aid, never as the sole gate.
 
-MLflow 3.14 exposes aggregated `trace.info.token_usage` and
+MLflow 3.15.1 exposes aggregated `trace.info.token_usage` and
 `trace.info.cost`; cost availability depends on the tracing integration,
 tracking-server extras, and model pricing support. See
 [MLflow token and cost tracking](https://mlflow.org/docs/latest/genai/tracing/token-usage-cost/).

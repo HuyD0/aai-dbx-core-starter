@@ -751,8 +751,8 @@ def test_openai_shaped_request_mapping_builds_an_array(tmp_path):
     """`messages.0.content` is the template's documented mapping.
 
     Treating every path segment as a dict key would replace the messages
-    list from extra_body with `{"0": {...}}`, and an OpenAI-compatible or
-    Foundry endpoint rejects that on every call.
+    list from extra_body with `{"0": {...}}`, and an OpenAI-compatible
+    endpoint rejects that on every call.
     """
 
     captured = {}

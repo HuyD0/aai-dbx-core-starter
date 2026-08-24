@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from black import Mode, format_str
 from notebook_content import LESSONS
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ EXPECTED_FILENAMES = (
     "03_hybrid_retrieval_and_reranking.ipynb",
     "04_mlflow_tracing_guardrails_and_evaluation.ipynb",
     "05_capstone_release_decision.ipynb",
+    "06_confidence_intervals_for_release_gates.ipynb",
 )
 
 
@@ -30,6 +32,13 @@ def _cell(notebook: str, position: int, kind: str, source: str) -> dict[str, obj
     normalized = source.strip() + "\n"
     metadata: dict[str, object] = {}
     if kind == "code":
+        # The locked authoring toolchain owns notebook formatting. Formatting
+        # here keeps generated JSON and its reviewable Python source in one
+        # deterministic contract instead of requiring hand edits after render.
+        # Black's Jupyter writer stores the final code line without a trailing
+        # newline; mirror that representation so `black --check` and
+        # `render_notebooks.py --check` agree byte-for-byte.
+        normalized = format_str(normalized, mode=Mode(line_length=88)).rstrip("\n")
         stripped = normalized.lstrip()
         if stripped.startswith("# Notebook preflight"):
             metadata["tags"] = ["preflight"]
@@ -90,7 +99,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     if tuple(sorted(LESSONS)) != EXPECTED_FILENAMES:
-        raise SystemExit("Notebook content must define the ordered 00-05 course")
+        raise SystemExit("Notebook content must define the ordered 00-06 course")
     NOTEBOOKS.mkdir(parents=True, exist_ok=True)
     stale: list[str] = []
     for filename, cells in sorted(LESSONS.items()):

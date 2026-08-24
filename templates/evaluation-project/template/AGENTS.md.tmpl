@@ -1,0 +1,38 @@
+# AGENTS.md — operating guide for AI coding agents
+
+This project is `{{.project_name}}`, generated from an AAI Databricks bundle
+template. The template name and version are recorded in `.aai-template.json`;
+`CLAUDE.md` imports this file, so every agent works from one source of truth.
+`README.md` explains the application itself; `make help` lists the workflow.
+
+## Hard rules
+
+1. **No secrets in Git.** Authentication is keyless (Azure identity and
+   Databricks unified authentication). Configuration files carry identifiers
+   and secret references, never secret values.
+2. **Pull requests stay credential-free.** Never add credentials, OIDC
+   permissions, or cloud login steps to the pull-request workflow.
+3. **Logical names in code, physical names in configuration.** Endpoint,
+   deployment, and index names belong in environment configuration, not in
+   application code.
+4. **Pin GitHub Actions to full commit SHAs** in any workflow you touch.
+
+## The evaluation gate
+
+`make evaluate` runs `evals/evaluate.py`. Its exit codes are a stable CI
+contract: `0` pass, `2` threshold failed, `1` configuration or runtime
+error. Scorers are versioned platform assets — select scorers and set
+thresholds; never redefine one locally.
+
+## What counts as a release
+
+Code, model, prompt, tool, index, embedding, and chunking changes are all
+application releases: each goes through the evaluation gate and the delivery
+path in `docs/uat-promotion.md`.
+
+## Where decisions go
+
+Record non-obvious decisions — reversals, rejected alternatives, constraints
+future work must not quietly undo — as dated files under `docs/decisions/`
+(its README states the format). Never record secrets, personal data,
+prompts, user content, or environment identifier values.

@@ -35,6 +35,10 @@ spec:
     dev:
       tags:
         environment: dev
+    uat:
+      tags:
+        environment: uat
+        lifecycle: validation
 
   resources:
     # Every golden-path bundle already exposes this logical job key. The Hub keeps the
@@ -50,14 +54,21 @@ spec:
 
   evaluation:
     profile: golden_path_release_gate_v1
-    dataset: {{.catalog}}.{{.schema}}.evaluation_cases
-    minimumCases: 1
+    dataset: {{.catalog}}.{{.schema}}.{{ template "project_name_underscored" . }}_golden_cases
+    minimumCases: 30
     maximumAgeHours: 168
     thresholds:
       gate_pass_rate: 1.0
 
   readiness:
-    profile: development_v1
+    # UAT uses the existing strict profile understood by the pinned SDK.
+    profile: medium_risk_production_v1
+
+  # Logical reference only. The platform resolves and enforces this policy at
+  # the gateway/serving boundary; mutable prices and credentials never belong
+  # in an application manifest.
+  costControls:
+    budgetPolicy: platform_standard_v1
 
   serviceLevels:
     maximumErrorRate: 0.02

@@ -5,7 +5,7 @@ beside each lesson, then return to the **Go deeper** links when you want more
 detail. The course [glossary](glossary.md) gives shorter definitions.
 
 This path favors official documentation and foundational papers. The executable
-project pins MLflow 3.14.0 and scikit-learn 1.9.0; versioned MLflow links match
+project pins MLflow 3.15.1 and scikit-learn 1.9.0; versioned MLflow links match
 the code you run.
 
 ## Before lesson 00: Mac, Python, and notebooks
@@ -76,16 +76,16 @@ immutable version; a digest alone does not answer those questions.
   numeric and categorical preprocessing in one pipeline.
 - [Pipeline](https://scikit-learn.org/stable/modules/generated/sklearn.pipeline.Pipeline.html) —
   the precise sklearn API contract.
-- [MLflow tracking quickstart 3.14.0](https://mlflow.org/docs/3.14.0/ml/getting-started/quickstart/) —
+- [MLflow tracking quickstart 3.15.1](https://mlflow.org/docs/3.15.1/ml/getting-started/quickstart/) —
   experiments, runs, parameters, metrics, and models.
-- [MLflow local database tutorial 3.14.0](https://mlflow.org/docs/3.14.0/ml/tracking/tutorials/local-database/) —
+- [MLflow local database tutorial 3.15.1](https://mlflow.org/docs/3.15.1/ml/tracking/tutorials/local-database/) —
   the SQLite layout used by this course.
 
 **Go deeper**
 
-- [MLflow sklearn guide 3.14.0](https://mlflow.org/docs/3.14.0/ml/traditional-ml/sklearn/) —
+- [MLflow sklearn guide 3.15.1](https://mlflow.org/docs/3.15.1/ml/traditional-ml/sklearn/) —
   explicit logging, autologging, model loading, and evaluation.
-- [MLflow dataset tracking 3.14.0](https://mlflow.org/docs/3.14.0/ml/dataset/) —
+- [MLflow dataset tracking 3.15.1](https://mlflow.org/docs/3.15.1/ml/dataset/) —
   what a logged dataset input records. It does not make a mutable source durable
   or copy all raw data into MLflow.
 
@@ -111,7 +111,7 @@ immutable version; a digest alone does not answer those questions.
 
 **Read now**
 
-- [MLflow model evaluation 3.14.0](https://mlflow.org/docs/3.14.0/ml/evaluation/) —
+- [MLflow model evaluation 3.15.1](https://mlflow.org/docs/3.15.1/ml/evaluation/) —
   classic classifier evaluation. It is different from MLflow GenAI evaluation.
 - [scikit-learn model evaluation](https://scikit-learn.org/stable/modules/model_evaluation.html) —
   metric definitions and scoring behavior.
@@ -127,11 +127,11 @@ immutable version; a digest alone does not answer those questions.
 
 **Read now**
 
-- [MLflow model signatures 3.14.0](https://mlflow.org/docs/3.14.0/ml/model/signatures/) —
+- [MLflow model signatures 3.15.1](https://mlflow.org/docs/3.15.1/ml/model/signatures/) —
   input/output names and types plus input examples.
-- [MLflow Model Registry workflow 3.14.0](https://mlflow.org/docs/3.14.0/ml/model-registry/workflow/) —
+- [MLflow Model Registry workflow 3.15.1](https://mlflow.org/docs/3.15.1/ml/model-registry/workflow/) —
   registered models, numbered versions, tags, and aliases.
-- [MLflow model aliases 3.14.0](https://mlflow.org/docs/3.14.0/ml/model-registry/workflow/#deploy-and-organize-models-with-aliases-and-tags) —
+- [MLflow model aliases 3.15.1](https://mlflow.org/docs/3.15.1/ml/model-registry/workflow/#deploy-and-organize-models-with-aliases-and-tags) —
   movable aliases versus concrete versions.
 
 **Go deeper**
@@ -139,7 +139,7 @@ immutable version; a digest alone does not answer those questions.
 - [scikit-learn model persistence](https://scikit-learn.org/stable/model_persistence.html) —
   environment compatibility and serialization security. Load model artifacts
   only from trusted sources.
-- [MLflow model dependencies 3.14.0](https://mlflow.org/docs/3.14.0/ml/model/dependencies/) —
+- [MLflow model dependencies 3.15.1](https://mlflow.org/docs/3.15.1/ml/model/dependencies/) —
   recorded model environments and reproducible loading.
 
 ## Lesson 09: monitoring, then Databricks

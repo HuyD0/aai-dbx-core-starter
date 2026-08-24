@@ -1,0 +1,4 @@
+interface:
+  display_name: "Change AAI SDK"
+  short_description: "Safely evolve SDK contracts and packaging"
+  default_prompt: "Use $aai-change-sdk to implement and verify this SDK change."

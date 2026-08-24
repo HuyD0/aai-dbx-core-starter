@@ -15,9 +15,9 @@ import argparse
 from pathlib import Path
 
 from aai_core import bootstrap
+from app.config import PROMPT_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
-PROMPT_NAME = "agent-system"
 
 
 def main() -> None:

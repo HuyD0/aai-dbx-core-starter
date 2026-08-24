@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
@@ -35,3 +36,26 @@ def is_missing_scalar(value: Any) -> bool:
         return bool(unequal)
     except (TypeError, ValueError):
         return False
+
+
+def numeric_score(value: Any) -> float | None:
+    """A scorer verdict as a number, matching MLflow's mean aggregation.
+
+    Booleans and yes/no verdicts become 1/0; unsupported categorical values
+    stay ``None`` rather than being assigned an invented ordering.
+    """
+
+    if is_missing_scalar(value):
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, int | float):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"yes", "true", "pass", "passed"}:
+            return 1.0
+        if normalized in {"no", "false", "fail", "failed"}:
+            return 0.0
+    return None

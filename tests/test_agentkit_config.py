@@ -3,6 +3,7 @@
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from aai_core.agentkit.config import (
     AgentkitConfig,
@@ -58,6 +59,43 @@ def test_unknown_keys_are_rejected(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(path)
     assert "surprise" in str(excinfo.value)
+
+
+def test_economics_defaults_are_report_only(tmp_path):
+    config = load_config(_write(tmp_path))
+
+    assert config.economics.enabled is True
+    assert config.economics.price_per_1m_input_tokens is None
+    assert config.economics.price_per_1m_output_tokens is None
+
+
+def test_economics_price_pair_loads_and_coerces(tmp_path):
+    text = MINIMAL + (
+        "economics:\n"
+        "  price_per_1m_input_tokens: 2.5\n"
+        "  price_per_1m_output_tokens: 10\n"
+    )
+
+    config = load_config(_write(tmp_path, text))
+
+    assert config.economics.price_per_1m_input_tokens == 2.5
+    assert config.economics.price_per_1m_output_tokens == 10.0
+
+
+def test_economics_price_pair_is_both_or_neither(tmp_path):
+    text = MINIMAL + "economics:\n  price_per_1m_input_tokens: 2.5\n"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write(tmp_path, text))
+    assert "pair" in str(excinfo.value)
+
+
+def test_economics_unknown_keys_are_rejected(tmp_path):
+    text = MINIMAL + "economics:\n  price_table: builtin\n"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write(tmp_path, text))
+    assert "price_table" in str(excinfo.value)
 
 
 def test_missing_config_names_the_expected_file(tmp_path):
@@ -198,7 +236,7 @@ def test_judge_model_uri_requires_a_databricks_deployment(tmp_path):
     project = ProjectContext(
         config=_config(),
         settings=dev_settings(
-            models={"judge-model": {"provider": "foundry", "deployment": "j"}}
+            models={"judge-model": {"provider": "azure_apim", "deployment": "j"}}
         ),
         root=tmp_path,
     )
@@ -356,3 +394,38 @@ def test_an_unreadable_endpoint_yields_no_identity(tmp_path):
     )
 
     assert project.judge_model_identity(client=client) is None
+
+
+def test_integrity_config_defaults_are_inert():
+    config = AgentkitConfig(
+        version=1, agent="src/app.py:respond", dataset="evals/data/cases.json"
+    )
+    assert config.integrity.consistency_sample == 0
+    assert config.integrity.require_anchors is False
+    assert config.integrity.require_calibration is False
+    assert config.integrity.anchors == "evals/judge_anchors.json"
+
+
+def test_integrity_config_parses_and_bounds_the_knobs():
+    config = AgentkitConfig(
+        version=1,
+        agent="src/app.py:respond",
+        dataset="evals/data/cases.json",
+        integrity={
+            "consistency_sample": 8,
+            "max_self_inconsistency": 0.25,
+            "anchors": "evals/frozen.json",
+            "max_anchor_drift": 0.05,
+            "require_anchors": True,
+        },
+    )
+    assert config.integrity.consistency_sample == 8
+    assert config.integrity.max_anchor_drift == 0.05
+    assert config.integrity.anchors == "evals/frozen.json"
+    with pytest.raises(ValidationError):
+        AgentkitConfig(
+            version=1,
+            agent="src/app.py:respond",
+            dataset="evals/data/cases.json",
+            integrity={"unknown_knob": True},
+        )

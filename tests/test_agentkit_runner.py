@@ -216,7 +216,7 @@ class FakeMlflow:
         self.genai = SimpleNamespace(
             evaluate=self._evaluate,
             scorers=SimpleNamespace(scorer=self._scorer, **_BUILTIN_FAKES),
-            make_judge=lambda **kwargs: SimpleNamespace(**kwargs),
+            make_judge=SimpleNamespace,
         )
 
     # --- experiment plumbing -------------------------------------------
@@ -227,10 +227,10 @@ class FakeMlflow:
         info = SimpleNamespace(run_id=self.run_id, experiment_id=self.experiment_id)
 
         class _Run:
-            def __enter__(inner):
+            def __enter__(self):
                 return SimpleNamespace(info=info)
 
-            def __exit__(inner, *args):
+            def __exit__(self, *args):
                 return False
 
         return _Run()
@@ -251,7 +251,7 @@ class FakeMlflow:
         outer = self
 
         class _Client:
-            def log_artifact(inner, run_id, local_path, artifact_path=None):
+            def log_artifact(self, run_id, local_path, artifact_path=None):
                 outer.run_artifacts.append(
                     (run_id, Path(local_path).name, artifact_path)
                 )
@@ -2748,7 +2748,7 @@ def test_a_traces_run_still_carries_its_traces(tmp_path):
     assert all("trace" in row for row in call["data"])
 
 
-def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
+def test_a_traces_run_preserves_curated_expectations(tmp_path):
     project = _traced_project(
         tmp_path,
         trace=lambda i: _serialized_trace(
@@ -2767,9 +2767,11 @@ def test_a_traces_run_says_when_mlflow_will_replace_the_expectations(tmp_path):
         mlflow_module=fake,
     )
 
-    assert any(
-        "trace's assessments" in warning for warning in outcome.warnings
-    ), outcome.warnings
+    assert not any("expectation" in warning for warning in outcome.warnings)
+    assert all(
+        row["expectations"]["expected_response"].startswith("answer")
+        for row in fake.evaluate_calls[0]["data"]
+    )
 
 
 def test_a_live_run_prices_the_fanout_it_will_actually_have(tmp_path):
@@ -2876,13 +2878,8 @@ def test_a_trace_without_a_usable_request_or_root_span_is_refused(tmp_path):
     assert fake.evaluate_calls == []
 
 
-def test_a_trace_replaced_expectation_removes_the_scorer_it_fed(tmp_path):
-    """The plan must not promise what MLflow will have taken away.
-
-    One trace assessment replaces the whole expectations column, so the
-    rows without one lose `expected_response` entirely — and
-    keyword_coverage reads an absent expected response as a vacuous 1.0.
-    """
+def test_a_trace_assessment_does_not_remove_an_authored_scorer(tmp_path):
+    """MLflow 3.15 keeps the curated column used to select the scorer."""
 
     def trace(index):
         assessments = (
@@ -2905,6 +2902,636 @@ def test_a_trace_replaced_expectation_removes_the_scorer_it_fed(tmp_path):
     )
 
     selected = {entry.spec.name for entry in outcome.plan.entries}
-    assert "keyword_coverage" not in selected
-    excluded = {item.spec.name: item.reason for item in outcome.plan.excluded}
-    assert "expected_response" in excluded.get("keyword_coverage", "")
+    assert "keyword_coverage" in selected
+
+
+# --- judge integrity and release binding ------------------------------------
+
+
+class _Frame:
+    """The minimal result_df surface the runner reads (duck-typed)."""
+
+    def __init__(self, data):
+        self._data = dict(data)
+        self.columns = list(self._data)
+
+    def __getitem__(self, name):
+        return self._data[name]
+
+    def get(self, name):
+        return self._data.get(name)
+
+
+class _ReinvocableJudge:
+    """A builtin-scorer stand-in whose re-invocation agrees with pass one."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def __call__(self, **kwargs):
+        return "yes"
+
+
+class JudgedFakeMlflow(FakeMlflow):
+    """A fake whose evaluate returns per-row scores and re-invocable judges."""
+
+    def __init__(self, rows=12, **kwargs):
+        super().__init__(**kwargs)
+        self.rows = rows
+        self.genai.scorers.Correctness = _ReinvocableJudge
+        self.genai.scorers.Safety = _ReinvocableJudge
+
+    def _evaluate(self, data=None, scorers=None, predict_fn=None):
+        self.evaluate_calls.append(
+            {"data": data, "scorers": scorers, "predict_fn": predict_fn}
+        )
+        count = len(data) if data is not None else self.rows
+        frame = _Frame(
+            {
+                "correctness/value": ["yes"] * count,
+                "safety/value": ["yes"] * count,
+            }
+        )
+        return SimpleNamespace(metrics=dict(self.metrics_to_return), result_df=frame)
+
+
+_INTEGRITY_CONFIG = (
+    "version: 1\n"
+    "agent: src/app/example_agent.py:respond\n"
+    "dataset: evals/data/golden_cases.json\n"
+    "integrity:\n"
+    "  consistency_sample: 3\n"
+)
+
+
+def test_judged_establish_freezes_anchors_and_measures_consistency(tmp_path):
+    from aai_core.agentkit.integrity import (
+        SELF_INCONSISTENCY_METRIC,
+        load_anchors,
+    )
+
+    project = _project(tmp_path, config_text=_INTEGRITY_CONFIG)
+    fake = JudgedFakeMlflow()
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=fake,
+    )
+
+    assert code == EXIT_PASS
+    results = outcome.results
+    assert results.integrity is not None
+    assert results.integrity.consistency.overall == 0.0
+    assert results.integrity.consistency.sample_size == 3
+    assert results.metrics[SELF_INCONSISTENCY_METRIC] == 0.0
+    assert fake.logged_metrics[SELF_INCONSISTENCY_METRIC] == 0.0
+
+    anchors = load_anchors(tmp_path / "evals" / "judge_anchors.json")
+    assert anchors.rows
+    assert all({"correctness", "safety"} <= set(row.scores) for row in anchors.rows)
+    assert anchors.scorer_versions == {"correctness": 1, "safety": 1}
+    assert any("Judge anchors frozen" in message for message in outcome.messages)
+
+
+def test_anchor_drift_is_measured_on_the_next_judged_run(tmp_path):
+    from aai_core.agentkit.integrity import ANCHOR_DRIFT_METRIC
+
+    project = _project(tmp_path, config_text=_INTEGRITY_CONFIG)
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=JudgedFakeMlflow(),
+    )
+    assert code == EXIT_PASS
+
+    outcome, code = run_scoring(
+        project,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=JudgedFakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    drift = outcome.results.integrity.anchor_drift
+    assert drift is not None
+    assert drift.overall == 0.0
+    assert outcome.results.metrics[ANCHOR_DRIFT_METRIC] == 0.0
+
+
+def test_unconfigured_projects_write_no_anchor_file(tmp_path):
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=JudgedFakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.integrity is None
+    assert not (tmp_path / "evals" / "judge_anchors.json").exists()
+
+
+def test_release_identity_comes_from_the_deployed_commit(tmp_path, monkeypatch):
+    release = "d" * 40
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setenv("AAI_RELEASE", release)
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.release == release
+    assert outcome.results.change_id == release[:12]
+    assert any(
+        "baseline establish --from-run" in warning
+        for warning in outcome.results.warnings
+    )
+
+
+def test_local_dev_release_records_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setenv("AAI_RELEASE", "local-dev")
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.release is None
+    assert not any(
+        "baseline establish --from-run" in warning
+        for warning in outcome.results.warnings
+    )
+
+
+# --- calibration enforcement and baseline-from-run --------------------------
+
+
+_REQUIRE_CALIBRATION_CONFIG = (
+    "version: 1\n"
+    "agent: src/app/example_agent.py:respond\n"
+    "dataset: evals/data/golden_cases.json\n"
+    "integrity:\n"
+    "  require_calibration: true\n"
+)
+
+
+def _calibrate_every_catalog_judge(root):
+    from aai_core.agentkit.calibration import (
+        CalibrationRecord,
+        calibration_path,
+        write_calibration,
+    )
+    from aai_core.agentkit.catalog import CATALOG
+
+    for spec in CATALOG:
+        if spec.judge is None:
+            continue
+        write_calibration(
+            calibration_path(root, "evals/judges", spec.name),
+            CalibrationRecord(
+                scorer=spec.name,
+                scorer_version=spec.version,
+                labels_digest="0" * 64,
+                sample_size=20,
+                annotator_count=2,
+                percent_agreement=0.9,
+                kappa=0.8,
+                passed=True,
+                recorded_at="2026-08-19T10:00:00Z",
+            ),
+        )
+
+
+def test_require_calibration_refuses_before_any_judge_spend(tmp_path):
+    project = _project(tmp_path, config_text=_REQUIRE_CALIBRATION_CONFIG)
+    fake = FakeMlflow()
+
+    with pytest.raises(ConfigError, match="require_calibration"):
+        run_scoring(
+            project,
+            establish_baseline=True,
+            judges_enabled=True,
+            mode="answer-sheet",
+            assume_yes=True,
+            mlflow_module=fake,
+        )
+
+    assert fake.evaluate_calls == []
+
+
+def test_calibrated_judges_clear_the_requirement(tmp_path):
+    project = _project(tmp_path, config_text=_REQUIRE_CALIBRATION_CONFIG)
+    _calibrate_every_catalog_judge(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+
+
+def test_smoke_never_requires_calibration(tmp_path):
+    project = _project(tmp_path, config_text=_REQUIRE_CALIBRATION_CONFIG)
+
+    outcome, code = run_scoring(
+        project,
+        command="smoke",
+        judges_enabled=False,
+        mode="answer-sheet",
+        assume_yes=True,
+        require_baseline=False,
+    )
+
+    assert code == EXIT_PASS
+
+
+def _verified_results_record(project, run_id="run-9", **overrides):
+    from aai_core.agentkit.baseline import (
+        BaselineDataset,
+        BaselineScope,
+        BaselineVersions,
+    )
+    from aai_core.agentkit.gate import build_policy
+    from aai_core.agentkit.results import ResultsRecord
+
+    policy = build_policy(project, scorer_names=("keyword_coverage",))
+    values = {
+        "command": "compare",
+        "recorded_at": "2026-08-18T10:00:00Z",
+        "run_id": run_id,
+        "experiment_id": "42",
+        "experiment_name": "/Shared/quality-eval",
+        "agent": "src/app/example_agent.py:respond",
+        "dataset": BaselineDataset(
+            ref="evals/data/golden_cases.json", digest="a" * 16, rows=12
+        ),
+        "scope": BaselineScope(mode="full", rows=12),
+        "mode": "answer-sheet",
+        "metrics": {
+            "keyword_coverage/mean": 0.9,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+        },
+        "versions": BaselineVersions(
+            agent="src/app/example_agent.py:respond",
+            scorers={"keyword_coverage": 2},
+            judge_model="endpoints:/judge-endpoint",
+            aai_core="0.4.0",
+        ),
+        "baseline_run_id": "run-0",
+        "baseline_metrics": {"keyword_coverage/mean": 0.85},
+        "policy_rules": policy.rules,
+        "decision": "inconclusive",
+        "change_id": "abc123456789",
+        "gate_passed": True,
+        "judges_enabled": True,
+    }
+    values.update(overrides)
+    return ResultsRecord(**values)
+
+
+class _FetchableMlflow(FakeMlflow):
+    """FakeMlflow that also serves a results artifact for fetch_results.
+
+    The real module exposes downloads as ``mlflow.artifacts``, which the
+    base fake uses as its log_artifact ledger — so the ledger moves aside
+    and the attribute takes the module's actual shape.
+    """
+
+    def __init__(self, artifact_path_by_run, **kwargs):
+        super().__init__(**kwargs)
+        self.logged_artifact_files = self.artifacts
+        self.artifacts = SimpleNamespace(
+            download_artifacts=(
+                lambda run_id, artifact_path: str(artifact_path_by_run[run_id])
+            )
+        )
+
+    def log_artifact(self, path, artifact_path=None):
+        self.logged_artifact_files.append((Path(path).name, artifact_path))
+
+
+def _served_record(tmp_path, project, **overrides):
+    record = _verified_results_record(project, **overrides)
+    path = tmp_path / "served-results.json"
+    path.write_text(
+        json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+    )
+    return record, _FetchableMlflow({record.run_id: path})
+
+
+def test_baseline_establish_from_run_moves_the_reference(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project)
+
+    messages, code = establish_baseline_from_run(
+        project,
+        record.run_id,
+        decided_by="group:pension-ai-owners",
+        mlflow_module=fake,
+    )
+
+    assert code == EXIT_PASS
+    joined = "\n".join(messages)
+    assert "adopt decision recorded" in joined
+    assert f"baseline -> run {record.run_id}" in joined
+    assert "pull request" in joined
+    baseline, _ = load_baseline(project.baseline_path)
+    assert baseline.run_id == record.run_id
+    assert baseline.recorded_by == "agentkit baseline establish --from-run"
+    assert baseline.metrics["keyword_coverage/mean"] == 0.9
+    # The governed adopt decision landed as a run with the decision tags.
+    assert fake.tags.get("aai.decision") == "adopt"
+
+
+def test_baseline_establish_accepts_an_existing_adopt_decision(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project, decision="adopt")
+
+    messages, code = establish_baseline_from_run(
+        project, record.run_id, mlflow_module=fake
+    )
+
+    assert code == EXIT_PASS
+    assert not any("adopt decision recorded" in message for message in messages)
+
+
+def test_baseline_establish_refuses_without_adopt_evidence(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project)
+
+    messages, code = establish_baseline_from_run(
+        project, record.run_id, mlflow_module=fake
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert any("--decided-by" in message for message in messages)
+    assert not project.baseline_path.exists()
+
+
+def test_baseline_establish_refuses_a_failing_gate(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(
+        tmp_path,
+        project,
+        metrics={
+            "keyword_coverage/mean": 0.2,
+            "refusal_compliance/mean": 1.0,
+            "response_length_ok/mean": 1.0,
+        },
+        gate_passed=False,
+    )
+
+    messages, code = establish_baseline_from_run(
+        project, record.run_id, decided_by="group:owners", mlflow_module=fake
+    )
+
+    assert code == EXIT_THRESHOLD_FAILED
+    assert any("does not pass its own recorded gate" in m for m in messages)
+    assert not project.baseline_path.exists()
+
+
+def test_baseline_establish_refuses_judge_free_and_smoke_runs(tmp_path):
+    from aai_core.agentkit.runner import establish_baseline_from_run
+
+    project = _project(tmp_path)
+    record, fake = _served_record(tmp_path, project, judges_enabled=False)
+    with pytest.raises(ConfigError, match="without judges"):
+        establish_baseline_from_run(project, record.run_id, mlflow_module=fake)
+
+    record, fake = _served_record(tmp_path, project, run_id="run-10", command="smoke")
+    with pytest.raises(ConfigError, match="smoke"):
+        establish_baseline_from_run(project, record.run_id, mlflow_module=fake)
+
+
+# --- run economics ---------------------------------------------------------
+
+
+def _economics_envelope(index, *, cost=None, tokens=(20, 10), duration_ms=400):
+    """A minimal v3-shaped trace document carrying usage metadata."""
+
+    metadata = {
+        "mlflow.trace.tokenUsage": json.dumps(
+            {
+                "input_tokens": tokens[0],
+                "output_tokens": tokens[1],
+                "total_tokens": tokens[0] + tokens[1],
+            }
+        )
+    }
+    if cost is not None:
+        metadata["mlflow.trace.cost"] = json.dumps({"total_cost": cost})
+    return {
+        "info": {
+            "trace_id": f"tr-{index:032x}",
+            "state": "OK",
+            "trace_metadata": metadata,
+            "execution_duration_ms": duration_ms,
+        },
+        "data": {"spans": []},
+    }
+
+
+def _frame_mlflow(frame):
+    mlflow = FakeMlflow()
+    mlflow._evaluate = lambda data=None, scorers=None, predict_fn=None: (
+        mlflow.evaluate_calls.append({"data": data, "predict_fn": predict_fn})
+        or SimpleNamespace(metrics=dict(mlflow.metrics_to_return), result_df=frame)
+    )
+    mlflow.genai = SimpleNamespace(
+        evaluate=mlflow._evaluate,
+        scorers=mlflow.genai.scorers,
+        make_judge=mlflow.genai.make_judge,
+    )
+    return mlflow
+
+
+def test_live_run_records_economics_from_the_result_frame(tmp_path):
+    """The frame's traces are the execution that was scored — and paid for."""
+
+    project = _project(tmp_path)
+    frame = _Frame(
+        {
+            "trace": [_economics_envelope(index, cost=0.01) for index in range(12)],
+            "error_message": [None, "agent exploded"] + [None] * 10,
+        }
+    )
+    mlflow = _frame_mlflow(frame)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    economics = outcome.results.economics
+    assert economics is not None
+    assert economics.successes == 11
+    assert economics.cost_source == "trace"
+    assert outcome.results.metrics["cost/coverage"] == 1.0
+    # The failed row's spend still lands on the successes.
+    assert outcome.results.metrics["economics/cost_per_success_usd"] == pytest.approx(
+        0.12 / 11
+    )
+    assert mlflow.logged_metrics["economics/success_rate"] == pytest.approx(11 / 12)
+    assert any(row.metric == "economics/success_rate" for row in outcome.comparison)
+    assert any("run economics:" in message for message in outcome.messages)
+
+
+def test_answer_sheet_run_records_no_economics(tmp_path):
+    """Replay has no agent trace; the judges' own traces are not agent spend."""
+
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.economics is None
+    assert not any(
+        metric.startswith("economics/")
+        or metric in ("cost/coverage", "tokens/coverage")
+        for metric in outcome.results.metrics
+    )
+    assert not any("economics" in warning for warning in outcome.results.warnings)
+
+
+def test_traces_run_reads_economics_from_stored_envelopes(tmp_path):
+    _project(tmp_path)
+    rows = []
+    for index in range(12):
+        trace = _serialized_trace(index)
+        trace["info"]["trace_metadata"] = {
+            "mlflow.trace.tokenUsage": json.dumps(
+                {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+            ),
+            "mlflow.trace.cost": json.dumps({"total_cost": 0.005}),
+        }
+        trace["info"]["execution_duration_ms"] = 1500
+        rows.append(
+            {
+                "inputs": {"question": f"question {index}"},
+                "expectations": {"expected_response": f"answer {index} about pensions"},
+                "trace": trace,
+            }
+        )
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(rows))
+    project = ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.mode == "traces"
+    economics = outcome.results.economics
+    assert economics is not None
+    assert economics.cost_known == 12
+    assert economics.llm_calls == (1,) * 12
+    assert outcome.results.metrics["economics/cost_per_success_usd"] == pytest.approx(
+        0.005
+    )
+    assert outcome.results.metrics["economics/latency_p95_seconds"] == pytest.approx(
+        1.5
+    )
+
+
+def test_frameless_live_run_degrades_with_a_warning(tmp_path):
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.economics is None
+    assert any("no per-row traces" in warning for warning in outcome.results.warnings)
+    assert "cost/coverage" not in outcome.results.metrics
+
+
+def test_disabled_economics_records_nothing_and_warns_nothing(tmp_path):
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: src/app/example_agent.py:respond\n"
+            "dataset: evals/data/golden_cases.json\n"
+            "economics:\n"
+            "  enabled: false\n"
+        ),
+    )
+    frame = _Frame({"trace": [_economics_envelope(index) for index in range(12)]})
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=_frame_mlflow(frame),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.economics is None
+    assert not any("economics" in warning for warning in outcome.results.warnings)

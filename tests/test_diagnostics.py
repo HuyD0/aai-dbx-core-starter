@@ -35,6 +35,20 @@ def test_doctor_passes_on_valid_config_without_cloud(tmp_path):
     assert all("install aai-core[" in check.detail for check in skipped)
 
 
+def test_doctor_fails_when_configuration_file_is_missing(tmp_path):
+    missing = tmp_path / "missing.yml"
+
+    checks = run_doctor(config_path=missing)
+
+    assert checks == [
+        type(checks[0])(
+            "configuration",
+            "fail",
+            f"configuration file does not exist: {missing}",
+        )
+    ]
+
+
 def test_doctor_reports_lifecycle_readiness_as_skips_not_failures(tmp_path):
     config = tmp_path / "aai-platform.yml"
     config.write_text(VALID_CONFIG, encoding="utf-8")

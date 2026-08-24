@@ -2,9 +2,9 @@
 
 The ``agent:`` value resolves by shape — a logical model from
 ``aai-platform.yml``, a Databricks serving endpoint, a UC registered model,
-any HTTP/JSON endpoint (a Foundry hosted agent included), a local Python
-callable, or a recorded answer sheet. Detection is pure string/filesystem
-logic; adapter construction imports heavy clients lazily.
+any HTTP/JSON endpoint, a local Python callable, or a recorded answer
+sheet. Detection is pure string/filesystem logic; adapter construction
+imports heavy clients lazily.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aai_core.agentkit.config import ProjectContext, RequestMapping
 from aai_core.agentkit.errors import (
@@ -88,40 +88,12 @@ def resolve_target(
     reference = str(ref).strip()
     if not reference:
         raise TargetResolutionError("agent must not be blank")
-    if reference.startswith("endpoints:/"):
-        return Target(TargetKind.SERVING_ENDPOINT, reference, reference)
-    if reference.startswith("models:/"):
-        normalized = _validated_model_uri(reference)
-        return Target(TargetKind.UC_MODEL, normalized, normalized)
-    if reference.startswith(("http://", "https://")):
-        normalized = _validated_http_url(reference)
-        return Target(TargetKind.HTTP, normalized, normalized)
-    if ":" in reference and not reference.startswith(("/", "\\")):
-        location, _, attribute = reference.rpartition(":")
-        if location.endswith(".py"):
-            path = root / location
-            if not path.is_file():
-                raise TargetResolutionError(
-                    f"agent {reference!r} points at {path}, which does not " "exist"
-                )
-            if not attribute.isidentifier():
-                raise TargetResolutionError(
-                    f"agent {reference!r} needs a function name after ':'"
-                )
-            return Target(
-                TargetKind.LOCAL_CALLABLE,
-                reference,
-                reference,
-                path=path,
-                attribute=attribute,
-            )
-        if _MODULE_PATH.match(location) and attribute.isidentifier():
-            return Target(
-                TargetKind.LOCAL_CALLABLE,
-                reference,
-                reference,
-                attribute=attribute,
-            )
+    prefixed = _prefixed_target(reference)
+    if prefixed is not None:
+        return prefixed
+    local = _local_reference_target(reference, root)
+    if local is not None:
+        return local
     candidate = root / reference
     if candidate.is_file() and candidate.suffix in {".json", ".jsonl"}:
         return Target(TargetKind.ANSWER_SHEET, reference, reference, path=candidate)
@@ -134,6 +106,53 @@ def resolve_target(
         f"could not resolve agent {reference!r}. Supported shapes:\n{shapes}",
         remediation="Set `agent:` in agentkit.yaml to one of the shapes above.",
     )
+
+
+def _prefixed_target(reference: str) -> Target | None:
+    """Resolve target forms with an unambiguous explicit prefix."""
+
+    if reference.startswith("endpoints:/"):
+        return Target(TargetKind.SERVING_ENDPOINT, reference, reference)
+    if reference.startswith("models:/"):
+        normalized = _validated_model_uri(reference)
+        return Target(TargetKind.UC_MODEL, normalized, normalized)
+    if reference.startswith(("http://", "https://")):
+        normalized = _validated_http_url(reference)
+        return Target(TargetKind.HTTP, normalized, normalized)
+    return None
+
+
+def _local_reference_target(reference: str, root: Path) -> Target | None:
+    """Resolve a file or module callable without importing application code."""
+
+    if ":" not in reference or reference.startswith(("/", "\\")):
+        return None
+    location, _, attribute = reference.rpartition(":")
+    if location.endswith(".py"):
+        path = root / location
+        if not path.is_file():
+            raise TargetResolutionError(
+                f"agent {reference!r} points at {path}, which does not exist"
+            )
+        if not attribute.isidentifier():
+            raise TargetResolutionError(
+                f"agent {reference!r} needs a function name after ':'"
+            )
+        return Target(
+            TargetKind.LOCAL_CALLABLE,
+            reference,
+            reference,
+            path=path,
+            attribute=attribute,
+        )
+    if _MODULE_PATH.match(location) and attribute.isidentifier():
+        return Target(
+            TargetKind.LOCAL_CALLABLE,
+            reference,
+            reference,
+            attribute=attribute,
+        )
+    return None
 
 
 def preflight_target(
@@ -221,15 +240,29 @@ def _validated_model_uri(reference: str) -> str:
 
 
 def _preflight_local_file(target: Target) -> None:
+    module = _parse_local_module(target)
+    attribute = target.attribute or ""
+    binding, dynamic_attributes = _inspect_local_bindings(module, attribute)
+    _require_callable_binding(target, attribute, binding, dynamic_attributes)
+
+
+def _parse_local_module(target: Target) -> ast.Module:
+    """Parse a local target without executing it."""
+
+    path = target.path
+    assert path is not None
     try:
-        source = target.path.read_text(encoding="utf-8")  # type: ignore[union-attr]
-        module = ast.parse(source, filename=str(target.path))
+        source = path.read_text(encoding="utf-8")
+        return ast.parse(source, filename=str(path))
     except (OSError, SyntaxError) as error:
         raise TargetResolutionError(
             f"could not inspect local agent {target.ref!r}: {error}"
         ) from error
 
-    attribute = target.attribute or ""
+
+def _inspect_local_bindings(module: ast.Module, attribute: str) -> tuple[str, bool]:
+    """Return the final statically knowable binding and dynamic-lookup flag."""
+
     binding = "absent"
     dynamic_attributes = False
     for node in module.body:
@@ -237,32 +270,39 @@ def _preflight_local_file(target: Target) -> None:
         if outcome is not None:
             binding = outcome
             continue
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == "__getattr__":
-                dynamic_attributes = True
-            if _definition_has_import_time_effect(node):
-                binding = "unknown"
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            if node.value is not None and any(
-                isinstance(item, (ast.Call, ast.NamedExpr))
-                for item in ast.walk(node.value)
-            ):
-                binding = "unknown"
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            if isinstance(node, ast.ImportFrom) and any(
-                alias.name == "*" for alias in node.names
-            ):
-                binding = "unknown"
-        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-            # Module docstring or another inert literal.
-            continue
-        elif isinstance(node, ast.Pass):
-            continue
-        else:
-            # Conditional definitions, try/except imports, exec-like calls,
-            # module __getattr__, and other dynamic module code make absence
-            # unknowable without executing application code.
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == "__getattr__"
+        ):
+            dynamic_attributes = True
+        if _statement_makes_binding_uncertain(node):
             binding = "unknown"
+    return binding, dynamic_attributes
+
+
+def _statement_makes_binding_uncertain(node: ast.stmt) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return _definition_has_import_time_effect(node)
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return node.value is not None and any(
+            isinstance(item, (ast.Call, ast.NamedExpr)) for item in ast.walk(node.value)
+        )
+    if isinstance(node, ast.ImportFrom):
+        return any(alias.name == "*" for alias in node.names)
+    if isinstance(node, ast.Import):
+        return False
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+        return False
+    return not isinstance(node, ast.Pass)
+
+
+def _require_callable_binding(
+    target: Target,
+    attribute: str,
+    binding: str,
+    dynamic_attributes: bool,
+) -> None:
+    """Reject a binding only when static inspection proves it invalid."""
 
     if binding in {"callable", "unknown"}:
         return
@@ -339,32 +379,13 @@ def _top_level_binding(node: ast.stmt, name: str) -> str | None:
     """
 
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        if node.name != name:
-            return None
-        if node.decorator_list:
-            return "unknown"
-        return "async" if isinstance(node, ast.AsyncFunctionDef) else "callable"
+        return _definition_binding(node, name)
     if isinstance(node, ast.Assign):
-        if any(
-            isinstance(target, ast.Name) and target.id == name
-            for target in node.targets
-        ):
-            return _assigned_value_kind(node.value)
-        if any(_binds_name(target, name) for target in node.targets):
-            return "unknown"
-        return None
+        return _assignment_binding(node, name)
     if isinstance(node, ast.AnnAssign):
-        if not isinstance(node.target, ast.Name) or node.target.id != name:
-            return None
-        # A bare annotation does not bind the name at runtime.
-        return None if node.value is None else _assigned_value_kind(node.value)
+        return _annotated_binding(node, name)
     if isinstance(node, (ast.Import, ast.ImportFrom)):
-        if any(
-            (alias.asname or alias.name.rpartition(".")[2]) == name
-            for alias in node.names
-        ):
-            return "unknown"
-        return None
+        return _import_binding(node, name)
     if isinstance(node, ast.AugAssign) and _binds_name(node.target, name):
         return "unknown"
     if isinstance(node, ast.Delete) and any(
@@ -372,6 +393,41 @@ def _top_level_binding(node: ast.stmt, name: str) -> str | None:
     ):
         return "absent"
     return None
+
+
+def _definition_binding(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    name: str,
+) -> str | None:
+    if node.name != name:
+        return None
+    if node.decorator_list:
+        return "unknown"
+    return "async" if isinstance(node, ast.AsyncFunctionDef) else "callable"
+
+
+def _assignment_binding(node: ast.Assign, name: str) -> str | None:
+    if any(
+        isinstance(target, ast.Name) and target.id == name for target in node.targets
+    ):
+        return _assigned_value_kind(node.value)
+    if any(_binds_name(target, name) for target in node.targets):
+        return "unknown"
+    return None
+
+
+def _annotated_binding(node: ast.AnnAssign, name: str) -> str | None:
+    if not isinstance(node.target, ast.Name) or node.target.id != name:
+        return None
+    # A bare annotation does not bind the name at runtime.
+    return None if node.value is None else _assigned_value_kind(node.value)
+
+
+def _import_binding(node: ast.Import | ast.ImportFrom, name: str) -> str | None:
+    imported = any(
+        (alias.asname or alias.name.rpartition(".")[2]) == name for alias in node.names
+    )
+    return "unknown" if imported else None
 
 
 def _assigned_value_kind(value: ast.expr) -> str:
@@ -456,9 +512,9 @@ def _expression_has_effect(node: ast.AST) -> bool:
         def visit_Lambda(self, expression: ast.Lambda) -> None:  # noqa: N802
             for default in expression.args.defaults:
                 self.visit(default)
-            for default in expression.args.kw_defaults:
-                if default is not None:
-                    self.visit(default)
+            for keyword_default in expression.args.kw_defaults:
+                if keyword_default is not None:
+                    self.visit(keyword_default)
 
     visitor = EffectVisitor()
     visitor.visit(node)
@@ -559,11 +615,47 @@ def build_predict_fn(
         return call(inputs)
 
     predict.__name__ = "agent"
-    traced = mlflow.trace(predict)
-    return traced
+    return cast(Callable[..., Any], mlflow.trace(predict))
 
 
 def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
+    module = _load_local_module(target)
+    function, signature = _local_function(target, module)
+    parameters = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+    ]
+    accepts_var_keyword = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    single_argument = len(parameters) == 1 and not accepts_var_keyword
+
+    def call(inputs: Mapping[str, Any]) -> Any:
+        try:
+            return _invoke_local(
+                target,
+                function,
+                signature,
+                parameters,
+                single_argument,
+                inputs,
+            )
+        except TargetContractError:
+            raise
+        except Exception as error:
+            raise TargetInvocationError(
+                f"agent call failed for {target.ref!r}: {error}"
+            ) from error
+
+    return call
+
+
+def _load_local_module(target: Target) -> Any:
+    """Load the already-preflighted local module."""
+
     if target.path is not None:
         specification = importlib.util.spec_from_file_location(
             "aai_agentkit_target", target.path
@@ -585,6 +677,12 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
             raise TargetResolutionError(
                 f"could not import module {module_name!r}: {error}"
             ) from error
+    return module
+
+
+def _local_function(target: Target, module: Any) -> tuple[Callable[..., Any], Any]:
+    """Resolve a synchronous callable and its inspectable signature."""
+
     function = getattr(module, target.attribute or "", None)
     if not callable(function):
         raise TargetResolutionError(
@@ -606,76 +704,61 @@ def _local_call(target: Target) -> Callable[[Mapping[str, Any]], Any]:
                 "AgentKit can map dataset inputs before evaluation."
             ),
         ) from error
-    parameters = [
-        parameter
-        for parameter in signature.parameters.values()
-        if parameter.kind
-        not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
-    ]
-    accepts_var_keyword = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    single_argument = len(parameters) == 1 and not accepts_var_keyword
+    return function, signature
 
-    def call(inputs: Mapping[str, Any]) -> Any:
-        try:
-            if single_argument:
-                parameter = parameters[0]
-                name = parameter.name
-                if len(inputs) == 1:
-                    value = (
-                        inputs[name] if name in inputs else next(iter(inputs.values()))
-                    )
-                    if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
-                        arguments: tuple[Any, ...] = ()
-                        keywords = {name: value}
-                    else:
-                        arguments = (value,)
-                        keywords = {}
-                else:
-                    # Do not discard row fields merely because the target's
-                    # declared argument is present. Binding the complete
-                    # mapping makes an incomplete agent contract fail before
-                    # the target or any judges are invoked.
-                    arguments = ()
-                    keywords = dict(inputs)
-            else:
-                arguments = ()
-                keywords = dict(inputs)
-            try:
-                signature.bind(*arguments, **keywords)
-            except TypeError as error:
-                raise TargetContractError(
-                    f"{target.ref!r} cannot accept dataset input keys "
-                    f"{sorted(inputs)}: {error}",
-                    remediation=(
-                        "Align the callable parameters with the dataset's "
-                        "inputs fields."
-                    ),
-                ) from error
-            result = function(*arguments, **keywords)
-            if inspect.isawaitable(result):
-                close = getattr(result, "close", None)
-                if callable(close):
-                    close()
-                raise TargetContractError(
-                    f"{target.ref!r} returned an awaitable, but AgentKit's "
-                    "local target adapter is synchronous",
-                    remediation=(
-                        "Await the operation inside a synchronous wrapper and "
-                        "return the final answer."
-                    ),
-                )
-            return result
-        except TargetContractError:
-            raise
-        except Exception as error:
-            raise TargetInvocationError(
-                f"agent call failed for {target.ref!r}: {error}"
-            ) from error
 
-    return call
+def _invoke_local(
+    target: Target,
+    function: Callable[..., Any],
+    signature: Any,
+    parameters: list[Any],
+    single_argument: bool,
+    inputs: Mapping[str, Any],
+) -> Any:
+    arguments, keywords = _local_arguments(parameters, single_argument, inputs)
+    try:
+        signature.bind(*arguments, **keywords)
+    except TypeError as error:
+        raise TargetContractError(
+            f"{target.ref!r} cannot accept dataset input keys "
+            f"{sorted(inputs)}: {error}",
+            remediation=(
+                "Align the callable parameters with the dataset's inputs fields."
+            ),
+        ) from error
+    result = function(*arguments, **keywords)
+    if inspect.isawaitable(result):
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        raise TargetContractError(
+            f"{target.ref!r} returned an awaitable, but AgentKit's local "
+            "target adapter is synchronous",
+            remediation=(
+                "Await the operation inside a synchronous wrapper and return "
+                "the final answer."
+            ),
+        )
+    return result
+
+
+def _local_arguments(
+    parameters: list[Any],
+    single_argument: bool,
+    inputs: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    if not single_argument:
+        return (), dict(inputs)
+    parameter = parameters[0]
+    name = parameter.name
+    if len(inputs) != 1:
+        # Do not discard extra row fields just because one matches the declared
+        # parameter. Binding the complete mapping makes drift fail closed.
+        return (), dict(inputs)
+    value = inputs[name] if name in inputs else next(iter(inputs.values()))
+    if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+        return (), {name: value}
+    return (value,), {}
 
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -925,7 +1008,7 @@ def _urllib_transport(request: urllib.request.Request) -> bytes:
     with _OPENER.open(  # noqa: S310 - https target configured by user
         request, timeout=_HTTP_TIMEOUT_SECONDS
     ) as response:
-        return response.read()
+        return cast(bytes, response.read())
 
 
 def _primary_input(inputs: Mapping[str, Any]) -> Any:

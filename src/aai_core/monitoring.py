@@ -39,6 +39,58 @@ _SOURCE_NAMESPACES = {
 }
 
 
+def _normalized_identifier(value: object, label: str) -> str:
+    """Validate and trim an identifier before it reaches MLflow."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string; got {type(value).__name__}")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{label} must not be blank")
+    return normalized
+
+
+def _normalized_span_id(value: object | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return _normalized_identifier(value, "span_id")
+    except ValueError as error:
+        raise ValueError("span_id must not be blank when provided") from error
+
+
+def _source_kind(value: FeedbackSourceKind | str) -> FeedbackSourceKind:
+    if isinstance(value, FeedbackSourceKind):
+        return value
+    return FeedbackSourceKind(str(value).strip().lower())
+
+
+def _validated_source_id(value: object, source_kind: FeedbackSourceKind) -> str:
+    """Require non-personal provenance in the namespace owned by its kind."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"source_id must be a string; got {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(
+            "source_id must not be blank: governed feedback always carries "
+            "a non-personal provenance identity such as 'group:domain-reviewers'"
+        )
+    namespace = _SOURCE_NAMESPACES[source_kind]
+    prefix, separator, identifier = value.partition(":")
+    if (
+        not separator
+        or prefix != namespace
+        or not fullmatch(r"[A-Za-z0-9._-]{1,64}", identifier)
+    ):
+        raise ValueError(
+            f"source_id must be a namespaced non-personal identity of the "
+            f"form '{namespace}:<identifier>' for {source_kind.value} "
+            "feedback; usernames, employee ids, and email addresses are "
+            "personal identities and never valid provenance"
+        )
+    return value
+
+
 def log_feedback(
     *,
     trace_id: str,
@@ -68,47 +120,14 @@ def log_feedback(
     # then normalize — an untrimmed trace id addresses a different (or no)
     # trace, and an untrimmed name records feedback under a label later
     # lookups will not match.
-    for label, supplied in (("trace_id", trace_id), ("name", name)):
-        if not isinstance(supplied, str):
-            raise TypeError(f"{label} must be a string; got {type(supplied).__name__}")
-    trace_id = trace_id.strip()
-    if not trace_id:
-        raise ValueError("trace_id must not be blank")
-    name = name.strip()
-    if not name:
-        raise ValueError("name must not be blank")
-    if span_id is not None:
-        if not isinstance(span_id, str):
-            raise TypeError(f"span_id must be a string; got {type(span_id).__name__}")
-        span_id = span_id.strip()
-        if not span_id:
-            raise ValueError("span_id must not be blank when provided")
-    if not isinstance(source_kind, FeedbackSourceKind):
-        source_kind = FeedbackSourceKind(str(source_kind).strip().lower())
-    # The namespace check below stringifies, but the value forwarded to
-    # AssessmentSource is the original object — so a non-string whose
-    # str() renders "group:reviewers" would validate and then fail inside
-    # MLflow's serialization instead of recording feedback.
-    if not isinstance(source_id, str):
-        raise TypeError(f"source_id must be a string; got {type(source_id).__name__}")
-    if not source_id.strip():
-        raise ValueError(
-            "source_id must not be blank: governed feedback always carries "
-            "a non-personal provenance identity such as 'group:domain-reviewers'"
-        )
-    namespace = _SOURCE_NAMESPACES[source_kind]
-    prefix, separator, identifier = source_id.partition(":")
-    if (
-        not separator
-        or prefix != namespace
-        or not fullmatch(r"[A-Za-z0-9._-]{1,64}", identifier)
-    ):
-        raise ValueError(
-            f"source_id must be a namespaced non-personal identity of the "
-            f"form '{namespace}:<identifier>' for {source_kind.value} "
-            "feedback; usernames, employee ids, and email addresses are "
-            "personal identities and never valid provenance"
-        )
+    trace_id = _normalized_identifier(trace_id, "trace_id")
+    name = _normalized_identifier(name, "name")
+    span_id = _normalized_span_id(span_id)
+    source_kind = _source_kind(source_kind)
+    # Provenance must be a real string before namespace validation; accepting
+    # an object whose str() merely looks valid would fail later in MLflow's
+    # serialization and make the feedback write nondeterministic.
+    source_id = _validated_source_id(source_id, source_kind)
 
     mlflow, assessment_source = _mlflow_and_source(mlflow_module)
     source = assessment_source(
@@ -211,7 +230,7 @@ def _assessment_matches(assessment: Any, *, name: str, value: Any | None) -> boo
     observed = getattr(assessment, "value", None)
     if observed is None:
         observed = getattr(getattr(assessment, "feedback", None), "value", None)
-    return observed == value
+    return bool(observed == value)
 
 
 def _mlflow_and_source(module: Any | None) -> tuple[Any, Any]:

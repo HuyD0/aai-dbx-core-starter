@@ -14,9 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from aai_core.agentkit.baseline import BaselineRecord
+from aai_core.agentkit.calibration import calibration_status
+from aai_core.agentkit.catalog import get_spec
 from aai_core.agentkit.config import ProjectContext
+from aai_core.agentkit.errors import UnknownScorerError
 from aai_core.agentkit.gate import GateReport
+from aai_core.agentkit.integrity import is_integrity_metric
 from aai_core.agentkit.results import ResultsRecord
+from aai_core.agentkit.statistics import is_statistics_metric
 
 EVIDENCE_JSON = "evidence.json"
 EVIDENCE_MARKDOWN = "evidence.md"
@@ -93,6 +98,30 @@ def build_evidence(
             or (baseline.dataset.digest if baseline else None),
             "metrics": _metric_rows(results),
         },
+        "statistics": (
+            results.statistics.model_dump(mode="json")
+            if results.statistics is not None
+            else None
+        ),
+        # What the run spent, coverage-first: unknown cost stays unknown
+        # rather than reading as zero, and per-success ratios appear only
+        # at complete coverage.
+        "economics": (
+            results.economics.model_dump(mode="json")
+            if results.economics is not None
+            else None
+        ),
+        # The judge measured as an instrument: self-consistency on this
+        # run's outputs and drift on frozen anchors. A delta is a statement
+        # about the agent only while the instrument held still.
+        "judge_integrity": (
+            results.integrity.model_dump(mode="json")
+            if results.integrity is not None
+            else None
+        ),
+        # Calibration coverage for the judges the run used — reported
+        # always, enforced only when integrity.require_calibration is set.
+        "judge_calibration": _calibration_rows(project, results),
         "gate": {
             "passed": passed,
             "failures": [
@@ -110,6 +139,7 @@ def build_evidence(
         },
         "decision": results.decision,
         "change_id": results.change_id,
+        "release": results.release,
         "recorded_at": results.recorded_at,
         "approver": dict(approver),
         "warnings": list(results.warnings),
@@ -157,6 +187,20 @@ def render_markdown(document: Mapping[str, Any]) -> str:
         "## What it was compared against",
         "",
     ]
+    _render_comparison(lines, comparison)
+    _render_statistics(lines, document.get("statistics"))
+    _render_economics(lines, document.get("economics"))
+    _render_judge_integrity(lines, document.get("judge_integrity"))
+    _render_judge_calibration(lines, document.get("judge_calibration"))
+    _render_scoring(lines, versions)
+    _render_gate(lines, gate)
+    _render_approval(lines, document["approver"])
+    _render_warnings(lines, document["warnings"])
+    _render_provenance(lines, document, versions)
+    return "\n".join(lines)
+
+
+def _render_comparison(lines: list[str], comparison: Mapping[str, Any]) -> None:
     if comparison["established_baseline"]:
         lines.append(
             "This run **is** the recorded baseline - the first version of "
@@ -178,6 +222,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
             f"{_format(row['baseline'])} | {_format(row['delta'])} |"
         )
 
+
+def _render_scoring(lines: list[str], versions: Mapping[str, Any]) -> None:
     lines.extend(
         [
             "",
@@ -201,6 +247,210 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     for name, prompt in sorted(dict(versions["judge_prompts"]).items()):
         lines.append(f"- judge prompt `{name}`: `{prompt}`")
 
+
+def _render_statistics(lines: list[str], statistics: Mapping[str, Any] | None) -> None:
+    if not statistics or not statistics.get("estimates"):
+        return
+    level = float(statistics["confidence_level"]) * 100
+    enforcement = "enabled" if statistics["enforced"] else "report-only"
+    # Records from before the bootstrap option carry no method key; they
+    # were computed with the normal approximation and render as such.
+    method = str(statistics.get("method") or "normal")
+    label = "bootstrap-percentile" if method == "bootstrap" else "normal-mean"
+    reproduction = (
+        f" ({statistics.get('bootstrap_resamples')} resamples, "
+        f"seed {statistics.get('bootstrap_seed')})"
+        if method == "bootstrap"
+        else ""
+    )
+    lines.extend(
+        [
+            "",
+            "## Statistical confidence",
+            "",
+            f"Intervals use the recorded {level:g}% {label} policy"
+            f"{reproduction}. "
+            f"The minimum enforceable sample is {statistics['minimum_cases']}; "
+            f"confidence enforcement was {enforcement}.",
+            "",
+            "| metric | n | mean | lower | upper |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for estimate in statistics["estimates"]:
+        lines.append(
+            f"| {estimate['metric']} | {estimate['sample_size']} | "
+            f"{_format(estimate['mean'])} | {_format(estimate['lower'])} | "
+            f"{_format(estimate['upper'])} |"
+        )
+    paired = statistics.get("paired") or []
+    if paired:
+        lines.extend(
+            [
+                "",
+                "Paired improvement is direction-normalized: positive is better.",
+                "",
+                "| metric | pairs | mean improvement | lower | upper |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for estimate in paired:
+            lines.append(
+                f"| {estimate['metric']} | {estimate['pair_count']} | "
+                f"{_format(estimate['mean_improvement'])} | "
+                f"{_format(estimate['lower_improvement'])} | "
+                f"{_format(estimate['upper_improvement'])} |"
+            )
+
+
+def _render_economics(lines: list[str], economics: Mapping[str, Any] | None) -> None:
+    if not economics:
+        return
+    rows = economics["rows"]
+    cost_total = economics.get("cost_total_usd")
+    lines.extend(
+        [
+            "",
+            "## Run economics",
+            "",
+            (
+                f"{economics['successes']} of {rows} rows completed "
+                f"successfully. Cost is known for {economics['cost_known']} "
+                f"of {rows} rows and token usage for "
+                f"{economics['tokens_known']} of {rows} "
+                f"(cost source: {economics['cost_source']}). Per-success "
+                "ratios are reported only at complete coverage — unknown "
+                "cost is never counted as zero."
+            ),
+        ]
+    )
+    if cost_total is not None:
+        lines.extend(
+            [
+                "",
+                (
+                    f"Known spend across all rows, failed ones included: "
+                    f"${_format(cost_total)}."
+                ),
+            ]
+        )
+    segments = economics.get("segments") or []
+    if segments:
+        lines.extend(
+            [
+                "",
+                (
+                    "Per-stratum economics — the evidence for routing an "
+                    "intent to a different model:"
+                ),
+                "",
+                (
+                    "| stratum | rows | success rate | cost/success | "
+                    "cost p95 | latency p95 (s) |"
+                ),
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for segment in segments:
+            value = segment["value"] or "(unset)"
+            lines.append(
+                f"| {segment['key']}={value} | {segment['rows']} | "
+                f"{_format(segment['success_rate'])} | "
+                f"{_format(segment.get('cost_per_success_usd'))} | "
+                f"{_format(segment.get('cost_p95_usd'))} | "
+                f"{_format(segment.get('latency_p95_seconds'))} |"
+            )
+
+
+def _render_judge_integrity(
+    lines: list[str], integrity: Mapping[str, Any] | None
+) -> None:
+    if not integrity:
+        return
+    preamble = (
+        "A delta is a statement about the agent only while the judge "
+        "held still; these checks measure the judge itself inside the run."
+    )
+    lines.extend(["", "## Judge integrity", "", preamble, ""])
+    consistency = integrity.get("consistency")
+    if consistency:
+        lines.append(
+            f"- Self-inconsistency: {_format(consistency['overall'])} over "
+            f"{consistency['sample_size']} re-scored row(s)"
+        )
+        for name, rate in sorted(dict(consistency.get("flip_rates") or {}).items()):
+            lines.append(f"  - `{name}`: {_format(rate)}")
+    drift = integrity.get("anchor_drift")
+    if drift:
+        lines.append(
+            f"- Anchor drift: {_format(drift['overall'])} over "
+            f"{drift['rows']} frozen row(s) from `{drift['anchors_ref']}` "
+            f"(digest `{str(drift['anchors_digest'])[:16]}`)"
+        )
+        for name, value in sorted(dict(drift.get("drift_by_scorer") or {}).items()):
+            lines.append(f"  - `{name}`: {_format(value)}")
+    failures = (consistency or {}).get("rescore_failures", 0) + (drift or {}).get(
+        "rescore_failures", 0
+    )
+    if failures:
+        lines.append(f"- Failed judge re-invocations: {failures}")
+
+
+def _calibration_rows(
+    project: ProjectContext, results: ResultsRecord
+) -> list[dict[str, Any]]:
+    judge_scorers: dict[str, int] = {}
+    for name, version in results.versions.scorers.items():
+        try:
+            spec = get_spec(name)
+        except UnknownScorerError:
+            continue
+        if spec.judge is not None:
+            judge_scorers[name] = int(version)
+    if not judge_scorers:
+        return []
+    return calibration_status(
+        root=project.root,
+        directory=project.config.integrity.calibration_dir,
+        judge_scorers=judge_scorers,
+        judge_prompts=dict(results.versions.judge_prompts),
+        judge_model_identity=results.versions.judge_model_identity,
+    )
+
+
+def _render_judge_calibration(
+    lines: list[str], calibration: list[Mapping[str, Any]] | None
+) -> None:
+    if not calibration:
+        return
+    preamble = (
+        "A judged score is auditable only against a named human "
+        "agreement measurement (chance-adjusted κ vs SME labels)."
+    )
+    lines.extend(["", "## Judge calibration", "", preamble, ""])
+    for row in calibration:
+        status = row.get("status", "unknown")
+        if status in {"uncalibrated", "unreadable"}:
+            lines.append(f"- `{row['scorer']}`: **{status}**")
+            if row.get("reason"):
+                lines.append(f"  - {row['reason']}")
+            continue
+        ceiling = row.get("human_ceiling_kappa")
+        ceiling_text = (
+            f", human ceiling κ {_format(ceiling)}" if ceiling is not None else ""
+        )
+        lines.append(
+            f"- `{row['scorer']}`: **{status}** — κ {_format(row.get('kappa'))} "
+            f"(minimum {_format(row.get('minimum_kappa'))}"
+            f"{ceiling_text}) over {row.get('sample_size')} labels, "
+            f"recorded {row.get('recorded_at')}"
+        )
+        for key in ("stale", "stale_prompt", "stale_judge"):
+            if row.get(key):
+                lines.append(f"  - **stale**: {row[key]}")
+
+
+def _render_gate(lines: list[str], gate: Mapping[str, Any]) -> None:
     if gate["failures"]:
         lines.extend(["", "## Why the gate failed", ""])
         for failure in gate["failures"]:
@@ -210,7 +460,8 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     if gate.get("policy_source"):
         lines.extend(["", f"Thresholds applied: {gate['policy_source']}."])
 
-    approver = document["approver"]
+
+def _render_approval(lines: list[str], approver: Mapping[str, Any]) -> None:
     lines.extend(
         [
             "",
@@ -230,17 +481,26 @@ def render_markdown(document: Mapping[str, Any]) -> str:
     if approver.get("caveat"):
         lines.append(f"- **Not verified**: {approver['caveat']}")
 
-    if document["warnings"]:
+
+def _render_warnings(lines: list[str], warnings: list[str]) -> None:
+    if warnings:
         lines.extend(["", "## Warnings", ""])
-        for warning in document["warnings"]:
+        for warning in warnings:
             lines.append(f"- {warning}")
 
+
+def _render_provenance(
+    lines: list[str], document: Mapping[str, Any], versions: Mapping[str, Any]
+) -> None:
+    release = document.get("release")
+    release_line = [f"- Release commit: `{release}`"] if release else []
     lines.extend(
         [
             "",
             "## Provenance",
             "",
             f"- Change id: `{document['change_id']}`",
+            *release_line,
             f"- MLflow experiment: {document['experiment']['name'] or 'unknown'}"
             + (
                 f" (run `{document['experiment']['run_id']}`)"
@@ -251,7 +511,6 @@ def render_markdown(document: Mapping[str, Any]) -> str:
             "",
         ]
     )
-    return "\n".join(lines)
 
 
 def databricks_approver_lookup(
@@ -398,7 +657,11 @@ def evaluated_model_version(agent: str, model_name: str) -> str | None:
 def _metric_rows(results: ResultsRecord) -> list[dict[str, Any]]:
     baseline = dict(results.baseline_metrics)
     rows = []
-    for metric in sorted(results.metrics):
+    for metric in sorted(
+        metric
+        for metric in results.metrics
+        if not is_statistics_metric(metric) and not is_integrity_metric(metric)
+    ):
         current = results.metrics[metric]
         reference = baseline.get(metric)
         rows.append(

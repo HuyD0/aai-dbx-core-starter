@@ -21,9 +21,9 @@ import os
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:  # POSIX is the deployment/runtime platform; keep Windows import-safe.
     import fcntl
@@ -39,7 +39,10 @@ from pydantic import (
 )
 
 from aai_core.agentkit.baseline import BaselineDataset, BaselineScope, BaselineVersions
+from aai_core.agentkit.economics import EconomicsEvidence
 from aai_core.agentkit.errors import ConfigError
+from aai_core.agentkit.integrity import IntegrityEvidence
+from aai_core.agentkit.statistics import StatisticalEvidence
 from aai_core.contracts import ContractModel, freeze_value, thaw_value
 from aai_core.evaluation import MetricRule
 
@@ -99,6 +102,17 @@ class ResultsRecord(ContractModel):
     scope: BaselineScope
     mode: str = Field(min_length=1)
     metrics: Mapping[str, float] = Field(default_factory=dict)
+    # Per-row numeric scorer values in dataset order. Content never travels
+    # with them; they exist solely to make paired uncertainty reproducible.
+    metric_samples: Mapping[str, tuple[float | None, ...]] = Field(default_factory=dict)
+    statistics: StatisticalEvidence | None = None
+    # Judge self-consistency and frozen-anchor drift, when the run measured
+    # them. ``None`` keeps records from before the integrity checks readable.
+    integrity: IntegrityEvidence | None = None
+    # What the run spent, per row and per successful completion, when the
+    # run's traces carried it. ``None`` keeps records from before the
+    # economics evidence readable.
+    economics: EconomicsEvidence | None = None
     versions: BaselineVersions
     baseline_run_id: str | None = None
     baseline_metrics: Mapping[str, float] = Field(default_factory=dict)
@@ -116,6 +130,10 @@ class ResultsRecord(ContractModel):
     allow_missing_regression_baseline: bool = False
     decision: str = Field(min_length=1)
     change_id: str = Field(min_length=1)
+    # The full release identifier (AAI_RELEASE — the deployed commit) when
+    # the run was scored under one. ``change_id`` truncates to 12 chars;
+    # the gate's release-binding check needs the complete value.
+    release: str | None = None
     gate_passed: bool
     gate_failures: tuple[Mapping[str, str], ...] = ()
     warnings: tuple[str, ...] = ()
@@ -141,6 +159,16 @@ class ResultsRecord(ContractModel):
             }
         return value
 
+    @field_validator("metric_samples", mode="before")
+    @classmethod
+    def coerce_metric_samples(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        return {
+            str(name): tuple(samples) if isinstance(samples, list | tuple) else samples
+            for name, samples in value.items()
+        }
+
     @field_validator("metrics", "baseline_metrics", mode="after")
     @classmethod
     def freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
@@ -151,20 +179,38 @@ class ResultsRecord(ContractModel):
             raise ValueError(
                 "metric values must be finite (invalid: " + ", ".join(non_finite) + ")"
             )
-        return freeze_value(value)
+        return cast(Mapping[str, float], freeze_value(value))
+
+    @field_validator("metric_samples", mode="after")
+    @classmethod
+    def freeze_metric_samples(
+        cls, value: Mapping[str, tuple[float | None, ...]]
+    ) -> Mapping[str, tuple[float | None, ...]]:
+        for name, samples in value.items():
+            if not name.strip():
+                raise ValueError("metric sample keys must name a metric")
+            if any(item is not None and not math.isfinite(item) for item in samples):
+                raise ValueError(f"metric samples for {name!r} must be finite")
+        return cast(Mapping[str, tuple[float | None, ...]], freeze_value(value))
 
     @field_validator("gate_failures", mode="after")
     @classmethod
     def freeze_failures(cls, value: tuple[Any, ...]) -> tuple[Any, ...]:
-        return freeze_value(value)
+        return cast(tuple[Any, ...], freeze_value(value))
 
     @field_serializer("metrics", "baseline_metrics")
     def serialize_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
-        return thaw_value(value)
+        return cast(dict[str, float], thaw_value(value))
+
+    @field_serializer("metric_samples")
+    def serialize_metric_samples(
+        self, value: Mapping[str, tuple[float | None, ...]]
+    ) -> dict[str, list[float | None]]:
+        return cast(dict[str, list[float | None]], thaw_value(value))
 
     @field_serializer("gate_failures")
     def serialize_failures(self, value: tuple[Any, ...]) -> list[dict[str, str]]:
-        return thaw_value(value)
+        return cast(list[dict[str, str]], thaw_value(value))
 
     @property
     def is_comparison(self) -> bool:
@@ -246,10 +292,8 @@ def begin_results_attempt(directory: Path, *, command: str) -> ResultsAttempt:
         # an old pass ineligible without depending on a new write succeeding.
         # Rewriting the marker binds it to this attempt; if that or any later
         # step fails, the marker remains and readers refuse.
-        try:
+        with suppress(FileNotFoundError):
             os.replace(pointer_path, transition_path)
-        except FileNotFoundError:
-            pass
         _write_contract_file(transition_path, pointer.model_dump())
         _write_attempt_state(directory, attempt)
         _write_contract_file(pointer_path, pointer.model_dump())
@@ -511,15 +555,17 @@ def fetch_results(run_id: str, *, mlflow_module: Any | None = None) -> ResultsRe
 
     if mlflow_module is None:
         try:
-            import mlflow as mlflow_module  # type: ignore[no-redef]
+            import mlflow
         except ImportError as error:
             from aai_core.agentkit.errors import missing_extra
 
             raise missing_extra(
                 "reading results from an MLflow run", "genai"
             ) from error
+    else:
+        mlflow = mlflow_module
     try:
-        local = mlflow_module.artifacts.download_artifacts(
+        local = mlflow.artifacts.download_artifacts(
             run_id=run_id, artifact_path=RESULTS_ARTIFACT_PATH
         )
     except Exception as error:

@@ -46,20 +46,54 @@ API_ENDPOINT = "https://prices.azure.com/api/retail/prices"
 API_VERSION = "2023-01-01-preview"
 SKUS_PER_REQUEST = 8  # keeps the $filter short; the API throttles greedily
 MAX_ATTEMPTS = 6
+MAX_PAGES_PER_REQUEST = 1_000
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+_ALLOWED_API_HOST = "prices.azure.com"
+
+
+def _validated_api_url(url: str) -> str:
+    """Allow only the documented Azure Retail Prices HTTPS endpoint."""
+
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != _ALLOWED_API_HOST
+        or parsed.port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/api/retail/prices"
+        or parsed.fragment
+    ):
+        raise ValueError("Retail API pagination returned an untrusted URL")
+    return url
 
 
 def _get_json(url: str) -> dict:
     """GET with retry: the retail API rate-limits with 429 fairly eagerly."""
 
+    safe_url = _validated_api_url(url)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(url, timeout=60) as response:
-                return json.load(response)
+            with urllib.request.urlopen(safe_url, timeout=60) as response:
+                declared_size = response.headers.get("Content-Length")
+                if declared_size and int(declared_size) > MAX_RESPONSE_BYTES:
+                    raise ValueError("Retail API response exceeds the size limit")
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise ValueError("Retail API response exceeds the size limit")
+                payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    raise ValueError("Retail API response must be a JSON object")
+                return payload
         except urllib.error.HTTPError as error:
             if error.code not in (429, 500, 502, 503) or attempt == MAX_ATTEMPTS:
                 raise
             retry_after = error.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else 2.0**attempt
+            try:
+                delay = float(retry_after) if retry_after else 2.0**attempt
+            except ValueError:
+                delay = 2.0**attempt
+            delay = min(max(delay, 0.0), 60.0)
             print(f"  HTTP {error.code}; retrying in {delay:.0f}s", file=sys.stderr)
             time.sleep(delay)
     raise AssertionError("unreachable")
@@ -84,10 +118,22 @@ def fetch_region_rates(region: str, instances: list[str]) -> dict[str, dict]:
             }
         )
         url = f"{API_ENDPOINT}?{query}"
+        seen_pages: set[str] = set()
+        page_count = 0
         while url:
+            url = _validated_api_url(url)
+            if url in seen_pages:
+                raise ValueError("Retail API pagination contains a cycle")
+            seen_pages.add(url)
+            page_count += 1
+            if page_count > MAX_PAGES_PER_REQUEST:
+                raise ValueError("Retail API pagination exceeds the page limit")
             payload = _get_json(url)
             _merge_items(rates, payload.get("Items", []))
-            url = payload.get("NextPageLink")
+            next_page = payload.get("NextPageLink")
+            if next_page is not None and not isinstance(next_page, str):
+                raise ValueError("Retail API pagination URL must be a string")
+            url = next_page
     return rates
 
 

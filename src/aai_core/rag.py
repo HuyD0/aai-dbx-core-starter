@@ -8,9 +8,18 @@ from typing import Any
 
 from aai_core.providers import SearchResult
 
+__all__ = [
+    "ChunkingProfile",
+    "EmbeddingProfile",
+    "RAGDocument",
+    "mlflow_documents",
+]
+
 
 @dataclass(frozen=True)
 class EmbeddingProfile:
+    """Versioned embedding configuration used to reject incompatible indexes."""
+
     logical_name: str
     provider: str
     model: str
@@ -33,6 +42,8 @@ class EmbeddingProfile:
 
 @dataclass(frozen=True)
 class ChunkingProfile:
+    """Versioned, validated document-chunking configuration."""
+
     name: str
     version: str
     chunk_size: int
@@ -48,6 +59,8 @@ class ChunkingProfile:
 
 @dataclass(frozen=True)
 class RAGDocument:
+    """Provider-neutral document normalized for MLflow retriever spans."""
+
     document_id: str
     page_content: str
     doc_uri: str | None = None
@@ -78,4 +91,6 @@ class RAGDocument:
 
 
 def mlflow_documents(results: Sequence[SearchResult]) -> list[dict[str, Any]]:
+    """Project normalized search results into MLflow document dictionaries."""
+
     return [result.as_mlflow_document() for result in results]

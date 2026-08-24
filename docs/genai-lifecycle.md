@@ -80,8 +80,9 @@ observing or registering behavior is not enough to authorize a release.
 11. Attach user/expert feedback and turn reviewed failures into regression cases.
 
 This is an evaluation-driven loop, not a one-way release pipeline. Reviewed
-production failures become evaluation records, and the same scorer definitions
-are reused for change regression tests and production monitoring.
+production failures become evaluation records. Reuse the same scorer intent—and
+the same implementation only when the runtime inputs match—across change
+regression tests and production monitoring.
 
 ## Experiment identity and run lineage
 
@@ -183,8 +184,14 @@ lineage described below. See `docs/agent-evaluation.md`.
 - Human/domain review.
 - Production sampled evaluation.
 
-The same scorers should be reused before and after deployment so quality does
-not mean something different in production.
+Use the same scorer semantics before and after deployment so quality does not
+mean something different in production, but respect their input contracts. A
+registered production scorer receives a trace without benchmark expectations.
+Trace-only decision/action consistency can be reproduced as self-contained
+notebook-defined `@scorer` code; registration serializes notebook code, not an
+imported scorer factory and its helpers. Expectation-dependent decision/tool
+appropriateness cannot be registered unchanged and remains a reviewed,
+dataset-backed development/release assessment.
 
 ## Offline and automatic evaluation
 
@@ -199,6 +206,16 @@ evaluation to the intended environment and trace status. Route every LLM
 scorer through the explicit approved `judge-model`; never rely on a provider's
 ambient default. Any row-level error from a gated scorer fails the release
 because MLflow aggregates otherwise omit failed rows.
+
+There is no public `promote_trace` API in the certified MLflow 3.15.1 surface.
+After minimization and human review, use the MLflow UI Add/Export flow or call
+native `dataset.merge_records(reviewed_traces)`. Trace
+conversion carries root inputs/outputs, expectation Assessments, and source
+trace/session lineage; it does not copy the full span tree into the dataset row.
+Normalize reviewed behavior contracts such as `expected_tool_calls` before
+using them as gate expectations. `aai-core` deliberately adds no stable wrapper
+for this native boundary, so live-validate managed UI and conversion behavior
+in the target workspace before automating it.
 
 The application team owns evaluation cases, scorer intent, and acceptance
 thresholds. The platform team owns approved judge deployments, scorer
@@ -242,6 +259,27 @@ explicit provenance and rationale, calibrate on one reviewed split, and verify
 agreement on another before allowing the judge into a release gate. Keep judge
 model, rubric, examples, and alignment state versioned.
 
+Calibration is measured, not asserted: `agentkit judge calibrate` computes
+chance-adjusted agreement (Cohen's κ, target ≥ 0.60) between the judge and
+the reviewer consensus, plus the pairwise inter-annotator ceiling — a judge
+cannot be more consistent than the humans defining the target, and a low
+ceiling means the rubric is under-specified, so fix the rubric before
+touching the model. The committed per-judge record binds scorer version,
+served judge identity, and prompt URI; evidence always reports it, and
+`integrity.require_calibration` makes scoring and the gate demand it. The
+auditable claim is never "the agent scores 0.87" — it is "0.87 under a judge
+that agrees with our reviewers at κ 0.71 against a ceiling of 0.78".
+
+The judge also stays measured *inside* every judged run: a re-judged sample
+of the run's own outputs bounds how much of any delta is judge noise, and
+frozen judge anchors separate "the judge moved" from "the agent regressed".
+A judge release is therefore its own lifecycle, out-of-band from agent
+changes: new prompt version and scorer version from the platform team,
+re-calibration on held-out labels, then a re-established baseline and
+anchors — in separate commits from any agent change, because a
+champion-versus-change delta is a statement about the agent only while the
+dataset and the judge were held constant.
+
 Prompt optimization is an optional experiment, not a deployment action. Bound
 its request and cost budget, train on a dedicated split, and run the resulting
 exact prompt version against held-out cases through the normal gate. Only then
@@ -263,11 +301,62 @@ gate either requires a declared minimum coverage or explicitly records that
 cost is report-only; it must not silently pass because cost telemetry is
 missing.
 
+The agent-evaluation toolkit implements this rule as recorded evidence:
+every live or traces run captures cost per successful completion, p95 tails,
+and the coverage counts from its own traces — see "Economics: what the run
+actually cost" in `agent-evaluation.md`. Compare on cost per successful
+completion, not mean cost per call: the mean prices attempts while the money
+is spent per outcome, and retries hide in exactly that gap.
+
 Framework autologgers are opt-in because they can capture raw call arguments.
 The stable provider adapters emit bounded spans and canonical token usage
 without additive provider options, raw `extra_body` payloads, or per-call
 credential headers. Do not combine those adapter spans with OpenAI
 autologging, which duplicates traces and token counts.
+
+## Model customization
+
+Prompting, retrieval, and fine-tuning form one escalation ladder, not three
+competing options. A prompt change alters instructions, a retrieval change
+alters the context the model reads, and fine-tuning alters the weights
+themselves. Escalate only when the cheaper lever is exhausted: fine-tuning is
+justified when repeated prompt versions and retrieval improvements still fail
+a behavioral requirement — output format, tone, citation discipline,
+consistency — on the governed evaluation set.
+
+Parameter-efficient fine-tuning (LoRA and its variants) changes behavior, not
+knowledge. It teaches a model how to respond in the required shape; it is not
+a mechanism for injecting new facts, which remains retrieval's job. A team
+reaching for fine-tuning to fix factual gaps should fix its retrieval and
+evaluation design instead.
+
+A fine-tuned adapter is an application release like every other change in the
+reproducibility manifest. It carries the same falsifiable hypothesis, the same
+baseline/change/result/decision contract, the same fixed ordered evaluation
+dataset, and the same release gate as a prompt change. Training data are
+versioned evidence: record the dataset digest, split membership, filtering
+rules, and pre-training validation results exactly as for evaluation datasets,
+and keep training, validation, and held-out evaluation splits disjoint. The
+adapter artifact, base model identity and revision, hyperparameters (rank,
+alpha, learning rate, epochs), and environment digest all enter the manifest.
+An adapter version is immutable; retraining creates a new version and a new
+comparison, never an overwrite.
+
+Serving cost changes shape at this stage. A pay-per-token endpoint bills
+nothing when idle; a dedicated fine-tuned endpoint bills continuously whether
+or not it serves traffic. A cost-quality comparison between a fine-tuned small
+model and a prompted larger model must therefore use expected request volume,
+not per-request price alone. `docs/cost-estimation.md` prices both shapes:
+GPU model serving, and foundation models as provisioned throughput or
+pay-per-token.
+
+Fine-tuning compute and serving endpoints are provisioned through the approved
+platform process like every other resource change, and training jobs stay
+keyless under the same workspace authentication chain as deployment. The
+standalone course in `examples/fine-tuning/` teaches these mechanics from
+first principles, credential-free — beginning with the memory economics
+above, with later lessons building through quantization, LoRA, QLoRA, and
+the PEFT library — before any connected training job.
 
 ## Prompt promotion
 
@@ -275,10 +364,12 @@ Prompt versions are immutable. Mutable aliases such as `development` and
 `production` are controlled deployment pointers, never release evidence.
 Some upstream tools and older project versions call a pre-release alias
 `candidate`; that prompt alias is deprecated here in favor of `validation`.
-It is distinct from the application maturity tag
-`ResourceContext.lifecycle="candidate"`. Evaluation and release evidence
-always bind the exact prompt URI, version, and content digest even when runtime
-configuration loads an alias. Promotion also cites the finished MLflow decision
+It is distinct from the schema-v2 application maturity tag
+`ResourceContext.lifecycle="validation"`. Historical schema-v1 evidence with
+the `candidate` lifecycle remains readable with a deprecation warning.
+Evaluation and release evidence always bind the exact prompt URI, version, and
+content digest even when runtime configuration loads an alias. Promotion also
+cites the finished MLflow decision
 run: the SDK reloads `decision/decision.json` and verifies its digest, lifecycle
 tags, gate metrics, run purpose, identity, and status before moving the alias.
 
@@ -343,6 +434,12 @@ The repository examples implement this contract in order:
 15. `14_platform_llm_operations.ipynb` walks the platform team's operating
     loop: judge governance, gateway request tags, cost by tag, fleet
     provenance, monitoring adoption, and rollback levers.
+16. `15_compare_and_select_llms.ipynb` is a credential-free interactive
+    workshop that compares baseline/change logical models through a golden
+    dataset, blinded pairwise judging, session-level TCO, and a fail-closed
+    governance evidence preflight. Its separate learner workshop contains the
+    intentional stubs; the canonical notebook is complete, and its simulated
+    measurements cannot authorize a release.
 
 The executable lifecycle scripts emit hypothesis, baseline, change, result,
 decision, and release. The advanced notebooks preserve that vocabulary while
@@ -364,5 +461,7 @@ remaining exploration and teaching artifacts. See
 - [LangSmith evaluation concepts](https://docs.langchain.com/langsmith/evaluation-concepts)
 - [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
 - [LangGraph interrupts and idempotency](https://docs.langchain.com/oss/python/langgraph/interrupts)
+- [Production LangGraph agents in this repository](langgraph-production.md)
+- [Multi-agent systems in production in this repository](multi-agent-systems.md)
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/)
 - [OpenTelemetry GenAI conventions — currently Development](https://github.com/open-telemetry/semantic-conventions-genai)

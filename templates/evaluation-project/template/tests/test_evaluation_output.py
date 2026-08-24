@@ -63,3 +63,32 @@ def test_failure_triage_details_are_explicit_opt_in(capsys):
     output = capsys.readouterr().out
     assert "details enabled" in output
     assert "A governed diagnostic rationale." in output
+
+
+def test_failure_triage_bounds_error_details_and_item_count(capsys):
+    result_df = Frame(
+        [
+            {"domain_policy/error_message": "private\n" + "x" * 300},
+            {"domain_policy/value": False},
+        ]
+    )
+
+    print_failure_triage(
+        SimpleNamespace(result_df=result_df),
+        max_items=1,
+        include_details=True,
+    )
+
+    output = capsys.readouterr().out
+    assert "private x" in output
+    assert "..." in output
+    assert "1 additional failure(s) omitted" in output
+
+
+def test_failure_triage_handles_missing_or_clean_result_frames(capsys):
+    print_failure_triage(SimpleNamespace())
+    print_failure_triage(SimpleNamespace(result_df=Frame([{"judge/value": "yes"}])))
+
+    output = capsys.readouterr().out
+    assert "unavailable (no result dataframe)" in output
+    assert "no explicit scorer failures" in output

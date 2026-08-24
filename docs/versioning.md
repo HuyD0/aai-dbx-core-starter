@@ -89,9 +89,21 @@ Python 3.11 and 3.12 at both supported bounds.
 Each template follows semver independently. Changes to generated behavior,
 dependencies, runtime, gates, or shared scaffold require a template version
 bump. `compatibility.json` binds every template version to its required
-`aai-core` version. Credential-free CI renders the template, installs the
-candidate SDK wheel rather than importing `src/`, and runs the generated
-project against that wheel.
+`aai-core` version.
+
+The checkout SDK and the SDK offered to newly generated projects are separate
+release channels. `sdk.version` is the version under development;
+`sdk.generated_project_default` is the reviewed default. While that default is
+a release candidate, credential-free generated-project CI installs it from the
+recorded full Git commit. The source ref and content digest are release metadata,
+and the generated provenance stamp records both the version and ref. This makes
+PR CI usable before a release tag exists without pretending that a runtime wheel
+has been published.
+
+Repository template tests still build the checkout wheel and exercise every
+render against it. That certifies the next template/SDK combination; it does not
+change the active generated-project default until the release metadata is
+reviewed deliberately.
 
 ## Releases
 
@@ -106,9 +118,11 @@ Consuming projects upgrade by changing their pinned version and re-running
 their release gate.
 
 Each published version MUST also be git-tagged `v<version>` on the release
-commit: generated projects' credential-free CI installs aai-core from that
-tag (their `aai_core_pip_source` default), so tag and volume wheel must
-describe the same code. Never move a release tag.
+commit. Never move a release tag. A commit-pinned candidate proves only that
+credential-free PR CI can install a reviewed SDK source; it does **not** prove
+that the Unity Catalog volume contains the runtime wheel. UAT and any runtime
+deployment remain blocked until the checksum and `release-manifest.json` have
+been published successfully.
 
 A release is accepted only when:
 
@@ -116,8 +130,25 @@ A release is accepted only when:
    and dependency pins agree;
 2. Python 3.11 and 3.12 base/provider lanes pass on the built wheel;
 3. every template renders and passes its offline gate using that wheel;
-4. the protected annotated tag points at the release commit; and
-5. the bounded keyless dev-workspace validation succeeds.
+4. the most recent dependency-canary run is green in all Python 3.11/3.12
+   `lowest-direct` and `highest` lanes for the frozen candidate;
+5. the protected annotated tag points at the release commit;
+6. the immutable wheel, checksum, and completion manifest are published; and
+7. the bounded keyless dev/UAT workspace validation succeeds.
+
+The transition is intentionally two-step:
+
+1. freeze the SDK source, record its full commit and content digest as the
+   release-candidate default, and obtain the complete CI and dependency-canary
+   evidence;
+2. tag and publish the reviewed release commit, verify the completion manifest,
+   then advance the checkout to the next unreleased version and change the
+   generated-project source to the exact annotated `v<version>` tag with
+   `status: published`.
+
+The release validator enforces the metadata shapes offline: candidates use full
+commit SHAs; published defaults use the exact annotated version tag. It never
+interprets a candidate commit pin as evidence that the volume artifact exists.
 
 Rollback means repinning the previous immutable release or publishing a new
 patch; it never means replacing release bytes or moving a tag.

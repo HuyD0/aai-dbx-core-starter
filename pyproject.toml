@@ -9,10 +9,22 @@ description = "Paved-road SDK for AI and ML applications on Azure Databricks."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 authors = [{ name = "AI/ML Platform Team" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
 dependencies = [
   "pydantic>=2.12,<3",
   "PyYAML>=6.0.3,<7",
 ]
+
+[project.urls]
+Documentation = "https://github.com/HuyD0/aai-dbx-core-starter/tree/main/docs"
+Issues = "https://github.com/HuyD0/aai-dbx-core-starter/issues"
+Repository = "https://github.com/HuyD0/aai-dbx-core-starter"
 
 [project.optional-dependencies]
 databricks = [
@@ -20,18 +32,9 @@ databricks = [
   "databricks-sdk>=0.122,<0.123",
   "databricks-openai>=0.17,<0.18",
 ]
-foundry = [
+azure-apim = [
   "azure-identity>=1.25.3,<2",
   "openai>=2.48,<3",
-]
-foundry-labs = [
-  "a2a-sdk>=1.0.3,<1.1",
-  "agent-framework-core>=1.12.1,<1.13",
-  "azure-ai-projects>=2.4,<3",
-  "azure-monitor-opentelemetry>=1.8.9,<2",
-  "httpx>=0.28.1,<1",
-  "opentelemetry-exporter-otlp-proto-http>=1.43,<1.44",
-  "opentelemetry-sdk>=1.43,<1.44",
 ]
 azure-search = [
   "azure-identity>=1.25.3,<2",
@@ -42,7 +45,7 @@ keyvault = [
   "azure-keyvault-secrets>=4.11,<5",
 ]
 genai = [
-  "mlflow[databricks]>=3.14,<3.15",
+  "mlflow[databricks]>=3.15.1,<3.16",
 ]
 examples = [
   "ipykernel>=6.29,<8",
@@ -50,15 +53,19 @@ examples = [
   "pandas>=2,<3",
 ]
 all = [
-  "aai-core[databricks,foundry,azure-search,keyvault,genai]",
+  "aai-core[databricks,azure-apim,azure-search,keyvault,genai]",
 ]
 dev = [
-  "black>=26.5.1,<27",
+  "black[jupyter]>=26.5.1,<27",
   "build>=1.5,<2",
   "hatchling>=1.31,<2",
+  "mypy>=1.18,<2",
+  "pip-audit>=2.9,<3",
   "pre-commit>=4.6.1,<5",
   "pytest>=9.1.1,<10",
+  "pytest-cov>=7,<8",
   "ruff>=0.16,<1",
+  "types-PyYAML>=6.0.12,<7",
   "zizmor>=1.5,<2",
   # Platform console (src/platform_app). Deliberately NOT a public `app` extra:
   # `pip install aai-core[app]` handing an SDK consumer a web server would misrepresent
@@ -68,6 +75,8 @@ dev = [
   # (tests/conftest.py); the console imports it lazily and degrades to `skip`.
   "fastapi>=0.140,<1",
   "jinja2>=3.1.6,<4",
+  "psycopg[binary]>=3.2,<4",
+  "sqlalchemy>=2.0.51,<3",
   "uvicorn>=0.51,<1",
 ]
 
@@ -83,10 +92,12 @@ packages = ["src/aai_core"]
 # data. Excluding them also prevents local data, models, or experiment artifacts
 # from entering a future source release.
 exclude = [
-  "/examples/local-finetuning",
-  "/tests/test_local_finetuning_project.py",
+  "/examples/fine-tuning",
   "/examples/local-classification",
+  "/examples/local-finetuning",
+  "/tests/test_finetuning_project.py",
   "/tests/test_local_classification_project.py",
+  "/tests/test_local_finetuning_project.py",
 ]
 
 [tool.pytest.ini_options]
@@ -96,19 +107,75 @@ addopts = "-ra"
 # no namespace-package trickery, nothing that can diverge between test and container.
 pythonpath = ["src", "src/platform_app", "examples/local-finetuning/src"]
 testpaths = ["tests"]
+markers = [
+  "generated_project: full rendered-project lint, type, coverage, offline, and wheel gate",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["aai_core"]
+
+[tool.coverage.report]
+fail_under = 86
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]
+show_missing = true
+skip_covered = true
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["aai_core"]
+mypy_path = "src"
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+# Provider SDKs are optional and several do not publish complete typing data.
+# Boundary adapters are still type-checked against the protocols owned here.
+ignore_missing_imports = true
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+# Optional providers and their NumPy stubs expose version-sensitive internal
+# graphs. SDK adapters are checked against aai-core-owned protocols instead.
+module = [
+  "mlflow",
+  "numpy",
+  "numpy.*",
+  "openai",
+]
+follow_imports = "skip"
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-exclude = ["examples/local-classification"]
+exclude = ["examples/fine-tuning", "examples/local-classification"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "C90", "SIM"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.isort]
-known-first-party = ["aai_core", "aai_console", "app", "jobs"]
+known-first-party = ["aai_core", "aai_console", "app", "evals", "jobs"]
+
+[tool.ruff.lint.per-file-ignores]
+# The separately scoped platform console keeps its existing complexity baseline;
+# SDK, examples, and generated application code are subject to C901 <= 12.
+"src/platform_app/**/*.py" = ["C901"]
 
 [tool.black]
 target-version = ["py311", "py312"]
 line-length = 88
-extend-exclude = "(^|/)examples/local-classification/"
+extend-exclude = "(^|/)examples/(fine-tuning|local-classification)/"

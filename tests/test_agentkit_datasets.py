@@ -10,12 +10,12 @@ import pytest
 from aai_core.agentkit.datasets import (
     attach_answer_sheet,
     dataset_digest,
+    delegation_structure_violations,
     effective_dataset,
     evaluation_rows,
     load_dataset,
     rows_missing_inputs,
     smoke_sample,
-    trace_expectation_overrides,
     validate_dataset,
 )
 from aai_core.agentkit.errors import ConfigError
@@ -225,7 +225,10 @@ def _trace_with_event_and_link(trace):
     return document
 
 
-def _malformed_complete_trace(case):
+def _malformed_complete_trace(case):  # noqa: C901
+    # Linear adversarial-fixture dispatcher: each branch corrupts one distinct
+    # MLflow contract arm. Splitting it would obscure the one-case/one-mutation
+    # audit table without reducing production complexity.
     document = _mlflow_v2_trace() if case.startswith("v2-") else _mlflow_trace()
     span = document["data"]["spans"][0]
     if case == "bad-request-time":
@@ -1434,6 +1437,7 @@ def test_missing_recognises_every_null_sentinel():
             np.datetime64("NaT", "ns"),
         ]
     except ImportError:
+        # NumPy is optional; the dependency-free sentinels above still run.
         pass
     try:
         import pandas as pd
@@ -1442,6 +1446,7 @@ def test_missing_recognises_every_null_sentinel():
         # proves the name check, not that the name is the right one.
         absent += [pd.NA, pd.NaT, float("nan")]
     except ImportError:
+        # pandas is optional; its concrete sentinels are additive coverage.
         pass
     for value in absent:
         assert _is_missing(value), value
@@ -2500,37 +2505,6 @@ def test_building_the_payload_does_not_alter_the_dataset(tmp_path):
     assert all("trace" in row for row in dataset.rows)
 
 
-def test_trace_expectation_overrides_names_the_expectation(tmp_path):
-    """MLflow rewrites the whole expectations column from trace assessments.
-
-    Its docstring says it fills the column only when absent; the code has
-    no such check.
-    """
-
-    def trace(index):
-        assessments = (
-            [
-                {
-                    "assessment_name": "expected_response",
-                    "expectation": {"value": "from trace"},
-                }
-            ]
-            if index == 1
-            else []
-        )
-        return {"info": {"trace_id": f"t{index}", "assessments": assessments}}
-
-    dataset = _traced_rows(tmp_path, trace=trace)
-
-    assert trace_expectation_overrides(dataset) == ("expected_response",)
-
-
-def test_no_override_reported_without_assessments(tmp_path):
-    dataset = _traced_rows(tmp_path, trace=lambda i: {"info": {"trace_id": f"t{i}"}})
-
-    assert trace_expectation_overrides(dataset) == ()
-
-
 def test_mlflow_really_does_raise_on_a_null_trace(tmp_path):
     """The reason `evaluation_rows` drops the column, checked not assumed.
 
@@ -2553,14 +2527,8 @@ def test_mlflow_really_does_raise_on_a_null_trace(tmp_path):
     assert "trace" not in frame.columns
 
 
-def test_mlflow_really_does_overwrite_curated_expectations(tmp_path):
-    """`_extract_expectations_from_trace` documents a guard it does not have.
-
-    Built through MLflow rather than hand-rolled JSON: the serialized
-    assessment carries `assessment_name`, `create_time` and
-    `last_update_time`, and a hand-written shape both fails to load and
-    proves nothing about the real one.
-    """
+def test_mlflow_really_preserves_curated_expectations(tmp_path):
+    """Pin AgentKit planning to certified MLflow 3.15 conversion semantics."""
 
     pytest.importorskip("mlflow")
     import mlflow
@@ -2595,8 +2563,7 @@ def test_mlflow_really_does_overwrite_curated_expectations(tmp_path):
 
     frame = _convert_to_eval_set([dict(row) for row in dataset.rows])
 
-    assert frame["expectations"][0] == {"expected_response": "from the trace"}
-    assert trace_expectation_overrides(dataset) == ("expected_response",)
+    assert frame["expectations"][0] == {"expected_response": "from the dataset"}
 
 
 def test_dropping_the_trace_keeps_the_question(tmp_path):
@@ -2647,13 +2614,8 @@ def test_an_unrecoverable_request_is_reported_not_passed(tmp_path):
     assert rows_missing_inputs(scored) == (0,)
 
 
-def test_traces_mode_plans_against_the_expectations_mlflow_will_use(tmp_path):
-    """One assessment replaces the whole column, including the empty ones.
-
-    A row whose trace carries no assessment ends up with no expectations
-    at all, whatever the dataset wrote — so a scorer chosen from the
-    curated field would score nothing and report a vacuous pass.
-    """
+def test_traces_mode_preserves_the_authored_expectations_mlflow_will_use(tmp_path):
+    """A trace assessment cannot replace a curated dataset column."""
 
     def trace(index):
         assessments = (
@@ -2673,12 +2635,10 @@ def test_traces_mode_plans_against_the_expectations_mlflow_will_use(tmp_path):
 
     scored = effective_dataset(dataset, mode="traces")
 
-    assert scored.rows[0]["expectations"] == {"expected_response": "from the trace"}
-    assert scored.rows[1]["expectations"] == {}
-    # No longer on every row, so the contract check will exclude the
-    # scorers that need it instead of letting them score vacuously.
-    assert scored.shape.expectation_keys == ()
-    assert scored.shape.partial_expectation_keys == ("expected_response",)
+    assert scored.rows[0]["expectations"] == {"expected_response": "a0"}
+    assert scored.rows[1]["expectations"] == {"expected_response": "a1"}
+    assert scored.shape.expectation_keys == ("expected_response",)
+    assert scored.shape.partial_expectation_keys == ()
 
 
 def test_traces_mode_decodes_serialized_expected_facts_for_plan_and_digest(tmp_path):
@@ -2691,7 +2651,6 @@ def test_traces_mode_decodes_serialized_expected_facts_for_plan_and_digest(tmp_p
         return [
             {
                 "inputs": {"question": "What is the vesting rule?"},
-                "expectations": {"expected_facts": ["authored fallback"]},
                 "trace": {
                     "info": {
                         "trace_id": "tr-realistic",
@@ -2876,3 +2835,195 @@ def test_a_trace_body_is_not_scanned_for_placeholders(tmp_path):
     )
 
     assert failures == []
+
+
+def _delegation_span(sid, span_type, *, parent=None, role=None, name=None):
+    """A minimal span record in the shape `_spans` reads."""
+
+    span = {
+        "context": {"span_id": sid},
+        "parent_id": parent,
+        "type": span_type,
+        "name": name or sid,
+    }
+    if role is not None:
+        span["attributes"] = {"agent.role": role}
+    return span
+
+
+def _delegation_trace(*spans):
+    return {"data": {"spans": list(spans)}}
+
+
+def _supervised_trace():
+    return _delegation_trace(
+        _delegation_span(
+            "root", "AGENT", role='"supervisor"', name="deepagent.supervisor"
+        ),
+        _delegation_span(
+            "d1", "AGENT", parent="root", role='"sql-analyst"', name="delegation"
+        ),
+        _delegation_span("llm", "LLM", parent="d1"),
+        _delegation_span("tool", "TOOL", parent="llm", name="execute_sql_query"),
+    )
+
+
+def test_delegation_spans_set_the_shape_flag(tmp_path):
+    """A non-root AGENT span carrying agent.role is the delegation marker."""
+
+    rows = [{"inputs": {"question": "a"}, "trace": _supervised_trace()}]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_delegation_spans
+    assert shape.has_tool_spans
+
+
+def test_delegation_flag_reads_json_encoded_attribute_values(tmp_path):
+    """MLflow stores attribute values JSON-encoded, quotes included."""
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            "trace": _delegation_trace(
+                {
+                    "context": {"span_id": "root"},
+                    "parent_id": None,
+                    "attributes": {"mlflow.spanType": '"AGENT"'},
+                },
+                {
+                    "context": {"span_id": "d1"},
+                    "parent_id": "root",
+                    "attributes": {
+                        "mlflow.spanType": '"AGENT"',
+                        "agent.role": '"docs-researcher"',
+                    },
+                },
+            ),
+        }
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert shape.has_delegation_spans
+
+
+def test_single_agent_traces_do_not_set_the_delegation_flag(tmp_path):
+    """Neither a labeled root nor role-less decision spans count.
+
+    `record_agent_decision` writes role-less AGENT spans inside ordinary
+    single-agent applications, and a role on only the root labels a single
+    agent; selecting multi-agent scorers for either would fail gates that
+    never claimed the delegation convention.
+    """
+
+    rows = [
+        {
+            "inputs": {"question": "a"},
+            # A labeled single agent: role on the root only.
+            "trace": _delegation_trace(
+                _delegation_span("root", "AGENT", role='"supervisor"'),
+                _delegation_span("tool", "TOOL", parent="root"),
+            ),
+        },
+        {
+            "inputs": {"question": "b"},
+            # Decision evidence: non-root AGENT spans without a role.
+            "trace": _delegation_trace(
+                _delegation_span("root", "CHAIN"),
+                _delegation_span("decision", "AGENT", parent="root"),
+            ),
+        },
+    ]
+    _write_dataset(tmp_path, rows)
+
+    shape = load_dataset("golden.json", root=tmp_path).shape
+
+    assert not shape.has_delegation_spans
+
+
+def test_delegation_structure_accepts_the_supervisor_shape():
+    assert delegation_structure_violations(_supervised_trace()) == ()
+
+
+def test_delegation_structure_skips_rows_outside_the_convention():
+    """No delegation spans or no readable trace: unscorable, not failed."""
+
+    assert delegation_structure_violations("not json") is None
+    assert delegation_structure_violations({"data": {"spans": []}}) is None
+    single_agent = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("tool", "TOOL", parent="root"),
+    )
+    assert delegation_structure_violations(single_agent) is None
+
+
+def test_delegation_structure_rejects_multiple_roots():
+    trace = _delegation_trace(
+        _delegation_span("a", "AGENT", role='"supervisor"'),
+        _delegation_span("b", "AGENT", role='"sql-analyst"', parent="a"),
+        _delegation_span("c", "AGENT"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations is not None
+    assert any("exactly one root" in violation for violation in violations)
+
+
+def test_delegation_structure_rejects_a_non_agent_root():
+    trace = _delegation_trace(
+        _delegation_span("root", "CHAIN", name="pipeline"),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == ("root span 'pipeline' is not an AGENT span",)
+
+
+def test_delegation_structure_rejects_an_unresolvable_graph():
+    """A chain that cannot be walked cannot be verified: violation, not skip."""
+
+    trace = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+        _delegation_span("tool", "TOOL", parent="missing"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == ("span parent graph does not resolve to a verifiable tree",)
+
+
+def test_delegation_structure_rejects_tools_under_the_root_agent():
+    """The supervisor never executes operational tools directly."""
+
+    trace = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+        _delegation_span("tool", "TOOL", parent="root", name="execute_sql_query"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == (
+        "TOOL span 'execute_sql_query' executes directly under the root agent",
+    )
+
+
+def test_delegation_structure_requires_a_role_on_the_executing_agent():
+    trace = _delegation_trace(
+        _delegation_span("root", "AGENT", role='"supervisor"'),
+        _delegation_span("d1", "AGENT", parent="root", role='"sql-analyst"'),
+        _delegation_span("worker", "AGENT", parent="root"),
+        _delegation_span("tool", "TOOL", parent="worker", name="lookup"),
+    )
+
+    violations = delegation_structure_violations(trace)
+
+    assert violations == (
+        "TOOL span 'lookup' runs under an AGENT span with no agent.role",
+    )

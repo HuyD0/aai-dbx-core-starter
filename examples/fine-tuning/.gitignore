@@ -1,0 +1,16 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# MLflow database, artifacts, Hugging Face cache, and course workflow state.
+.aai/
+mlruns/
+mlflow.db
+
+# Local environment and credentials never belong in this project.
+.env
+*.env
+databrickscfg

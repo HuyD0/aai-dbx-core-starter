@@ -168,7 +168,7 @@ def test_local_finetuning_project_has_isolated_locked_contract():
     pyproject = (PROJECT / "pyproject.toml").read_text(encoding="utf-8")
     assert "mlx-lm[train]==0.31.3" in pyproject
     assert "sys_platform == 'darwin'" in pyproject
-    assert "mlflow==3.14.0" in pyproject
+    assert "mlflow==3.15.1" in pyproject
     assert "kaggle==2.2.4" in pyproject
     assert "jupyterlab==4.6.2" in pyproject
 

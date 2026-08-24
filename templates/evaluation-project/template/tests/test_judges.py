@@ -7,7 +7,8 @@ import pytest
 from aai_core.agentkit.catalog import get_spec
 from aai_core.agentkit.config import ProjectContext
 from aai_core.agentkit.errors import ConfigError
-from app.judges import judge_model_uri
+from app import judges
+from app.judges import judge_model_uri, judge_scorers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,13 +32,44 @@ def test_a_non_databricks_judge_is_rejected():
     ungoverned = ProjectContext(
         config=context.config,
         settings=context.settings.model_copy(
-            update={"models": {"judge-model": {"provider": "foundry"}}}
+            update={"models": {"judge-model": {"provider": "azure_apim"}}}
         ),
         root=context.root,
     )
 
     with pytest.raises(ConfigError):
         ungoverned.judge_model_uri()
+
+
+def test_context_inputs_are_unambiguous_and_settings_remain_supported():
+    context = project()
+
+    with pytest.raises(ValueError, match="settings or project"):
+        judge_model_uri(settings=context.settings, project=context)
+
+    assert judge_model_uri(settings=context.settings) == judge_model_uri(
+        project=context
+    )
+
+
+def test_judge_scorers_build_the_shared_plan_with_the_governed_model(monkeypatch):
+    built = []
+
+    def fake_build_scorer(spec, **options):
+        built.append((spec, options))
+        return spec.name
+
+    monkeypatch.setattr(judges, "build_scorer", fake_build_scorer)
+
+    scorers = judge_scorers(project=project())
+
+    assert scorers
+    assert scorers == [spec.name for spec, _ in built]
+    assert all(spec.judge is not None for spec, _ in built)
+    assert all(
+        options["judge_model_uri"] == "endpoints:/judge-endpoint"
+        for _, options in built
+    )
 
 
 def test_domain_policy_is_report_only_until_calibrated():

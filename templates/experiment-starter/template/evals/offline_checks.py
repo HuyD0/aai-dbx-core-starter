@@ -7,7 +7,6 @@ records the run in MLflow on the credentialed path.
 
 from __future__ import annotations
 
-import csv
 import json
 import sys
 from pathlib import Path
@@ -19,9 +18,9 @@ MIN_ROWS = 10
 REQUIRED_GATED_METRICS = ("accuracy",)
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901 - linear, independent contract assertions
     sys.path.insert(0, str(ROOT / "src"))
-    from app.experiment import DEFAULT_SEED, evaluate_rows
+    from app.experiment import DEFAULT_SEED, evaluate_rows, load_csv_rows
 
     failures: list[str] = []
 
@@ -32,8 +31,7 @@ def main() -> int:
         if metric not in gated:
             failures.append(f"gate_config.json does not gate {metric}")
 
-    with (ROOT / "data" / "sample.csv").open(encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
+    rows = load_csv_rows(ROOT / "data" / "sample.csv")
     if len(rows) < MIN_ROWS:
         failures.append(f"data/sample.csv has {len(rows)} rows; keep >= {MIN_ROWS}")
     for column in ("feature_signal", "label"):

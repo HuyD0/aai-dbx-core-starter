@@ -1,29 +1,33 @@
-"""Tier-2 gate: the full suite with code scorers AND LLM judges.
+"""Tier-2 gate: the full suite with code scorers and LLM judges.
 
-Runs on the credentialed path — locally with workspace auth, or as the
-bundle's `release_gate` job so compute goes to the data. Scores every row,
-compares against the recorded baseline, applies every threshold, and writes
-the run to MLflow with its dataset, scorer, prompt, and model versions
-attached.
+Runs on the credentialed path, locally with workspace authentication or as
+the bundle's ``release_gate`` job. AgentKit scores every row, compares the run
+with the recorded baseline, applies every threshold, and writes governed
+evidence to MLflow.
 
     python evals/evaluate.py                      # score and compare
-    python evals/evaluate.py --update-baseline    # record this run AS the baseline
+    python evals/evaluate.py --update-baseline    # establish this baseline
 
-Equivalent to `agentkit eval`; this wrapper keeps the file path the bundle
-job and the Makefile refer to. Exit codes: 0 passed, 2 a threshold failed,
-1 a configuration or runtime error.
+This wrapper preserves the path used by the bundle and Makefile while routing
+behavior through ``agentkit eval``. Exit codes are stable: 0 passed, 2 a
+threshold failed, and 1 a configuration or runtime error.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 from aai_core.agentkit.cli import main
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def build_arguments(argv: list[str] | None = None) -> list[str]:
+    """Translate the stable template wrapper flags to AgentKit arguments."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
@@ -68,8 +72,8 @@ def build_arguments(argv: list[str] | None = None) -> list[str]:
         arguments.append("--yes")
     mode = parsed.mode
     if parsed.model_name:
-        # Score the version that triggered promotion, whatever agentkit.yaml
-        # names. Without this the gate could approve an unrelated target.
+        # Score exactly the version that triggered promotion. Falling back to
+        # the configured agent could approve an unrelated target.
         arguments += [
             "--agent",
             f"models:/{parsed.model_name}/{parsed.model_version}",
@@ -87,18 +91,27 @@ def build_arguments(argv: list[str] | None = None) -> list[str]:
     return arguments
 
 
+def validate_bundled_inputs(arguments: list[str]) -> None:
+    """Fail local case and answer-sheet drift before target or judge work."""
+
+    # Imported lazily so tests can exercise this plain wrapper without a
+    # rendered project's ``src`` directory on sys.path.
+    from app.targets import validate_bundled_data
+
+    include_answer_sheet = any(
+        arguments[index : index + 2] == ["--mode", "answer-sheet"]
+        for index in range(len(arguments) - 1)
+    )
+    validate_bundled_data(ROOT, include_answer_sheet=include_answer_sheet)
+
+
 def publish_evidence_run_id(root: Path | None = None) -> str | None:
     """Hand the approval task the exact run this evaluation recorded.
 
-    The approval task needs to name the run whose evidence supports it.
-    Searching MLflow for the newest run against this model version would
-    pick up a concurrent or manual evaluation of the same version instead,
-    and point a reviewer at a different dataset, config, or gate. The run
-    id travels as a Databricks task value, which is exact.
-
-    Best effort on the *write* only: outside a job there is no task value
-    to set, and a laptop run must not fail because of it. The approval
-    task falls back to a search when the value is absent, and says so.
+    Searching MLflow for the newest run against a model version can select a
+    concurrent or manual evaluation with different data or policy. A task
+    value preserves the exact evidence identity. Writing it is best effort so
+    local runs outside Databricks remain usable.
     """
 
     from aai_core.agentkit.results import load_latest_results
@@ -108,19 +121,30 @@ def publish_evidence_run_id(root: Path | None = None) -> str | None:
     run_id = loaded[0].run_id if loaded else None
     if not run_id:
         return None
+    # ``databricks.sdk.runtime`` creates a remote dbutils client when the
+    # Databricks runtime namespace is absent. Importing it on a developer
+    # machine can therefore authenticate and retry instead of failing fast.
+    # The ``dbruntime`` module is the same boundary the certified SDK uses to
+    # distinguish an in-runtime namespace from its local fallback.
+    if find_spec("dbruntime") is None:
+        return run_id
     try:
         from databricks.sdk.runtime import dbutils
 
         dbutils.jobs.taskValues.set(key="evidence_run_id", value=run_id)
     except Exception as error:  # noqa: BLE001 - no task values outside a job
-        # Not fatal: the approval task falls back to searching for the run
-        # and says that is what it did. Worth a line in the job log, since
-        # it is why the approver sees the less exact message.
-        print(f"could not hand the run id to the approval task: {error}")
+        # Do not echo a provider exception message into job logs; exception
+        # messages are not a trusted redaction boundary.
+        print(
+            "could not hand the run id to the approval task "
+            f"({type(error).__name__})"
+        )
     return run_id
 
 
 if __name__ == "__main__":
-    code = main(build_arguments(sys.argv[1:]))
+    agentkit_arguments = build_arguments(sys.argv[1:])
+    validate_bundled_inputs(agentkit_arguments)
+    exit_code = main(agentkit_arguments)
     publish_evidence_run_id()
-    raise SystemExit(code)
+    raise SystemExit(exit_code)

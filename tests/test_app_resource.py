@@ -66,7 +66,16 @@ APPS_RUNTIME_ENV = {
     "extra": "",
 }
 
-DIRECT_REQUIREMENTS = ("fastapi", "jinja2", "uvicorn", "databricks-sdk", "pyyaml")
+DIRECT_REQUIREMENTS = (
+    "databricks-sdk",
+    "fastapi",
+    "jinja2",
+    "psycopg",
+    "psycopg-binary",
+    "pyyaml",
+    "sqlalchemy",
+    "uvicorn",
+)
 
 
 def _normalise(name: str) -> str:
@@ -187,7 +196,11 @@ def test_only_the_wheel_is_published_to_the_artifact_volume():
     sdist would put a web server into the SDK artifact volume.
     """
     workflow = (WORKFLOWS / "publish-sdk.yml").read_text(encoding="utf-8")
-    assert "python -m build --wheel" in workflow, "the release build must be wheel-only"
+    cloud_verify = (ROOT / "scripts" / "cloud-verify.sh").read_text(encoding="utf-8")
+    assert "./scripts/cloud-verify.sh" in workflow
+    assert (
+        "python -m build --wheel --no-isolation" in cloud_verify
+    ), "the acceptance gate must produce the wheel that publication stages"
     assert "dist/*.tar.gz" not in workflow, "the sdist must not be published"
 
 
@@ -196,7 +209,7 @@ def test_console_dependencies_are_reachable_from_the_dev_extra():
     there or pull-request CI fails on an ImportError."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dev = " ".join(pyproject["project"]["optional-dependencies"]["dev"])
-    for package in ("fastapi", "jinja2", "uvicorn"):
+    for package in ("fastapi", "jinja2", "psycopg", "sqlalchemy", "uvicorn"):
         assert package in dev, f"{package} must be in the dev extra"
 
 
@@ -311,6 +324,8 @@ def test_app_resource_supplies_every_identifier_the_console_reads():
         "AAI_CONSOLE_SDK_ARTIFACT_VOLUME",
         "AAI_CONSOLE_JOB_COMPUTE_POLICY_ID",
         "AAI_CONSOLE_TEMPLATE_REPO",
+        "AAI_HUB_STATE_MODE",
+        "AAI_HUB_LAKEBASE_SCHEMA",
         "AAI_HUB_JOB_MODE",
         "AAI_HUB_REGISTRATION_PRINCIPALS",
         "AAI_HUB_PLATFORM_VIEWER_GROUP",
@@ -344,6 +359,25 @@ def test_template_repo_default_agrees_with_the_identifier_fixture():
 
 def test_volume_binding_is_read_only():
     """The console reads no application data; anything beyond READ_VOLUME is excess."""
-    binding = _app_resource()["resources"][0]["uc_securable"]
+    binding = next(
+        item["uc_securable"]
+        for item in _app_resource()["resources"]
+        if "uc_securable" in item
+    )
     assert binding["securable_type"] == "VOLUME"
     assert binding["permission"] == "READ_VOLUME"
+
+
+def test_lakebase_binding_reuses_exact_autoscaling_resource_paths():
+    binding = next(
+        item for item in _app_resource()["resources"] if item["name"] == "postgres"
+    )
+    assert set(binding) == {"name", "postgres"}
+    assert binding["postgres"] == {
+        "branch": "${var.hub_lakebase_branch}",
+        "database": "${var.hub_lakebase_database}",
+        "permission": "CAN_CONNECT_AND_CREATE",
+    }
+    text = RESOURCE.read_text(encoding="utf-8")
+    assert "instance_name" not in text
+    assert "database_name" not in text

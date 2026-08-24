@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from pydantic import Field, field_serializer, field_validator
 
@@ -48,11 +48,11 @@ class CostEstimate(ContractModel):
     @field_validator("calls_by_scorer", mode="after")
     @classmethod
     def freeze_calls(cls, value: Mapping[str, int]) -> Mapping[str, int]:
-        return freeze_value(value)
+        return cast(Mapping[str, int], freeze_value(value))
 
     @field_serializer("calls_by_scorer")
     def serialize_calls(self, value: Mapping[str, int]) -> dict[str, int]:
-        return thaw_value(value)
+        return cast(dict[str, int], thaw_value(value))
 
 
 def estimate(
@@ -150,15 +150,32 @@ def estimate(
     )
 
 
-def enforce_budget(cost: CostEstimate, *, max_judge_calls: int | None) -> None:
-    """Abort BEFORE any judge call when the estimate exceeds the budget."""
+def enforce_budget(
+    cost: CostEstimate,
+    *,
+    max_judge_calls: int | None,
+    extra_judge_calls: int = 0,
+) -> None:
+    """Abort BEFORE any judge call when the estimate exceeds the budget.
 
-    if max_judge_calls is not None and cost.judge_calls > max_judge_calls:
+    ``extra_judge_calls`` covers spend the plan itself does not model —
+    the judge-integrity re-scoring calls — so the configured ceiling is a
+    ceiling on the whole run, not just its first pass.
+    """
+
+    total = cost.judge_calls + max(0, extra_judge_calls)
+    if max_judge_calls is not None and total > max_judge_calls:
+        detail = (
+            f" (including {extra_judge_calls} integrity re-scoring calls)"
+            if extra_judge_calls
+            else ""
+        )
         raise BudgetExceededError(
-            f"this run would make {cost.judge_calls} judge calls; "
+            f"this run would make {total} judge calls{detail}; "
             f"budget.max_judge_calls is {max_judge_calls}",
-            remediation="Reduce rows (--rows), remove judge scorers, or "
-            "raise budget.max_judge_calls in agentkit.yaml.",
+            remediation="Reduce rows (--rows), remove judge scorers, lower "
+            "integrity.consistency_sample, or raise budget.max_judge_calls "
+            "in agentkit.yaml.",
         )
 
 

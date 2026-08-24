@@ -57,6 +57,13 @@ class AuthenticationEvidence(HubModel):
     rate_limit_configured: bool | None
 
 
+class CostEvidence(HubModel):
+    """Platform-observed cost controls for the current application version."""
+
+    budget_policy_configured: bool | None
+    attribution_verified: bool | None
+
+
 class TracingEvidence(HubModel):
     configured: bool | None
     recent_trace_metadata_complete: bool | None
@@ -97,6 +104,7 @@ class ReadinessEvidence(HubModel):
     tags: TagEvidence
     risk: RiskEvidence
     authentication: AuthenticationEvidence
+    cost: CostEvidence
     tracing: TracingEvidence
     jobs: JobEvidence
     evaluation: EvaluationEvidence
@@ -119,6 +127,7 @@ class ReadinessProfile(HubModel):
     require_ai_gateway: bool = True
     require_request_tags: bool = True
     require_rate_limit: bool = False
+    require_budget_policy: bool = False
     require_monitoring: bool = True
 
     @model_validator(mode="after")
@@ -671,6 +680,66 @@ class ReadinessEvaluator:
                 evaluated_at=evaluated_at,
                 remediation="Configure the rate limit required by this risk profile.",
                 severity=rate_severity,
+            )
+        )
+
+        if not self.profile.require_budget_policy:
+            budget_status = ReadinessStatus.NOT_APPLICABLE
+            budget_detail = "this profile does not require a governed budget policy"
+            budget_severity = ReadinessSeverity.INFORMATIONAL
+        else:
+            budget_status = self._boolean_status(evidence.cost.budget_policy_configured)
+            budget_detail = (
+                "a governed budget policy is configured"
+                if budget_status is ReadinessStatus.PASS
+                else "the governed budget policy is missing or unknown"
+            )
+            budget_severity = ReadinessSeverity.BLOCKING
+        add(
+            self._result(
+                rule_id="budget_policy",
+                description="A governed budget policy is configured where required.",
+                status=budget_status,
+                evidence=budget_detail,
+                evaluated_at=evaluated_at,
+                remediation=(
+                    "Bind the application cost center to an approved platform "
+                    "budget policy and verify it through authoritative billing."
+                ),
+                severity=budget_severity,
+            )
+        )
+
+        if not self.profile.require_budget_policy:
+            attribution_status = ReadinessStatus.NOT_APPLICABLE
+            attribution_detail = (
+                "this profile does not require observed cost attribution"
+            )
+            attribution_severity = ReadinessSeverity.INFORMATIONAL
+        else:
+            attribution_status = self._boolean_status(
+                evidence.cost.attribution_verified
+            )
+            attribution_detail = (
+                "cost attribution was verified for the current version"
+                if attribution_status is ReadinessStatus.PASS
+                else "cost attribution is missing or unknown for the current version"
+            )
+            attribution_severity = ReadinessSeverity.BLOCKING
+        add(
+            self._result(
+                rule_id="cost_attribution",
+                description=(
+                    "Observed usage joins to the application, owner, and cost center."
+                ),
+                status=attribution_status,
+                evidence=attribution_detail,
+                evaluated_at=evaluated_at,
+                remediation=(
+                    "Route inference through the approved gateway and emit the "
+                    "platform-controlled request tags."
+                ),
+                severity=attribution_severity,
             )
         )
 

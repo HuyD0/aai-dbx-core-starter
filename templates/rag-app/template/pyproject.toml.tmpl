@@ -11,7 +11,7 @@ dependencies = [
   "azure-search-documents>=12,<13",
   "databricks-ai-search>=0.77,<0.78",
   "databricks-openai>=0.17,<0.18",
-  "mlflow[databricks]>=3.14,<3.15",
+  "mlflow[databricks]>=3.15.1,<3.16",
   "openai>=2.48,<3",
   "PyYAML>=6.0.3,<7",
 ]
@@ -20,8 +20,12 @@ dependencies = [
 dev = [
   "black>=26.5.1,<27",
   "build>=1.5,<2",
+  "mypy>=1.18,<2",
+  "pip-audit>=2.9,<3",
   "pytest>=9.1.1,<10",
+  "pytest-cov>=7,<8",
   "ruff>=0.16,<1",
+  "types-PyYAML>=6.0.12,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -31,9 +35,29 @@ packages = ["src/app"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 
+[tool.mypy]
+# Provider packages and their NumPy stubs expose version-sensitive internals.
+# Application boundaries are checked against aai-core-owned protocols instead.
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+module = [
+  "mlflow",
+  "numpy",
+  "numpy.*",
+  "openai",
+]
+follow_imports = "skip"
+
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C90", "SIM"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.isort]
 known-first-party = ["aai_core", "app", "jobs"]

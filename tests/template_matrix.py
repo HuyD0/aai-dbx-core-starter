@@ -6,14 +6,15 @@ overrides + the combo's `overrides`, then asserts `expect_present` /
 toggled by a template's __preamble must be asserted present in one combo and
 absent in a sibling — that is the dead-skip-glob guard.
 
-The first combo of each template is also the deep-tier combo (ruff, black,
-generated pytest, offline checks), so it must render a fully working project.
+Every combo runs the deep generated-project tier (validation, Ruff, Black,
+mypy, branch coverage, offline checks, and a wheel build), so each branch must
+render a fully working project.
 """
 
 COMBOS = {
     "analytics-app": [
         {
-            "name": "databricks",
+            "name": "databricks-review-off",
             "overrides": {
                 "project_name": "test-analytics",
                 "model_provider": "databricks",
@@ -46,19 +47,22 @@ COMBOS = {
                 "notebooks/02_context_engineering.py",
                 "notebooks/03_run_the_agent.py",
                 "notebooks/04_evaluate_and_gate.py",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/decisions/README.md",
             ],
             # No serving surface by design: projects graduate to agent-app.
             "expect_absent": ["app.yaml", "start_server.py", "resources/agent_app.yml"],
         },
         {
-            "name": "foundry",
+            "name": "databricks-review-on",
             "overrides": {
                 "project_name": "test-analytics",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com",
+                "model_provider": "databricks",
                 "model_deployment": "chat",
+                "adversarial_review": "yes",
             },
-            "expect_present": ["src/app/agent.py"],
+            "expect_present": ["src/app/agent.py", "src/app/reviewer.py"],
             "expect_absent": [],
         },
     ],
@@ -72,6 +76,9 @@ COMBOS = {
                 "data/sample.csv",
                 "notebooks/01_explore.py",
                 "evals/evaluate.py",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/decisions/README.md",
             ],
             "expect_absent": [],
         },
@@ -96,17 +103,10 @@ COMBOS = {
                 "scripts/register_prompt.py",
                 "scripts/promote_prompt.py",
                 "evals/evaluate.py",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/decisions/README.md",
             ],
-            "expect_absent": [],
-        },
-        {
-            "name": "foundry",
-            "overrides": {
-                "project_name": "test-prompt-app",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-            },
-            "expect_present": ["src/app/assistant.py"],
             "expect_absent": [],
         },
     ],
@@ -129,6 +129,9 @@ COMBOS = {
                 "notebooks/01_align_judge.py",
                 "resources/optional/deployment_job.yml",
                 "resources/optional/registered_model.yml",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/decisions/README.md",
             ],
             # Thresholds live in agentkit.yaml now; scorer categorization is
             # structural (a scorer's kind comes from the shared registry).
@@ -149,9 +152,14 @@ COMBOS = {
             },
             "expect_present": [
                 "src/app/rag.py",
+                "src/app/release_evidence.py",
                 "jobs/build_chunks.py",
                 "tests/test_chunks.py",
+                "tests/test_release_evidence.py",
                 "scripts/promote_prompt.py",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/decisions/README.md",
             ],
             "expect_absent": [],
         },
@@ -173,21 +181,6 @@ COMBOS = {
                 "tests/test_chunks.py",
             ],
         },
-        {
-            "name": "foundry-azure-search",
-            "overrides": {
-                "project_name": "test-rag",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-                "model_deployment": "chat",
-                "retrieval_provider": "azure_ai_search",
-                "search_endpoint": "https://search.search.windows.net",
-                "search_index": "knowledge",
-                "embedding_deployment": "embedding",
-            },
-            "expect_present": ["src/app/rag.py"],
-            "expect_absent": ["jobs/build_chunks.py"],
-        },
     ],
     "agent-app": [
         {
@@ -207,8 +200,19 @@ COMBOS = {
                 "app.yaml",
                 "requirements.txt",
                 "resources/agent_app.yml",
+                "tests/_endpoint_trace_probe.py",
                 "tests/test_app_endpoint.py",
                 "notebooks/02_enable_monitoring.py",
+                "scripts/create_release.py",
+                "scripts/smoke_deployment.py",
+                "evals/data/live_probes.json",
+                "tests/test_evaluation_config.py",
+                "tests/test_feedback.py",
+                "tests/test_release_evidence.py",
+                "tests/test_sync_dataset.py",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/decisions/README.md",
             ],
             "expect_absent": ["src/app/scoring.py"],
         },
@@ -228,26 +232,7 @@ COMBOS = {
                 "app.yaml",
                 "requirements.txt",
                 "resources/agent_app.yml",
-                "tests/test_app_endpoint.py",
-            ],
-        },
-        {
-            "name": "foundry-no-serving",
-            "overrides": {
-                "project_name": "test-agent-app",
-                "model_provider": "foundry",
-                "foundry_endpoint": "https://unused.services.ai.azure.com/api/projects/test-project",
-                "model_deployment": "chat",
-            },
-            # Foundry cannot satisfy serving resource declarations, so the
-            # serving path is omitted even though include_serving defaults yes.
-            "expect_present": ["src/app/agent.py"],
-            "expect_absent": [
-                "src/app/endpoint.py",
-                "start_server.py",
-                "app.yaml",
-                "requirements.txt",
-                "resources/agent_app.yml",
+                "tests/_endpoint_trace_probe.py",
                 "tests/test_app_endpoint.py",
             ],
         },

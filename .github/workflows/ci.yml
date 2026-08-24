@@ -22,6 +22,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Release validation reads the exact candidate commit recorded in
+          # compatibility.json, which may predate the pull-request merge ref.
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -31,7 +34,7 @@ jobs:
         run: |
           python -m pip install uv==0.8.23
           uv lock --check
-          uv sync --python 3.12 --extra dev --locked
+          uv sync --python 3.12 --extra dev --extra all --locked
 
       - name: Install Databricks CLI for local template rendering
         uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
@@ -63,9 +66,17 @@ jobs:
       - name: Test code and execute every notebook twice
         run: make -C examples/local-classification check
 
-  python-311:
+      - name: Audit the course runtime dependency closure
+        run: |
+          examples/local-classification/.venv/bin/python \
+            templates/_shared/files/scripts/audit_dependencies.py \
+            --policy templates/_shared/files/security-audit.toml \
+            --requirement \
+            examples/local-classification/src/aai_local_classification/model-requirements.lock
+
+  finetuning-course:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,7 +84,32 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          python-version: "3.12"
+
+      - name: Install the locked fine-tuning course
+        run: |
+          python -m pip install uv==0.8.23
+          make -C examples/fine-tuning install
+
+      - name: Test code and execute every notebook twice
+        run: make -C examples/fine-tuning check
+
+  python-311:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The Python 3.11 suite also exercises the pinned release candidate.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
           python-version: "3.11"
+
+      - name: Install Databricks CLI for local template rendering
+        uses: databricks/setup-cli@8b7b124dc4f5b9621e959ea61cf4d3dd4e421f67 # v1.9.0
 
       - name: Install and test Python 3.11 compatibility
         run: |
@@ -90,9 +126,24 @@ jobs:
           make -C examples/local-classification test
           make -C examples/local-classification notebook-check
 
+      - name: Install the fine-tuning course on Python 3.11
+        run: make -C examples/fine-tuning install
+
+      - name: Test fine-tuning runtime compatibility on Python 3.11
+        # Python 3.11 resolves the older numpy environment marker, so this job
+        # is what proves the course code on both certified numpy branches.
+        run: |
+          make -C examples/fine-tuning test
+          make -C examples/fine-tuning notebook-check
+
   provider-extras:
+    name: Provider contracts / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,32 +151,93 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
-      - name: Install the certified provider stack
+      - name: Install the certified provider stacks
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
         run: |
           python -m pip install uv==0.8.23
-          uv sync --python 3.12 --extra dev --extra all --locked
+          uv sync \
+            --python "$PYTHON_VERSION" \
+            --extra dev \
+            --extra all \
+            --locked
           uv pip install \
             --python .venv/bin/python \
             --requirements templates/agent-app/template/recipes/langgraph/requirements.lock
+          uv pip install \
+            --python .venv/bin/python \
+            --requirements templates/agent-app/template/recipes/langgraph-lakebase/requirements.lock
           uv pip check --python .venv/bin/python
 
       - name: Exercise the optional LangGraph durability contract
         env:
           LANGGRAPH_STRICT_MSGPACK: "true"
         run: |
-          uv run --python 3.12 pytest -q \
+          .venv/bin/python -m pytest -q \
             templates/agent-app/template/recipes/langgraph/test_graph.py
 
-      - name: Verify generated transitive template locks
+      - name: Exercise the Lakebase persistence recipe against local PostgreSQL
+        env:
+          LANGGRAPH_STRICT_MSGPACK: "true"
         run: |
-          uv run --python 3.12 python \
+          # The runner image ships PostgreSQL preinstalled but stopped. A
+          # local scratch server stands in for Lakebase (managed Postgres);
+          # no credential or cloud resource is involved.
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql \
+            -c "CREATE ROLE aai_it LOGIN PASSWORD 'aai_it_pw' CREATEDB;" \
+            -c "CREATE DATABASE aai_it OWNER aai_it;"
+          AAI_LAKEBASE_TEST_DSN="postgresql://aai_it:aai_it_pw@127.0.0.1:5432/aai_it" \
+            .venv/bin/python -m pytest -q \
+              templates/agent-app/template/recipes/langgraph-lakebase/
+
+      - name: Verify generated transitive template locks
+        if: matrix.python == '3.12'
+        run: |
+          .venv/bin/python \
             scripts/lock_template_dependencies.py --check
 
-      - name: Exercise real provider import boundaries
+      - name: Audit installed dependencies
         run: |
-          uv run --python 3.12 python - <<'PY'
+          .venv/bin/python \
+            templates/_shared/files/scripts/audit_dependencies.py \
+            --policy templates/_shared/files/security-audit.toml \
+            --installed-python .venv/bin/python
+
+      - name: Audit every generated runtime lock
+        if: matrix.python == '3.12'
+        run: |
+          while IFS= read -r lock; do
+            echo "auditing $lock"
+            .venv/bin/python \
+              templates/_shared/files/scripts/audit_dependencies.py \
+              --policy templates/_shared/files/security-audit.toml \
+              --requirement "$lock"
+          done < <(
+            { find templates -name requirements.lock -type f -print; \
+              printf '%s\n' \
+                examples/local-classification/src/aai_local_classification/model-requirements.lock; \
+            } | sort -u
+          )
+
+      - name: Audit standalone course dependency graphs
+        if: matrix.python == '3.12'
+        run: |
+          for project in \
+            examples/local-classification \
+            examples/local-finetuning; do
+            echo "auditing $project"
+            .venv/bin/python \
+              templates/_shared/files/scripts/audit_dependencies.py \
+              --policy templates/_shared/files/security-audit.toml \
+              --uv-project "$project"
+          done
+
+      - name: Exercise provider import boundaries
+        run: |
+          .venv/bin/python - <<'PY'
           import azure.identity
           import azure.keyvault.secrets
           import azure.search.documents

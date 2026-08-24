@@ -5,7 +5,7 @@
 # tests/test_app_resource.py recomputes this from uv.lock and fails on any
 # difference, printing the expected content.
 #
-# Why the whole closure and not just the five direct requirements: `pip install
+# Why the whole closure and not just the direct requirements: `pip install
 # -r requirements.txt` resolves anything unpinned at DEPLOY time, so a newer
 # starlette or pydantic could reach the container months after CI tested the
 # locked set. This is a second dependency channel that `uv lock --check` never
@@ -21,7 +21,10 @@
 databricks-sdk==0.122.0
 fastapi==0.140.0
 jinja2==3.1.6
+psycopg==3.3.4
+psycopg-binary==3.3.4
 pyyaml==6.0.3
+sqlalchemy==2.0.51
 uvicorn==0.51.0
 
 # Transitive closure, pinned so the deployed set equals the tested set.
@@ -32,8 +35,9 @@ certifi==2026.7.22
 cffi==2.1.0
 charset-normalizer==3.4.9
 click==8.4.2
-cryptography==48.0.1
+cryptography==49.0.0
 google-auth==2.56.2
+greenlet==3.5.4
 h11==0.16.0
 idna==3.18
 markupsafe==3.0.3

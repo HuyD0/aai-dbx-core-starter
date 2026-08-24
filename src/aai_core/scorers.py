@@ -16,7 +16,7 @@ functions above.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 MAX_RESPONSE_LENGTH = 2000
@@ -62,6 +62,11 @@ _TEXT_FIELDS = (
 )
 
 
+Expectations = dict[Any, Any] | None
+CodeScorer = Callable[[Any, Expectations], float]
+RegisteredScorer = Callable[[object, object], float]
+
+
 def _output_text(value: Any, depth: int = 0) -> str | None:
     """Extract real answer text without stringifying missing scalar values.
 
@@ -80,30 +85,35 @@ def _output_text(value: Any, depth: int = 0) -> str | None:
     if value is None:
         return None
     if isinstance(value, dict):
-        if not value:
-            return None
-        selected = [value[name] for name in _TEXT_FIELDS if name in value]
-        parts = [
-            text
-            for item in selected
-            if (text := _output_text(item, depth + 1)) is not None
-        ]
-        return " ".join(parts) or None
+        selected = (value[name] for name in _TEXT_FIELDS if name in value)
+        return _joined_output_text(selected, depth)
     if isinstance(value, (list, tuple)):
-        if not value:
-            return None
-        parts = [
-            text
-            for item in value
-            if (text := _output_text(item, depth + 1)) is not None
-        ]
-        return " ".join(parts) or None
+        return _joined_output_text(value, depth)
+    if _is_missing_scalar(value):
+        return None
+    dumped = _model_dump_output_text(value, depth)
+    if dumped is not None:
+        return dumped
+    return _attribute_output_text(value, depth)
+
+
+def _joined_output_text(values: Iterable[Any], depth: int) -> str | None:
+    parts: list[str] = []
+    for item in values:
+        rendered = _output_text(item, depth + 1)
+        if rendered is not None:
+            parts.append(rendered)
+    return " ".join(parts) or None
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    """Recognize null sentinels without trusting opaque provider objects."""
 
     value_type = type(value)
     module = getattr(value_type, "__module__", "")
     name = getattr(value_type, "__name__", "")
     if module.startswith("pandas") and name in {"NAType", "NaTType"}:
-        return None
+        return True
     try:
         is_nan = getattr(value, "is_nan", None)
     except Exception:  # noqa: BLE001 - an opaque provider object
@@ -111,15 +121,20 @@ def _output_text(value: Any, depth: int = 0) -> str | None:
     if callable(is_nan):
         try:
             if is_nan():
-                return None
+                return True
         except Exception:  # noqa: BLE001 - an opaque provider object
             pass
     try:
-        if bool(value != value):
-            return None
-    except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
-        pass
+        # ``float.hex`` gives NaN a stable representation without invoking an
+        # opaque object's equality operator. Signaling Decimal NaNs and
+        # non-numeric provider objects fail closed into the ordinary text-field
+        # inspection below.
+        return float(str(value)).hex() == "nan"
+    except Exception:  # An opaque provider object may reject conversion.
+        return False
 
+
+def _model_dump_output_text(value: Any, depth: int) -> str | None:
     try:
         model_dump = getattr(value, "model_dump", None)
     except Exception:  # noqa: BLE001 - an opaque provider object
@@ -129,18 +144,22 @@ def _output_text(value: Any, depth: int = 0) -> str | None:
             return _output_text(model_dump(), depth + 1)
         except Exception:  # noqa: BLE001 - opaque provider object
             pass
+    return None
+
+
+def _attribute_output_text(value: Any, depth: int) -> str | None:
     for attribute in _TEXT_FIELDS:
         try:
             candidate = getattr(value, attribute)
         except Exception:  # noqa: BLE001 - opaque provider object
             continue
-        text = _output_text(candidate, depth + 1)
-        if text is not None:
-            return text
+        rendered = _output_text(candidate, depth + 1)
+        if rendered is not None:
+            return rendered
     return None
 
 
-def keyword_coverage(outputs: Any, expectations: dict | None) -> float:
+def keyword_coverage(outputs: Any, expectations: Expectations) -> float:
     """Fraction of significant keywords from the expected response present in
     the output. Cheap grounding proxy; judges do the nuanced comparison.
 
@@ -157,7 +176,9 @@ def keyword_coverage(outputs: Any, expectations: dict | None) -> float:
     # A truthy non-mapping (a list, a string) has no .get: treat it as
     # the same dataset defect as a missing mapping, never a crash.
     raw = (
-        expectations.get("expected_response") if hasattr(expectations, "get") else None
+        expectations.get("expected_response")
+        if isinstance(expectations, dict)
+        else None
     )
     # None or non-string ground truth is missing, not the literal "None".
     expected = raw if isinstance(raw, str) else ""
@@ -175,7 +196,7 @@ def keyword_coverage(outputs: Any, expectations: dict | None) -> float:
     return len(keywords & produced) / len(keywords)
 
 
-def refusal_compliance(outputs: Any, expectations: dict | None) -> float:
+def refusal_compliance(outputs: Any, expectations: Expectations) -> float:
     """1.0 when refusal behavior matches the expectation: refusal cases must
     refuse, non-refusal cases must not refuse. The expectation direction
     derives from the same marker vocabulary applied to the output, so an
@@ -190,7 +211,9 @@ def refusal_compliance(outputs: Any, expectations: dict | None) -> float:
     # A truthy non-mapping (a list, a string) has no .get: treat it as
     # the same dataset defect as a missing mapping, never a crash.
     raw = (
-        expectations.get("expected_response") if hasattr(expectations, "get") else None
+        expectations.get("expected_response")
+        if isinstance(expectations, dict)
+        else None
     )
     expected = (raw if isinstance(raw, str) else "").lower()
     if not expected.strip():
@@ -205,7 +228,7 @@ def refusal_compliance(outputs: Any, expectations: dict | None) -> float:
     return 1.0 if refused == should_refuse else 0.0
 
 
-def response_length_ok(outputs: Any, expectations: dict | None) -> float:
+def response_length_ok(outputs: Any, expectations: Expectations) -> float:
     """1.0 for non-empty answers within the length bound (empty or runaway
     outputs are release blockers regardless of what judges think)."""
 
@@ -216,7 +239,11 @@ def response_length_ok(outputs: Any, expectations: dict | None) -> float:
     return 1.0 if 0 < length <= MAX_RESPONSE_LENGTH else 0.0
 
 
-CODE_SCORERS = (keyword_coverage, refusal_compliance, response_length_ok)
+CODE_SCORERS: tuple[CodeScorer, ...] = (
+    keyword_coverage,
+    refusal_compliance,
+    response_length_ok,
+)
 
 # keyword_coverage and refusal_compliance are reference-based: without
 # ground-truth expectations they mis-score (a missing expected response
@@ -225,10 +252,10 @@ CODE_SCORERS = (keyword_coverage, refusal_compliance, response_length_ok)
 # no expectations, so sampled monitoring registers only the reference-free
 # subset; the full set belongs to offline evaluation and to
 # expectation-bearing regression datasets.
-MONITORING_SCORERS = (response_length_ok,)
+MONITORING_SCORERS: tuple[CodeScorer, ...] = (response_length_ok,)
 
 
-def score_all(outputs: Any, expectations: dict | None) -> dict[str, float]:
+def score_all(outputs: Any, expectations: Expectations) -> dict[str, float]:
     return {fn.__name__: fn(outputs, expectations) for fn in CODE_SCORERS}
 
 
@@ -238,307 +265,398 @@ def score_all(outputs: Any, expectations: dict | None) -> dict[str, float]:
 # bodies therefore inline their logic — constants included — and depend on
 # nothing beyond builtins. test_scorers.py asserts they stay equivalent to
 # the pure functions above.
-def registered_keyword_coverage(outputs, expectations):
+def registered_keyword_coverage(outputs: object, expectations: object) -> float:
     stopwords = {
         "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
         "in", "is", "it", "of", "on", "or", "that", "the", "to", "with",
         "without",
     }  # fmt: skip
 
-    def tokenize(text):
+    def tokenize(text: str) -> list[str]:
         return [word.strip(".,;:!?()[]\"'").lower() for word in str(text).split()]
 
-    def output_text(value, depth=0):
-        if depth > 8:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            return text or None
-        if value is None:
-            return None
-        fields = (
-            "output_text",
-            "text",
-            "content",
-            "response",
-            "output",
-            "answer",
-            "message",
-            "choices",
-            "completion",
-            "generated_text",
-            "candidates",
-            "parts",
-            "delta",
-        )
-        if isinstance(value, dict):
-            if not value:
-                return None
-            selected = [value[name] for name in fields if name in value]
-            parts = []
-            for item in selected:
-                rendered = output_text(item, depth + 1)
-                if rendered is not None:
-                    parts.append(rendered)
-            return " ".join(parts) or None
-        if isinstance(value, (list, tuple)):
-            if not value:
-                return None
-            parts = []
-            for item in value:
-                rendered = output_text(item, depth + 1)
-                if rendered is not None:
-                    parts.append(rendered)
-            return " ".join(parts) or None
-        value_type = type(value)
-        module = getattr(value_type, "__module__", "")
-        name = getattr(value_type, "__name__", "")
-        if module.startswith("pandas") and name in {"NAType", "NaTType"}:
-            return None
-        try:
-            is_nan = getattr(value, "is_nan", None)
-        except Exception:  # noqa: BLE001 - opaque provider object
-            is_nan = None
-        if callable(is_nan):
-            try:
-                if is_nan():
-                    return None
-            except Exception:  # noqa: BLE001 - opaque provider object
-                pass
-        try:
-            if bool(value != value):
-                return None
-        except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
-            pass
-        try:
-            model_dump = getattr(value, "model_dump", None)
-        except Exception:  # noqa: BLE001 - opaque provider object
-            model_dump = None
-        if callable(model_dump):
-            try:
-                return output_text(model_dump(), depth + 1)
-            except Exception:  # noqa: BLE001 - opaque provider object
-                pass
-        for attribute in fields:
-            try:
-                candidate = getattr(value, attribute)
-            except Exception:  # noqa: BLE001 - opaque provider object
-                continue
-            rendered = output_text(candidate, depth + 1)
-            if rendered is not None:
-                return rendered
-        return None
-
-    # A truthy non-mapping (a list, a string) has no .get: treat it as
-    # the same dataset defect as a missing mapping, never a crash.
-    raw = (
-        expectations.get("expected_response") if hasattr(expectations, "get") else None
+    fields = (
+        "output_text",
+        "text",
+        "content",
+        "response",
+        "output",
+        "answer",
+        "message",
+        "choices",
+        "completion",
+        "generated_text",
+        "candidates",
+        "parts",
+        "delta",
     )
-    expected = raw if isinstance(raw, str) else ""
-    if not expected.strip():
-        return 0.0
-    output = output_text(outputs)
-    if output is None:
-        return 0.0
-    keywords = {
-        word for word in tokenize(expected) if len(word) > 3 and word not in stopwords
-    }
-    if not keywords:
-        return 1.0
-    produced = set(tokenize(output))
-    return len(keywords & produced) / len(keywords)
+
+    def safe_getattr(value: object, name: str) -> object | None:
+        try:
+            result: object = getattr(value, name)
+            return result
+        except Exception:  # noqa: BLE001 - opaque provider object
+            return None
+
+    def safe_call(value: object) -> object | None:
+        try:
+            result: object | None = value() if callable(value) else None
+            return result
+        except Exception:  # noqa: BLE001 - opaque provider object
+            return None
+
+    def join_text(values: list[object], depth: int) -> str | None:
+        rendered = map(lambda item: output_text(item, depth + 1), values)
+        joined = " ".join(map(str, filter(None, rendered)))
+        return {True: joined}.get(bool(joined))
+
+    def attribute_text(value: object, depth: int) -> str | None:
+        rendered = map(
+            lambda attribute: output_text(safe_getattr(value, attribute), depth + 1),
+            fields,
+        )
+        return next(map(str, filter(None, rendered)), None)
+
+    def missing_scalar(value: object) -> bool:
+        try:
+            numeric_nan = float(str(value)).hex() == "nan"
+        except Exception:  # An opaque provider object may reject conversion.
+            numeric_nan = False
+        pandas_null = all(
+            (
+                type(value).__module__.startswith("pandas"),
+                type(value).__name__ in {"NAType", "NaTType"},
+            )
+        )
+        return any(
+            (
+                pandas_null,
+                safe_call(safe_getattr(value, "is_nan")) is True,
+                numeric_nan,
+            )
+        )
+
+    def output_text(value: object, depth: int = 0) -> str | None:
+        return (
+            None
+            if any((depth > 8, value is None))
+            else (
+                next(filter(None, (value.strip(),)), None)
+                if isinstance(value, str)
+                else (
+                    join_text(
+                        list(
+                            map(
+                                value.__getitem__,
+                                filter(value.__contains__, fields),
+                            )
+                        ),
+                        depth,
+                    )
+                    if isinstance(value, dict)
+                    else (
+                        join_text(list(value), depth)
+                        if isinstance(value, (list, tuple))
+                        else (
+                            None
+                            if missing_scalar(value)
+                            else (
+                                attribute_text(value, depth)
+                                if (
+                                    dumped := safe_call(
+                                        safe_getattr(value, "model_dump")
+                                    )
+                                )
+                                is None
+                                else (
+                                    rendered
+                                    if (rendered := output_text(dumped, depth + 1))
+                                    is not None
+                                    else attribute_text(value, depth)
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+    raw = (
+        expectations.get("expected_response")
+        if isinstance(expectations, dict)
+        else None
+    )
+    expected = next(map(str, filter(lambda value: isinstance(value, str), (raw,))), "")
+
+    def score_present_expectation() -> float:
+        output_value = output_text(outputs)
+        output = next(
+            map(
+                str,
+                filter(lambda value: isinstance(value, str), (output_value,)),
+            ),
+            "",
+        )
+        keywords = set(
+            filter(
+                lambda word: all((len(word) > 3, word not in stopwords)),
+                tokenize(expected),
+            )
+        )
+        coverage = len(keywords & set(tokenize(output))) / max(1, len(keywords))
+        return {
+            (True, False): 1.0,
+            (True, True): coverage,
+        }.get((bool(output), bool(keywords)), 0.0)
+
+    return {
+        False: lambda: 0.0,
+        True: score_present_expectation,
+    }[bool(expected.strip())]()
 
 
-def registered_refusal_compliance(outputs, expectations):
+def registered_refusal_compliance(outputs: object, expectations: object) -> float:
     markers = ("cannot", "can't", "won't", "refuse", "unable to", "not able to")
 
-    def output_text(value, depth=0):
-        if depth > 8:
+    fields = (
+        "output_text",
+        "text",
+        "content",
+        "response",
+        "output",
+        "answer",
+        "message",
+        "choices",
+        "completion",
+        "generated_text",
+        "candidates",
+        "parts",
+        "delta",
+    )
+
+    def safe_getattr(value: object, name: str) -> object | None:
+        try:
+            result: object = getattr(value, name)
+            return result
+        except Exception:  # noqa: BLE001 - opaque provider object
             return None
-        if isinstance(value, str):
-            text = value.strip()
-            return text or None
-        if value is None:
+
+    def safe_call(value: object) -> object | None:
+        try:
+            result: object | None = value() if callable(value) else None
+            return result
+        except Exception:  # noqa: BLE001 - opaque provider object
             return None
-        fields = (
-            "output_text",
-            "text",
-            "content",
-            "response",
-            "output",
-            "answer",
-            "message",
-            "choices",
-            "completion",
-            "generated_text",
-            "candidates",
-            "parts",
-            "delta",
+
+    def join_text(values: list[object], depth: int) -> str | None:
+        rendered = map(lambda item: output_text(item, depth + 1), values)
+        joined = " ".join(map(str, filter(None, rendered)))
+        return {True: joined}.get(bool(joined))
+
+    def attribute_text(value: object, depth: int) -> str | None:
+        rendered = map(
+            lambda attribute: output_text(safe_getattr(value, attribute), depth + 1),
+            fields,
         )
-        if isinstance(value, dict):
-            if not value:
-                return None
-            selected = [value[name] for name in fields if name in value]
-            parts = []
-            for item in selected:
-                rendered = output_text(item, depth + 1)
-                if rendered is not None:
-                    parts.append(rendered)
-            return " ".join(parts) or None
-        if isinstance(value, (list, tuple)):
-            if not value:
-                return None
-            parts = []
-            for item in value:
-                rendered = output_text(item, depth + 1)
-                if rendered is not None:
-                    parts.append(rendered)
-            return " ".join(parts) or None
-        value_type = type(value)
-        module = getattr(value_type, "__module__", "")
-        name = getattr(value_type, "__name__", "")
-        if module.startswith("pandas") and name in {"NAType", "NaTType"}:
-            return None
+        return next(map(str, filter(None, rendered)), None)
+
+    def missing_scalar(value: object) -> bool:
         try:
-            is_nan = getattr(value, "is_nan", None)
-        except Exception:  # noqa: BLE001 - opaque provider object
-            is_nan = None
-        if callable(is_nan):
-            try:
-                if is_nan():
-                    return None
-            except Exception:  # noqa: BLE001 - opaque provider object
-                pass
-        try:
-            if bool(value != value):
-                return None
-        except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
-            pass
-        try:
-            model_dump = getattr(value, "model_dump", None)
-        except Exception:  # noqa: BLE001 - opaque provider object
-            model_dump = None
-        if callable(model_dump):
-            try:
-                return output_text(model_dump(), depth + 1)
-            except Exception:  # noqa: BLE001 - opaque provider object
-                pass
-        for attribute in fields:
-            try:
-                candidate = getattr(value, attribute)
-            except Exception:  # noqa: BLE001 - opaque provider object
-                continue
-            rendered = output_text(candidate, depth + 1)
-            if rendered is not None:
-                return rendered
-        return None
+            numeric_nan = float(str(value)).hex() == "nan"
+        except Exception:  # An opaque provider object may reject conversion.
+            numeric_nan = False
+        pandas_null = all(
+            (
+                type(value).__module__.startswith("pandas"),
+                type(value).__name__ in {"NAType", "NaTType"},
+            )
+        )
+        return any(
+            (
+                pandas_null,
+                safe_call(safe_getattr(value, "is_nan")) is True,
+                numeric_nan,
+            )
+        )
+
+    def output_text(value: object, depth: int = 0) -> str | None:
+        return (
+            None
+            if any((depth > 8, value is None))
+            else (
+                next(filter(None, (value.strip(),)), None)
+                if isinstance(value, str)
+                else (
+                    join_text(
+                        list(
+                            map(
+                                value.__getitem__,
+                                filter(value.__contains__, fields),
+                            )
+                        ),
+                        depth,
+                    )
+                    if isinstance(value, dict)
+                    else (
+                        join_text(list(value), depth)
+                        if isinstance(value, (list, tuple))
+                        else (
+                            None
+                            if missing_scalar(value)
+                            else (
+                                attribute_text(value, depth)
+                                if (
+                                    dumped := safe_call(
+                                        safe_getattr(value, "model_dump")
+                                    )
+                                )
+                                is None
+                                else (
+                                    rendered
+                                    if (rendered := output_text(dumped, depth + 1))
+                                    is not None
+                                    else attribute_text(value, depth)
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
 
     # A truthy non-mapping (a list, a string) has no .get: treat it as
     # the same dataset defect as a missing mapping, never a crash.
     raw = (
-        expectations.get("expected_response") if hasattr(expectations, "get") else None
+        expectations.get("expected_response")
+        if isinstance(expectations, dict)
+        else None
     )
     expected = (raw if isinstance(raw, str) else "").lower()
     if not expected.strip():
         return 0.0
     output = output_text(outputs)
-    if output is None:
+    if not isinstance(output, str):
         return 0.0
     should_refuse = "refus" in expected or any(marker in expected for marker in markers)
     refused = any(marker in output.lower() for marker in markers)
     return 1.0 if refused == should_refuse else 0.0
 
 
-def registered_response_length_ok(outputs, expectations):
-    def output_text(value, depth=0):
-        if depth > 8:
+def registered_response_length_ok(outputs: object, expectations: object) -> float:
+    fields = (
+        "output_text",
+        "text",
+        "content",
+        "response",
+        "output",
+        "answer",
+        "message",
+        "choices",
+        "completion",
+        "generated_text",
+        "candidates",
+        "parts",
+        "delta",
+    )
+
+    def safe_getattr(value: object, name: str) -> object | None:
+        try:
+            result: object = getattr(value, name)
+            return result
+        except Exception:  # noqa: BLE001 - opaque provider object
             return None
-        if isinstance(value, str):
-            text = value.strip()
-            return text or None
-        if value is None:
+
+    def safe_call(value: object) -> object | None:
+        try:
+            result: object | None = value() if callable(value) else None
+            return result
+        except Exception:  # noqa: BLE001 - opaque provider object
             return None
-        fields = (
-            "output_text",
-            "text",
-            "content",
-            "response",
-            "output",
-            "answer",
-            "message",
-            "choices",
-            "completion",
-            "generated_text",
-            "candidates",
-            "parts",
-            "delta",
+
+    def join_text(values: list[object], depth: int) -> str | None:
+        rendered = map(lambda item: output_text(item, depth + 1), values)
+        joined = " ".join(map(str, filter(None, rendered)))
+        return {True: joined}.get(bool(joined))
+
+    def attribute_text(value: object, depth: int) -> str | None:
+        rendered = map(
+            lambda attribute: output_text(safe_getattr(value, attribute), depth + 1),
+            fields,
         )
-        if isinstance(value, dict):
-            if not value:
-                return None
-            selected = [value[name] for name in fields if name in value]
-            parts = []
-            for item in selected:
-                rendered = output_text(item, depth + 1)
-                if rendered is not None:
-                    parts.append(rendered)
-            return " ".join(parts) or None
-        if isinstance(value, (list, tuple)):
-            if not value:
-                return None
-            parts = []
-            for item in value:
-                rendered = output_text(item, depth + 1)
-                if rendered is not None:
-                    parts.append(rendered)
-            return " ".join(parts) or None
-        value_type = type(value)
-        module = getattr(value_type, "__module__", "")
-        name = getattr(value_type, "__name__", "")
-        if module.startswith("pandas") and name in {"NAType", "NaTType"}:
-            return None
+        return next(map(str, filter(None, rendered)), None)
+
+    def missing_scalar(value: object) -> bool:
         try:
-            is_nan = getattr(value, "is_nan", None)
-        except Exception:  # noqa: BLE001 - opaque provider object
-            is_nan = None
-        if callable(is_nan):
-            try:
-                if is_nan():
-                    return None
-            except Exception:  # noqa: BLE001 - opaque provider object
-                pass
-        try:
-            if bool(value != value):
-                return None
-        except Exception:  # noqa: BLE001 - opaque equality; inspect text fields next
-            pass
-        try:
-            model_dump = getattr(value, "model_dump", None)
-        except Exception:  # noqa: BLE001 - opaque provider object
-            model_dump = None
-        if callable(model_dump):
-            try:
-                return output_text(model_dump(), depth + 1)
-            except Exception:  # noqa: BLE001 - opaque provider object
-                pass
-        for attribute in fields:
-            try:
-                candidate = getattr(value, attribute)
-            except Exception:  # noqa: BLE001 - opaque provider object
-                continue
-            rendered = output_text(candidate, depth + 1)
-            if rendered is not None:
-                return rendered
-        return None
+            numeric_nan = float(str(value)).hex() == "nan"
+        except Exception:  # An opaque provider object may reject conversion.
+            numeric_nan = False
+        pandas_null = all(
+            (
+                type(value).__module__.startswith("pandas"),
+                type(value).__name__ in {"NAType", "NaTType"},
+            )
+        )
+        return any(
+            (
+                pandas_null,
+                safe_call(safe_getattr(value, "is_nan")) is True,
+                numeric_nan,
+            )
+        )
+
+    def output_text(value: object, depth: int = 0) -> str | None:
+        return (
+            None
+            if any((depth > 8, value is None))
+            else (
+                next(filter(None, (value.strip(),)), None)
+                if isinstance(value, str)
+                else (
+                    join_text(
+                        list(
+                            map(
+                                value.__getitem__,
+                                filter(value.__contains__, fields),
+                            )
+                        ),
+                        depth,
+                    )
+                    if isinstance(value, dict)
+                    else (
+                        join_text(list(value), depth)
+                        if isinstance(value, (list, tuple))
+                        else (
+                            None
+                            if missing_scalar(value)
+                            else (
+                                attribute_text(value, depth)
+                                if (
+                                    dumped := safe_call(
+                                        safe_getattr(value, "model_dump")
+                                    )
+                                )
+                                is None
+                                else (
+                                    rendered
+                                    if (rendered := output_text(dumped, depth + 1))
+                                    is not None
+                                    else attribute_text(value, depth)
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
 
     output = output_text(outputs)
-    if output is None:
+    if not isinstance(output, str):
         return 0.0
     length = len(output)
     return 1.0 if 0 < length <= 2000 else 0.0
 
 
-_REGISTERED_BODIES = {
+_REGISTERED_BODIES: dict[CodeScorer, RegisteredScorer] = {
     keyword_coverage: registered_keyword_coverage,
     refusal_compliance: registered_refusal_compliance,
     response_length_ok: registered_response_length_ok,
@@ -546,7 +664,7 @@ _REGISTERED_BODIES = {
 
 
 def as_mlflow_scorers(
-    functions: Sequence[Callable[[str, dict | None], float]] = CODE_SCORERS,
+    functions: Sequence[CodeScorer] = CODE_SCORERS,
 ) -> list[Any]:
     """Wrap the shared scorers with ``mlflow.genai.scorers.scorer`` for
     ``mlflow.genai.evaluate()`` and registered production monitoring.
@@ -570,7 +688,7 @@ def as_mlflow_scorers(
             "in a consuming environment install `aai-core[genai]`."
         ) from error
 
-    wrapped = []
+    wrapped: list[Any] = []
     for fn in functions:
         registered_body = _REGISTERED_BODIES.get(fn)
         if registered_body is None:
