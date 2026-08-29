@@ -12,6 +12,8 @@ dependencies = [
   # accelerate is a hard runtime requirement of peft; pinned explicitly so the
   # course controls the version even though no lesson imports it directly.
   "accelerate==1.14.0",
+  # Held one certified line back from dependency-policy.toml; exempted with
+  # rationale in tests/test_example_dependency_policy.py EXEMPT_PINS.
   "mlflow==3.14.0",
   # numpy 2.5.x requires Python >= 3.12; 2.4.x is the newest series that still
   # supports 3.11. Both are NumPy 2.x, so lesson code sees one API surface on
