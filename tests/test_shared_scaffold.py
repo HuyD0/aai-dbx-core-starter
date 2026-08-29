@@ -94,6 +94,93 @@ def test_template_runtime_locks_are_exact_and_transitive():
         assert len(pins) >= 20, f"{template.name} regressed to a direct-only lock"
 
 
+def test_opted_out_forks_are_review_pinned():
+    """Every opted-out fork carries a current fork_reviews pin: a canonical
+    change cannot silently skip the forks it no longer reaches (that happened
+    once — a canonical databricks.yml.tmpl comment missed the agent-app
+    fork)."""
+
+    assert not sync_module.fork_review_drift()
+
+
+def _fork_review_fixture(tmp_path, *, fork_reviews):
+    shared = tmp_path / "_shared"
+    (shared / "files").mkdir(parents=True)
+    (shared / "files" / "Makefile").write_text("canonical\n", encoding="utf-8")
+    manifest = {
+        "files": ["Makefile"],
+        "opt_out": {"Makefile": ["agent-app", "prompt-app"]},
+        "fork_reviews": fork_reviews,
+    }
+    (shared / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    templates = tmp_path / "templates"
+    fork = templates / "agent-app" / "template" / "Makefile"
+    fork.parent.mkdir(parents=True)
+    fork.write_text("forked\n", encoding="utf-8")
+    # prompt-app opts out without a fork: a legitimate absence.
+    return shared, templates
+
+
+def test_fork_review_detects_a_canonical_change_and_a_missing_pin(tmp_path):
+    import hashlib
+
+    canonical_digest = hashlib.sha256(b"canonical\n").hexdigest()
+
+    shared, templates = _fork_review_fixture(
+        tmp_path, fork_reviews={"Makefile": {"agent-app": canonical_digest}}
+    )
+    assert sync_module.fork_review_drift(shared, templates) == []
+
+    (shared / "files" / "Makefile").write_text("canonical v2\n", encoding="utf-8")
+    stale = sync_module.fork_review_drift(shared, templates)
+    assert len(stale) == 1 and "changed since" in stale[0]
+
+    shared, templates = _fork_review_fixture(tmp_path / "unpinned", fork_reviews={})
+    unpinned = sync_module.fork_review_drift(shared, templates)
+    assert len(unpinned) == 1 and "no recorded review" in unpinned[0]
+
+
+def test_fork_review_rejects_entries_for_absent_or_unlisted_forks(tmp_path):
+    shared, templates = _fork_review_fixture(
+        tmp_path,
+        fork_reviews={
+            "Makefile": {"agent-app": "0" * 64, "prompt-app": "0" * 64},
+            "unlisted.py": {"agent-app": "0" * 64},
+        },
+    )
+    drift = sync_module.fork_review_drift(shared, templates)
+    assert any("opts out without a fork" in line for line in drift)
+    assert any("opt_out does not list" in line for line in drift)
+
+
+def test_missing_canonical_is_reported_and_acknowledge_does_not_crash(tmp_path):
+    shared, templates = _fork_review_fixture(
+        tmp_path, fork_reviews={"Makefile": {"agent-app": "0" * 64}}
+    )
+    (shared / "files" / "Makefile").unlink()
+
+    drift = sync_module.fork_review_drift(shared, templates)
+    assert len(drift) == 1 and "is missing" in drift[0]
+
+    sync_module.acknowledge_forks(shared, templates)
+
+    # A retired canonical cannot be rubber-stamped: the report stays alive.
+    still = sync_module.fork_review_drift(shared, templates)
+    assert len(still) == 1 and "is missing" in still[0]
+
+
+def test_acknowledge_forks_repins_and_clears_drift(tmp_path):
+    shared, templates = _fork_review_fixture(tmp_path, fork_reviews={})
+    assert sync_module.fork_review_drift(shared, templates)
+
+    sync_module.acknowledge_forks(shared, templates)
+
+    assert sync_module.fork_review_drift(shared, templates) == []
+    reviews = json.loads((shared / "manifest.json").read_text())["fork_reviews"]
+    assert set(reviews) == {"Makefile"}
+    assert set(reviews["Makefile"]) == {"agent-app"}
+
+
 def test_manifest_files_exist_and_nothing_orphaned():
     manifest = json.loads((SHARED / "manifest.json").read_text())
     for relative in manifest["files"]:

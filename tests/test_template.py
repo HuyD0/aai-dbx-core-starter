@@ -7,6 +7,7 @@ render matrix and generated-project quality tier are skipped when it is
 absent. All of it is credential-free.
 """
 
+import ast
 import configparser
 import json
 import os
@@ -453,6 +454,102 @@ def test_template_schema_shared_contract(template: Path):
     if template.name == "rag-app":
         assert properties["prompt_version"]["pattern"] == "^[1-9][0-9]*$"
         assert properties["knowledge_version"]["maxLength"] == 128
+
+
+def _required_cli_flags(script: Path) -> list[str]:
+    """argparse flags the script declares required=True, from its AST."""
+
+    flags: list[str] = []
+    for node in ast.walk(ast.parse(script.read_text(encoding="utf-8"))):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and node.args
+        ):
+            continue
+        first = node.args[0]
+        if not (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and first.value.startswith("--")
+        ):
+            continue
+        if any(
+            keyword.arg == "required"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords
+        ):
+            flags.append(first.value)
+    return flags
+
+
+@pytest.mark.parametrize("template", TEMPLATES, ids=template_ids)
+def test_success_message_commands_match_generated_interfaces(template: Path):
+    """The wizard's numbered next steps are the first commands a new developer
+    pastes, so a step must not exit with a usage error: every printed
+    evaluate invocation discharges each argparse flag the generated script
+    declares required (directly, or through the Makefile variables `make
+    evaluate` maps onto those flags), and every printed make target exists in
+    the generated Makefile."""
+
+    schema = schema_for(template)
+    required = _required_cli_flags(template / "template" / "evals" / "evaluate.py")
+    makefile = (template / "template" / "Makefile").read_text(encoding="utf-8")
+    make_targets = set(re.findall(r"^([A-Za-z][A-Za-z0-9_-]*):", makefile, re.M))
+
+    for line in schema["success_message"].splitlines():
+        step = re.match(r"\s*\d+\.\s+(.*)", line)
+        if step is None:
+            continue
+        command = step.group(1).split("#", 1)[0].strip()
+        if "evals/evaluate.py" in command:
+            missing = [flag for flag in required if flag not in command]
+            assert not missing, (
+                f"{template.name} success_message step {command!r} omits "
+                f"required evaluate.py flag(s) {missing}"
+            )
+        if not command.startswith("make "):
+            continue
+        tokens = command.split()[1:]
+        targets = [token for token in tokens if "=" not in token]
+        variables = {token.split("=", 1)[0] for token in tokens if "=" in token}
+        for target in targets:
+            assert target in make_targets, (
+                f"{template.name} success_message names make target {target!r}, "
+                "which the generated Makefile does not define"
+            )
+        if "evaluate" in targets:
+            for flag in required:
+                variable = flag.lstrip("-").replace("-", "_").upper()
+                assert variable in variables, (
+                    f"{template.name} success_message runs `make evaluate` "
+                    f"without {variable}=, but the generated evaluate.py "
+                    f"requires {flag}"
+                )
+
+
+def test_replace_with_defaults_are_covered_by_the_onboarding_handoff_table():
+    """A `replace-with-*` default names an externally provisioned value the
+    developer cannot discover alone. Its wizard description must say who to
+    ask, and docs/developer-onboarding.md's handoff table must list the
+    prompt so the platform team knows to hand the value over."""
+
+    onboarding = (ROOT / "docs" / "developer-onboarding.md").read_text(encoding="utf-8")
+    for template in TEMPLATES:
+        for name, prop in schema_for(template)["properties"].items():
+            if "replace-with" not in str(prop.get("default", "")):
+                continue
+            assert "platform team" in prop["description"], (
+                f"{template.name}: {name} defaults to a replace-with "
+                "placeholder but its description does not tell the developer "
+                "to obtain the value from the platform team"
+            )
+            assert f"`{name}`" in onboarding, (
+                f"{template.name}: {name} is missing from the handoff table "
+                "in docs/developer-onboarding.md"
+            )
 
 
 # ---------------------------------------------------------------- render tier

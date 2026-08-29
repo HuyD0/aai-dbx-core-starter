@@ -68,13 +68,13 @@
     "model_deployment": {
       "type": "string",
       "default": "replace-with-model-endpoint",
-      "description": "Databricks serving endpoint name",
+      "description": "Databricks serving endpoint name; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 9
     },
     "judge_deployment": {
       "type": "string",
       "default": "replace-with-judge-endpoint",
-      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 11
     },
     "prompt_name": {
@@ -106,7 +106,7 @@
     "experiment_id": {
       "type": "string",
       "default": "replace-with-mlflow-experiment-id",
-      "description": "ID of the existing MLflow experiment named in aai-platform.yml; the externally onboarded App identity requires CAN_EDIT",
+      "description": "ID of the existing MLflow experiment named in aai-platform.yml; the externally onboarded App identity requires CAN_EDIT; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 15,
       "skip_prompt_if": {
         "properties": {
@@ -119,7 +119,7 @@
     "app_usage_policy_id": {
       "type": "string",
       "default": "replace-with-app-usage-policy-id",
-      "description": "Externally provisioned Databricks Apps usage policy ID",
+      "description": "Externally provisioned Databricks Apps usage policy ID; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 16,
       "skip_prompt_if": {
         "properties": {

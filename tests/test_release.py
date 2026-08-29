@@ -365,6 +365,59 @@ def test_release_validation_jobs_fetch_candidate_commit_history():
     assert checkout["with"]["fetch-depth"] == 0
 
 
+def test_certified_lock_divergence_is_reported():
+    policy = {
+        "resolution": {"certified_lock": "uv.lock"},
+        "packages": {"mlflow": {"certified": "3.15.1"}},
+    }
+    lock = {"package": [{"name": "mlflow", "version": "3.16.0"}]}
+
+    issues = release_validation.certified_lock_divergences(policy, lock)
+
+    assert len(issues) == 1
+    assert "mlflow" in issues[0]
+    assert "3.16.0" in issues[0] and "3.15.1" in issues[0]
+
+
+def test_certified_lock_split_resolution_counts_as_divergence():
+    """A universal lock may resolve one package to several versions across
+    environment markers; if any of them is uncertified, CI partially tests an
+    uncertified version."""
+
+    policy = {
+        "resolution": {"certified_lock": "uv.lock"},
+        "packages": {"numpy": {"certified": "2.4.1"}},
+    }
+    lock = {
+        "package": [
+            {"name": "numpy", "version": "2.4.1"},
+            {"name": "numpy", "version": "2.5.1"},
+        ]
+    }
+
+    assert release_validation.certified_lock_divergences(policy, lock)
+
+
+def test_certified_lock_check_skips_template_only_packages():
+    policy = {
+        "resolution": {"certified_lock": "uv.lock"},
+        "packages": {
+            "mlflow": {"certified": "3.15.1"},
+            "langgraph": {"certified": "1.2.9"},
+        },
+    }
+    lock = {"package": [{"name": "mlflow", "version": "3.15.1"}]}
+
+    assert release_validation.certified_lock_divergences(policy, lock) == []
+
+
+def test_certified_lock_agrees_with_dependency_policy():
+    policy = release_validation.load_toml(ROOT / "dependency-policy.toml")
+    lock = release_validation.load_toml(ROOT / policy["resolution"]["certified_lock"])
+
+    assert release_validation.certified_lock_divergences(policy, lock) == []
+
+
 def test_dependency_canary_workflow_matches_release_acceptance_metadata():
     compatibility = json.loads((ROOT / "compatibility.json").read_text())
     canary = compatibility["release_acceptance"]["dependency_canary"]

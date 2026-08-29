@@ -67,19 +67,19 @@
     "model_deployment": {
       "type": "string",
       "default": "replace-with-model-endpoint",
-      "description": "Databricks serving endpoint name",
+      "description": "Databricks serving endpoint name; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 9
     },
     "judge_deployment": {
       "type": "string",
       "default": "replace-with-judge-endpoint",
-      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 11
     },
     "warehouse_id": {
       "type": "string",
       "default": "replace-with-sql-warehouse-id",
-      "description": "Serverless SQL warehouse id used by the seed job and the analytics executor; the deploy identity needs CAN USE on it",
+      "description": "Serverless SQL warehouse id used by the seed job and the analytics executor; the deploy identity needs CAN USE on it; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 12
     },
     "adversarial_review": {

@@ -64,13 +64,13 @@
     "model_deployment": {
       "type": "string",
       "default": "replace-with-model-endpoint",
-      "description": "Databricks serving endpoint name",
+      "description": "Databricks serving endpoint name; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 9
     },
     "judge_deployment": {
       "type": "string",
       "default": "replace-with-judge-endpoint",
-      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges",
+      "description": "Approved gateway-fronted Databricks serving endpoint used by LLM judges; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 11
     },
     "retrieval_provider": {
@@ -86,19 +86,19 @@
     "search_endpoint": {
       "type": "string",
       "default": "https://replace-with-search-service.search.windows.net",
-      "description": "Azure AI Search service or Databricks AI Search endpoint",
+      "description": "Azure AI Search service or Databricks AI Search endpoint; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 13
     },
     "search_index": {
       "type": "string",
       "default": "replace-with-search-index",
-      "description": "Search index name",
+      "description": "Search index name; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 14
     },
     "embedding_deployment": {
       "type": "string",
       "default": "replace-with-embedding-endpoint",
-      "description": "Embedding deployment or endpoint name. Its embedding dimension must match the search index's vector field (the config default assumes 1536, e.g. text-embedding-3-small); index, embeddings, and chunking change together as one release",
+      "description": "Embedding deployment or endpoint name. Its embedding dimension must match the search index's vector field (the config default assumes 1536, e.g. text-embedding-3-small); index, embeddings, and chunking change together as one release; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 15
     },
     "aai_core_version": {
@@ -161,13 +161,13 @@
     "knowledge_version": {
       "type": "string",
       "default": "replace-with-knowledge-version",
-      "description": "Bounded non-secret immutable identifier for the externally managed knowledge/chunk/index snapshot evaluated by the release gate",
+      "description": "Bounded non-secret immutable identifier for the externally managed knowledge/chunk/index snapshot evaluated by the release gate; obtain the approved value from your platform team (handoff table in docs/developer-onboarding.md)",
       "order": 18,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
       "pattern_match_failure_message": "Use 1-128 letters, numbers, dots, underscores, colons, slashes, plus signs, or hyphens."
     }
   },
-  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. python evals/evaluate.py --prompt-version <version>  # note decision_run_id\n  6. python scripts/promote_prompt.py --version <version> --decision-run-id <run-id> --to validation\n  7. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
+  "success_message": "\n{{.project_name}} created.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. python3.12 scripts/setup_dev.py     # preflight + isolated setup\n  3. make check                          # tests + deterministic gate\n  4. python scripts/register_prompt.py   # note the immutable version\n  5. make evaluate PROMPT_VERSION=<version> KNOWLEDGE_VERSION=<snapshot-id>  # note decision_run_id\n  6. python scripts/promote_prompt.py --version <version> --decision-run-id <run-id> --to validation\n  7. make bundle-validate bundle-deploy\n\nRun `make help` for every available target.",
   "min_databricks_cli_version": "v1.6.0"
 }

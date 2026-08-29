@@ -22,7 +22,7 @@ OPS_RAG_MLFLOW_URI := sqlite:///$(OPS_RAG_MLFLOW_DIR)/mlflow.db
 
 .PHONY: help check-uv install lint format format-check typecheck test coverage audit \
 	build check verify \
-	sync-templates check-templates lock-templates check-template-locks \
+	sync-templates check-templates acknowledge-forks lock-templates check-template-locks \
 	sync-upstream resolve-upstream bundle-validate validate-templates doctor \
 	doctor-cloud quickstart examples-install examples-list local-start local-example \
 	local-lifecycle local-ui workspace-connect workspace-example examples-connect example \
@@ -235,6 +235,9 @@ sync-templates: ## Copy the canonical shared scaffold into every template.
 
 check-templates: ## Check that generated template scaffold files are in sync.
 	$(PYTHON) scripts/sync_template_shared.py --check
+
+acknowledge-forks: ## Re-pin opted-out fork reviews after reviewing a canonical change.
+	$(PYTHON) scripts/sync_template_shared.py --acknowledge-forks
 
 lock-templates: check-uv ## Regenerate exact transitive template runtime locks.
 	$(PYTHON) scripts/lock_template_dependencies.py

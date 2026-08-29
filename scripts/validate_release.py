@@ -250,6 +250,40 @@ def certified_pins(policy: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def certified_lock_divergences(
+    policy: Mapping[str, Any], lock_document: Mapping[str, Any]
+) -> list[str]:
+    """Certified versions the certified lock does not actually resolve.
+
+    AGENTS.md promises "PRs test the certified locks": CI installs uv.lock, so
+    a `uv lock --upgrade` that moves a governed package while the policy,
+    versions.json, and template locks keep the old pin would silently make CI
+    test one version while generated projects install another. Template and
+    recipe locks are cross-checked against `certified` elsewhere in this
+    module; this closes the root resolution. A governed package absent from
+    the root lock (a template-only recipe dependency) resolves only in those
+    locks and is skipped here.
+    """
+
+    locked: dict[str, set[str]] = {}
+    for entry in lock_document.get("package", []):
+        locked.setdefault(normalized_name(str(entry["name"])), set()).add(
+            str(entry["version"])
+        )
+    lock_name = policy["resolution"]["certified_lock"]
+    divergences: list[str] = []
+    for package, certified in sorted(certified_pins(dict(policy)).items()):
+        versions = locked.get(package)
+        if versions is None or versions == {certified}:
+            continue
+        divergences.append(
+            f"{lock_name} resolves {package} to {sorted(versions)} but "
+            f"dependency-policy.toml certifies {certified}; re-certify the "
+            "policy and regenerate dependent locks together"
+        )
+    return divergences
+
+
 def requirement_pins(path: Path) -> dict[str, str]:
     pins: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -535,6 +569,12 @@ def validate_repository() -> (  # noqa: C901 - linear, independent release asser
             failures.append(
                 f"root {package}{specifier} != policy range {expected_range}"
             )
+
+    failures.extend(
+        certified_lock_divergences(
+            policy, load_toml(ROOT / policy["resolution"]["certified_lock"])
+        )
+    )
 
     for name, template in discovered.items():
         expected = expected_templates[name]
