@@ -80,8 +80,9 @@ def test_fixture_reports_are_synthetic_and_comparable():
     assert {report.total_examples for report in reports.values()} == {6}
     supported = {report.supported_intents for report in reports.values()}
     assert len(supported) == 1
+    supported_intents = next(iter(supported))
     # The license forbids committing dataset content: every intent is invented.
-    assert all(intent.startswith("demo_") for intent in supported.pop())
+    assert all(intent.startswith("demo_") for intent in supported_intents)
 
     for method in ("majority", "keyword-rule"):
         assert isinstance(
