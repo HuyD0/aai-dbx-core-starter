@@ -1,4 +1,4 @@
-"""Reviewable source for the six workshop notebooks."""
+"""Reviewable source for the seven workshop notebooks."""
 
 from __future__ import annotations
 
@@ -1584,7 +1584,349 @@ You completed the full lifecycle: baseline, controlled change, result, an
 `adopt` decision earned on row-level evidence, and a digest-sealed release
 record that refuses forged decisions. The result stays reproducible offline,
 while every real model, judge, search, trace, and deployment operation is
-explicit, keyless, and governed by the surrounding platform.
+explicit, keyless, and governed by the surrounding platform. Lesson 06 asks the
+question every one of those numbers deserves: how sure are we?
+"""),
+    ],
+    "06_confidence_intervals_for_release_gates.ipynb": [
+        m("""
+# 06 Confidence intervals for release gates
+
+## Learning objectives
+
+- read a scorer mean as an estimate with an interval, never as a fact;
+- choose between normal and bootstrap intervals for bounded scores;
+- diagnose a failing retrieval slice from interval width;
+- gate promotion on lower confidence bounds and paired improvements.
+"""),
+        c(preflight()),
+        m("""
+## Per-row scores are the raw evidence
+
+`benchmark` collapses every case into one mean per metric. That mean hides how
+the number would move if the next ten cases arrived. `benchmark_samples` keeps
+the per-case scores in dataset order — `None` where a case is out of scope for
+a metric — which is exactly the shape `aai_core.agentkit.statistics` consumes.
+The same module computes the uncertainty section of a real AgentKit project's
+`agentkit compare` report; this lesson applies it to the workshop's fixed
+cases.
+"""),
+        c("""
+from agentic_ops_rag import RetrievalMode
+from agentic_ops_rag.evaluation import benchmark_samples, load_cases
+
+pipeline = session.offline_pipeline()
+cases = load_cases(course_root / "data" / "evaluation_cases.jsonl")
+samples = benchmark_samples(pipeline, cases, mode=RetrievalMode.HYBRID)
+{
+    "retrieval/recall_at_3": samples["retrieval/recall_at_3"],
+    "retrieval/mrr": samples["retrieval/mrr"],
+}
+"""),
+        m("""
+## Two interval methods, one bounded scale
+
+Retrieval recall lives on a 0..1 scale and piles up near the ceiling. A normal
+approximation draws a symmetric interval around the mean, so on nine scored
+rows it promises recall above 100% — a bound no future case can reach. The
+percentile bootstrap resamples the recorded rows with replacement and reads
+the bounds off the resampled means, so it cannot leave the observed range.
+Draws come from a generator seeded per metric: the same rows and configuration
+always reproduce the same interval.
+"""),
+        c("""
+from aai_core.agentkit.statistics import StatisticsConfig, build_statistical_evidence
+from aai_core.evaluation import MetricDirection, MetricRule
+
+retrieval_rules = (
+    MetricRule(
+        metric="retrieval/recall_at_3",
+        direction=MetricDirection.HIGHER,
+        required=0.8,
+    ),
+    MetricRule(
+        metric="retrieval/mrr",
+        direction=MetricDirection.HIGHER,
+        required=0.75,
+    ),
+)
+normal_evidence, _ = build_statistical_evidence(
+    samples, {}, retrieval_rules, StatisticsConfig()
+)
+bootstrap_evidence, _ = build_statistical_evidence(
+    samples, {}, retrieval_rules, StatisticsConfig(method="bootstrap")
+)
+interval_comparison = {
+    normal.metric: {
+        "rows_scored": normal.sample_size,
+        "mean": normal.mean,
+        "normal": [normal.lower, normal.upper],
+        "bootstrap": [bootstrap.lower, bootstrap.upper],
+    }
+    for normal, bootstrap in zip(
+        normal_evidence.estimates, bootstrap_evidence.estimates, strict=True
+    )
+    if normal.metric.startswith("retrieval/")
+}
+interval_comparison
+"""),
+        m("""
+Both methods agree the recall mean is 0.9375; they disagree about what the
+nine scored rows can promise. The normal upper bound exceeds 1.0 — an
+impossible recall — while the bootstrap bounds stay inside the scale. Note the
+metrics that scored 1.0 on every row, such as abstention accuracy: their
+intervals collapse to a point. Perfection on eleven cases is still evidence
+from only eleven cases, which is why enforcement pairs every bound with a
+minimum
+sample size instead of trusting a zero-width interval.
+"""),
+        m("""
+## Interval width is a retrieval diagnostic
+
+A wide interval on a retrieval metric usually means a slice of the dataset is
+failing while the rest is fine — not that every answer is uniformly mediocre.
+Simulate the classic cause: an index build that silently missed one runbook.
+The corpus, cases, and pipeline code stay identical; one document never made
+it into the index.
+"""),
+        c("""
+from agentic_ops_rag import (
+    OfflineOperationsRetriever,
+    OperationsRAGPipeline,
+    load_documents,
+)
+
+documents = load_documents(course_root / "data" / "operations_documents.jsonl")
+missing_runbook = "alpha-payments-latency"
+degraded_pipeline = OperationsRAGPipeline(
+    OfflineOperationsRetriever(
+        tuple(
+            document
+            for document in documents
+            if document.document_id != missing_runbook
+        )
+    )
+)
+degraded_samples = benchmark_samples(
+    degraded_pipeline, cases, mode=RetrievalMode.HYBRID
+)
+degraded_evidence, _ = build_statistical_evidence(
+    degraded_samples, {}, retrieval_rules, StatisticsConfig(method="bootstrap")
+)
+width_report = {
+    degraded.metric: {
+        "full_index": [full.lower, full.upper],
+        "degraded_index": [degraded.lower, degraded.upper],
+        "width_ratio": round(
+            (degraded.upper - degraded.lower) / (full.upper - full.lower), 2
+        ),
+    }
+    for full, degraded in zip(
+        bootstrap_evidence.estimates, degraded_evidence.estimates, strict=True
+    )
+    if degraded.metric == "retrieval/recall_at_3"
+}
+width_report
+"""),
+        m("""
+The recall interval tripled in width because every case that expected the
+missing runbook lost ground — two rows fell to zero, and the approval case
+kept only its second expected document — while every other row held its
+score. Read `degraded_samples["retrieval/recall_at_3"]` to see exactly which
+rows moved. Abstention accuracy and citation integrity stayed perfect on both
+indexes — the damage is invisible to them. Width localized the failure to
+retrieval before anyone read a single transcript.
+"""),
+        m("""
+## Paired improvement beats interval overlap
+
+Compare the full index against the degraded one and the two recall intervals
+overlap — by the folklore rule the difference "is not significant". The rule
+is wrong here: both runs scored the same ordered rows, so their noise is
+correlated, and the honest test is the per-row paired difference. Passing the
+degraded run as the baseline samples pairs each row with itself.
+"""),
+        c("""
+paired_evidence, _ = build_statistical_evidence(
+    samples,
+    degraded_samples,
+    retrieval_rules,
+    StatisticsConfig(method="bootstrap"),
+)
+{
+    paired.metric: {
+        "pairs": paired.pair_count,
+        "mean_improvement": paired.mean_improvement,
+        "improvement_interval": [
+            paired.lower_improvement,
+            paired.upper_improvement,
+        ],
+    }
+    for paired in paired_evidence.paired
+}
+"""),
+        m("""
+## Gate on the bound, not the mean
+
+Enforcement turns these intervals into promotion policy. With
+`enforce_confidence`, the statistics module adds synthetic rules next to each
+threshold: the lower confidence bound must clear the same bar, and the scored
+sample must reach `minimum_cases`. In an AgentKit project the identical policy
+runs as `agentkit gate`, whose exit codes are a CI contract — `0` pass, `2`
+threshold failed. Here the same rules are applied object-shaped.
+"""),
+        c("""
+from agentic_ops_rag.evaluation import benchmark
+
+from aai_core.agentkit.statistics import extend_rules_with_statistics
+from aai_core.evaluation import GatePolicy, apply_gate
+
+recall_rule = (retrieval_rules[0],)
+strict_config = StatisticsConfig(method="bootstrap", enforce_confidence=True)
+_, strict_synthetic = build_statistical_evidence(
+    samples, {}, recall_rule, strict_config
+)
+strict_rules = extend_rules_with_statistics(
+    recall_rule, strict_config, allow_missing_regression_baseline=True
+)
+aggregates = benchmark(pipeline, cases, mode=RetrievalMode.HYBRID)
+strict_gate = apply_gate(
+    {"retrieval/recall_at_3": aggregates["retrieval/recall_at_3"], **strict_synthetic},
+    policy=GatePolicy(rules=strict_rules, allow_missing_regression_baseline=True),
+)
+{
+    "passed": strict_gate.passed,
+    "failures": [failure.metric for failure in strict_gate.failures],
+}
+"""),
+        m("""
+The lower bound clears 0.8, and the gate still refuses: nine scored rows are
+below the default `minimum_cases` of 30. That refusal is the correct verdict
+for this dataset, not an obstacle. The cell below lowers the minimum to the
+nine rows the recall metric actually scores, purely as a teaching allowance —
+a production suite grows to the minimum before enforcing, it never lowers the
+bar to its own size.
+"""),
+        c("""
+teaching_config = StatisticsConfig(
+    method="bootstrap", enforce_confidence=True, minimum_cases=9
+)
+teaching_rules = extend_rules_with_statistics(
+    recall_rule, teaching_config, allow_missing_regression_baseline=True
+)
+gate_outcomes = {}
+for label, row_samples, target in (
+    ("full_index", samples, pipeline),
+    ("degraded_index", degraded_samples, degraded_pipeline),
+):
+    _, synthetic = build_statistical_evidence(
+        row_samples, {}, recall_rule, teaching_config
+    )
+    observed = benchmark(target, cases, mode=RetrievalMode.HYBRID)
+    verdict = apply_gate(
+        {"retrieval/recall_at_3": observed["retrieval/recall_at_3"], **synthetic},
+        policy=GatePolicy(
+            rules=teaching_rules, allow_missing_regression_baseline=True
+        ),
+    )
+    gate_outcomes[label] = {
+        "passed": verdict.passed,
+        "failures": [failure.metric for failure in verdict.failures],
+    }
+gate_outcomes
+"""),
+        c("""
+# YOUR TURN — TODO: check whether the paired recall gain survives reseeding.
+seed_lower_bounds = {}
+for seed in (0, 7, 20260823):
+    reseeded, _ = build_statistical_evidence(
+        samples,
+        degraded_samples,
+        retrieval_rules,
+        StatisticsConfig(method="bootstrap", bootstrap_seed=seed),
+    )
+    by_metric = {paired.metric: paired for paired in reseeded.paired}
+    seed_lower_bounds[seed] = by_metric["retrieval/recall_at_3"].lower_improvement
+seed_lower_bounds
+"""),
+        c("""
+# CHECK YOUR WORK
+assert set(seed_lower_bounds) == {0, 7, 20260823}
+assert all(lower >= 0.0 for lower in seed_lower_bounds.values())
+assert set(seed_lower_bounds.values()) == {0.0}
+"A lower bound pinned at zero under every seed is a sample-size finding."
+"""),
+        c("""
+# Reference solution
+reference_bounds = {}
+for seed in sorted(seed_lower_bounds):
+    evidence, _ = build_statistical_evidence(
+        samples,
+        degraded_samples,
+        retrieval_rules,
+        StatisticsConfig(method="bootstrap", bootstrap_seed=seed),
+    )
+    lower_by_metric = {
+        paired.metric: paired.lower_improvement for paired in evidence.paired
+    }
+    reference_bounds[seed] = lower_by_metric["retrieval/recall_at_3"]
+assert reference_bounds == seed_lower_bounds
+{
+    "lower_bounds_by_seed": reference_bounds,
+    "verdict": "nine pairs cannot certify this margin; grow the suite",
+}
+"""),
+        m("""
+## Optional: the same statistics on judge scores
+
+Nothing above is specific to deterministic scorers. In a connected project the
+per-row scores come from governed LLM judges, and the identical configuration
+lives in `agentkit.yaml` under `statistics:` — the `evaluation-project`
+template ships the block commented out, including `method: bootstrap`.
+"""),
+        c("""
+RUN_CONNECTED = False
+connected_confidence = None
+if RUN_CONNECTED:
+    resources = session.connected_components(allow_network=True)
+    connected_confidence = {
+        "model_provider": resources["model"].provider,
+        "next_step": (
+            "score the fixed cases through the governed judge, then feed the "
+            "per-row scores to build_statistical_evidence unchanged"
+        ),
+    }
+connected_confidence
+"""),
+        m(
+            knowledge_check(
+                (
+                    "Why does the normal recall interval exceed 1.0 while the "
+                    "bootstrap interval cannot?"
+                ),
+                (
+                    "The degraded index widened the recall interval without "
+                    "touching abstention accuracy. What does that combination "
+                    "localize?"
+                ),
+                (
+                    "The paired lower bound touched zero for one seed. What is "
+                    "the honest remediation, and what would be the dishonest "
+                    "one?"
+                ),
+            )
+        ),
+        m("""
+## Recap
+
+You turned scorer means into interval evidence: the bootstrap kept bounds
+inside the metric's feasible range where the normal approximation escaped it,
+interval width localized a missing runbook that abstention and citation
+metrics could not see, and the paired improvement decided what overlapping
+intervals could not. The gate refused what eleven cases cannot certify — first on
+sample size, then on the lower bound once the index degraded. A real project
+enables the same policy in `agentkit.yaml` and reads the verdict from
+`agentkit gate` exit codes.
 """),
     ],
 }

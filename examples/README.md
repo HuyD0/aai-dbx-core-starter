@@ -85,9 +85,28 @@ make study-prepare-flight
 make study-offline-check
 ```
 
+## Separate fine-tuning mechanics course
+
+[`fine-tuning/`](fine-tuning/README.md) is a standalone course with its own
+exact environment that teaches the model-customization stage of
+`docs/genai-lifecycle.md`, beginning with the memory economics of full
+fine-tuning; later lessons add quantization, LoRA, QLoRA, and the PEFT
+library. It complements the Apple-silicon study above from the other side:
+that project practices the governed *workflow* around one LoRA change, while
+this course builds the *mechanics* — what the bits, adapters, and memory
+actually do — on tiny CPU-only torch models built from configuration, so it
+runs on Linux and Apple Silicon alike and executes in CI. It needs no GPU,
+download, or credential after install. Start with:
+
+```bash
+make finetune-install
+make finetune-check
+make finetune-notebook
+```
+
 ## Separate agentic operations and RAG workshop
 
-[`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone six-notebook
+[`agentic-ops-rag/`](agentic-ops-rag/README.md) is a standalone seven-notebook
 workshop on governed RAG pipelines: trusted routing and access filters,
 structure-aware chunking, embedding/index compatibility, Azure AI Search and
 Databricks AI Search retrieval modes, MLflow 3 tracing and evaluation, human
@@ -249,8 +268,8 @@ only that store at `http://127.0.0.1:5000`.
 | 09 | [`09_multi_turn_session_evaluation.ipynb`](09_multi_turn_session_evaluation.ipynb) | How to scope real traces, retain their IDs, and gate complete conversations: every reply passes a turn-level check while the session gate still rejects two of three conversations. |
 | 10 | [`10_layered_judges.ipynb`](10_layered_judges.ipynb) | Why a judge you have not calibrated is not a gate: two runnable rules are scored against human labels, agreement is computed per split, and the better judge stays report-only on 12 labels. |
 | 11 | [`11_cost_quality_tradeoff.ipynb`](11_cost_quality_tradeoff.ipynb) | Why quality comes before cost: fixture models actually run over the synthetic cases, so quality, tokens, and coverage are derived, and the model tying for best quality still cannot win without cost evidence. |
-| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | Why optimizer evidence is never release evidence: a toy optimizer picks the edit scoring 1.00 on its training split and 0.61 on the disjoint held-out split, and a leaked overlapping split would have certified it. |
-| 13 | [`13_decision_and_promotion_lifecycle.ipynb`](13_decision_and_promotion_lifecycle.ipynb) | Why every comparison ends in a recorded `adopt`/`reject`/`inconclusive` decision, and why the `production` prompt alias moves only on adopt-grade evidence. |
+| 12 | [`12_agent_alignment_optimization.ipynb`](12_agent_alignment_optimization.ipynb) | Why optimizer evidence is never release evidence: a toy optimizer picks the edit scoring 1.00 on its training split and 0.61 on the disjoint held-out split, and a leaked overlapping split would have certified it. Example 12 also measures the judge itself before it gates before it gates: per-run stability against frozen anchors, plus a committed kappa-vs-SME calibration record. |
+| 13 | [`13_decision_and_promotion_lifecycle.ipynb`](13_decision_and_promotion_lifecycle.ipynb) | Why every comparison ends in a recorded `adopt`/`reject`/`inconclusive` decision, why the `production` prompt alias moves only on adopt-grade evidence, and why the recorded baseline moves only after live verification, with promotion evidence bound to the deployed commit. |
 | 14 | [`14_platform_llm_operations.ipynb`](14_platform_llm_operations.ipynb) | The platform team's operating loop: judge governance, gateway request tags, cost-by-tag queries, fleet provenance, monitoring adoption, and rollback levers. |
 | 15 | [`15_compare_and_select_llms.ipynb`](15_compare_and_select_llms.ipynb) | A complete reference for same-case model A/B accuracy, blinded judge win rates, session TCO where the cheaper-per-token model loses on cost per resolved session, and fail-closed governance checks. |
 

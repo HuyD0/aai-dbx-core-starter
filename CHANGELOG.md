@@ -4,6 +4,43 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Extended the example curriculum to teach the judge-measurement and
+  verified-promotion lifecycle: lesson 12 gains two runnable
+  credential-free sections — per-run judge stability (self-consistency
+  and frozen-anchor drift, with the "judge changed, not the agent"
+  reading) and the committed kappa-vs-SME calibration record behind
+  `agentkit judge calibrate` — and lesson 13 gains the
+  move-the-baseline-only-after-live-verification flow
+  (`agentkit baseline establish --from-run`), demonstrating the gate's
+  deployed-commit binding refusal offline.
+- Added lesson `06_confidence_intervals_for_release_gates` to the agentic
+  operations RAG workshop: a credential-free demonstration of the AgentKit
+  statistics module on the workshop's fixed cases — normal versus bootstrap
+  intervals on a bounded recall scale, interval width localizing a simulated
+  missing-runbook index build, paired per-row improvements deciding what
+  overlapping intervals cannot, confidence-bound gating with the
+  `minimum_cases` guard, and a seed-robustness exercise. Backing it,
+  `agentic_ops_rag.evaluation.benchmark_samples` now exposes the per-case
+  scores in dataset order (`None` for out-of-scope cases) and `benchmark`
+  derives its aggregates from them unchanged.
+- Added run-economics evidence to AgentKit: every live or traces run reads
+  its own traces and records success rate, p50/p95 tails for cost, tokens,
+  and latency, and cost per successful completion — total known spend,
+  failed rows included, over the rows that completed — plus per-stratum
+  segments driven by the existing `strata` configuration. Coverage-first
+  throughout (`cost/coverage`/`tokens/coverage`; unknown cost is never
+  zero, and per-success ratios appear only at complete coverage), with
+  cost taken from trace-recorded values or an opt-in
+  `economics.price_per_1m_input_tokens`/`..._output_tokens` pair — never a
+  shipped price table, and deliberately no mean-cost-per-call metric.
+  Report-only by default; gate through the ordinary
+  `thresholds`/`regression_budget` grammar (economics directions resolve
+  lower-is-better before the registry fallback). The evidence persists on
+  `ResultsRecord` as an optional field, so older records stay readable
+  while pre-economics readers cannot parse new ones — the same preview-tier
+  trade the integrity evidence made. Rationale and rejected alternatives:
+  `docs/decisions/2026-08-23-agentkit-economics-evidence.md`. The
+  `evaluation-project` template documents the block and moves to 2.3.0.
 - Added `statistics.method: bootstrap` to AgentKit: confidence bounds around
   scorer means and paired baseline improvements can now come from seeded
   percentile bootstrap resampling instead of the normal approximation, which

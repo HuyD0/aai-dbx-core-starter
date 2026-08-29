@@ -380,8 +380,10 @@ def _cmd_eval(arguments: argparse.Namespace) -> int:
             + ", ".join(submit_only_flags),
             remediation=(
                 "Run the option locally without `--submit`, or remove it and "
-                "submit the release_gate job using its committed project "
-                "configuration."
+                "submit the release_gate job, which scores the project "
+                "configuration already deployed to the workspace. Run "
+                f"`databricks bundle deploy -t {arguments.target}` first if "
+                "that configuration has changed."
             ),
         )
     project = _project(arguments)

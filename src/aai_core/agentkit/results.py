@@ -39,6 +39,7 @@ from pydantic import (
 )
 
 from aai_core.agentkit.baseline import BaselineDataset, BaselineScope, BaselineVersions
+from aai_core.agentkit.economics import EconomicsEvidence
 from aai_core.agentkit.errors import ConfigError
 from aai_core.agentkit.integrity import IntegrityEvidence
 from aai_core.agentkit.statistics import StatisticalEvidence
@@ -108,6 +109,10 @@ class ResultsRecord(ContractModel):
     # Judge self-consistency and frozen-anchor drift, when the run measured
     # them. ``None`` keeps records from before the integrity checks readable.
     integrity: IntegrityEvidence | None = None
+    # What the run spent, per row and per successful completion, when the
+    # run's traces carried it. ``None`` keeps records from before the
+    # economics evidence readable.
+    economics: EconomicsEvidence | None = None
     versions: BaselineVersions
     baseline_run_id: str | None = None
     baseline_metrics: Mapping[str, float] = Field(default_factory=dict)

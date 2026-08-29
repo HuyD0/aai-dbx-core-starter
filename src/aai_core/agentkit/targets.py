@@ -1015,8 +1015,10 @@ def _primary_input(inputs: Mapping[str, Any]) -> Any:
     if len(inputs) == 1:
         return next(iter(inputs.values()))
     # An HTTP request mapping is the adapter for structured input.  Preserve
-    # the complete row rather than choosing a familiar-looking key and
-    # silently dropping context, history, tenant, or another required field.
+    # the complete `inputs` mapping rather than choosing a familiar-looking
+    # key and silently dropping context, history, tenant, or another required
+    # field.  Only `inputs` reaches the agent: expectations, outputs and the
+    # trace are what the answer is scored against.
     # Chat-style adapters call `_primary_text`, which rejects this mapping.
     return dict(inputs)
 

@@ -3341,3 +3341,197 @@ def test_baseline_establish_refuses_judge_free_and_smoke_runs(tmp_path):
     record, fake = _served_record(tmp_path, project, run_id="run-10", command="smoke")
     with pytest.raises(ConfigError, match="smoke"):
         establish_baseline_from_run(project, record.run_id, mlflow_module=fake)
+
+
+# --- run economics ---------------------------------------------------------
+
+
+def _economics_envelope(index, *, cost=None, tokens=(20, 10), duration_ms=400):
+    """A minimal v3-shaped trace document carrying usage metadata."""
+
+    metadata = {
+        "mlflow.trace.tokenUsage": json.dumps(
+            {
+                "input_tokens": tokens[0],
+                "output_tokens": tokens[1],
+                "total_tokens": tokens[0] + tokens[1],
+            }
+        )
+    }
+    if cost is not None:
+        metadata["mlflow.trace.cost"] = json.dumps({"total_cost": cost})
+    return {
+        "info": {
+            "trace_id": f"tr-{index:032x}",
+            "state": "OK",
+            "trace_metadata": metadata,
+            "execution_duration_ms": duration_ms,
+        },
+        "data": {"spans": []},
+    }
+
+
+def _frame_mlflow(frame):
+    mlflow = FakeMlflow()
+    mlflow._evaluate = lambda data=None, scorers=None, predict_fn=None: (
+        mlflow.evaluate_calls.append({"data": data, "predict_fn": predict_fn})
+        or SimpleNamespace(metrics=dict(mlflow.metrics_to_return), result_df=frame)
+    )
+    mlflow.genai = SimpleNamespace(
+        evaluate=mlflow._evaluate,
+        scorers=mlflow.genai.scorers,
+        make_judge=mlflow.genai.make_judge,
+    )
+    return mlflow
+
+
+def test_live_run_records_economics_from_the_result_frame(tmp_path):
+    """The frame's traces are the execution that was scored — and paid for."""
+
+    project = _project(tmp_path)
+    frame = _Frame(
+        {
+            "trace": [_economics_envelope(index, cost=0.01) for index in range(12)],
+            "error_message": [None, "agent exploded"] + [None] * 10,
+        }
+    )
+    mlflow = _frame_mlflow(frame)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=mlflow,
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    economics = outcome.results.economics
+    assert economics is not None
+    assert economics.successes == 11
+    assert economics.cost_source == "trace"
+    assert outcome.results.metrics["cost/coverage"] == 1.0
+    # The failed row's spend still lands on the successes.
+    assert outcome.results.metrics["economics/cost_per_success_usd"] == pytest.approx(
+        0.12 / 11
+    )
+    assert mlflow.logged_metrics["economics/success_rate"] == pytest.approx(11 / 12)
+    assert any(row.metric == "economics/success_rate" for row in outcome.comparison)
+    assert any("run economics:" in message for message in outcome.messages)
+
+
+def test_answer_sheet_run_records_no_economics(tmp_path):
+    """Replay has no agent trace; the judges' own traces are not agent spend."""
+
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="answer-sheet",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.economics is None
+    assert not any(
+        metric.startswith("economics/")
+        or metric in ("cost/coverage", "tokens/coverage")
+        for metric in outcome.results.metrics
+    )
+    assert not any("economics" in warning for warning in outcome.results.warnings)
+
+
+def test_traces_run_reads_economics_from_stored_envelopes(tmp_path):
+    _project(tmp_path)
+    rows = []
+    for index in range(12):
+        trace = _serialized_trace(index)
+        trace["info"]["trace_metadata"] = {
+            "mlflow.trace.tokenUsage": json.dumps(
+                {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+            ),
+            "mlflow.trace.cost": json.dumps({"total_cost": 0.005}),
+        }
+        trace["info"]["execution_duration_ms"] = 1500
+        rows.append(
+            {
+                "inputs": {"question": f"question {index}"},
+                "expectations": {"expected_response": f"answer {index} about pensions"},
+                "trace": trace,
+            }
+        )
+    (tmp_path / "evals" / "data" / "golden_cases.json").write_text(json.dumps(rows))
+    project = ProjectContext.load(tmp_path / "agentkit.yaml", environ={})
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.mode == "traces"
+    economics = outcome.results.economics
+    assert economics is not None
+    assert economics.cost_known == 12
+    assert economics.llm_calls == (1,) * 12
+    assert outcome.results.metrics["economics/cost_per_success_usd"] == pytest.approx(
+        0.005
+    )
+    assert outcome.results.metrics["economics/latency_p95_seconds"] == pytest.approx(
+        1.5
+    )
+
+
+def test_frameless_live_run_degrades_with_a_warning(tmp_path):
+    project = _project(tmp_path)
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=FakeMlflow(),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.economics is None
+    assert any("no per-row traces" in warning for warning in outcome.results.warnings)
+    assert "cost/coverage" not in outcome.results.metrics
+
+
+def test_disabled_economics_records_nothing_and_warns_nothing(tmp_path):
+    project = _project(
+        tmp_path,
+        config_text=(
+            "version: 1\n"
+            "agent: src/app/example_agent.py:respond\n"
+            "dataset: evals/data/golden_cases.json\n"
+            "economics:\n"
+            "  enabled: false\n"
+        ),
+    )
+    frame = _Frame({"trace": [_economics_envelope(index) for index in range(12)]})
+
+    outcome, code = run_scoring(
+        project,
+        establish_baseline=True,
+        judges_enabled=True,
+        mode="live",
+        assume_yes=True,
+        mlflow_module=_frame_mlflow(frame),
+        environ={},
+    )
+
+    assert code == EXIT_PASS
+    assert outcome.results.economics is None
+    assert not any("economics" in warning for warning in outcome.results.warnings)

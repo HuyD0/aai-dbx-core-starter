@@ -626,6 +626,243 @@ def optimization_plan() -> JsonRecord:
     }
 
 
+# --- the judge as a measured instrument (sections 5 and 6 of the lesson) ---
+#
+# Everything below is deterministic arithmetic over the fictional calibration
+# split: no network, no credentials, no judge endpoint. The point is to show
+# the same mechanics a real project runs — per-run judge stability and the
+# committed kappa record — on labels small enough to read.
+
+_JUDGE_NAME = "correctness"
+_JUDGE_METRIC = "correctness/mean"
+_CALIBRATION_REPLICAS = 4
+
+
+def _steady_judge(
+    *, inputs: Any = None, outputs: Any = None, expectations: Any = None
+) -> str:
+    """A deterministic stand-in judge: pass when the required fact is cited."""
+
+    text = str(outputs or "").casefold()
+    expected = dict(expectations or {})
+    facts = [str(fact).casefold() for fact in expected.get("required_facts", [])]
+    source = str(expected.get("source_id", "")).casefold()
+    passed = all(fact in text for fact in facts) and (not source or source in text)
+    return "yes" if passed else "no"
+
+
+def _drifted_judge(
+    *, inputs: Any = None, outputs: Any = None, expectations: Any = None
+) -> str:
+    """The same endpoint name after a silent repoint: a stricter judge.
+
+    It additionally demands wording no recorded answer contains, so every
+    frozen anchor re-scores differently — exactly what a provider-side
+    judge change looks like from inside a run.
+    """
+
+    if "per the audited filing" not in str(outputs or "").casefold():
+        return "no"
+    return _steady_judge(inputs=inputs, outputs=outputs, expectations=expectations)
+
+
+def judge_stability_summary() -> JsonRecord:
+    """Measure the judge inside the run: self-consistency and anchor drift.
+
+    Two passes over the calibration split. The steady judge agrees with
+    itself and with the frozen anchors; the drifted judge leaves the agent
+    outputs untouched and still moves every anchor score — proof that a
+    metric drop with anchor drift indicts the instrument, not the agent.
+    """
+
+    from aai_core.agentkit.integrity import (
+        ANCHOR_DRIFT_METRIC,
+        SELF_INCONSISTENCY_METRIC,
+        IntegrityConfig,
+        JudgeAnchors,
+        RowJudge,
+        anchor_rows_digest,
+        build_anchor_rows,
+        run_integrity_checks,
+    )
+
+    rows = SPLIT_RECORDS["judge_calibration"]
+    outputs_by_row = [row["outputs"] for row in rows]
+    steady = RowJudge(name=_JUDGE_NAME, metric=_JUDGE_METRIC, scorer=_steady_judge)
+    drifted = RowJudge(name=_JUDGE_NAME, metric=_JUDGE_METRIC, scorer=_drifted_judge)
+    first_pass = {
+        _JUDGE_METRIC: tuple(
+            (
+                1.0
+                if _steady_judge(
+                    outputs=row["outputs"], expectations=row["expectations"]
+                )
+                == "yes"
+                else 0.0
+            )
+            for row in rows
+        )
+    }
+    config = IntegrityConfig(
+        consistency_sample=4, max_self_inconsistency=0.2, max_anchor_drift=0.1
+    )
+
+    anchor_rows = build_anchor_rows(
+        rows=rows,
+        outputs_by_row=outputs_by_row,
+        metric_samples=first_pass,
+        judges=[steady],
+    )
+    anchors = JudgeAnchors(
+        recorded_at="2026-08-19T00:00:00Z",
+        recorded_by="agentkit compare --establish-baseline",
+        change_id="fictional-baseline",
+        judge_model="endpoints:/fictional-judge",
+        judge_prompts={},
+        scorer_versions={_JUDGE_NAME: 1},
+        rows=anchor_rows,
+        digest=anchor_rows_digest(anchor_rows),
+    )
+
+    _, steady_metrics, steady_warnings = run_integrity_checks(
+        config=config,
+        rows=rows,
+        outputs_by_row=outputs_by_row,
+        metric_samples=first_pass,
+        judges=[steady],
+        anchors=anchors,
+    )
+    _, drifted_metrics, drifted_warnings = run_integrity_checks(
+        config=config,
+        rows=rows,
+        outputs_by_row=outputs_by_row,
+        metric_samples=first_pass,
+        judges=[drifted],
+        anchors=anchors,
+    )
+    drift_reading = next(
+        (
+            warning
+            for warning in drifted_warnings
+            if "the judge changed, not the agent" in warning
+        ),
+        "",
+    )
+    return {
+        "stable_judge": {
+            "self_inconsistency": steady_metrics[SELF_INCONSISTENCY_METRIC],
+            "anchor_drift": steady_metrics[ANCHOR_DRIFT_METRIC],
+            "warnings": list(steady_warnings),
+        },
+        "drifted_judge": {
+            "self_inconsistency": drifted_metrics[SELF_INCONSISTENCY_METRIC],
+            "anchor_drift": drifted_metrics[ANCHOR_DRIFT_METRIC],
+            "reading": drift_reading,
+        },
+        "frozen_anchor_rows": len(anchors.rows),
+        "gate_rules": {
+            SELF_INCONSISTENCY_METRIC: f"<= {config.max_self_inconsistency:g}",
+            ANCHOR_DRIFT_METRIC: (
+                f"<= {config.max_anchor_drift:g} once require_anchors is true"
+            ),
+        },
+        "freeze_command": "agentkit compare --establish-baseline",
+    }
+
+
+def _calibration_labels() -> list[Any]:
+    """Fictional SME labels: mostly agreement, a few honest disagreements.
+
+    Six cases, four labelled paraphrases each. Two annotator groups agree
+    on everything except two risk paraphrases (a tie: no consensus for the
+    judge to match) and the judge misses one revenue paraphrase while
+    over-passing one policy paraphrase — enough structure for a kappa that
+    is neither 1.0 nor noise.
+    """
+
+    from aai_core.agentkit.calibration import AnnotatorVerdict, CalibrationLabel
+
+    labels = []
+    for case_id in SPLIT_MANIFEST["judge_calibration"]:
+        topic = case_id.split("-")[1]
+        for replica in range(_CALIBRATION_REPLICAS):
+            human = "no" if topic == "policy" else "yes"
+            second = human
+            judge = human
+            if topic == "risk" and replica >= 2:
+                second = "no"  # the two reviewers split: a tie, not a target
+            if topic == "policy" and replica == 0:
+                judge = "yes"  # the judge over-passes one refusal paraphrase
+            if topic == "revenue" and replica == 3:
+                judge = "no"  # ...and misses one correct citation
+            labels.append(
+                CalibrationLabel(
+                    example_id=f"{case_id}-r{replica}",
+                    judge_value=judge,
+                    annotations=(
+                        AnnotatorVerdict(
+                            annotator="group:fictional-reviewers-a", value=human
+                        ),
+                        AnnotatorVerdict(
+                            annotator="group:fictional-reviewers-b", value=second
+                        ),
+                    ),
+                )
+            )
+    return labels
+
+
+def judge_calibration_summary() -> JsonRecord:
+    """Chance-adjusted agreement with the SMEs, as the committed record.
+
+    In a project this is ``agentkit judge calibrate --scorer correctness
+    --labels <sme-labels.json>``, which writes ``evals/judges/<scorer>.json``
+    — the record ``agentkit evidence`` reports and, under
+    ``integrity.require_calibration``, scoring and the gate demand.
+    """
+
+    from aai_core.agentkit.calibration import calibrate
+
+    record = calibrate(
+        scorer=_JUDGE_NAME,
+        scorer_version=1,
+        labels=_calibration_labels(),
+        judge_model="endpoints:/fictional-judge",
+        recorded_at="2026-08-19T00:00:00Z",
+        decided_by="group:fictional-domain-reviewers",
+    )
+    return {
+        "kappa": round(record.kappa, 3),
+        "human_ceiling_kappa": (
+            None
+            if record.human_ceiling_kappa is None
+            else round(record.human_ceiling_kappa, 3)
+        ),
+        "percent_agreement": round(record.percent_agreement, 3),
+        "consensus_labels": record.sample_size,
+        "ties_excluded": record.tie_count,
+        "annotator_groups": record.annotator_count,
+        "minimum_kappa": record.minimum_kappa,
+        "passed": record.passed,
+        "auditable_claim": (
+            f"scores gate under judge '{record.scorer}' v{record.scorer_version}, "
+            f"which agrees with our reviewers at kappa {record.kappa:.2f} "
+            f"against a human ceiling of {record.human_ceiling_kappa:.2f}"
+        ),
+        "project_command": (
+            "agentkit judge calibrate --scorer correctness "
+            "--labels evals/data/calibration_labels.json "
+            "--decided-by group:domain-reviewers"
+        ),
+        "release_rule": (
+            "judge releases move in their own change: new prompt version, "
+            "re-calibration on held-out labels, then a re-established "
+            "baseline and judge anchors - never in the same commit as an "
+            "agent change"
+        ),
+    }
+
+
 __all__ = [
     "AlignmentConfig",
     "OPTIMIZATION_BUDGET",
@@ -641,6 +878,8 @@ __all__ = [
     "evaluate_prompt_variant",
     "evaluate_winner_on_holdout",
     "experimental_dependency_status",
+    "judge_calibration_summary",
+    "judge_stability_summary",
     "optimization_plan",
     "run_alignment_workflow",
     "run_toy_prompt_optimization",

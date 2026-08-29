@@ -267,6 +267,20 @@ An HTTP target that needs a token — `request_mapping.auth_env` names the
 environment variable, never the value — has to be `https://`. Loopback is the
 exception, because a local stub never puts the credential on a network.
 
+An HTTP endpoint is sent **every field the row's `inputs` object carries**,
+not just a recognisable one like `question`. The single-value shorthand
+applies only when `inputs` genuinely has one field. This matters because the
+failure it prevents is invisible: an endpoint handed the question without the
+`context` or `history` beside it still answers, and that answer still becomes
+promotion evidence — for an invocation the dataset never described. Write
+`request_mapping` for the whole `inputs` object, and a field the endpoint
+cannot accept is a configuration error rather than a silent omission.
+
+Only `inputs` travels. A row's `expectations`, `outputs` and `trace` are what
+the answer is scored *against*, so they never reach the agent — and copying
+one of them into `inputs` to make it arrive hands the agent its own answer
+sheet, which turns the comparison into evidence of nothing.
+
 ### Where the answers come from
 
 A scoring run needs an answer for every row, and there are three honest ways
@@ -329,6 +343,24 @@ because a budget approved against last month's fan-out is not a budget.
 
 `agentkit eval --submit` runs the bundle's `release_gate` job.
 
+The submitted job scores the project's **deployed** configuration — the
+bundle files already uploaded to the workspace, not the ones in your working
+tree and not the ones in the last commit. `--submit` runs
+`databricks bundle validate` and `databricks bundle run`; it does **not**
+deploy. So change `agentkit.yaml`, a dataset, or a scorer and you must
+`databricks bundle deploy -t <target>` before submitting, or `release_gate`
+will score the previous version and record that as the evidence for your
+change.
+
+That is also why anything which would change what gets scored locally has
+nowhere to travel, and `--submit` refuses it up front rather than running
+something other than what you asked for: `--agent`, `--mode`, `--decision`,
+`--plan`, the baseline selection and establishment flags, the drift
+override, and a `--config` (or `AGENTKIT_CONFIG`) pointing anywhere but the
+project's own `agentkit.yaml`. Run those locally without `--submit`, or
+deploy the change and submit the deployed version. Only `--target`, which
+selects the bundle target rather than the evaluation, travels.
+
 **Smoke does not create an MLflow run.** A code-scorer-only pass over
 recorded answers needs nothing from MLflow, so it does not open one. That is
 deliberate on two counts: it keeps smoke runnable on every commit with no
@@ -343,7 +375,7 @@ endpoint's rate limit. Spark is the wrong tool for the scoring loop itself,
 though it remains the right tool for the work around it — scanning production
 traces to build a dataset, aggregating across many runs.
 
-## Cost is visible before the run, never after
+## Judge spend is visible before the run
 
 Every judged run prints the estimate first — how many judge calls, roughly how
 many tokens, and the dollar figure if you have configured your negotiated
@@ -382,6 +414,59 @@ actually sends, and a long expected answer against a short recorded one is
 otherwise invisible in the number you approve. Per-row scorers still use the
 whole-dataset mean, because they really do see every row. Rows whose trace
 cannot be read keep the conservative per-row assumption.
+
+## Economics: what the run actually cost
+
+The estimate above covers the judges. What the *agent* spent is recorded
+after, from the run's own traces — and not as a mean. Mean cost per call is
+a trap metric: it prices *attempts* while the money is spent per *outcome*.
+A failed row's spend — including every retry inside its trace, each one
+re-sending grown context — still has to be paid for by the rows that
+succeeded, so a small model that looks cheap per call and fails a tenth of
+the time can cost more per delivered answer than the large model it was
+meant to undercut. Every live or traces run therefore records the decision
+metrics instead:
+
+- **`economics/cost_per_success_usd`** and `economics/tokens_per_success`:
+  all known spend, failed rows included, divided by the rows that completed.
+- **Tail percentiles, not means**: `economics/cost_p95_usd`,
+  `economics/tokens_p95`, and `economics/latency_p95_seconds` (with p50
+  companions). The retry tail lives here, invisible to an average.
+- **`economics/success_rate`**, where success means the agent *completed*:
+  the row produced an answer and its trace did not end in ERROR. Judge and
+  scorer failures are deliberately excluded — they measure the instrument,
+  they already fail the gate through `<scorer>/error_count`, and folding
+  them in would move the cost signal every time a judge endpoint flaps.
+  Quality remains the gate's own concern.
+- **`cost/coverage` and `tokens/coverage`**: unknown cost is not zero cost.
+  A row whose trace records nothing stays unknown, the per-success ratios
+  are reported only at complete coverage, and a threshold on an absent
+  ratio fails closed.
+
+Cost comes from the trace when the platform recorded it, otherwise from a
+project-configured price pair applied to the trace's token usage
+(`economics.price_per_1m_input_tokens` and `..._output_tokens` — priced
+separately because a retry loop grows input tokens far faster than output).
+No price table ships in `aai-core`. Answer-sheet replay records no
+economics at all: the sheet holds no agent trace, and the judges' own
+traces are not agent spend.
+
+Everything is report-only by default. Gating is opt-in through the ordinary
+grammar — a `thresholds` entry such as `cost/coverage: ">=1.0"` or
+`economics/cost_per_success_usd: "<=0.05"`, or a `regression_budget` entry
+(direction-aware: falling cost is never a regression) — so an economics
+rule persists in the record's `policy_rules` and replays like any other.
+Cost stays a decision aid beside the quality gate, never the sole gate.
+
+With `strata:` configured, the same evidence is segmented per stratum
+value: rows, success rate, known spend, cost per success, and the p95
+tails, per intent. That table is the routing evidence — "these intents
+retry until they cost more than the larger model" — and the routing change
+itself is an experiment like any other: repoint the intent's logical model
+in `aai-platform.yml`, run `agentkit compare`, and record the decision once
+the comparison shows the quality drop is near zero while the cost per
+success actually fell. The SDK ships no router, because a routing change
+without that evidence is exactly the guess this section exists to replace.
 
 ## What the gate refuses
 
@@ -528,7 +613,10 @@ the model that endpoint actually served, resolved judge prompt versions, the
 baseline it was compared against, the gate verdict, and the decision. A run
 scored under a release identity records the full deployed commit, and a run
 with the integrity checks configured records its judge self-inconsistency
-and anchor-drift evidence alongside the metrics they gate.
+and anchor-drift evidence alongside the metrics they gate. A live or traces
+run records its economics evidence too — per-row token, cost, duration, and
+completion readings with their coverage counts, and the per-stratum
+segments — beside the synthetic metrics they produce.
 
 Decisions use the platform vocabulary — **adopt**, **reject**, or
 **inconclusive** — and default to `inconclusive`, because a comparison that

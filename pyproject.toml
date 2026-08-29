@@ -92,10 +92,12 @@ packages = ["src/aai_core"]
 # data. Excluding them also prevents local data, models, or experiment artifacts
 # from entering a future source release.
 exclude = [
-  "/examples/local-finetuning",
-  "/tests/test_local_finetuning_project.py",
+  "/examples/fine-tuning",
   "/examples/local-classification",
+  "/examples/local-finetuning",
+  "/tests/test_finetuning_project.py",
   "/tests/test_local_classification_project.py",
+  "/tests/test_local_finetuning_project.py",
 ]
 
 [tool.pytest.ini_options]
@@ -157,7 +159,7 @@ follow_imports = "skip"
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-exclude = ["examples/local-classification"]
+exclude = ["examples/fine-tuning", "examples/local-classification"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C90", "SIM"]
@@ -176,4 +178,4 @@ known-first-party = ["aai_core", "aai_console", "app", "evals", "jobs"]
 [tool.black]
 target-version = ["py311", "py312"]
 line-length = 88
-extend-exclude = "(^|/)examples/local-classification/"
+extend-exclude = "(^|/)examples/(fine-tuning|local-classification)/"
