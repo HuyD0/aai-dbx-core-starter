@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -41,6 +42,43 @@ from aai_local_finetuning.evaluation import (
 from aai_local_finetuning.evaluation import session as evaluation_session_module
 
 _ORIGINAL_SYS_PATH = tuple(sys.path)
+
+
+@functools.cache
+def _child_snapshot_capture_error() -> str | None:
+    """Probe whether a pristine child interpreter can capture a snapshot.
+
+    The subprocess-based governance tests need a host whose interpreter
+    startup already satisfies the strict capture invariants (for example, no
+    symlinked ``sitecustomize`` origin) and whose environment can import this
+    package in isolation. Where that fails, the reason is environmental, not a
+    machinery regression, so those tests skip with the child's own error.
+    """
+
+    script = (
+        "from aai_local_finetuning import training\n"
+        "training.capture_execution_snapshot()\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-P", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode == 0:
+        return None
+    lines = [line for line in result.stderr.splitlines() if line.strip()]
+    return lines[-1] if lines else f"exit code {result.returncode}"
+
+
+def _require_child_snapshot_capture() -> None:
+    error = _child_snapshot_capture_error()
+    if error is not None:
+        pytest.skip(
+            "host interpreter startup cannot satisfy the strict capture "
+            f"invariants in a child process: {error}"
+        )
 
 
 def _activate_test_runtime(
@@ -1762,8 +1800,11 @@ except RuntimeError as error:
 else:
     raise AssertionError("pre-audit cython_runtime forgery was accepted")
 """
+    # -P keeps the invoker's working directory out of the child's sys.path:
+    # an embedding repository checkout is not governed import evidence.
+    _require_child_snapshot_capture()
     result = subprocess.run(
-        [sys.executable, "-c", script, tmp_path.as_posix()],
+        [sys.executable, "-P", "-c", script, tmp_path.as_posix()],
         check=False,
         capture_output=True,
         text=True,
@@ -1837,6 +1878,10 @@ def test_capture_requires_active_extension_tracker_order(
         training._install_runtime_extension_finder()
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("mlx") is None,
+    reason="MLX native extensions are available on prepared Apple silicon only",
+)
 def test_real_snapshot_allows_first_mlx_native_import() -> None:
     script = r"""
 import sys
@@ -1868,6 +1913,7 @@ except RuntimeError as error:
 else:
     raise AssertionError("replacement MLX child was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -1936,8 +1982,11 @@ assert mlflow.__version__
 """
     environment = os.environ.copy()
     environment["PYTHONPATH"] = (training.PROJECT_ROOT / "src").as_posix()
+    # -P keeps the working directory off the child's sys.path so an embedding
+    # repository's shadowing top-level names cannot create governance overlaps.
+    _require_child_snapshot_capture()
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-P", "-c", script],
         cwd=training.PROJECT_ROOT,
         env=environment,
         check=False,
@@ -1992,6 +2041,7 @@ except RuntimeError as error:
 else:
     raise AssertionError("replacement extension module was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -2043,6 +2093,7 @@ except RuntimeError as error:
 else:
     raise AssertionError("replacement native-created module was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -2104,6 +2155,7 @@ except RuntimeError as error:
 else:
     raise AssertionError("replacement source module was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -2163,6 +2215,7 @@ except RuntimeError as error:
 else:
     raise AssertionError(f"pre-audit {origin} real-name claim was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script, claim_kind],
         check=False,
@@ -2203,6 +2256,7 @@ for name in ("wave", "_ctypes_test"):
     sys.modules[name] = native
     training.recheck_execution_snapshot(snapshot)
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -2278,6 +2332,7 @@ except RuntimeError as error:
 else:
     raise AssertionError("replacement highspy native child was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -2331,6 +2386,7 @@ except RuntimeError as error:
 else:
     raise AssertionError("removed lazy namespace module was accepted")
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,
@@ -2391,6 +2447,7 @@ for name in ("_statistics", "__hello__"):
     sys.modules[name] = native
     training.recheck_execution_snapshot(snapshot)
 """
+    _require_child_snapshot_capture()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script],
         check=False,

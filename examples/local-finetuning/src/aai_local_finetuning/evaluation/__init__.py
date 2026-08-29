@@ -11,7 +11,12 @@ from .io import (
     write_records_jsonl,
     write_report_json,
 )
-from .metrics import Evaluator, evaluate_predictions, format_error_analysis
+from .metrics import (
+    Evaluator,
+    evaluate_predictions,
+    evaluation_fingerprint,
+    format_error_analysis,
+)
 from .models import (
     ClassificationMetrics,
     DeterministicInferenceConfig,
@@ -41,6 +46,12 @@ from .promotion import (
     PromotionThresholds,
     decide_lora_promotion,
 )
+from .promotion_demo import (
+    PROMOTION_DEMO_METHODS,
+    bind_promotion_demo_reports,
+    degrade_schema_validity,
+    load_promotion_demo_reports,
+)
 from .session import (
     EvaluationSession,
     build_local_mlx_inference_config,
@@ -51,6 +62,7 @@ from .session import (
 __all__ = [
     "BaselineEvaluation",
     "ChangeEvidence",
+    "PROMOTION_DEMO_METHODS",
     "ClassificationMetrics",
     "DistributionSummary",
     "ErrorAnalysis",
@@ -79,10 +91,14 @@ __all__ = [
     "ResponsePolicyResult",
     "SliceMetrics",
     "SupportOutput",
+    "bind_promotion_demo_reports",
     "decide_lora_promotion",
+    "degrade_schema_validity",
     "build_local_mlx_inference_config",
     "evaluate_predictions",
+    "evaluation_fingerprint",
     "format_error_analysis",
+    "load_promotion_demo_reports",
     "load_predictions_jsonl",
     "load_records_jsonl",
     "parse_portable_record",

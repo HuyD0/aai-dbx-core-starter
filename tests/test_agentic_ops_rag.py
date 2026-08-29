@@ -728,7 +728,7 @@ def test_fixed_cases_cover_retrieval_abstention_access_and_action_policy():
     metrics = benchmark(pipeline, cases, mode=RetrievalMode.HYBRID)
     assert metrics["security/tenant_isolation"] == 1.0
     assert metrics["security/region_isolation"] == 1.0
-    assert metrics["security/group_authorization"] == 1.0
+    assert metrics["security/group_access"] == 1.0
     assert metrics["security/current_evidence"] == 1.0
     assert metrics["safety/action_approval"] == 1.0
     assert metrics["answer/abstention_accuracy"] == 1.0
@@ -778,7 +778,7 @@ def test_release_gate_detects_each_returned_authorization_scope_leak():
         },
         # This is deliberately same-tenant and same-region. Tenant-only checks
         # must not authorize evidence restricted to another group.
-        "security/group_authorization": {
+        "security/group_access": {
             "retrieved_allowed_groups": (("ops-identity",),),
         },
         "security/current_evidence": {
@@ -792,7 +792,7 @@ def test_release_gate_detects_each_returned_authorization_scope_leak():
             mode=RetrievalMode.HYBRID,
         )
         assert metrics[metric_name] == 0.0
-        if metric_name == "security/group_authorization":
+        if metric_name == "security/group_access":
             assert metrics["security/tenant_isolation"] == 1.0
             assert metrics["security/region_isolation"] == 1.0
         gate = release_gate(metrics)
@@ -871,7 +871,8 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
 
     regressed_metrics = {
         **metrics,
-        "latency/p95_ms": metrics["latency/p95_ms"] + 11.0,
+        # Just beyond the policy's 20ms fixture-latency regression allowance.
+        "latency/p95_ms": metrics["latency/p95_ms"] + 21.0,
     }
     regressed_absolute_gate = release_gate(regressed_metrics)
     assert regressed_absolute_gate.passed
@@ -914,7 +915,7 @@ def test_release_eligibility_honors_exact_recorded_comparison_decision():
         metrics=absolute_gate.metrics,
         failures=(
             GateFailure(
-                metric="security/group_authorization",
+                metric="security/group_access",
                 reason="current policy rejects this evidence",
             ),
         ),
@@ -1059,7 +1060,12 @@ def test_generated_notebooks_are_current_clean_compilable_and_hands_on():
     assert "extend_rules_with_statistics(" in confidence_source
     assert "enforce_confidence=True" in confidence_source
     assert "bootstrap_seed=seed" in confidence_source
-    assert 'missing_runbook = "alpha-payments-503-current"' in confidence_source
+    # The degraded index must remove a runbook exactly one case depends on.
+    # Removing the ERR-PAY-503 runbook now costs two cases (the paraphrase
+    # case added for the retrieval ablation also needs it), which certifies
+    # the paired improvement at every seed and destroys the sample-size
+    # lesson this exercise exists to teach.
+    assert 'missing_runbook = "alpha-payments-latency"' in confidence_source
     # The interval evidence must stay reproducible: only the seeded generator
     # inside aai_core may draw, and the lesson needs no numeric dependency.
     assert "numpy" not in confidence_source

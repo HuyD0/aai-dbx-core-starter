@@ -1723,6 +1723,61 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 )
                 training_anatomy
                 """),
+            md(
+                """
+                ## The one number that carries the lesson
+
+                “LoRA trains a small adapter” is a claim you can compute, not take
+                on faith. The helper below reads the pinned checkpoint's
+                `config.json` and the training YAML, reproduces the Qwen2 parameter
+                arithmetic, and reports how many parameters the configured adapter
+                actually trains: rank-8 pairs of low-rank matrices on `q_proj` and
+                `v_proj` across the last eight layers. Expect a fraction of a
+                percent of the roughly 494 million base parameters. The 4-bit
+                quantization changes storage bytes, not this parameter count, and a
+                small trainable share is a capacity statement — not evidence that
+                the change helps, which remains notebook 07's question.
+                """,
+                "what-to-notice",
+            ),
+            code("""
+                from aai_local_finetuning.learning import lora_parameter_budget
+
+                model_config_path = settings.model_dir / "config.json"
+                if model_config_path.is_file():
+                    model_config = json.loads(
+                        model_config_path.read_text(encoding="utf-8")
+                    )
+                    budget = lora_parameter_budget(model_config, training_config)
+                    print(
+                        f"trainable {budget.trainable_fraction:.4%} of "
+                        f"{budget.total_parameters:,} parameters "
+                        f"({budget.lora_trainable_parameters:,} LoRA parameters: "
+                        f"rank {budget.rank} on "
+                        f"{' and '.join(budget.adapted_projections)} over the last "
+                        f"{budget.adapted_layers} layers)"
+                    )
+                    parameter_evidence = {
+                        "total_parameters": budget.total_parameters,
+                        "lora_trainable_parameters": (
+                            budget.lora_trainable_parameters
+                        ),
+                        "trainable_fraction": budget.trainable_fraction,
+                        "adapted_layers": budget.adapted_layers,
+                        "adapted_projections": list(budget.adapted_projections),
+                        "rank": budget.rank,
+                    }
+                else:
+                    print(
+                        "Model config.json is absent, so the parameter budget "
+                        "cannot be computed. Run `make prepare-flight` while "
+                        "online, then rerun this cell."
+                    )
+                    parameter_evidence = {
+                        "status": "model assets missing; run `make prepare-flight`"
+                    }
+                parameter_evidence
+                """),
             md("""
                 ## Load measured preflight evidence
 
@@ -1899,8 +1954,19 @@ NOTEBOOKS: tuple[Notebook, ...] = (
 
                 This is the first notebook that reads test examples for scoring. Do not
                 revise prompts, demonstrations, thresholds, response policy, or training
-                configuration after seeing these errors. A small default probe teaches
-                the workflow; it is explicitly report-only and cannot support promotion.
+                configuration after seeing these errors.
+
+                The default evaluation scope is a **deterministic stratified
+                subsample**: the first two frozen records of every supported intent, in
+                frozen-split order (54 of the 270 test records). Every intent keeps
+                support, so macro-F1 is defined for each of the 27 classes and the
+                six-method comparison is honest at course scale — unlike a first-N
+                slice, which would leave most intents with zero support and make the
+                macro average meaningless. Notebook 08 reads this same scope by default
+                and reaches a real adopt/reject decision at course scale.
+                **Promotion-grade evidence still requires the complete run**: set
+                `EVALUATION_SUBSAMPLE_PER_INTENT = None` when you have the time and
+                battery for all 270 records.
                 """,
                 "what-to-notice",
             ),
@@ -1921,9 +1987,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     write_report_json,
                 )
                 from aai_local_finetuning.learning import (
+                    COMPLETE_EVALUATION_SCOPE,
                     generate_support_predictions,
                     load_support_splits,
                     report_row,
+                    stratified_evaluation_scope,
+                    stratified_subsample,
                     support_contract,
                 )
                 from aai_local_finetuning.modeling import LocalMLXPredictor
@@ -1936,8 +2005,12 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     shared_adapter_lock,
                 )
 
-                EVALUATION_LIMIT = 9  # Set to None for complete promotion evidence.
-                scope = "full" if EVALUATION_LIMIT is None else "partial"
+                EVALUATION_SUBSAMPLE_PER_INTENT = 2  # Set to None for complete promotion evidence.
+                scope = (
+                    COMPLETE_EVALUATION_SCOPE
+                    if EVALUATION_SUBSAMPLE_PER_INTENT is None
+                    else stratified_evaluation_scope(EVALUATION_SUBSAMPLE_PER_INTENT)
+                )
                 evidence_dir = PROJECT_ROOT / "artifacts" / "notebook" / "evaluation"
                 evidence_dir.mkdir(parents=True, exist_ok=True)
                 lineage_copy = (
@@ -1976,24 +2049,23 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 splits = load_support_splits(settings)
                 allowed_intents, _ = support_contract(splits.train)
                 FULL_FROZEN_COUNT = len(splits.test)
-                if EVALUATION_LIMIT is not None and (
-                    isinstance(EVALUATION_LIMIT, bool)
-                    or not isinstance(EVALUATION_LIMIT, int)
-                    or not 1 <= EVALUATION_LIMIT < FULL_FROZEN_COUNT
-                ):
-                    raise ValueError(
-                        "EVALUATION_LIMIT must be a positive partial count below "
-                        "the frozen-set size; use None for complete evidence"
-                    )
                 frozen_records = (
                     splits.test
-                    if EVALUATION_LIMIT is None
-                    else splits.test[:EVALUATION_LIMIT]
+                    if EVALUATION_SUBSAMPLE_PER_INTENT is None
+                    else stratified_subsample(
+                        splits.test,
+                        per_intent=EVALUATION_SUBSAMPLE_PER_INTENT,
+                    )
                 )
                 {
+                    "evaluation_scope": scope,
                     "scored_now": len(frozen_records),
                     "full_frozen_count": FULL_FROZEN_COUNT,
-                    "promotion_eligible": len(frozen_records) == FULL_FROZEN_COUNT,
+                    "intents_with_support": len(
+                        {record.target.intent for record in frozen_records}
+                    ),
+                    "supported_intents": len(allowed_intents),
+                    "promotion_grade": scope == COMPLETE_EVALUATION_SCOPE,
                 }
                 """),
             md("""
@@ -2072,8 +2144,11 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ## Add the LoRA change and persist its evidence atomically
 
                 Notebook probes never overwrite official evaluation artifacts. Filenames
-                include `partial` unless all frozen examples were scored. Reports carry
-                the evaluation fingerprint used to prove comparability later.
+                carry the declared evaluation scope — `stratified-subsample-2-per-intent`
+                by default, `complete` for the full frozen run — and notebook 08 reads
+                the same scope by default, so the evidence this cell writes is exactly
+                what the decision notebook consumes. Reports carry the evaluation
+                fingerprint used to prove comparability later.
 
                 The canonical adapter is separate from notebook smoke adapters. A weight
                 file alone is not training lineage: the success manifest must also match
@@ -2097,8 +2172,8 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 the later decision inconclusive.
 
                 Same-name notebook artifacts were invalidated before the first method was
-                fitted. If setup, prediction, or scoring fails, an older partial/full file
-                therefore cannot masquerade as evidence from this attempt.
+                fitted. If setup, prediction, or scoring fails, an older file from this
+                scope therefore cannot masquerade as evidence from this attempt.
                 """),
             code("""
                 try:
@@ -2283,7 +2358,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 ## Checkpoint
 
                 Confirm that every compared report has the same fingerprint and record
-                count. Partial evidence is useful for learning but cannot promote a change.
+                count. The default stratified scope supports a real course-scale
+                decision in notebook 08; only the `complete` scope is promotion-grade
+                evidence for a real deployment decision.
 
                 **Next:** `08_mlflow_and_promotion.ipynb` records lineage and computes an
                 adopt, reject, or inconclusive decision.
@@ -2308,8 +2385,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 prerequisites="07 — Frozen regression evaluation",
                 objectives=(
                     "Inspect local experiment lineage without a tracking server.",
-                    "Require comparable complete reports before making a promotion decision.",
+                    "Require comparable scope-matched reports before making a decision.",
                     "Apply absolute output gates in addition to relative macro-F1 improvement.",
+                    "Watch the same gates reject an in-memory degraded change.",
                 ),
                 evidence="a local run record and an adopt/reject/inconclusive assessment",
             ),
@@ -2331,11 +2409,21 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     BaselineEvaluation,
                     LocalMLXInferenceConfig,
                     PromotionThresholds,
+                    bind_promotion_demo_reports,
                     decide_lora_promotion,
+                    degrade_schema_validity,
+                    evaluation_fingerprint,
+                    load_promotion_demo_reports,
                     recheck_evaluation_session,
                     start_evaluation_session,
                 )
-                from aai_local_finetuning.learning import load_report, load_support_splits
+                from aai_local_finetuning.learning import (
+                    COMPLETE_EVALUATION_SCOPE,
+                    load_report,
+                    load_support_splits,
+                    stratified_evaluation_scope,
+                    stratified_subsample,
+                )
                 from aai_local_finetuning.offline import verify_flight_manifest
                 from aai_local_finetuning.settings import (
                     PROJECT_ROOT,
@@ -2399,26 +2487,53 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """),
             md(
                 """
-                ## Inventory full notebook reports
+                ## Inventory scope-matched notebook reports
 
-                Promotion requires all meaningful baselines and the LoRA change on the
-                complete frozen set with identical evaluation fingerprints. The LoRA
-                report must also carry the same training-manifest fingerprint that was
-                validated before inference and is still current now. Every report must
-                carry one evaluation-time source/runtime hash, all of those hashes must
-                agree, and that contract must still match the live interpreter, platform,
-                governed source, and exact package set. Partial reports, missing methods,
-                or any lineage mismatch force `inconclusive`. Model reports must also
-                name the exact same verified checkpoint and generation controls. Prompt
-                recipes may differ because they are intended baseline changes, but at
-                least one untouched-model control must match the LoRA prompt recipe and
-                demonstration count. `max_tokens`, sampler, cache controls, and model
-                bytes may not differ in a fair LoRA comparison.
+                A decision requires all meaningful baselines and the LoRA change on the
+                **same declared evaluation scope** with identical evaluation
+                fingerprints. The default below reads the
+                `stratified-subsample-2-per-intent` reports that notebook 07 writes by
+                default, and the expected fingerprint is recomputed from the frozen
+                split, so a first-N shortcut with the same record count cannot pass as
+                the stratified scope. A decision at that scope is a real adopt/reject
+                for this course; **promotion-grade evidence requires the `complete`
+                scope** — rerun notebook 07 with
+                `EVALUATION_SUBSAMPLE_PER_INTENT = None`, then set it to `None` here
+                too.
+
+                The LoRA report must also carry the same training-manifest fingerprint
+                that was validated before inference and is still current now. Every
+                report must carry one evaluation-time source/runtime hash, all of those
+                hashes must agree, and that contract must still match the live
+                interpreter, platform, governed source, and exact package set.
+                Mixed-scope reports, missing methods, or any lineage mismatch force
+                `inconclusive`. Model reports must also name the exact same verified
+                checkpoint and generation controls. Prompt recipes may differ because
+                they are intended baseline changes, but at least one untouched-model
+                control must match the LoRA prompt recipe and demonstration count.
+                `max_tokens`, sampler, cache controls, and model bytes may not differ
+                in a fair LoRA comparison.
                 """,
                 "what-to-notice",
             ),
             code("""
+                EVALUATION_SUBSAMPLE_PER_INTENT = 2  # Match notebook 07; None reads complete scope.
+                decision_scope = (
+                    COMPLETE_EVALUATION_SCOPE
+                    if EVALUATION_SUBSAMPLE_PER_INTENT is None
+                    else stratified_evaluation_scope(EVALUATION_SUBSAMPLE_PER_INTENT)
+                )
                 splits = load_support_splits(settings)
+                expected_records = (
+                    splits.test
+                    if EVALUATION_SUBSAMPLE_PER_INTENT is None
+                    else stratified_subsample(
+                        splits.test,
+                        per_intent=EVALUATION_SUBSAMPLE_PER_INTENT,
+                    )
+                )
+                expected_fingerprint = evaluation_fingerprint(expected_records)
+                promotion_grade = decision_scope == COMPLETE_EVALUATION_SCOPE
                 report_dir = PROJECT_ROOT / "artifacts" / "notebook" / "evaluation"
                 required_methods = (
                     "majority",
@@ -2429,14 +2544,22 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                     "lora-change",
                 )
                 report_paths = {
-                    method: report_dir / f"full-{method}-report.json"
+                    method: report_dir / f"{decision_scope}-{method}-report.json"
                     for method in required_methods
                 }
                 report_status = {
                     method: path.is_file() for method, path in report_paths.items()
                 }
-                lineage_path = report_dir / "full-lora-change-training-manifest.json"
-                report_status
+                lineage_path = (
+                    report_dir
+                    / f"{decision_scope}-lora-change-training-manifest.json"
+                )
+                {
+                    "evaluation_scope": decision_scope,
+                    "expected_examples": len(expected_records),
+                    "promotion_grade": promotion_grade,
+                    "report_status": report_status,
+                }
                 """),
             md(
                 """
@@ -2485,7 +2608,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 counts = set()
                 evaluation_contract_hashes = set()
                 inference_configs_comparable = False
-                complete_and_comparable = False
+                scope_consistent_and_comparable = False
 
                 with shared_adapter_lock(settings.adapter_dir):
                     decision_evaluation_session = start_evaluation_session(settings)
@@ -2585,9 +2708,9 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 and current_manifest.model_files
                                 == current_base_model.model_files
                             )
-                            complete_and_comparable = (
-                                len(fingerprints) == 1
-                                and counts == {len(splits.test)}
+                            scope_consistent_and_comparable = (
+                                fingerprints == {expected_fingerprint}
+                                and counts == {len(expected_records)}
                                 and evaluation_contract_hashes
                                 == {current_execution_sha256}
                                 and loaded_reports[
@@ -2604,7 +2727,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         report_status["lora-training-lineage"] = False
                         lineage_error = str(error)
 
-                    if complete_and_comparable:
+                    if scope_consistent_and_comparable:
                         recheck_training_snapshot(current_snapshot)
                         assessment = decide_lora_promotion(
                             change_name="bitext-structured-output-lora-v1",
@@ -2626,8 +2749,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                         assessment = {
                             "decision": "inconclusive",
                             "reasons": [
-                                "all six methods must be scored on the complete frozen set",
-                                "report counts and evaluation fingerprints must match",
+                                "all six methods must be scored on the declared "
+                                "evaluation scope",
+                                "report counts and fingerprints must match the "
+                                "records that scope reconstructs",
                                 "the LoRA report must match the current success manifest",
                                 "all reports must match the current source/runtime contract",
                                 "all model reports must match the current checkpoint",
@@ -2638,6 +2763,14 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             "available_reports": report_status,
                             "lineage_error": lineage_error,
                         }
+                    assessment["evaluation_scope"] = decision_scope
+                    assessment["promotion_grade"] = promotion_grade
+                    if not promotion_grade:
+                        assessment["scope_note"] = (
+                            "Course-scale decision on the stratified subsample; "
+                            "promotion-grade evidence requires the complete "
+                            "frozen run."
+                        )
 
                     if current_snapshot is not None:
                         recheck_training_snapshot(current_snapshot)
@@ -2650,8 +2783,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                                 "run_purpose": "promotion_assessment",
                                 "execution_mode": "offline_local",
                                 "decision": str(assessment["decision"]),
+                                "evaluation_scope": decision_scope,
                             }
                         )
+                        mlflow.log_param("evaluation_scope", decision_scope)
                         mlflow.log_params(
                             {
                                 f"threshold.{name}": value
@@ -2680,7 +2815,7 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                             current_base_model.model_dump(mode="json"),
                             "runtime/base-model-execution-contract.json",
                         )
-                        if complete_and_comparable:
+                        if scope_consistent_and_comparable:
                             mlflow.log_param(
                                 "max_tokens",
                                 loaded_reports[
@@ -2720,6 +2855,119 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """),
             md(
                 """
+                ## Watch the gates catch a failure — an in-memory reject
+
+                Comparability plumbing earns its keep only when it can refuse
+                something. This demo copies one change report **in memory**, degrades
+                its schema-validity rate below the locked 0.98 threshold, and re-runs
+                the same `decide_lora_promotion` function. Nothing is written to disk
+                and no logged artifact changes.
+
+                When your own scope-matched reports were loaded above, the demo
+                mutates those. Otherwise it uses the committed synthetic fixture
+                reports in `tests/fixtures/promotion-demo` — invented classroom
+                numbers, clearly labelled, never promotion evidence — rebound to this
+                machine's live source/runtime contract, verified base model, and the
+                flight-preparation preflight adapter's genuine training manifest, so
+                the real lineage gates still execute. The cell prints which evidence
+                it used, the intact decision, and then the named failure reasons the
+                degraded copy earns.
+                """,
+                "demo-not-evidence",
+                "what-to-notice",
+            ),
+            code(
+                """
+                demo_reports = None
+                demo_snapshot = None
+                demo_source = None
+                if scope_consistent_and_comparable:
+                    demo_reports = dict(loaded_reports)
+                    demo_snapshot = current_snapshot
+                    demo_source = "your scope-matched notebook reports"
+                else:
+                    try:
+                        demo_snapshot = require_valid_training_snapshot(
+                            settings.preflight_adapter_dir,
+                            config_path=(
+                                PROJECT_ROOT / "configs" / "training" / "lora.yaml"
+                            ),
+                            expected_iterations=1,
+                            expected_adapter_path=settings.preflight_adapter_dir,
+                        )
+                        demo_reports = bind_promotion_demo_reports(
+                            load_promotion_demo_reports(
+                                PROJECT_ROOT
+                                / "tests"
+                                / "fixtures"
+                                / "promotion-demo"
+                            ),
+                            evaluation_execution_contract_sha256=(
+                                decision_evaluation_session.execution_contract_sha256
+                            ),
+                            base_model=current_base_model,
+                            training_manifest_sha256=demo_snapshot.manifest_sha256,
+                            training_execution_contract_sha256=(
+                                demo_snapshot.manifest.execution_contract_sha256
+                            ),
+                        )
+                        demo_source = (
+                            "committed synthetic fixture reports "
+                            "(invented numbers; never promotion evidence)"
+                        )
+                    except (OSError, ValueError, TrainingManifestError) as error:
+                        print(f"Reject demo unavailable on this machine: {error}")
+                        print(
+                            "The demo binds fixtures to the preflight adapter's "
+                            "genuine training manifest. Run `make prepare-flight` "
+                            "while online to restore it, then rerun this cell."
+                        )
+
+                if demo_reports is not None:
+                    demo_baselines = [
+                        BaselineEvaluation(
+                            name=name,
+                            report=demo_reports[name],
+                            meaningful=name != "majority",
+                        )
+                        for name in required_methods
+                        if name != "lora-change"
+                    ]
+                    intact_demo = decide_lora_promotion(
+                        change_name="promotion-gate-demo",
+                        evaluation_session=decision_evaluation_session,
+                        training_snapshot=demo_snapshot,
+                        change_report=demo_reports["lora-change"],
+                        baselines=demo_baselines,
+                        thresholds=thresholds,
+                    )
+                    degraded_change = degrade_schema_validity(
+                        demo_reports["lora-change"], rate=0.5
+                    )
+                    degraded_demo = decide_lora_promotion(
+                        change_name="promotion-gate-demo-degraded",
+                        evaluation_session=decision_evaluation_session,
+                        training_snapshot=demo_snapshot,
+                        change_report=degraded_change,
+                        baselines=demo_baselines,
+                        thresholds=thresholds,
+                    )
+                    print(f"Demo evidence: {demo_source}")
+                    print(f"Intact change decision: {intact_demo.decision.value}")
+                    print(
+                        "Schema validity degraded to 0.500 (threshold "
+                        f"{thresholds.minimum_schema_validity_rate:.2f}) -> "
+                        f"decision: {degraded_demo.decision.value}"
+                    )
+                    for reason in degraded_demo.result.reasons:
+                        print(f"  - {reason}")
+                    assert degraded_demo.result.passes_schema_threshold is False
+                "In-memory demo only; no artifact or logged decision changed."
+                """,
+                "demo-not-evidence",
+            ),
+            md(
+                """
                 ## Exercise — defend the decision
 
                 Write a short rationale that cites the strongest meaningful baseline,
@@ -2731,8 +2979,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
             code(
                 """
                 decision_rationale = (
-                    "The current notebook run remains inconclusive unless all six full "
-                    "reports share the frozen fingerprint; partial metrics are not promotion evidence."
+                    "The current notebook run remains inconclusive unless all six "
+                    "reports match the declared scope's fingerprint; a stratified-scope "
+                    "adopt is a course-scale decision, and only the complete frozen "
+                    "run is promotion-grade evidence."
                 )
                 assert any(
                     word in decision_rationale.lower()
@@ -2753,8 +3003,10 @@ NOTEBOOKS: tuple[Notebook, ...] = (
                 """
                 ## Checkpoint
 
-                You have completed the Bitext lifecycle without treating training as
-                success or using a partial run as promotion evidence.
+                You have completed the Bitext lifecycle: a real course-scale decision
+                on the declared stratified scope, a demonstrated gate rejection, and a
+                clear statement that promotion-grade evidence requires the complete
+                frozen run — without ever treating training success as the decision.
 
                 **Next:** `09_capstone_policy_dataset.ipynb` asks a different question:
                 when should deterministic policy, not a language model, own the truth?

@@ -652,8 +652,9 @@ PRIMERS: dict[int, Primer] = {
             "validity, policy compliance, latency, output tokens, and carefully scoped memory measurements.",
             "**Pair aggregates with bounded errors.** Use a documented taxonomy and masked samples so reviewers can "
             "understand failures without turning evaluation into an uncontrolled data dump.",
-            "**Verify fingerprints before comparison.** Partial smoke results and full frozen results are different "
-            "evidence and must not share a comparison table without explicit qualification.",
+            "**Declare the evaluation scope and verify fingerprints before comparison.** A stratified course-scale "
+            "subsample and the complete frozen run are different evidence; every compared report must carry the same "
+            "declared scope and record fingerprint, and only the complete scope is promotion-grade.",
             "**Preserve uncertainty.** Small slices, missing artifacts, incomparable runs, or unstable execution should "
             "lead to an inconclusive decision rather than an overstated win.",
         ),
@@ -740,7 +741,8 @@ PRIMERS: dict[int, Primer] = {
             "**Metric shopping.** Selecting whichever score improved after results defeats predeclared evaluation intent.",
             "**Moving thresholds after the run.** That converts a gate into post-hoc justification and requires a new experiment.",
             "**Treating MLflow as proof by itself.** Tracking preserves what was logged; it cannot verify omitted inputs or bad methodology.",
-            "**Comparing smoke and full runs as peers.** Different record sets, methods, or fingerprints are intentionally incomparable.",
+            "**Comparing runs across evaluation scopes as peers.** Smoke, stratified course-scale, and complete "
+            "frozen runs have different record sets and fingerprints; they are intentionally incomparable.",
         ),
         references=(
             "[Tool guidance] MLflow experiment tracking documentation",

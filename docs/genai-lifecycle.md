@@ -421,13 +421,21 @@ The repository examples implement this contract in order:
 10. `09_multi_turn_session_evaluation.ipynb` scopes traces by opaque session,
     release, environment, and evaluation batch before applying session-level
     metrics and critical-case gates.
-11. `10_layered_judges.ipynb` keeps exact rules deterministic and measures a
-    nuanced judge against balanced human feedback on a held-out split.
-12. `11_cost_quality_tradeoff.ipynb` filters logical model candidates through
-    quality and policy gates before comparing known, covered cost.
+11. `10_layered_judges.ipynb` keeps exact rules deterministic, then runs two
+    judge rules over the reviewed responses and computes their agreement
+    against balanced human feedback on a held-out split. The better judge
+    still stays report-only: twelve labels cannot authorize a gate.
+12. `11_cost_quality_tradeoff.ipynb` runs fixture models over the synthetic
+    cases so quality, tokens, and cost coverage are derived rather than
+    declared, then filters through quality and policy gates before comparing
+    known, covered cost. A model tying for best quality is excluded because
+    it reported no cost evidence.
 13. `12_agent_alignment_optimization.ipynb` keeps judge calibration, optimizer
-    training, and final held-out release evidence separate; it is disabled by
-    default and cannot move a production alias.
+    training, and final held-out release evidence separate. A deterministic
+    toy optimizer shows why: the edit that scores best on the training split
+    collapses on the disjoint held-out split, and an overlapping split would
+    have certified that memorizing prompt. The connected optimizer is
+    disabled by default and cannot move a production alias.
 14. `13_decision_and_promotion_lifecycle.ipynb` ends the comparison in a
     recorded adopt/reject decision bound to its gate evidence and shows the
     production alias refusing to move without adopt-grade evidence.

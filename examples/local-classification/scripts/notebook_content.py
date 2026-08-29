@@ -748,7 +748,7 @@ which rows must remain untouched?
 excellent even though that information will not exist when predictions are
 needed.
 
-**Estimated time:** 40–50 minutes.
+**Estimated time:** 50–60 minutes.
 **Prerequisite:** lessons 00–02; you understand prediction time, labels, data
 quality checks, and time cohorts.
 """),
@@ -903,8 +903,113 @@ happened. At real prediction time the column would not exist, so the model would
 fail operationally.
 """),
         m("""
-The configuration explicitly lists forbidden fields. This readable rule runs
-before any expensive fit.
+## Measure the leak instead of trusting the story
+
+A crosstab raises suspicion; a fit turns it into a number. The next cell trains
+the same preprocessing + logistic-regression pipeline twice on the same
+training rows: once on the nine honest features, and once with
+`cancellation_reason` smuggled in as a tenth categorical feature. Building the
+leaky twin requires hand-crafting a settings object that skips the feature
+contract — which is exactly how leaks happen in real projects: a private code
+path bypasses the guard.
+
+### Words introduced
+
+| Word | Plain meaning | Single job in this course |
+|---|---|---|
+| average precision (AP) | Ranking-quality score; no-skill sits near the churn rate, perfect is 1.0 | compare models on one number |
+
+Lesson 04 builds classification metrics carefully. Here you only need: higher
+is better, and a perfect `1.00` should make you suspicious, not proud.
+
+**Before you run this:** predict both validation numbers. Honest churn
+prediction is genuinely hard, so expect a middling honest score. Where does
+the leaky twin land?
+"""),
+        c("""
+from aai_local_classification.contracts import FeatureSettings
+from aai_local_classification.modeling import build_candidate, candidate_specs
+
+leaky_features = FeatureSettings(
+    numeric=settings.features.numeric,
+    categorical=settings.features.categorical + ("cancellation_reason",),
+    forbidden=settings.features.forbidden,
+)
+leaky_settings = settings.model_copy(update={"features": leaky_features})
+logistic_spec = candidate_specs()[0]
+honest_model = build_candidate(logistic_spec, settings).fit(X_train, y_train)
+leaky_model = build_candidate(logistic_spec, leaky_settings).fit(
+    feature_frame(leaked_train, leaky_settings), y_train
+)
+print("✓ Fitted an honest pipeline and a leaky twin on the same training rows")
+"""),
+        c("""
+from sklearn.metrics import average_precision_score
+
+leaked_validation = add_intentional_leakage(validation)
+
+
+def validation_average_precision(model, features):
+    positive = list(model.classes_).index(1)
+    scores = model.predict_proba(features)[:, positive]
+    return average_precision_score(y_validation, scores)
+
+
+honest_ap = validation_average_precision(honest_model, X_validation)
+leaky_ap = validation_average_precision(
+    leaky_model, feature_frame(leaked_validation, leaky_settings)
+)
+print(f"Honest features:          validation AP = {honest_ap:.2f}")
+print(f"With cancellation_reason: validation AP = {leaky_ap:.2f}")
+"""),
+        m("""
+### What you should see
+
+Close to `0.47` for the honest features and a perfect `1.00` for the leaky
+twin. The cells print two decimals because trailing digits can differ across
+platforms; the gap between the two numbers is the point.
+
+### How to interpret the output
+
+One glance at a leaderboard would crown the leaky model. Nothing in the number
+itself warns you: the inflation comes from `cancellation_reason` restating the
+label, so the model earns a perfect ranking by reading the answer sheet.
+Offline evaluation cannot detect this by itself — you must know each feature's
+timing.
+"""),
+        m("""
+## The perfect model collapses at prediction time
+
+At serving time the business asks: which current subscribers look likely to
+churn *next month*? Nobody has a cancellation reason yet, so the column cannot
+exist in a future scoring frame.
+
+**Before you run this:** predict what happens when the leaky model scores the
+honest validation features, which lack the leaked column.
+"""),
+        c("""
+future_frame = X_validation  # at scoring time, cancellation_reason cannot exist
+try:
+    leaky_model.predict_proba(future_frame)
+    serving_result = "Scored without error — the leak would go unnoticed"
+except ValueError as error:
+    serving_result = f"ValueError: {error}"
+print("Serving the leaky model on a frame without the leaked column:")
+print(serving_result)
+"""),
+        m("""
+### What you should see
+
+A printed `ValueError` naming the missing `cancellation_reason` column. The
+"perfect" model cannot score a single future row. This failure mode is the
+*lucky* one: a loud crash on the first real scoring run. The unlucky version is
+a leaked column that still exists at serving time with a different meaning —
+silently wrong scores instead of an error.
+"""),
+        m("""
+The configuration explicitly lists forbidden fields. Packaged training runs
+this readable rule before any expensive fit — the leaky twin above could only
+exist because we deliberately bypassed that path.
 """),
         c("""
 forbidden_attempt = "cancellation_reason"
@@ -929,6 +1034,48 @@ cannot silently bypass this display.
 
 “The column improves validation” is not enough. First ask whether its value
 exists, with the same meaning, at the exact prediction time.
+"""),
+        m("""
+## Preprocessing leakage: the quiet third kind
+
+Target leakage shouts once you measure it. Preprocessing leakage whispers: no
+column is wrong, yet a cleanup step fitted on all rows has absorbed information
+from the rows that are supposed to judge the model. Compare a `StandardScaler`
+fitted only on training rows with one fitted on training plus validation rows.
+
+**Before you run this:** monthly fees drift upward over time, and validation
+rows are later than training rows. Predict which fitted mean is larger.
+"""),
+        c("""
+from sklearn.preprocessing import StandardScaler
+
+train_only_scaler = StandardScaler().fit(X_train[["monthly_fee"]])
+peeking_scaler = StandardScaler().fit(
+    pd.concat([X_train, X_validation], ignore_index=True)[["monthly_fee"]]
+)
+scaler_comparison = pd.DataFrame(
+    {
+        "fitted_mean": [train_only_scaler.mean_[0], peeking_scaler.mean_[0]],
+        "fitted_scale": [train_only_scaler.scale_[0], peeking_scaler.scale_[0]],
+    },
+    index=["train only", "train + validation"],
+)
+scaler_comparison.round(2)
+"""),
+        m("""
+### What you should see
+
+Two different scalers: fitted means near `64.23` and `64.85`, with a smaller
+difference in scale. The peeking scaler drifted toward validation's later,
+higher fees.
+
+### How to interpret the output
+
+The shift looks small, but it means every “standardized” training value was
+computed using information from the evaluation period. This is why the course
+keeps the scaler inside one sklearn `Pipeline`: calling `fit` on training rows
+fits the scaler and the model on exactly the same rows, and validation rows
+only ever pass through `transform`.
 """),
         m("""
 ### Guided exercise
@@ -979,9 +1126,15 @@ test version.
   split for this scenario.
 - Feature availability is evaluated at prediction time; future facts are
   leakage even when present in historical storage.
+- The leak was measured, not narrated: the leaky twin scored a perfect
+  validation average precision, then could not score a future frame at all.
+- A scaler fitted on training plus validation rows quietly absorbs future
+  information; fitting preprocessing inside one pipeline on train only
+  prevents it.
 
 **Evidence created:** explicit `X_train`, `y_train`, `X_validation`, and
-`y_validation` in memory only. No test rows were loaded and no model was fit.
+`y_validation`, plus two throwaway teaching models, all in memory only. No
+test rows were loaded and nothing was persisted.
 
 **Ready for 04?** You can give one sentence for each split's job and identify
 the three leakage types above.
@@ -1878,7 +2031,7 @@ did not use?
 **Why this matters:** the test set is useful only if the model, threshold, and
 release rules are fixed before its labels are examined.
 
-**Estimated time:** 50–65 minutes.
+**Estimated time:** 60–75 minutes.
 **Prerequisite:** lesson 06; you understand the selected candidate, threshold,
 average precision, precision, recall, and confusion counts.
 """),
@@ -2146,6 +2299,116 @@ pd.Series(
 ).to_frame("value")
 """),
         m("""
+## What the gate is for: watch it reject an overfit challenger
+
+Every check above passed, so it is fair to ask whether this gate can ever say
+no. Give it a deserving target: a random forest with no depth or leaf limits
+memorizes the training rows almost perfectly. Everything below is a scratch
+exercise in memory only — it logs no MLflow run, writes no evidence file, and
+never touches the frozen test rows.
+
+**Before you run this:** predict the challenger's *training* average
+precision. Then predict whether its validation number will be close to it.
+"""),
+        c("""
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+
+from aai_local_classification.modeling import build_preprocessor
+
+train = load_split(settings, SplitName.TRAIN, paths.data_root)
+validation = load_split(settings, SplitName.VALIDATION, paths.data_root)
+X_train = feature_frame(train, settings)
+X_validation = feature_frame(validation, settings)
+memorizer = RandomForestClassifier(
+    max_depth=None, min_samples_leaf=1, random_state=settings.random_seed, n_jobs=1
+)
+challenger = Pipeline(
+    [("preprocess", build_preprocessor(settings)), ("classifier", memorizer)]
+).fit(X_train, train.churned_30d)
+print("✓ Fitted a deliberately overfit challenger in memory only")
+"""),
+        c("""
+from sklearn.metrics import average_precision_score
+
+positive = list(challenger.classes_).index(1)
+train_ap = average_precision_score(
+    train.churned_30d, challenger.predict_proba(X_train)[:, positive]
+)
+challenger_validation_ap = average_precision_score(
+    validation.churned_30d, challenger.predict_proba(X_validation)[:, positive]
+)
+print(f"Challenger TRAIN average precision:      {train_ap:.2f}")
+print(f"Challenger VALIDATION average precision: {challenger_validation_ap:.2f}")
+print(f"Overfit gap: {train_ap - challenger_validation_ap:.2f}")
+"""),
+        m("""
+### What you should see
+
+A training average precision of `1.00` against a validation average precision
+close to `0.39` — an overfit gap of roughly `0.6`. A team looking only at
+training metrics would ship this model with total confidence.
+
+### How to interpret the output
+
+A perfect training score is not evidence; it is the definition of memorization
+capacity. The honest question is what a fixed policy earns on rows the model
+never saw. Next, feed the challenger's validation metrics through the same
+prewritten `promotion_checks` the real gate used — a scratch what-if with the
+already-fixed action threshold, not new release evidence.
+"""),
+        c("""
+from aai_local_classification.evaluation import evaluate_probabilities
+
+challenger_probability = challenger.predict_proba(X_validation)[:, positive]
+challenger_metrics = evaluate_probabilities(
+    validation.churned_30d,
+    challenger_probability,
+    decision.threshold,
+    false_negative_cost=settings.selection.false_negative_cost,
+    false_positive_cost=settings.selection.false_positive_cost,
+)
+print(
+    f"Challenger at fixed threshold {decision.threshold:.2f}: "
+    f"AP {challenger_metrics.average_precision:.2f}, "
+    f"recall {challenger_metrics.recall:.2f}, "
+    f"Brier {challenger_metrics.brier_score:.2f}, "
+    f"cost per 1,000 {challenger_metrics.cost_per_1000:.1f}"
+)
+"""),
+        c("""
+from aai_local_classification.evaluation import maximum_recall_gap, promotion_checks
+
+challenger_slice_gap = maximum_recall_gap(
+    recall_slices(
+        validation, validation.churned_30d, challenger_probability, decision.threshold
+    )
+)
+scratch_checks = promotion_checks(challenger_metrics, challenger_slice_gap, settings)
+scratch_outcome = "ADOPT" if all(scratch_checks.values()) else "REJECT"
+print(f"Scratch gate outcome for the challenger: {scratch_outcome}")
+print(f"Persisted decision on disk, untouched:   {decision.decision.value.upper()}")
+pd.Series(scratch_checks, name="passed").to_frame()
+"""),
+        m("""
+### What you should see
+
+`REJECT` for the challenger, while the persisted decision on disk still reads
+`ADOPT`. In the table, `minimum_test_average_precision` is `False`: the
+challenger's AP of about `0.39` falls below the `0.42` floor. Five of six
+checks pass — and it does not matter, because one failed prewritten check is
+enough to reject.
+
+### How to interpret the output
+
+This is what the gate is for. The same model that scored a perfect `1.00` on
+training rows fails the very first quality bar on rows it never saw. A release
+process trusting training metrics — or a demo's enthusiasm — would have
+shipped it. The prewritten checks did not need to be argued with; they only
+needed to be run. And because this was a scratch evaluation, the real evidence
+chain (`decision.json` and the MLflow result run) is exactly as it was.
+"""),
+        m("""
 ### Guided exercise
 
 Without reevaluating test rows, apply a hypothetical stricter cost limit of 500
@@ -2194,9 +2457,13 @@ workflow, this gate belongs in a job or CI task—not an informal UI click.
 - The selected model, threshold, and gate were fixed before test access.
 - Actual values, rules, margins, confusion counts, and slices explain the gate.
 - Both adopt and reject are valid outcomes; compatible reruns reuse evidence.
+- The reject path is real: an overfit challenger with a perfect training score
+  failed the prewritten AP floor on unseen rows and was rejected in a scratch
+  run that created no evidence.
 
 **Evidence created:** one MLflow frozen-test result and `decision.json`. The
-frozen test is now consumed for this exact model and policy.
+frozen test is now consumed for this exact model and policy; the scratch
+challenger left nothing behind.
 
 **Ready for 08?** You can explain why the passing test is release evidence, not
 permission to tune again.

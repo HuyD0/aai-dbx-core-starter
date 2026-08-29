@@ -1,0 +1,166 @@
+{
+  "total_examples": 6,
+  "inference_config": {
+    "schema_version": "1.0.0",
+    "mode": "local_mlx",
+    "method": "lora-change",
+    "prompt_recipe": "strong",
+    "few_shot_examples": 0,
+    "generation": {
+      "max_tokens": 96,
+      "sampler": "greedy_argmax",
+      "logits_processors": [],
+      "draft_model": false,
+      "max_kv_size": null,
+      "prefill_step_size": 2048,
+      "kv_bits": null,
+      "kv_group_size": 64,
+      "quantized_kv_start": 0
+    },
+    "base_model": {
+      "schema_version": "1.0.0",
+      "repository": "aai-local-finetuning/promotion-demo-fixture",
+      "model_path": "models/promotion-demo-fixture",
+      "model_revision": "51d7e465d4c8ca99994b940a47a60f8bd3c0911d",
+      "model_files": [
+        {
+          "path": "LOCAL_REVISION",
+          "sha256": "05d5c0c217af44b4f53aba7f679f443032eadb87dd4599fe0349161723372736",
+          "size_bytes": 41
+        },
+        {
+          "path": "config.json",
+          "sha256": "fb78af651a44d3c5ec546c949839bbb0cdaf8e03c26a80bcb99f9a072e206a82",
+          "size_bytes": 128
+        }
+      ],
+      "model_files_sha256": "2a83327f59e3036bbae7c87a1c284c37630c2a1a5a0acc5a6b43f17485ee42bd"
+    },
+    "adapter_manifest_sha256": "353ffb7539dc1a4a98079aaf05c60016aa778bff525dc2e75fd4f70db39cb352"
+  },
+  "evaluation_fingerprint": "268b4039bd123b0aa2dd586adf12984b25213be417a256ab4670ed4ff9cbc52e",
+  "evaluation_execution_contract_sha256": "75b3d170d31f990b60be46b4e25e04c47667ae8ef92c00ade4b63e2422e92ccd",
+  "training_manifest_sha256": "353ffb7539dc1a4a98079aaf05c60016aa778bff525dc2e75fd4f70db39cb352",
+  "training_execution_contract_sha256": "ec10ed3aafaad833783bc672e0a8bb1737ff0158e737a921c5e42bc6e877ee04",
+  "supported_intents": [
+    "demo_ask_invoice",
+    "demo_recover_access",
+    "demo_track_parcel"
+  ],
+  "classification": {
+    "intent_accuracy": 0.833,
+    "macro_precision": 0.75,
+    "macro_recall": 0.75,
+    "macro_f1": 0.75,
+    "weighted_f1": 0.75,
+    "per_intent_f1": {
+      "demo_ask_invoice": 0.8,
+      "demo_recover_access": 0.75,
+      "demo_track_parcel": 0.7
+    },
+    "category_accuracy": 0.833,
+    "escalation_accuracy": 1.0
+  },
+  "output_quality": {
+    "json_parse_rate": 1.0,
+    "json_schema_validity_rate": 1.0,
+    "unsupported_intent_rate": 0.0,
+    "response_policy_compliance_rate": 1.0
+  },
+  "performance": {
+    "latency_ms": {
+      "count": 6,
+      "minimum": 728.0,
+      "mean": 910.0,
+      "median": 910.0,
+      "p95": 1092.0,
+      "maximum": 1137.5
+    },
+    "output_tokens": {
+      "count": 6,
+      "minimum": 34.4,
+      "mean": 43.0,
+      "median": 43.0,
+      "p95": 51.6,
+      "maximum": 53.75
+    },
+    "peak_memory_mb": {
+      "count": 6,
+      "minimum": 1160.0,
+      "mean": 1450.0,
+      "median": 1450.0,
+      "p95": 1740.0,
+      "maximum": 1812.5
+    }
+  },
+  "by_intent": {
+    "demo_ask_invoice": {
+      "count": 2,
+      "intent_accuracy": 0.8,
+      "category_accuracy": 0.8,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    },
+    "demo_recover_access": {
+      "count": 2,
+      "intent_accuracy": 0.75,
+      "category_accuracy": 0.75,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    },
+    "demo_track_parcel": {
+      "count": 2,
+      "intent_accuracy": 0.7,
+      "category_accuracy": 0.7,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    }
+  },
+  "by_flag": {
+    "__none__": {
+      "count": 6,
+      "intent_accuracy": 0.833,
+      "category_accuracy": 0.833,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    }
+  },
+  "by_difficulty": {
+    "unspecified": {
+      "count": 6,
+      "intent_accuracy": 0.833,
+      "category_accuracy": 0.833,
+      "escalation_accuracy": 1.0,
+      "json_parse_rate": 1.0,
+      "json_schema_validity_rate": 1.0,
+      "unsupported_intent_rate": 0.0,
+      "response_policy_compliance_rate": 1.0
+    }
+  },
+  "error_analysis": {
+    "total_errors": 1,
+    "counts": {
+      "json_parse": 0,
+      "json_schema": 0,
+      "unsupported_intent": 0,
+      "intent": 1,
+      "category": 0,
+      "escalation": 0,
+      "response_policy": 0
+    },
+    "examples": [],
+    "truncated": false
+  }
+}

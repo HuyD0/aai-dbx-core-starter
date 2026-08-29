@@ -327,13 +327,23 @@ def test_required_lifecycle_behaviors_are_taught_in_order():
             "macro F1",
         ),
         "05_prompt_baselines.ipynb": ("basic", "strong", "few_shot"),
-        "06_lora_finetuning.ipynb": ("run_lora", "training evidence"),
+        "06_lora_finetuning.ipynb": (
+            "run_lora",
+            "training evidence",
+            "lora_parameter_budget",
+            "trainable",
+        ),
         "07_frozen_evaluation.ipynb": (
             "schema",
             "format_error_analysis",
             "memory",
+            "stratified_subsample",
         ),
-        "08_mlflow_and_promotion.ipynb": ("mlflow", "decide_lora_promotion"),
+        "08_mlflow_and_promotion.ipynb": (
+            "mlflow",
+            "decide_lora_promotion",
+            "degrade_schema_validity",
+        ),
         "09_capstone_policy_dataset.ipynb": ("rule_catalog", "400/100/150"),
         "10_capstone_model_vs_hybrid.ipynb": ("build_hybrid_review", "ceiling"),
     }
@@ -437,6 +447,49 @@ def test_high_risk_practices_are_explained_and_enforced_in_the_narrative():
         "model_input_modality",
     ):
         assert f'"{field}",' in sources["11_design_the_next_project.ipynb"]
+
+
+def test_notebook_07_default_output_is_notebook_08_default_input():
+    """The evidence-scope contract must agree across the 07 -> 08 boundary."""
+
+    sources = {
+        path.name: "\n".join(_source(cell) for cell in notebook["cells"])
+        for path, notebook in _notebooks()
+    }
+    frozen = sources["07_frozen_evaluation.ipynb"]
+    decision = sources["08_mlflow_and_promotion.ipynb"]
+
+    for source in (frozen, decision):
+        assert "EVALUATION_SUBSAMPLE_PER_INTENT = 2" in source
+        assert "stratified_evaluation_scope(EVALUATION_SUBSAMPLE_PER_INTENT)" in source
+        assert "COMPLETE_EVALUATION_SCOPE" in source
+        assert "stratified-subsample-2-per-intent" in source
+        assert "promotion-grade" in source
+
+    assert "{scope}-{name}-report.json" in frozen
+    assert "{decision_scope}-{method}-report.json" in decision
+    assert "-lora-change-training-manifest.json" in frozen
+    assert "-lora-change-training-manifest.json" in decision
+    assert "expected_fingerprint = evaluation_fingerprint(expected_records)" in decision
+
+    # The in-memory reject demo runs the real gates twice and stays unpersisted.
+    assert "bind_promotion_demo_reports" in decision
+    assert "degrade_schema_validity(" in decision
+    assert 'change_name="promotion-gate-demo"' in decision
+    assert 'change_name="promotion-gate-demo-degraded"' in decision
+    assert "In-memory demo only; no artifact or logged decision changed." in decision
+
+    fixture_dir = PROJECT_ROOT / "tests" / "fixtures" / "promotion-demo"
+    assert '"promotion-demo"' in decision
+    for method in (
+        "majority",
+        "keyword-rule",
+        "basic",
+        "strong",
+        "few_shot",
+        "lora-change",
+    ):
+        assert (fixture_dir / f"{method}-report.json").is_file()
 
 
 def test_prediction_notebooks_bind_inference_scoring_and_persistence_to_sessions():
