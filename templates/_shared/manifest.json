@@ -1,5 +1,5 @@
 {
-  "$comment": "Canonical shared-scaffold manifest consumed by scripts/sync_template_shared.py. Every path under files/ is copied byte-for-byte into each template's template/ directory, and every library/*.tmpl into each template's library/. A template listed in opt_out for a path does not receive it. CI runs the sync in --check mode, so editing a copy inside a template without editing the canonical file here fails the drift test.",
+  "$comment": "Canonical shared-scaffold manifest consumed by scripts/sync_template_shared.py. Every path under files/ is copied byte-for-byte into each template's template/ directory, and every library/*.tmpl into each template's library/. A template listed in opt_out for a path does not receive it. CI runs the sync in --check mode, so editing a copy inside a template without editing the canonical file here fails the drift test. fork_reviews pins each opted-out fork to the sha256 of the canonical file it was last reviewed against: editing a canonical file that has forks fails --check until the change is reviewed against every fork and `python scripts/sync_template_shared.py --acknowledge-forks` re-pins the hashes. The pin is of the canonical, not the fork \u2014 a fork evolves freely, but a canonical change must be consciously dispositioned for each fork it cannot reach.",
   "files": [
     ".github/workflows/ci.yml",
     ".github/workflows/codeql.yml",
@@ -76,5 +76,47 @@
     "tests/test_manifest_dataset.py": [
       "evaluation-project"
     ]
+  },
+  "fork_reviews": {
+    "Makefile": {
+      "agent-app": "56cd912594cc670adff573f5e1212e85f84ec92a2fde3e3a246a21ca33c25bae",
+      "rag-app": "56cd912594cc670adff573f5e1212e85f84ec92a2fde3e3a246a21ca33c25bae"
+    },
+    "aai-platform.yml.tmpl": {
+      "evaluation-project": "ce91e37c96728749eabfbb9f0cf2fb6d3b0d9e8894e1b4714308e41f26e6c714",
+      "experiment-starter": "ce91e37c96728749eabfbb9f0cf2fb6d3b0d9e8894e1b4714308e41f26e6c714",
+      "prompt-app": "ce91e37c96728749eabfbb9f0cf2fb6d3b0d9e8894e1b4714308e41f26e6c714",
+      "rag-app": "ce91e37c96728749eabfbb9f0cf2fb6d3b0d9e8894e1b4714308e41f26e6c714"
+    },
+    "ai-app.yaml.tmpl": {
+      "analytics-app": "d21509f6e4cfbeb1a101f5ca9a9444374109b16774403429e489c05e45015c12",
+      "evaluation-project": "d21509f6e4cfbeb1a101f5ca9a9444374109b16774403429e489c05e45015c12",
+      "experiment-starter": "d21509f6e4cfbeb1a101f5ca9a9444374109b16774403429e489c05e45015c12"
+    },
+    "databricks.yml.tmpl": {
+      "agent-app": "ea1cb104b166217e858285d0a2f4ece7cd08e16667c427844828f79797b43d65",
+      "analytics-app": "ea1cb104b166217e858285d0a2f4ece7cd08e16667c427844828f79797b43d65",
+      "rag-app": "ea1cb104b166217e858285d0a2f4ece7cd08e16667c427844828f79797b43d65"
+    },
+    "pyproject.toml.tmpl": {
+      "agent-app": "8e84feda657289ebb25bee5e55bd76a1bd9e52f54ff291bad4e6ac53d9a01185",
+      "analytics-app": "8e84feda657289ebb25bee5e55bd76a1bd9e52f54ff291bad4e6ac53d9a01185",
+      "experiment-starter": "8e84feda657289ebb25bee5e55bd76a1bd9e52f54ff291bad4e6ac53d9a01185",
+      "rag-app": "8e84feda657289ebb25bee5e55bd76a1bd9e52f54ff291bad4e6ac53d9a01185"
+    },
+    "scripts/promote_prompt.py": {
+      "rag-app": "b43742db65be4c39df53565e5756049e5815bd4f20b7f2d64b05798ec10aadc6"
+    },
+    "scripts/register_prompt.py": {
+      "rag-app": "a31acdb8e76e3ac93ac50e9eac1c8e248b1a4cd0c1002d360b6a3411b227aa87"
+    },
+    "scripts/sync_dataset.py": {
+      "analytics-app": "dc0aae556371c4fa21fbc863f28db66314f8de9203802cda2c544432b76c8935",
+      "evaluation-project": "dc0aae556371c4fa21fbc863f28db66314f8de9203802cda2c544432b76c8935",
+      "experiment-starter": "dc0aae556371c4fa21fbc863f28db66314f8de9203802cda2c544432b76c8935"
+    },
+    "tests/test_manifest_dataset.py": {
+      "evaluation-project": "776817bd78a09be32d9afe0b6d3ce0d01e5e6a07f1867cc75aa5d732bab3c0c3"
+    }
   }
 }

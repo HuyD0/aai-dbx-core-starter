@@ -359,6 +359,115 @@ def planned_copies() -> list[tuple[Path, Path]]:
     return pairs
 
 
+def fork_review_drift(
+    shared_dir: Path = SHARED_DIR, templates_dir: Path = TEMPLATES_DIR
+) -> list[str]:
+    """Opted-out forks whose canonical source changed since their last review.
+
+    An opt_out entry turns a shared file into a per-template fork that the
+    byte-for-byte sync no longer sees, so a fix applied to the canonical copy
+    can silently never reach the fork (that happened: a canonical
+    databricks.yml.tmpl comment missed the agent-app fork). fork_reviews in
+    the manifest records the sha256 of the canonical file each fork was last
+    reviewed against; when the canonical moves, this check fails until someone
+    reviews the change against each fork, ports what applies, and runs
+    `python scripts/sync_template_shared.py --acknowledge-forks`.
+
+    The hash pins the canonical, not the fork: a fork is free to evolve on its
+    own, but a canonical change must be consciously dispositioned for every
+    fork it does not reach.
+    """
+
+    manifest = json.loads((shared_dir / "manifest.json").read_text(encoding="utf-8"))
+    opt_out: dict[str, list[str]] = manifest.get("opt_out", {})
+    reviews: dict[str, dict[str, str]] = manifest.get("fork_reviews", {})
+    acknowledge = "python scripts/sync_template_shared.py --acknowledge-forks"
+    drift: list[str] = []
+    for relative, templates in opt_out.items():
+        canonical = shared_dir / "files" / relative
+        canonical_digest = (
+            hashlib.sha256(canonical.read_bytes()).hexdigest()
+            if canonical.is_file()
+            else None
+        )
+        for template in templates:
+            fork = templates_dir / template / "template" / relative
+            recorded = reviews.get(relative, {}).get(template)
+            if not fork.is_file():
+                if recorded is not None:
+                    drift.append(
+                        f"fork_reviews records {relative} for {template}, but "
+                        f"{template} opts out without a fork; run `{acknowledge}` "
+                        "to drop the stale entry"
+                    )
+                continue
+            if canonical_digest is None:
+                drift.append(
+                    f"templates/_shared/files/{relative} is missing but "
+                    f"{template} still opts out and forks it; either restore "
+                    "the canonical file or remove the opt_out entry and adopt "
+                    "the fork as template-owned"
+                )
+            elif recorded is None:
+                drift.append(
+                    f"templates/{template}/template/{relative} is an opted-out "
+                    f"fork with no recorded review; review it against "
+                    f"templates/_shared/files/{relative}, port what applies, "
+                    f"then run `{acknowledge}`"
+                )
+            elif recorded != canonical_digest:
+                drift.append(
+                    f"templates/_shared/files/{relative} changed since "
+                    f"{template}'s opted-out fork was last reviewed against it; "
+                    f"port what applies to the fork, then run `{acknowledge}`"
+                )
+    for relative, templates in reviews.items():
+        for template in templates:
+            if template not in opt_out.get(relative, []):
+                drift.append(
+                    f"fork_reviews records {relative} for {template}, which "
+                    f"opt_out does not list; run `{acknowledge}` to drop the "
+                    "orphaned entry"
+                )
+    return sorted(drift)
+
+
+def acknowledge_forks(
+    shared_dir: Path = SHARED_DIR, templates_dir: Path = TEMPLATES_DIR
+) -> None:
+    """Re-pin every existing opted-out fork to the current canonical hash.
+
+    Run this only after actually reviewing the canonical change against each
+    fork — it is the mechanical tail of the review, not a substitute for it.
+    """
+
+    manifest_path = shared_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    reviews: dict[str, dict[str, str]] = {}
+    for relative, templates in manifest.get("opt_out", {}).items():
+        canonical = shared_dir / "files" / relative
+        if not canonical.is_file():
+            # A retired canonical cannot be reviewed against; fork_review_drift
+            # reports it, and pinning nothing keeps that report alive.
+            continue
+        for template in templates:
+            if not (templates_dir / template / "template" / relative).is_file():
+                continue
+            reviews.setdefault(relative, {})[template] = hashlib.sha256(
+                canonical.read_bytes()
+            ).hexdigest()
+    manifest["fork_reviews"] = {
+        relative: dict(sorted(templates.items()))
+        for relative, templates in sorted(reviews.items())
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    try:
+        displayed = manifest_path.relative_to(REPO_ROOT)
+    except ValueError:
+        displayed = manifest_path
+    print(f"acknowledged fork reviews in {displayed}")
+
+
 def unmanaged_duplicate_sources() -> list[str]:
     """Report byte-identical template source files outside shared ownership.
 
@@ -396,7 +505,17 @@ def main() -> int:
         action="store_true",
         help="Report drift between canonical and template copies; exit 1 on any.",
     )
+    parser.add_argument(
+        "--acknowledge-forks",
+        action="store_true",
+        help="After reviewing a canonical change against every opted-out fork, "
+        "re-pin the recorded fork-review hashes to the current canonical files.",
+    )
     args = parser.parse_args()
+
+    if args.acknowledge_forks:
+        acknowledge_forks()
+        return 0
 
     drift: list[str] = []
     for source, destination in planned_copies():
@@ -422,6 +541,7 @@ def main() -> int:
     drift.extend(_apply_bundle_identifiers(check=args.check))
     drift.extend(_apply_project_urls(check=args.check))
     drift.extend(unmanaged_duplicate_sources())
+    drift.extend(fork_review_drift())
 
     if drift:
         for line in drift:

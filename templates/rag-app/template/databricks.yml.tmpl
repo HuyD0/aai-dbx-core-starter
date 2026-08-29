@@ -68,6 +68,7 @@ targets:
   uat:
     mode: production
     workspace:
+      # Literal by design: the CLI forbids variable interpolation in auth fields.
       host: {{.uat_workspace_host}}
     # The externally provisioned UAT CI identity deploys and runs the bundle.
     # Keep run_as unset; do not fall back to the shared legacy principal.
