@@ -159,14 +159,16 @@ def enforce_budget(
     """Abort BEFORE any judge call when the estimate exceeds the budget.
 
     ``extra_judge_calls`` covers spend the plan itself does not model —
-    the judge-integrity re-scoring calls — so the configured ceiling is a
-    ceiling on the whole run, not just its first pass.
+    the judge-integrity re-scoring calls and the continuous-verifier calls
+    — so the configured ceiling is a ceiling on the whole run, not just
+    its first pass.
     """
 
     total = cost.judge_calls + max(0, extra_judge_calls)
     if max_judge_calls is not None and total > max_judge_calls:
         detail = (
-            f" (including {extra_judge_calls} integrity re-scoring calls)"
+            f" (including {extra_judge_calls} extra judge calls beyond the "
+            "scorer plan: integrity re-scoring and continuous scoring)"
             if extra_judge_calls
             else ""
         )
@@ -174,8 +176,8 @@ def enforce_budget(
             f"this run would make {total} judge calls{detail}; "
             f"budget.max_judge_calls is {max_judge_calls}",
             remediation="Reduce rows (--rows), remove judge scorers, lower "
-            "integrity.consistency_sample, or raise budget.max_judge_calls "
-            "in agentkit.yaml.",
+            "integrity.consistency_sample, disable scorers.continuous, or "
+            "raise budget.max_judge_calls in agentkit.yaml.",
         )
 
 
