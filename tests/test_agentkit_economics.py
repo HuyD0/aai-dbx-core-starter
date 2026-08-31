@@ -235,6 +235,55 @@ def test_usage_summed_from_llm_spans_when_metadata_is_absent():
     assert metrics["economics/tokens_p50"] == pytest.approx(330.0)
 
 
+def test_embedding_spans_are_not_priced_at_the_agent_model_rate():
+    """A RAG query embeds before it retrieves; those tokens bill separately.
+
+    The embedding span records its billed input under the OpenTelemetry
+    attribute so the trace keeps the evidence. Summing it here would price
+    it at the chat model's configured pair — a model that never saw it.
+    """
+
+    config = EconomicsConfig(
+        price_per_1m_input_tokens=1_000_000.0,
+        price_per_1m_output_tokens=1_000_000.0,
+    )
+    spans = [
+        {
+            "attributes": {
+                "mlflow.spanType": json.dumps("EMBEDDING"),
+                "gen_ai.usage.input_tokens": 5_000,
+            }
+        },
+        {
+            "attributes": {
+                "mlflow.spanType": json.dumps("LLM"),
+                "mlflow.chat.tokenUsage": json.dumps(
+                    {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}
+                ),
+            }
+        },
+    ]
+
+    evidence, _, _ = _build([_envelope(spans=spans)], config=config)
+
+    assert evidence is not None
+    assert evidence.input_tokens == (100,)
+    assert evidence.total_tokens == (110,)
+    assert evidence.cost_usd == (110.0,)
+    assert evidence.cost_source == "configured-price"
+
+
+def test_untyped_spans_still_contribute_their_usage():
+    """Only a known differently-billed type is skipped, never an unlabelled span."""
+
+    spans = [{"attributes": {"gen_ai.usage.input_tokens": 7}}]
+
+    evidence, _, _ = _build([_envelope(spans=spans)])
+
+    assert evidence is not None
+    assert evidence.input_tokens == (7,)
+
+
 def test_trace_recorded_cost_beats_the_configured_price():
     config = EconomicsConfig(
         price_per_1m_input_tokens=100.0, price_per_1m_output_tokens=100.0

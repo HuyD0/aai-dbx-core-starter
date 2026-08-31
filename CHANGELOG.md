@@ -4,6 +4,23 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Gave the SDK's two untyped trace gaps their MLflow span semantics.
+  Structured-output parsing and validation now run under a `PARSER` span
+  (`structured.parse`, a sibling of the model call's `LLM` span): a schema
+  failure is a real, fallible step that the provider call reports as a
+  success, so the trace previously showed a green model span and no failure
+  at all — the one place `generate_typed`'s sanitized error tells the
+  operator to look. The span identifies the call and never restates the
+  rejected content. `EMBEDDING` spans now record the provider's billed
+  input tokens on `gen_ai.usage.input_tokens`, deliberately not
+  `mlflow.chat.tokenUsage`: MLflow aggregates that key across every span
+  type into the trace-level total that AgentKit prices at the agent chat
+  model's configured rate pair, so the embedding side would be billed at
+  chat rates on every retrieval row. `economics._span_usage` now skips
+  `EMBEDDING` spans, matching the contract its docstring already stated,
+  while spans with an unreadable type still contribute. See
+  `docs/decisions/2026-08-31-embedding-tokens-stay-out-of-the-chat-aggregate.md`.
+
 - Extended the example curriculum to teach the judge-measurement and
   verified-promotion lifecycle: lesson 12 gains two runnable
   credential-free sections — per-run judge stability (self-consistency

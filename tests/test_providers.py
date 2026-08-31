@@ -12,6 +12,9 @@ from aai_core.providers import (
     OpenAICompatibleChatModel,
     UnsupportedCapabilityError,
 )
+from aai_core.providers.openai_compatible import (
+    OpenAICompatibleEmbeddingProvider,
+)
 from aai_core.providers.search import DatabricksAISearchRetriever
 from aai_core.providers.types import (
     ProviderConfigurationError,
@@ -56,6 +59,20 @@ class FakeCompletions:
 class FakeOpenAI:
     def __init__(self):
         self.chat = SimpleNamespace(completions=FakeCompletions())
+
+
+class FakeEmbeddings:
+    def create(self, **request):
+        assert request["model"] == "embedding-deployment"
+        return SimpleNamespace(
+            data=[SimpleNamespace(embedding=[0.1, 0.2])],
+            usage=SimpleNamespace(prompt_tokens=11, total_tokens=11),
+        )
+
+
+class FakeEmbeddingOpenAI:
+    def __init__(self):
+        self.embeddings = FakeEmbeddings()
 
 
 class FakeAsyncOpenAI:
@@ -746,3 +763,84 @@ def test_retriever_records_documents_on_the_retriever_span(monkeypatch):
     assert span.inputs == {"query": "question"}
     assert span.outputs[0]["page_content"] == "grounding"
     assert span.outputs[0]["metadata"]["doc_uri"] == "https://example/doc"
+
+
+def test_embedding_span_records_billed_tokens_outside_the_chat_aggregate(
+    monkeypatch,
+):
+    """Embedding usage is evidence, but it is not chat-model spend.
+
+    MLflow folds ``mlflow.chat.tokenUsage`` from every span type into the
+    authoritative trace-level total, which agentkit prices at the agent
+    model's configured rate. The embedding side is billed differently, so
+    it is recorded on the OpenTelemetry GenAI attribute instead.
+    """
+
+    from conftest import install_fake_module
+
+    class FakeSpan:
+        def __init__(self):
+            self.attributes = {}
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+    recorded = {}
+
+    @contextmanager
+    def start_span(name, span_type):
+        span = FakeSpan()
+        recorded.update(name=name, span_type=span_type, span=span)
+        yield span
+
+    install_fake_module(monkeypatch, "mlflow", start_span=start_span)
+    provider = OpenAICompatibleEmbeddingProvider(
+        logical_name="general-embedding",
+        provider="databricks",
+        model="embedding-deployment",
+        client=FakeEmbeddingOpenAI(),
+    )
+
+    with _sdk_trace_state():
+        vectors = provider.embed_documents(["grounding text"])
+
+    assert vectors == [[0.1, 0.2]]
+    assert recorded["span_type"] == "EMBEDDING"
+    assert recorded["span"].attributes["gen_ai.usage.input_tokens"] == 11
+    assert "mlflow.chat.tokenUsage" not in recorded["span"].attributes
+
+
+def test_embedding_span_omits_usage_a_provider_does_not_report(monkeypatch):
+    from conftest import install_fake_module
+
+    class FakeSpan:
+        def __init__(self):
+            self.attributes = {}
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+    recorded = {}
+
+    @contextmanager
+    def start_span(name, span_type):
+        span = FakeSpan()
+        recorded.update(span=span)
+        yield span
+
+    class UsagelessEmbeddings:
+        def create(self, **request):
+            return SimpleNamespace(data=[SimpleNamespace(embedding=[0.3])])
+
+    install_fake_module(monkeypatch, "mlflow", start_span=start_span)
+    provider = OpenAICompatibleEmbeddingProvider(
+        logical_name="general-embedding",
+        provider="databricks",
+        model="embedding-deployment",
+        client=SimpleNamespace(embeddings=UsagelessEmbeddings()),
+    )
+
+    with _sdk_trace_state():
+        provider.embed_documents(["grounding text"])
+
+    assert "gen_ai.usage.input_tokens" not in recorded["span"].attributes
