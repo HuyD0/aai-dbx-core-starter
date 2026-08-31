@@ -15,6 +15,7 @@ document is invisible to developers and agents.
 
 - [GenAI and RAG lifecycle](genai-lifecycle.md) — the evidence chain from experiment to release.
 - [Agent evaluation](agent-evaluation.md) — the comparison-first paved road and its gate.
+- [Continuous scoring](continuous-scoring.md) — the experimental logprob-weighted verifier path and its granularity sweep.
 - [Analytics lifecycle](analytics-lifecycle.md) — self-service LLM analytics, from question to governed result.
 - [Production LangGraph agents](langgraph-production.md) — durable state, interrupts, and long-term memory.
 - [Multi-agent systems](multi-agent-systems.md) — when a second agent pays its way, delegation traces, and coordination scorers.

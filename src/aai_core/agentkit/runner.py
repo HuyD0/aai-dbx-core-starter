@@ -21,6 +21,7 @@ from statistics import fmean
 from typing import Any, Literal
 
 from aai_core.agentkit import catalog as catalog_module
+from aai_core.agentkit import continuous as continuous_module
 from aai_core.agentkit import integrity as integrity_module
 from aai_core.agentkit._values import is_missing_scalar, numeric_score
 from aai_core.agentkit.baseline import (
@@ -150,6 +151,9 @@ class _PreparedRun:
     # the re-scoring calls too.
     anchors: JudgeAnchors | None = None
     integrity_calls: int = 0
+    # The experimental logprob-weighted verifier path, planned before spend
+    # for the same reason. None when disabled or on judge-free runs.
+    continuous: continuous_module.ContinuousRunPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -213,8 +217,14 @@ def run_scoring(
     transport: Callable[..., Any] | None = None,
     confirm: Callable[[str], bool] | None = None,
     environ: MutableMapping[str, str] | None = None,
+    continuous_model: Any | None = None,
 ) -> tuple[RunOutcome, int]:
-    """Score the current version and compare it against the baseline."""
+    """Score the current version and compare it against the baseline.
+
+    ``continuous_model`` injects a caller-owned verifier chat model for the
+    continuous scoring path (tests, notebooks); by default the configured
+    logical name resolves through the governed provider configuration.
+    """
 
     # Every real invocation supersedes earlier gate evidence immediately,
     # even when target, dataset, baseline, budget, or prompt validation later
@@ -248,10 +258,13 @@ def run_scoring(
         require_baseline=require_baseline,
         mlflow_module=mlflow_module,
     )
+    continuous_calls = (
+        prepared.continuous.judge_calls if prepared.continuous is not None else 0
+    )
     enforce_budget(
         prepared.cost,
         max_judge_calls=project.config.budget.max_judge_calls,
-        extra_judge_calls=prepared.integrity_calls,
+        extra_judge_calls=prepared.integrity_calls + continuous_calls,
     )
     judge_model_identity = project.judge_model_identity() if judges_enabled else None
     baseline = _check_model_comparability(
@@ -299,6 +312,7 @@ def run_scoring(
         judge_model_identity=judge_model_identity,
         judges_enabled=judges_enabled,
         warnings=warnings,
+        continuous_model=continuous_model,
     )
     return _finish_scoring(
         project,
@@ -370,6 +384,12 @@ def _prepare_run(
             dataset_rows=dataset.shape.row_count,
             anchor_rows=len(anchors.rows) if anchors is not None else 0,
         )
+    continuous_plan = continuous_module.plan_run(
+        config.scorers.continuous,
+        default_judge_model=config.scorers.judge_model,
+        shape=dataset.shape,
+        judges_enabled=judges_enabled,
+    )
     outcome = RunOutcome(plan=plan, cost=cost, dataset=dataset, plan_only=plan_only)
     outcome.messages.extend(
         (
@@ -385,6 +405,8 @@ def _prepare_run(
             "call(s) (self-consistency sample and frozen anchors); the "
             "budget ceiling covers them too."
         )
+    if continuous_plan is not None:
+        outcome.messages.append(continuous_plan.message())
     return _PreparedRun(
         target=target,
         mode=resolved_mode,
@@ -397,6 +419,7 @@ def _prepare_run(
         outcome=outcome,
         anchors=anchors,
         integrity_calls=integrity_calls,
+        continuous=continuous_plan,
     )
 
 
@@ -592,7 +615,12 @@ def _prepare_backend(
     require_baseline: bool,
     mlflow_module: Any | None,
 ) -> _EvaluationBackend:
-    scored_locally = _is_locally_scorable(prepared.plan, prepared.mode)
+    # An active continuous plan is a judge: scoring locally would print a
+    # verifier-call estimate, enforce it against the budget, and then never
+    # make the calls — a run that promises an instrument it does not use.
+    scored_locally = _is_locally_scorable(prepared.plan, prepared.mode) and not (
+        prepared.continuous is not None and prepared.continuous.active
+    )
     mlflow = None if scored_locally else _mlflow(mlflow_module)
     if scored_locally:
         warnings.append(
@@ -682,6 +710,7 @@ def _score_prepared_run(
     judge_model_identity: str | None,
     judges_enabled: bool,
     warnings: list[str],
+    continuous_model: Any | None = None,
 ) -> _ScoredRun:
     change_id = _change_id()
     summary = _run_summary(prepared.target, establish_baseline=establish_baseline)
@@ -747,6 +776,7 @@ def _score_prepared_run(
             baseline_samples=baseline_samples,
             policy=policy,
             warnings=warnings,
+            continuous_model=continuous_model,
         )
     return _ScoredRun(
         gate=gate,
@@ -782,6 +812,7 @@ def _score_with_mlflow(
     baseline_samples: Mapping[str, tuple[float | None, ...]],
     policy: GatePolicy,
     warnings: list[str],
+    continuous_model: Any | None = None,
 ) -> tuple[
     GateResult,
     str,
@@ -806,7 +837,7 @@ def _score_with_mlflow(
         if prepared.mode == "live"
         else None
     )
-    scorers = [
+    plan_scorers = [
         catalog_module.build_scorer(
             entry.spec,
             judge_model_uri=prepared.judge_model_uri,
@@ -816,68 +847,104 @@ def _score_with_mlflow(
         )
         for entry in prepared.plan.entries
     ]
+    # Activated after the confirmation and budget checks that already
+    # covered its calls: the probe is spend. A backend without logprobs
+    # deactivates the path here (fallback), before any row is scored. The
+    # continuous scorer rides beside the plan's scorers but stays out of
+    # ``plan_scorers`` — integrity re-scoring pairs those with the plan's
+    # entries one to one.
+    continuous_state: continuous_module.ActiveContinuousScoring | None = None
+    if prepared.continuous is not None and prepared.continuous.active:
+        continuous_state = continuous_module.activate_run(
+            prepared.continuous,
+            settings=project.settings,
+            mlflow_module=mlflow,
+            model=continuous_model,
+        )
+    scorers = plan_scorers + list(
+        continuous_state.scorers if continuous_state is not None else ()
+    )
     manager = project.experiment_manager(mlflow_module=mlflow)
     experiment_name = manager.experiment_name
-    with manager.run(
-        run_name=f"{command}-{prepared.mode}",
-        description=summary,
-        parameters={
-            "mode": prepared.mode,
-            "dataset": prepared.dataset.ref,
-            "row_count": prepared.dataset.shape.row_count,
-        },
-        metadata=metadata,
-    ) as active_run:
-        run_id, experiment_id = _run_identity(active_run)
-        native_result = mlflow.genai.evaluate(
-            data=[dict(row) for row in prepared.dataset.rows],
-            scorers=scorers,
-            predict_fn=predict_fn,
-        )
-        warnings.extend(_coverage_warnings(native_result))
-        metric_samples = _metric_samples(native_result)
-        metrics = _metrics_with_scorer_errors(native_result)
-        statistics, statistical_metrics = build_statistical_evidence(
-            metric_samples,
-            baseline_samples,
-            policy.rules,
-            project.config.statistics,
-        )
-        metrics.update(statistical_metrics)
-        integrity, integrity_metrics, integrity_warnings, anchor_rows = _run_integrity(
-            project,
-            prepared,
-            scorers=scorers,
-            native_result=native_result,
-            metric_samples=metric_samples,
-            capture_anchors=metadata.purpose is RunPurpose.BASELINE,
-        )
-        metrics.update(integrity_metrics)
-        warnings.extend(integrity_warnings)
-        economics, economics_metrics, economics_warnings = _run_economics(
-            project,
-            prepared,
-            native_result=native_result,
-        )
-        metrics.update(economics_metrics)
-        warnings.extend(economics_warnings)
-        gate = apply_gate(
-            metrics,
-            policy=policy,
-            baseline_metrics=baseline_metrics,
-        )
-        recorded_decision = _decision_value(decision, gate)
-        tags = _run_tags(
-            prepared,
-            backend,
-            recorded_at=recorded_at,
-            judge_model_identity=judge_model_identity,
-            gate=gate,
-            decision=recorded_decision,
-        )
-        mlflow.log_metrics(dict(gate.metrics))
-        mlflow.set_tags(tags)
-        _record_reproducibility(mlflow)
+    try:
+        with manager.run(
+            run_name=f"{command}-{prepared.mode}",
+            description=summary,
+            parameters={
+                "mode": prepared.mode,
+                "dataset": prepared.dataset.ref,
+                "row_count": prepared.dataset.shape.row_count,
+            },
+            metadata=metadata,
+        ) as active_run:
+            run_id, experiment_id = _run_identity(active_run)
+            native_result = mlflow.genai.evaluate(
+                data=[dict(row) for row in prepared.dataset.rows],
+                scorers=scorers,
+                predict_fn=predict_fn,
+            )
+            warnings.extend(_coverage_warnings(native_result))
+            metric_samples = _metric_samples(native_result)
+            metrics = _metrics_with_scorer_errors(native_result)
+            statistics, statistical_metrics = build_statistical_evidence(
+                metric_samples,
+                baseline_samples,
+                policy.rules,
+                project.config.statistics,
+            )
+            metrics.update(statistical_metrics)
+            (
+                integrity,
+                integrity_metrics,
+                integrity_warnings,
+                anchor_rows,
+            ) = _run_integrity(
+                project,
+                prepared,
+                scorers=plan_scorers,
+                native_result=native_result,
+                metric_samples=metric_samples,
+                capture_anchors=metadata.purpose is RunPurpose.BASELINE,
+            )
+            metrics.update(integrity_metrics)
+            warnings.extend(integrity_warnings)
+            economics, economics_metrics, economics_warnings = _run_economics(
+                project,
+                prepared,
+                native_result=native_result,
+            )
+            metrics.update(economics_metrics)
+            warnings.extend(economics_warnings)
+            extra_tags: dict[str, str] = {}
+            if continuous_state is not None:
+                continuous_metrics, continuous_warnings = continuous_state.finalize(
+                    metric_samples
+                )
+                metrics.update(continuous_metrics)
+                warnings.extend(continuous_warnings)
+                mlflow.log_params(continuous_state.parameters())
+                extra_tags = continuous_state.tags()
+            gate = apply_gate(
+                metrics,
+                policy=policy,
+                baseline_metrics=baseline_metrics,
+            )
+            recorded_decision = _decision_value(decision, gate)
+            tags = _run_tags(
+                prepared,
+                backend,
+                recorded_at=recorded_at,
+                judge_model_identity=judge_model_identity,
+                gate=gate,
+                decision=recorded_decision,
+            )
+            tags.update(extra_tags)
+            mlflow.log_metrics(dict(gate.metrics))
+            mlflow.set_tags(tags)
+            _record_reproducibility(mlflow)
+    finally:
+        if continuous_state is not None:
+            continuous_state.close()
     return (
         gate,
         recorded_decision,
