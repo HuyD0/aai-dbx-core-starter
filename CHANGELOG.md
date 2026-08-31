@@ -20,6 +20,16 @@ All notable changes to `aai-core` are documented here.
   `EMBEDDING` spans, matching the contract its docstring already stated,
   while spans with an unreadable type still contribute. See
   `docs/decisions/2026-08-31-embedding-tokens-stay-out-of-the-chat-aggregate.md`.
+- Recorded a time-boxed dependency-audit exception for CVE-2026-71211
+  (GHSA-h7x2-h6g9-p789), the MLflow AI Gateway secret/proxy SSRF. The
+  advisory covers 3.13.0 through 3.15.2 with no fixed release inside the
+  supported `>=3.15.1,<3.16` range, and it had been failing every
+  dependency-audit step in CI since the advisory was re-scored. The
+  vulnerable path is the tracking server's own HTTP handlers; neither this
+  repository nor a generated project runs an MLflow server, and the
+  exception names the affected symbols so it self-invalidates the moment
+  any source file references one. It expires 2026-09-30 and must be
+  removed once a fixed MLflow ships in range.
 - Added an experimental continuous scoring path to AgentKit
   (`aai_core.agentkit.continuous`, `scorers.continuous` in
   `agentkit.yaml`): a logprob-weighted verifier that prompts for a

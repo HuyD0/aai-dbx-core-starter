@@ -10,3 +10,14 @@ forbidden_symbols = [
   "pkcs7_decrypt_pem",
   "pkcs7_decrypt_smime",
 ]
+
+[[exceptions]]
+id = "CVE-2026-71211"
+package = "mlflow"
+expires = "2026-09-30"
+reason = "MLflow's AI Gateway secret/proxy SSRF is reachable only through the tracking server's own HTTP handlers; this repository and its generated projects run no MLflow server and call no gateway secret or proxy handler. Remove when a fixed MLflow ships inside the supported range."
+forbidden_symbols = [
+  "_create_gateway_secret",
+  "gateway_api",
+  "raw_proxy",
+]
