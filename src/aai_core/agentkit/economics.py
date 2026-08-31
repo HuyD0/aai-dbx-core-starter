@@ -58,6 +58,10 @@ _SPAN_OUTPUT_TOKENS_KEY = "gen_ai.usage.output_tokens"
 _SPAN_TYPE_ATTRIBUTE = "mlflow.spanType"
 _SPAN_TYPE_KEYS = ("type", "span_type", "spanType")
 _LLM_SPAN_TYPES = frozenset({"LLM", "CHAT_MODEL"})
+# Embedding tokens are billed at the embedding model's rate, which is not the
+# configured pair. They are excluded from the priced sum rather than from the
+# trace: the span still carries them under `gen_ai.usage.input_tokens`.
+_UNPRICED_SPAN_TYPES = frozenset({"EMBEDDING"})
 
 # Enough segments to see every intent that matters, few enough that a
 # free-text stratum cannot turn the evidence into a row-per-row dump.
@@ -564,10 +568,18 @@ def _span_usage(
     Each span contributes its own effective total — the explicit total
     when it recorded one, otherwise the sum of its sides — so a trace
     mixing both span shapes is not under-counted.
+
+    Spans billed at a rate other than the configured pair are skipped. A
+    RAG query embeds before it retrieves, and pricing those tokens at the
+    agent model's rate would inflate every retrieval row by a model the
+    project never priced. A span whose type cannot be read still counts:
+    dropping unlabelled spans would silently under-count instead.
     """
 
     input_total = output_total = total_total = None
     for span in spans:
+        if _span_type(span) in _UNPRICED_SPAN_TYPES:
+            continue
         attributes = _span_attributes(span)
         usage = _decoded(attributes.get(_SPAN_TOKEN_USAGE_KEY))
         if isinstance(usage, Mapping):

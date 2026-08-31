@@ -4,6 +4,22 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Gave the SDK's two untyped trace gaps their MLflow span semantics.
+  Structured-output parsing and validation now run under a `PARSER` span
+  (`structured.parse`, a sibling of the model call's `LLM` span): a schema
+  failure is a real, fallible step that the provider call reports as a
+  success, so the trace previously showed a green model span and no failure
+  at all — the one place `generate_typed`'s sanitized error tells the
+  operator to look. The span identifies the call and never restates the
+  rejected content. `EMBEDDING` spans now record the provider's billed
+  input tokens on `gen_ai.usage.input_tokens`, deliberately not
+  `mlflow.chat.tokenUsage`: MLflow aggregates that key across every span
+  type into the trace-level total that AgentKit prices at the agent chat
+  model's configured rate pair, so the embedding side would be billed at
+  chat rates on every retrieval row. `economics._span_usage` now skips
+  `EMBEDDING` spans, matching the contract its docstring already stated,
+  while spans with an unreadable type still contribute. See
+  `docs/decisions/2026-08-31-embedding-tokens-stay-out-of-the-chat-aggregate.md`.
 - Recorded a time-boxed dependency-audit exception for CVE-2026-71211
   (GHSA-h7x2-h6g9-p789), the MLflow AI Gateway secret/proxy SSRF. The
   advisory covers 3.13.0 through 3.15.2 with no fixed release inside the
@@ -14,7 +30,6 @@ All notable changes to `aai-core` are documented here.
   exception names the affected symbols so it self-invalidates the moment
   any source file references one. It expires 2026-09-30 and must be
   removed once a fixed MLflow ships in range.
-
 - Added an experimental continuous scoring path to AgentKit
   (`aai_core.agentkit.continuous`, `scorers.continuous` in
   `agentkit.yaml`): a logprob-weighted verifier that prompts for a

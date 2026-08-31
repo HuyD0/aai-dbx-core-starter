@@ -311,14 +311,40 @@ class OpenAICompatibleEmbeddingProvider:
                 "mlflow.llm.provider": self.provider,
                 "mlflow.llm.model": self.model,
             },
-        ):
+        ) as span:
             response = _call_provider(
                 lambda: self.native_client.embeddings.create(**request),
                 description="embedding",
                 provider=self.provider,
                 logical_name=self.logical_name,
             )
+            if span is not None:
+                input_tokens = _embedding_input_tokens(response)
+                if input_tokens is not None:
+                    span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
         return [list(item.embedding) for item in response.data]
+
+
+def _embedding_input_tokens(response: Any) -> int | None:
+    """Billed input tokens for an embedding request, when the provider reports them.
+
+    Deliberately *not* ``mlflow.chat.tokenUsage``. MLflow aggregates that key
+    across every span type into the authoritative trace-level total, and
+    ``aai_core.agentkit.economics`` prices that total at the project's
+    configured rate pair for the *agent's* chat model. Embedding tokens are
+    billed at a different rate, so folding them into the chat aggregate would
+    over-state the cost of every retrieval query. The OpenTelemetry GenAI
+    attribute keeps the evidence on the span, where the trace and per-model
+    pricing can read it, without entering that aggregate.
+
+    Embeddings have no generated tokens, so there is no output side to record.
+    """
+
+    usage = _as_mapping(getattr(response, "usage", None))
+    tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+    if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+        return tokens
+    return None
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
