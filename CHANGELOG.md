@@ -20,7 +20,25 @@ All notable changes to `aai-core` are documented here.
   `EMBEDDING` spans, matching the contract its docstring already stated,
   while spans with an unreadable type still contribute. See
   `docs/decisions/2026-08-31-embedding-tokens-stay-out-of-the-chat-aggregate.md`.
-
+- Added an experimental continuous scoring path to AgentKit
+  (`aai_core.agentkit.continuous`, `scorers.continuous` in
+  `agentkit.yaml`): a logprob-weighted verifier that prompts for a
+  single-token letter score, reads the top logprobs at the score
+  position, filters to valid score tokens, renormalizes by the retained
+  mass, and records the probability-weighted average beside the discrete
+  judges — report-only, off by default, and never replacing the discrete
+  path. Criteria-decomposed judgments, K repeated evaluations with
+  positional alternation for pairwise comparisons, configurable
+  granularity (letter scales, 2–26 points), runtime logprob-capability
+  probing with a warned fallback to the discrete path on backends that
+  return none (the Anthropic API among them), per-run instrument
+  telemetry (tie rates for both instruments, normalization mass with a
+  low-mass flag, call and token counts, granularity/repeats params), and
+  budget-enforced verifier calls. `scripts/sweep_continuous_scoring.py`
+  sweeps granularity 5/10/20 × repeats 1/2/4 over graded candidates with
+  a known ordering and reports Kendall tau-b ranking agreement and tie
+  rate per combination (with a credential-free `--simulate` mode). See
+  `docs/continuous-scoring.md`.
 - Extended the example curriculum to teach the judge-measurement and
   verified-promotion lifecycle: lesson 12 gains two runnable
   credential-free sections — per-run judge stability (self-consistency

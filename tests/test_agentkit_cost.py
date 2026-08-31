@@ -639,5 +639,7 @@ def test_budget_ceiling_covers_integrity_rescoring_calls():
     with pytest.raises(BudgetExceededError) as excinfo:
         enforce_budget(cost, max_judge_calls=100, extra_judge_calls=11)
     assert "101 judge calls" in str(excinfo.value)
-    assert "11 integrity re-scoring calls" in str(excinfo.value)
+    assert "11 extra judge calls" in str(excinfo.value)
+    assert "integrity re-scoring and continuous scoring" in str(excinfo.value)
     assert "integrity.consistency_sample" in str(excinfo.value.remediation)
+    assert "scorers.continuous" in str(excinfo.value.remediation)

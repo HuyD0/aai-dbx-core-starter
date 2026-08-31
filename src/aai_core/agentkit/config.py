@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 import yaml
 from pydantic import Field, ValidationError, field_serializer, field_validator
 
+from aai_core.agentkit.continuous import ContinuousScoringConfig
 from aai_core.agentkit.cost import DEFAULT_CHUNKS_PER_ROW
 from aai_core.agentkit.economics import EconomicsConfig
 from aai_core.agentkit.errors import ConfigError, UnknownScorerError
@@ -79,6 +80,10 @@ class ScorersConfig(ContractModel):
     remove: tuple[str, ...] = ()
     judge_model: str = Field(default="judge-model", min_length=1)
     guidelines: tuple[str, ...] = ()
+    # The experimental logprob-weighted verifier path. Off by default; when
+    # enabled it runs BESIDE the discrete judges (report-only), never
+    # instead of them. See docs/continuous-scoring.md.
+    continuous: ContinuousScoringConfig = Field(default_factory=ContinuousScoringConfig)
 
     @field_validator("add", "remove", "guidelines", mode="before")
     @classmethod
