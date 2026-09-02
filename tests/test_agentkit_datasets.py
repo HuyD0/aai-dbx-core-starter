@@ -3027,3 +3027,91 @@ def test_delegation_structure_requires_a_role_on_the_executing_agent():
     assert violations == (
         "TOOL span 'lookup' runs under an AGENT span with no agent.role",
     )
+
+
+# --- tool ordering -----------------------------------------------------------
+
+
+def test_parse_tool_order_accepts_pairs_and_objects():
+    from aai_core.agentkit.datasets import parse_tool_order
+
+    assert parse_tool_order(
+        [["verify_identity", "issue_refund"], {"before": "a", "after": "b"}]
+    ) == (("verify_identity", "issue_refund"), ("a", "b"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "verify_identity",
+        [],
+        [["only_one"]],
+        [["a", "b", "c"]],
+        [{"before": "a"}],
+        [["a", ""]],
+        [["same", "same"]],
+        [[1, 2]],
+    ],
+)
+def test_parse_tool_order_rejects_malformed_policies(value):
+    from aai_core.agentkit.datasets import parse_tool_order
+    from aai_core.agentkit.errors import ConfigError
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse_tool_order(value)
+    assert "expected_tool_order" in str(excinfo.value)
+
+
+def test_tool_order_policy_violations_check_every_guarded_call():
+    from aai_core.agentkit.datasets import tool_order_policy_violations
+
+    pairs = (("verify_identity", "issue_refund"),)
+    assert (
+        tool_order_policy_violations(["verify_identity", "issue_refund"], pairs) == ()
+    )
+    # One verification covers every later guarded call.
+    assert (
+        tool_order_policy_violations(
+            ["verify_identity", "issue_refund", "issue_refund"], pairs
+        )
+        == ()
+    )
+    assert tool_order_policy_violations(["issue_refund", "verify_identity"], pairs) == (
+        "TOOL 'issue_refund' ran before any 'verify_identity' call",
+    )
+    assert tool_order_policy_violations(["issue_refund"], pairs) == (
+        "TOOL 'issue_refund' ran before any 'verify_identity' call",
+    )
+    assert tool_order_policy_violations([], pairs) == ()
+    assert tool_order_policy_violations(["verify_identity"], pairs) == ()
+
+
+def test_tool_order_violations_read_v2_start_times_and_fall_back_to_list_order():
+    from aai_core.agentkit.datasets import tool_order_violations
+
+    policy = [["verify_identity", "issue_refund"]]
+    v2 = {
+        "data": {
+            "spans": [
+                {"span_type": "TOOL", "name": "issue_refund", "start_time": 5},
+                {"span_type": "TOOL", "name": "verify_identity", "start_time": 1},
+            ]
+        }
+    }
+    assert tool_order_violations(v2, policy) == ()
+
+    unclocked = {
+        "data": {
+            "spans": [
+                {"attributes": {"mlflow.spanType": '"TOOL"'}, "name": "issue_refund"},
+                {
+                    "attributes": {"mlflow.spanType": '"TOOL"'},
+                    "name": "verify_identity",
+                },
+            ]
+        }
+    }
+    assert tool_order_violations(unclocked, policy) == (
+        "TOOL 'issue_refund' ran before any 'verify_identity' call",
+    )
+    assert tool_order_violations(None, policy) is None

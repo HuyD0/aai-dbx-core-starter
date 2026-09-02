@@ -4,6 +4,23 @@ All notable changes to `aai-core` are documented here.
 
 ## Unreleased
 
+- Added `tool_order_policy` to the shared scorer registry: a deterministic
+  code scorer that reads `expectations.expected_tool_order` — a list of
+  `[before, after]` tool-name pairs — against the trace's TOOL spans in
+  start order and fails the row when a guarded tool starts without a prior
+  call of its precondition. The unordered trajectory scorers cannot see
+  that an agent verified identity *after* issuing the refund; this one is
+  the behaviour check for exactly that. It auto-selects when every row
+  carries the expectation and the rows carry tool spans, passes vacuously
+  when the guarded tool never ran (a skipped call is the trajectory
+  scorers' finding), skips rows whose trace has no readable spans, and
+  raises on a malformed policy rather than reading it as "no policy".
+  Example 08 gains a fourth fixture that reaches the right answer through
+  the right multiset of calls in the wrong order, the console's Evaluate
+  track now carries the `agentkit` command loop, and the Deep Agents
+  accelerator records the SKILL.md digest on every evaluation run and
+  compares the promoted skill against the run made under the previous one.
+  See `docs/decisions/2026-09-02-tool-order-policy-is-a-code-scorer.md`.
 - Gave the SDK's two untyped trace gaps their MLflow span semantics.
   Structured-output parsing and validation now run under a `PARSER` span
   (`structured.parse`, a sibling of the model call's `LLM` span): a schema

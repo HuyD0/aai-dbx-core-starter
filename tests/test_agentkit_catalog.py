@@ -1152,3 +1152,149 @@ def test_pension_judge_instructions_are_unchanged_by_the_trace_variant():
     assert "{{ trace }}" not in captured["instructions"]
     assert "Answer 'yes'" in captured["instructions"]
     assert "feedback_value_type" not in captured
+
+
+# --- tool_order_policy -------------------------------------------------------
+
+
+def _tool_span(name, start):
+    return {"type": "TOOL", "name": name, "start_time_unix_nano": start}
+
+
+def test_expected_tool_order_selects_the_ordering_scorer_on_traces():
+    plan = select_scorers(
+        _shape(
+            expectation_keys=("expected_response", "expected_tool_order"),
+            has_traces=True,
+            has_retrieval_spans=False,
+            has_tool_spans=True,
+        ),
+        _config(),
+        mode="traces",
+        judges_enabled=False,
+    )
+
+    entry = next(e for e in plan.entries if e.spec.name == "tool_order_policy")
+    assert entry.reason == "expectations.expected_tool_order present"
+    assert entry.threshold == ">=1.0"
+    assert entry.spec.judge is None
+
+
+def test_rows_without_the_expectation_do_not_buy_the_ordering_scorer():
+    plan = select_scorers(
+        _shape(has_traces=True, has_retrieval_spans=False, has_tool_spans=True),
+        _config(),
+        mode="traces",
+        judges_enabled=True,
+    )
+
+    assert "tool_order_policy" not in _selected_names(plan)
+
+
+def test_a_partial_ordering_expectation_is_excluded_and_names_the_gap():
+    plan = select_scorers(
+        _shape(
+            has_traces=True,
+            has_retrieval_spans=False,
+            has_tool_spans=True,
+            partial_expectation_keys=("expected_tool_order",),
+        ),
+        _config(),
+        mode="traces",
+        judges_enabled=False,
+    )
+
+    reason = _excluded(plan, "tool_order_policy")
+    assert "only some rows have expectations.expected_tool_order" in reason
+
+
+def test_ordering_scorer_needs_tool_spans_in_the_rows_traces():
+    plan = select_scorers(
+        _shape(
+            expectation_keys=("expected_tool_order",),
+            has_traces=True,
+            has_retrieval_spans=True,
+            has_tool_spans=False,
+        ),
+        _config(),
+        mode="traces",
+        judges_enabled=False,
+    )
+
+    assert "carry no tool-call spans" in _excluded(plan, "tool_order_policy")
+
+
+def test_ordering_scorer_on_an_answer_sheet_points_at_traces_mode():
+    plan = select_scorers(
+        _shape(expectation_keys=("expected_tool_order",), has_traces=True),
+        _config(),
+        mode="answer-sheet",
+        judges_enabled=False,
+    )
+
+    assert "--mode traces" in _excluded(plan, "tool_order_policy")
+
+
+def test_live_ordering_scorer_says_rows_without_tools_pass_vacuously():
+    plan = select_scorers(
+        _shape(expectation_keys=("expected_tool_order",)),
+        _config(),
+        mode="live",
+        judges_enabled=False,
+    )
+
+    entry = next(e for e in plan.entries if e.spec.name == "tool_order_policy")
+    assert "pass vacuously" in entry.reason
+    assert "trajectory scorers" in entry.reason
+
+
+def test_build_tool_order_scorer_fails_passes_and_skips():
+    built = build_scorer(get_spec("tool_order_policy"), mlflow_module=_fake_mlflow())
+    assert built.name == "tool_order_policy"
+    policy = {"expected_tool_order": [["verify_identity", "issue_refund"]]}
+
+    # List order is not evidence; the span clock is. Written out of order on
+    # purpose so a scorer that trusted the list would pass this.
+    verified_first = {
+        "data": {
+            "spans": [
+                _tool_span("issue_refund", 20),
+                _tool_span("verify_identity", 10),
+            ]
+        }
+    }
+    assert built.function(expectations=policy, trace=verified_first) == 1.0
+
+    refund_first = {
+        "data": {
+            "spans": [
+                _tool_span("verify_identity", 20),
+                _tool_span("issue_refund", 10),
+            ]
+        }
+    }
+    assert built.function(expectations=policy, trace=refund_first) == 0.0
+
+    # Verification skipped entirely while the refund ran: the post's case.
+    unverified = {"data": {"spans": [_tool_span("issue_refund", 10)]}}
+    assert built.function(expectations=policy, trace=unverified) == 0.0
+
+    # Neither ran: nothing is out of order. The missing call is the
+    # trajectory scorers' finding.
+    no_tools = {"data": {"spans": [{"type": "LLM", "name": "chat"}]}}
+    assert built.function(expectations=policy, trace=no_tools) == 1.0
+
+    # No readable spans at all: unscorable, not failed.
+    assert built.function(expectations=policy, trace={"data": {}}) == []
+
+
+def test_build_tool_order_scorer_raises_on_a_malformed_policy():
+    built = build_scorer(get_spec("tool_order_policy"), mlflow_module=_fake_mlflow())
+    trace = {"data": {"spans": [_tool_span("issue_refund", 10)]}}
+
+    with pytest.raises(ConfigError) as excinfo:
+        built.function(expectations={"expected_tool_order": "verify"}, trace=trace)
+    assert "expected_tool_order" in str(excinfo.value)
+
+    with pytest.raises(ConfigError):
+        built.function(expectations={}, trace=trace)

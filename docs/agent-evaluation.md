@@ -101,6 +101,7 @@ has to memorise the contracts:
 | `expectations.guidelines` | per-row guideline adherence |
 | retrieval spans in the trace | groundedness, retrieval relevance, sufficiency |
 | tool-call spans in the trace | tool-call correctness and efficiency |
+| `expectations.expected_tool_order` plus tool-call spans | tool-order policy: every guarded tool ran after its declared precondition |
 | delegation spans in the trace (non-root `AGENT` spans with `agent.role`) | delegation structure, subagent routing accuracy |
 | always | response length; safety on judged runs |
 
@@ -108,6 +109,18 @@ The inferred plan is printed before every run, along with what the judge calls
 will cost, and anything that *cannot* run is listed with the reason. A
 retrieval scorer needs retriever spans in a trace; recorded answers do not
 have those, so it is excluded and says so rather than silently scoring zero.
+
+The ordering row is the one deterministic behaviour check that reads both
+an expectation and the trace. A trajectory scorer answers *which* tools ran;
+it cannot say that identity verification ran *before* the refund, and an
+agent that does both in the wrong order passes an unordered comparison with
+the right answer in hand. `expected_tool_order` states that policy as
+`[before, after]` tool-name pairs, and `tool_order_policy` fails a row the
+moment a guarded tool starts without a prior call of its guard. It is code,
+not a judge: the span clock is the evidence, so there is nothing to
+calibrate and nothing to spend. A tool that never ran cannot be out of
+order — the skipped call is the trajectory scorers' finding — and a
+malformed policy raises rather than reading as "no policy".
 
 Two details in that table are per row, not per dataset. A scorer whose
 contract is a *choice* — correctness reads `expected_response` **or**

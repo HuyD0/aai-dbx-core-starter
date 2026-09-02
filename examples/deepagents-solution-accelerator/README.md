@@ -38,7 +38,7 @@ span hierarchy is deterministic evidence rather than a framework side effect.
 |---|---|
 | `notebooks/01_agent_setup_and_definition.ipynb` | Pins the runtime stack, defines strictly bounded leaf tools, composes the supervisor and sub-agents with `create_deep_agent()`, and writes the Models-from-Code module with deterministic tracing middleware. |
 | `notebooks/02_deployment_and_trace_logging.ipynb` | Logs the module with the MLflow LangChain flavor, adds a version to the pre-provisioned registered model, renders the executable platform-owner serving handoff, validates the deployed version, and attaches governed user feedback to trace IDs. |
-| `notebooks/03_continuous_eval_and_feedback_loop.ipynb` | Harvests deterministic, judge (`subagent_routing_accuracy`, `RelevanceToQuery`), user, and operational signals from traces, then synthesizes and promotes `SKILL.md` guardrails from normalized signal codes only. |
+| `notebooks/03_continuous_eval_and_feedback_loop.ipynb` | Harvests deterministic, judge (`subagent_routing_accuracy`, `RelevanceToQuery`), user, and operational signals from traces, then synthesizes and promotes `SKILL.md` guardrails from normalized signal codes only. Every evaluation run is tagged with the deployed `SKILL.md` digest, and a closing cell compares the run with the latest one under a different digest so a promoted skill is proven on the same signals rather than assumed to have helped. |
 
 ## Prerequisites and boundaries
 

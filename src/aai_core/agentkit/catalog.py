@@ -261,6 +261,19 @@ CATALOG: tuple[ScorerSpec, ...] = (
         judge=JudgeBinding(),
     ),
     ScorerSpec(
+        name="tool_order_policy",
+        version=1,
+        kind=ScorerKind.CODE,
+        summary=(
+            "Code: every guarded tool ran only after its declared " "precondition tool."
+        ),
+        metric="tool_order_policy/mean",
+        needs_expectations=("expected_tool_order",),
+        needs_trace=TraceNeed.TOOLS,
+        default_threshold=">=1.0",
+        judge_overhead_tokens=0,
+    ),
+    ScorerSpec(
         name="keyword_coverage",
         version=2,
         kind=ScorerKind.CODE,
@@ -541,6 +554,13 @@ def _auto_reason(
     return _trace_scorer_reason(spec, shape)
 
 
+# Scorers that auto-select on one specific expectation key being present.
+_SINGLE_KEY_SCORERS: Mapping[str, str] = {
+    "expectations_guidelines": "guidelines",
+    "tool_order_policy": "expected_tool_order",
+}
+
+
 def _expectation_scorer_reason(
     spec: ScorerSpec,
     available: set[str],
@@ -556,9 +576,10 @@ def _expectation_scorer_reason(
         if available.intersection(spec.needs_expectations):
             return True, "expected facts/response present"
         return False, ""
-    if spec.name == "expectations_guidelines":
-        if "guidelines" in available:
-            return True, "expectations.guidelines present"
+    single_key = _SINGLE_KEY_SCORERS.get(spec.name)
+    if single_key is not None:
+        if single_key in available:
+            return True, f"expectations.{single_key} present"
         return False, ""
     if spec.name == "relevance":
         # `available`, not the intersection: a suite whose rows are split
@@ -736,7 +757,12 @@ def _conditional_note(spec: ScorerSpec, shape: DatasetShape, mode: str) -> str |
         )
     elif spec.needs_trace is TraceNeed.TOOLS:
         kind = "tool-call spans"
-        scored = "rows without them are scored against an empty tool call list"
+        scored = (
+            "rows without them pass vacuously; a skipped call is the "
+            "trajectory scorers' finding"
+            if spec.kind is ScorerKind.CODE
+            else "rows without them are scored against an empty tool call list"
+        )
     elif spec.needs_trace is TraceNeed.DELEGATION:
         kind = "delegation spans"
         scored = (
@@ -888,6 +914,28 @@ def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
             return 0.0 if violations else 1.0
 
         return delegation_scorer
+
+    if spec.name == "tool_order_policy":
+
+        @scorer_decorator(name=spec.name)
+        def tool_order_scorer(
+            expectations: Mapping[str, Any] | None = None,
+            trace: Any = None,
+        ) -> float | list[Any]:
+            from aai_core.agentkit.datasets import tool_order_violations
+
+            # A malformed policy raises: the row errors and the gate fails,
+            # rather than the rule quietly reading as "nothing to check".
+            violations = tool_order_violations(
+                trace, (expectations or {}).get("expected_tool_order")
+            )
+            if violations is None:
+                # No readable spans: unscorable, the same skip the
+                # delegation scorer returns.
+                return []
+            return 0.0 if violations else 1.0
+
+        return tool_order_scorer
 
     if spec.name == "latency_seconds":
 

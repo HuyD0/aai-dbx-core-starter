@@ -20,6 +20,23 @@ APIs native and opt-in.
 | [Prompt engineering lifecycle](https://mlflow.org/cookbook/prompt-engineering/) | Strong coverage: immutable prompt versions, exact-version evaluation, controlled aliases, and gated promotion. | Retain the stricter repository behavior. A prompt change is an application release; do not rely on a long-running service hot-reloading a moved alias without an evaluated rollout. Add few-shot and side-by-side comparison guidance. |
 | [Cost-quality trade-off](https://mlflow.org/cookbook/cost-quality-tradeoff/) | The progressive example compares baseline/change quality, latency, tokens, cost, and coverage. `examples/11_cost_quality_tradeoff.ipynb` fixes the prompt/data/scorer contract, separates target and judge cost, filters on quality first, and excludes incomplete cost from ranking. | Keep vendor prices out of core. The next connected step compares configured logical models using trace-recorded cost and platform gateway/billing evidence. |
 
+## Blog post review (2026-09-02)
+
+Two later MLflow posts were reviewed against the same certified line. They
+describe the loop this repository already teaches — trace first, build a
+dataset, layer deterministic and judged scorers, inspect traces, iterate,
+then monitor and optimize — so the decisions below are narrow.
+
+| Post | Repository coverage | Decision |
+|---|---|---|
+| [Evaluating and improving agent skills](https://mlflow.org/blog/evaluating-improving-agent-skills/) | The three scorer classes it names — output-based, rule-based, trace-based — are the curriculum's Outcome/Behavior/Operations layers. Its headline example, a precondition tool that must run *before* the tool it guards, had no equivalent: the trajectory scorers are unordered by design. The shared registry now carries `tool_order_policy`, reading `expectations.expected_tool_order` against TOOL spans in start order, and `examples/08_tool_trajectory_evaluation.ipynb` adds the case the multiset cannot see. The Deep Agents accelerator, which already synthesizes and promotes `SKILL.md`, now records the skill digest on every evaluation run and compares a promoted skill with the last run under the previous digest. | Adopt ordering as a deterministic registry scorer, not a judge (`docs/decisions/2026-09-02-tool-order-policy-is-a-code-scorer.md`). A skill change is an application release: prove it on the same signals, never assume it helped. |
+| [Structured AI evaluation](https://mlflow.org/blog/structured-ai-eval/) | Its three phases map onto the lessons directly: prototype with tracing (01, 07), evaluate with judges and datasets (04, 08–10), monitor and optimize (12–14). `Guidelines`, `make_judge`, datasets, prompt versions, and human feedback are all native objects here already, with the judge-calibration gate the post omits. The console's Evaluate track, previously a checklist, now carries the `agentkit` command loop the post describes. | Keep autologging opt-in (it captures raw framework arguments) and prompt optimization outside the certified locks. Categorical `make_judge` output (`Literal[...]`) stays a native option; the registry converts categorical verdicts into explicit numeric gate metrics rather than adding a scale. |
+
+One correction: the first post's code calls a scorer named `ToolCallRelevance`.
+No such class exists in MLflow 3.15.1 or on MLflow's main branch; the tool-call
+scorers are `ToolCallCorrectness` and `ToolCallEfficiency`, both already in
+the registry. Do not copy that snippet into a lesson.
+
 ## Core boundary
 
 The stable SDK now provides:

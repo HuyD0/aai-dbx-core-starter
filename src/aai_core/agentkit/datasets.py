@@ -2018,6 +2018,125 @@ def delegation_structure_violations(trace: Any) -> tuple[str, ...] | None:
     return tuple(violations)
 
 
+_TOOL_ORDER_KEY = "expected_tool_order"
+
+
+def parse_tool_order(value: Any) -> tuple[tuple[str, str], ...]:
+    """The ``(before, after)`` pairs an ``expected_tool_order`` expectation names.
+
+    Each entry is either a two-item list ``["verify_identity",
+    "issue_refund"]`` or an object ``{"before": ..., "after": ...}``. Both
+    names must be non-empty strings and differ: a tool cannot be its own
+    precondition. Anything else is a configuration error, raised rather
+    than read as "no policy" — an ordering rule that silently stopped
+    applying is exactly the failure the scorer exists to catch.
+    """
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise _malformed_tool_order("must be a list of [before, after] pairs")
+    pairs: list[tuple[str, str]] = []
+    for index, entry in enumerate(value):
+        if isinstance(entry, Mapping):
+            before, after = entry.get("before"), entry.get("after")
+        elif (
+            isinstance(entry, Sequence)
+            and not isinstance(entry, (str, bytes))
+            and len(entry) == 2
+        ):
+            before, after = entry[0], entry[1]
+        else:
+            raise _malformed_tool_order(
+                f"entry {index} must be a [before, after] pair or a "
+                "{before, after} object"
+            )
+        if not isinstance(before, str) or not before.strip():
+            raise _malformed_tool_order(f"entry {index} has no before tool name")
+        if not isinstance(after, str) or not after.strip():
+            raise _malformed_tool_order(f"entry {index} has no after tool name")
+        if before.strip() == after.strip():
+            raise _malformed_tool_order(
+                f"entry {index} names {before.strip()!r} as its own precondition"
+            )
+        pairs.append((before.strip(), after.strip()))
+    if not pairs:
+        raise _malformed_tool_order("names no pairs")
+    return tuple(pairs)
+
+
+def _malformed_tool_order(detail: str) -> ConfigError:
+    return ConfigError(
+        f"expectations.{_TOOL_ORDER_KEY} {detail}",
+        remediation=(
+            "Write the ordering policy as a list of [before, after] tool-name "
+            'pairs, for example [["verify_identity", "issue_refund"]].'
+        ),
+    )
+
+
+def tool_order_policy_violations(
+    observed: Sequence[str], pairs: Sequence[tuple[str, str]]
+) -> tuple[str, ...]:
+    """Ordering-policy violations over tool names in execution order.
+
+    For every ``(before, after)`` pair, each call of ``after`` must be
+    preceded by at least one call of ``before``. A call that never
+    happened cannot violate the order: an agent that skipped the guarded
+    tool as well as its guard has a missing-call problem, which the
+    trajectory scorers report, not an ordering one. Empty is a pass.
+    """
+
+    violations: list[str] = []
+    for before, after in pairs:
+        seen_before = False
+        for name in observed:
+            if name == before:
+                seen_before = True
+            elif name == after and not seen_before:
+                violations.append(f"TOOL '{after}' ran before any '{before}' call")
+                break
+    return tuple(violations)
+
+
+def tool_order_violations(trace: Any, expected_order: Any) -> tuple[str, ...] | None:
+    """The trace's TOOL spans checked against an ``expected_tool_order``.
+
+    ``None`` means the row is unscorable rather than failed: the trace
+    carries no readable spans, the same skip the delegation scorer
+    returns. A readable trace with no TOOL spans is scored, and passes
+    vacuously — see :func:`tool_order_policy_violations`.
+    """
+
+    pairs = parse_tool_order(expected_order)
+    spans = _spans(trace)
+    if not spans:
+        return None
+    return tool_order_policy_violations(_ordered_tool_names(spans), pairs)
+
+
+def _ordered_tool_names(spans: Sequence[Mapping[str, Any]]) -> list[str]:
+    """TOOL span names in start order, stable for spans without a clock."""
+
+    tools = [span for span in spans if _is_tool(span)]
+    indexed = sorted(
+        enumerate(tools), key=lambda item: (_span_start_ns(item[1]), item[0])
+    )
+    return [_span_label(span) for _index, span in indexed]
+
+
+def _span_start_ns(span: Mapping[str, Any]) -> int:
+    """The span's start, in whichever field this serialization used.
+
+    MLflow v3 writes ``start_time_unix_nano``; v2 writes ``start_time``.
+    A span with neither sorts by its position in the list.
+    """
+
+    for key in ("start_time_unix_nano", "start_time"):
+        value = span.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 0
+
+
 def _span_outputs(span: Mapping[str, Any]) -> Any | None:
     """What a span returned, wherever this serialization put it.
 
