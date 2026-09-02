@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import pandas as pd
 
+from aai_core.agentkit.datasets import parse_tool_order, tool_order_policy_violations
 from aai_core.evaluation import GatePolicy, MetricDirection, MetricRule, apply_gate
 
 JsonRecord = dict[str, Any]
@@ -201,6 +202,79 @@ _TOOL_TRAJECTORY_CASES: tuple[JsonRecord, ...] = (
             },
         },
     },
+    {
+        "case_id": "right-answer-unordered-precondition",
+        "inputs": {"question": "What was fictional net debt?"},
+        "expectations": {
+            "expected_facts": ["$54.2 million", "ARS-FY25-Q2-DEBT"],
+            "expected_tool_calls": [
+                {
+                    "name": "check_source_entitlement",
+                    "arguments": {"source_id": "ARS-FY25-Q2-DEBT"},
+                },
+                {
+                    "name": "lookup_earnings_source",
+                    "arguments": {"source_id": "ARS-FY25-Q2-DEBT"},
+                },
+            ],
+            # The entitlement check exists to guard the lookup: it must
+            # start first. Same shape the registry's tool_order_policy reads.
+            "expected_tool_order": [
+                ["check_source_entitlement", "lookup_earnings_source"],
+            ],
+        },
+        "agent_decisions": [
+            {
+                "decision_type": "tool_selection",
+                "goal": "Answer from governed earnings evidence.",
+                "selected_action": "lookup_earnings_source",
+                "reason": "The question requires a governed source lookup.",
+                "evidence_refs": ["user_request"],
+                "confidence": 0.93,
+            },
+            {
+                "decision_type": "tool_selection",
+                "goal": "Confirm the caller may see the source.",
+                "selected_action": "check_source_entitlement",
+                "reason": "Entitlement was not yet confirmed for this source.",
+                "evidence_refs": ["observed_tool_results"],
+                "confidence": 0.90,
+            },
+            {
+                "decision_type": "evidence_sufficiency",
+                "goal": "Determine whether more tool evidence is needed.",
+                "selected_action": "answer",
+                "reason": (
+                    "No additional tool was selected after the observed tool result."
+                ),
+                "evidence_refs": ["provider_tool_calls", "observed_tool_results"],
+                "confidence": 0.92,
+            },
+        ],
+        "observed": {
+            "answer": "$54.2 million [source: ARS-FY25-Q2-DEBT]",
+            "tool_calls": [
+                {
+                    "name": "lookup_earnings_source",
+                    "arguments": {"source_id": "ARS-FY25-Q2-DEBT"},
+                },
+                {
+                    "name": "check_source_entitlement",
+                    "arguments": {"source_id": "ARS-FY25-Q2-DEBT"},
+                },
+            ],
+            "tool_results": [
+                {"name": "lookup_earnings_source", "status": "ok"},
+                {"name": "check_source_entitlement", "status": "ok"},
+            ],
+            "operations": {
+                "latency_ms": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "cost_usd": None,
+            },
+        },
+    },
 )
 
 
@@ -323,8 +397,14 @@ def score_tool_trajectory_case(case: Mapping[str, Any]) -> JsonRecord:
     action_consistent = bool(selected_actions) and selected == observed_actions
     action_appropriate = bool(selected_actions) and selected == expected_actions
     trajectory_exact = observed == expected
+    order_violations = tool_order_violations_for_case(case)
+    order_ok = not order_violations
     behavior_passed = (
-        action_consistent and action_appropriate and trajectory_exact and fallback_safe
+        action_consistent
+        and action_appropriate
+        and trajectory_exact
+        and fallback_safe
+        and order_ok
     )
     operations_assessment = (
         "FAIL"
@@ -345,6 +425,7 @@ def score_tool_trajectory_case(case: Mapping[str, Any]) -> JsonRecord:
         "tool_execution_succeeded": bool(tool_results)
         and all(result.get("status") == "ok" for result in tool_results),
         "safe_fallback_observed": fallback_safe,
+        "tool_order_policy": order_ok,
         "operations_evidence": operations,
         "outcome_assessment": "PASS" if outcome_passed else "FAIL",
         "behavior_assessment": "PASS" if behavior_passed else "FAIL",
@@ -352,7 +433,23 @@ def score_tool_trajectory_case(case: Mapping[str, Any]) -> JsonRecord:
         "observed_tool_failure_count": len(failed_results),
         "missing_calls": list((expected - observed).elements()),
         "unexpected_calls": list((observed - expected).elements()),
+        "order_violations": list(order_violations),
     }
+
+
+def tool_order_violations_for_case(case: Mapping[str, Any]) -> tuple[str, ...]:
+    """The case's ordering-policy violations, over observed calls in order.
+
+    A row that declares no ``expected_tool_order`` has no policy to break.
+    The check is the shared registry's: ``agentkit`` runs the same
+    function over a real trace's TOOL spans as ``tool_order_policy``.
+    """
+
+    policy = case["expectations"].get("expected_tool_order")
+    if policy is None:
+        return ()
+    observed_names = [str(call["name"]) for call in case["observed"]["tool_calls"]]
+    return tool_order_policy_violations(observed_names, parse_tool_order(policy))
 
 
 def build_tool_trajectory_reports(
@@ -378,6 +475,7 @@ def tool_trajectory_gate(report: pd.DataFrame) -> JsonRecord:
         and report["decision_tool_appropriateness"].all()
         and report["tool_trajectory_exact"].all()
         and report["safe_fallback_observed"].all()
+        and report["tool_order_policy"].all()
     )
     return {
         "measurement_source": "simulated_offline_fixture",

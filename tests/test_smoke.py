@@ -328,6 +328,8 @@ def test_advanced_notebooks_preserve_release_guardrails():
     trajectory = sources["08_tool_trajectory_evaluation.ipynb"]
     assert "right-answer-wrong-trajectory" in trajectory
     assert "correct-tool-failed-safe-fallback" in trajectory
+    assert "right-answer-unordered-precondition" in trajectory
+    assert "tool_order_policy" in trajectory
     assert "tool_trajectory_exact" in trajectory
     assert "decision_action_consistency" in trajectory
     assert "decision_tool_appropriateness" in trajectory
@@ -430,14 +432,23 @@ def test_tool_trajectory_fixture_separates_decisions_execution_and_assessment():
     wrong_path = report.loc["right-answer-wrong-trajectory"]
     safe_fallback = report.loc["correct-tool-failed-safe-fallback"]
 
-    assert len(namespace["EVAL_CASES"]) == 3
-    assert report["final_answer_correct"].tolist() == [True, True, True]
-    assert report["decision_action_consistency"].tolist() == [True, True, True]
-    assert report["decision_tool_appropriateness"].tolist() == [True, False, True]
-    assert report["tool_trajectory_exact"].tolist() == [True, False, True]
-    assert report["tool_execution_succeeded"].tolist() == [True, True, False]
-    assert report["safe_fallback_observed"].tolist() == [True, True, True]
+    wrong_order = report.loc["right-answer-unordered-precondition"]
+
+    assert len(namespace["EVAL_CASES"]) == 4
+    assert report["final_answer_correct"].tolist() == [True, True, True, True]
+    assert report["decision_action_consistency"].tolist() == [True] * 4
+    assert report["decision_tool_appropriateness"].tolist() == [
+        True,
+        False,
+        True,
+        True,
+    ]
+    assert report["tool_trajectory_exact"].tolist() == [True, False, True, True]
+    assert report["tool_execution_succeeded"].tolist() == [True, True, False, True]
+    assert report["safe_fallback_observed"].tolist() == [True, True, True, True]
+    assert report["tool_order_policy"].tolist() == [True, True, True, False]
     assert report["operations_evidence"].tolist() == [
+        "partial",
         "partial",
         "partial",
         "partial",
@@ -446,16 +457,25 @@ def test_tool_trajectory_fixture_separates_decisions_execution_and_assessment():
         "PASS",
         "PASS",
         "PASS",
+        "PASS",
     ]
     assert assurance_report["behavior_assessment"].tolist() == [
         "PASS",
         "FAIL",
         "PASS",
+        "FAIL",
     ]
     assert assurance_report["operations_assessment"].tolist() == [
         "PASS",
         "PASS",
         "FAIL",
+        "PASS",
+    ]
+    # Right answer, right multiset, wrong order: only the ordering policy sees it.
+    assert bool(wrong_order["tool_trajectory_exact"])
+    assert not bool(wrong_order["tool_order_policy"])
+    assert wrong_order["order_violations"] == [
+        "TOOL 'lookup_earnings_source' ran before any 'check_source_entitlement' call"
     ]
     assert bool(wrong_path["final_answer_correct"])
     assert bool(wrong_path["decision_action_consistency"])
@@ -495,6 +515,17 @@ def test_tool_trajectory_fixture_separates_decisions_execution_and_assessment():
             fallback_reason = case["agent_decisions"][1]["reason"]
             assert "SourceUnavailable" in fallback_reason
             assert "succeed" not in fallback_reason.lower()
+        elif case["case_id"] == "right-answer-unordered-precondition":
+            # Two selections, recorded in the order they were made: the guard
+            # was chosen second, which is the whole point of the case.
+            assert decision_types == [
+                "tool_selection",
+                "tool_selection",
+                "evidence_sufficiency",
+            ]
+            assert case["expectations"]["expected_tool_order"] == [
+                ["check_source_entitlement", "lookup_earnings_source"]
+            ]
         else:
             assert decision_types == ["tool_selection", "evidence_sufficiency"]
         assert all(value is None for value in case["observed"]["operations"].values())

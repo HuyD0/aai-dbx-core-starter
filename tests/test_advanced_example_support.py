@@ -64,9 +64,18 @@ def test_tool_assurance_helpers_preserve_layered_gate_behavior():
     cases = tool_trajectory_cases()
     report, assurance = build_tool_trajectory_reports(cases)
 
-    assert assurance["outcome_assessment"].tolist() == ["PASS", "PASS", "PASS"]
-    assert assurance["behavior_assessment"].tolist() == ["PASS", "FAIL", "PASS"]
+    assert assurance["outcome_assessment"].tolist() == ["PASS"] * 4
+    assert assurance["behavior_assessment"].tolist() == ["PASS", "FAIL", "PASS", "FAIL"]
+    assert report["tool_order_policy"].tolist() == [True, True, True, False]
     assert tool_trajectory_gate(report)["decision"] == "reject"
+
+    # The ordering policy alone can block: swap the two calls and the fourth
+    # case passes, so a fixture where only the order was wrong is exactly the
+    # case the multiset cannot distinguish from a clean one.
+    reordered_calls = deepcopy(cases[3])
+    observed_calls = reordered_calls["observed"]["tool_calls"]
+    observed_calls[0], observed_calls[1] = observed_calls[1], observed_calls[0]
+    assert score_tool_trajectory_case(reordered_calls)["tool_order_policy"] is True
 
     reordered = deepcopy(cases[2])
     events = reordered["observed"]["trajectory_events"]

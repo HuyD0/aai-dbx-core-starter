@@ -264,6 +264,51 @@ tracks:
           - Tool selection and arguments
           - Latency and provider cost
 
+      - id: smoke
+        title: Run the free gate on every commit
+        body: >
+          `agentkit` ships inside the SDK, so every generated agent project can run the
+          same evaluation loop. `smoke` scores a sample with code scorers only: seconds,
+          no cluster, no credentials, no judge spend. It is the gate for pull requests.
+        source: docs/agent-evaluation.md
+        blocks:
+          - lang: bash
+            code: agentkit smoke
+
+      - id: compare
+        title: Score the change against the last version
+        body: >
+          A score on its own is not evidence; the unit of evidence is a comparison.
+          Establish the baseline once, change something, then compare, gate and render
+          the record a reviewer can read. Which scorers run is inferred from what your
+          dataset rows contain, and the plan is printed before any judge spend.
+        source: docs/agent-evaluation.md
+        blocks:
+          - lang: bash
+            code: agentkit compare --establish-baseline
+          - lang: bash
+            code: agentkit compare
+          - lang: bash
+            code: agentkit gate
+          - lang: bash
+            code: agentkit evidence
+
+      - id: judges
+        title: Select scorers from the registry, and measure a judge before trusting it
+        body: >
+          Scorer name, judge binding, prompt version and scale are versioned platform
+          assets: a project selects scorers and sets thresholds, never redefines one.
+          Deterministic checks come first, including tool selection and the order
+          guarded tools ran in. Add an LLM judge only where semantic judgement is
+          required, and measure its agreement with reviewer labels before it gates a
+          release.
+        source: docs/agent-evaluation.md
+        blocks:
+          - lang: bash
+            code: agentkit scorers ls
+          - lang: bash
+            code: agentkit judge calibrate
+
   - id: deploy
     title: Deploy and monitor
     subtitle: Bundle validate and deploy
