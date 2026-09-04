@@ -38,6 +38,7 @@ from aai_core.contracts import thaw_value
 
 _ENDPOINT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _MODULE_PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_GENIE_SPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _HTTP_TIMEOUT_SECONDS = 60
 _AUTH_REMEDIATIONS = {
     401: "The request was not authenticated. Check the token in the "
@@ -55,6 +56,7 @@ SUPPORTED_SHAPES = (
     ),
     ("HTTP endpoint", "https://host/score  (request_mapping maps the fields)"),
     ("local callable", "src/app/example_agent.py:respond  or  pkg.module:respond"),
+    ("Genie space", "genie:/01ef2b3c...  (a Databricks AI/BI space id)"),
     ("answer sheet", "evals/data/answer_sheet.json  (recorded outputs)"),
 )
 
@@ -65,6 +67,11 @@ class TargetKind(StrEnum):
     UC_MODEL = "uc-model"
     HTTP = "http"
     LOCAL_CALLABLE = "local-callable"
+    # A managed agent: configured in the workspace, reached over the Genie
+    # Conversation API. Distinct from SERVING_ENDPOINT because the call shape,
+    # the auth path and the answer contract all differ — a Genie turn is prose
+    # plus the SQL it ran, not a chat completion.
+    GENIE_SPACE = "genie-space"
     ANSWER_SHEET = "answer-sheet"
 
 
@@ -119,6 +126,9 @@ def _prefixed_target(reference: str) -> Target | None:
     if reference.startswith(("http://", "https://")):
         normalized = _validated_http_url(reference)
         return Target(TargetKind.HTTP, normalized, normalized)
+    if reference.startswith("genie:/"):
+        normalized = _validated_genie_space(reference)
+        return Target(TargetKind.GENIE_SPACE, normalized, normalized)
     return None
 
 
@@ -176,6 +186,35 @@ def preflight_target(
             _preflight_http(target, project.config.request_mapping)
     elif target.kind is TargetKind.UC_MODEL:
         _validated_model_uri(target.normalized)
+    elif target.kind is TargetKind.GENIE_SPACE:
+        _validated_genie_space(target.normalized)
+
+
+def _validated_genie_space(reference: str) -> str:
+    """Reject a malformed Genie reference locally, before any workspace call.
+
+    A space id is opaque, so this checks only what is knowable without the
+    network: the prefix is present and what follows is a single plausible id
+    rather than a path, a URL, or an empty string. Whether the space exists and
+    whether the caller may query it are workspace answers, reported at call
+    time with a remediation — preflight performs no network operation.
+    """
+
+    space_id = reference.removeprefix("genie:/").strip()
+    if not space_id:
+        raise TargetResolutionError(
+            f"agent {reference!r} names no Genie space",
+            remediation="Use genie:/<space_id> with the id from the space URL.",
+        )
+    if not _GENIE_SPACE_ID.match(space_id):
+        raise TargetResolutionError(
+            f"agent {reference!r} does not look like a Genie space id",
+            remediation=(
+                "Pass the bare space id (genie:/01ef2b3c...), not a URL or a "
+                "workspace path. It is the last path segment of the space URL."
+            ),
+        )
+    return f"genie:/{space_id}"
 
 
 def _validated_model_uri(reference: str) -> str:
@@ -608,6 +647,8 @@ def build_predict_fn(
         call = _logical_model_call(target, project)
     elif target.kind is TargetKind.SERVING_ENDPOINT:
         call = _serving_call(target, project)
+    elif target.kind is TargetKind.GENIE_SPACE:
+        call = _genie_call(target, project)
     else:
         call = _uc_model_call(target, mlflow)
 
@@ -909,6 +950,118 @@ def _serving_call(
         return completion.choices[0].message.content
 
     return call
+
+
+# A Genie turn is prose plus the SQL it ran; capping the rows keeps one row of
+# an eval set from dragging a whole result table into the trace and the judges.
+GENIE_MAX_RESULT_ROWS = 100
+
+
+def _genie_call(
+    target: Target, project: ProjectContext
+) -> Callable[[Mapping[str, Any]], Any]:
+    """Call a Genie space and return the structured text-to-SQL answer.
+
+    The answer is a mapping rather than a string because a text-to-SQL answer
+    is not just its prose: the statement and the rows are what make the prose
+    checkable. ``response`` is a recognised text field, so every existing
+    scorer reads the prose unchanged, while ``generated_sql`` is what the
+    ``sql_read_only`` and ``sql_claim_scope`` registry scorers grade.
+    """
+
+    space_id = target.normalized.removeprefix("genie:/")
+    try:
+        from databricks.sdk import WorkspaceClient
+    except ImportError as error:
+        raise missing_extra(
+            f"Calling the Genie space {space_id!r}", "databricks"
+        ) from error
+
+    try:
+        client = WorkspaceClient()
+    except Exception as error:
+        raise TargetResolutionError(
+            f"could not create a workspace client for Genie space "
+            f"{space_id!r}: {error}",
+            remediation="Authenticate to the workspace first (`az login` "
+            "with DATABRICKS_AUTH_TYPE=azure-cli, or the Databricks CLI "
+            "profile the platform documents).",
+        ) from error
+
+    def call(inputs: Mapping[str, Any]) -> Any:
+        question = _primary_text(inputs, target)
+        try:
+            # A fresh conversation per row: an evaluation row must not depend
+            # on the row before it.
+            message = client.genie.start_conversation_and_wait(space_id, question)
+        except Exception as error:
+            raise TargetInvocationError(
+                f"Genie space {space_id!r} call failed: {error}",
+                remediation="Check the space id and that your identity holds "
+                "CAN RUN on the space and access to its warehouse and tables.",
+            ) from error
+        return _genie_answer(client, space_id, message)
+
+    return call
+
+
+def _genie_answer(client: Any, space_id: str, message: Any) -> dict[str, Any]:
+    """Flatten a Genie message into the structured answer the scorers read."""
+
+    prose: list[str] = []
+    sql = ""
+    rows: list[list[str]] = []
+    truncated = False
+
+    for attachment in getattr(message, "attachments", None) or []:
+        text = getattr(attachment, "text", None)
+        content = getattr(text, "content", None) if text is not None else None
+        if content:
+            prose.append(str(content))
+        query = getattr(attachment, "query", None)
+        if query is None:
+            continue
+        sql = str(getattr(query, "query", "") or "") or sql
+        metadata = getattr(query, "query_result_metadata", None)
+        if metadata is not None and getattr(metadata, "is_truncated", None):
+            truncated = True
+        attachment_id = getattr(attachment, "attachment_id", None)
+        if not attachment_id:
+            continue
+        try:
+            result = client.genie.get_message_attachment_query_result(
+                space_id,
+                message.conversation_id,
+                message.message_id,
+                attachment_id,
+            )
+        except Exception:
+            # An expired or unavailable result must not lose the prose and SQL
+            # already in hand: those are still scorable, and a turn reported
+            # with no rows is more useful than no turn at all.
+            continue
+        statement = getattr(result, "statement_response", None)
+        data = list(
+            getattr(getattr(statement, "result", None), "data_array", None) or []
+        )
+        manifest = getattr(statement, "manifest", None)
+        truncated = truncated or bool(getattr(manifest, "truncated", False))
+        if len(data) > GENIE_MAX_RESULT_ROWS:
+            # Our own cap is a truncation too, and the scorers judge the rows
+            # actually seen — reporting it keeps an exhaustive claim honest.
+            data = data[:GENIE_MAX_RESULT_ROWS]
+            truncated = True
+        if data:
+            rows = data
+
+    error = getattr(message, "error", None)
+    return {
+        "response": "\n".join(prose),
+        "generated_sql": sql,
+        "query_result": rows,
+        "truncated": truncated,
+        "error": str(getattr(error, "error", None) or error) if error else None,
+    }
 
 
 def _uc_model_call(target: Target, mlflow: Any) -> Callable[[Mapping[str, Any]], Any]:

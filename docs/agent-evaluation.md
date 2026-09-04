@@ -720,6 +720,81 @@ its gate passes on the first run. Edit `src/app/example_agent.py`, run
 `agentkit compare` again, and watch the numbers move — that loop is the thing
 worth learning.
 
+## Grading an agent you did not build
+
+Most of this guide assumes you own the agent: you can change the prompt, swap the
+retriever, read the spans. A **managed** agent — a Databricks AI/BI Genie space,
+a vendor assistant — breaks that assumption. You configure it and it answers.
+There is no prompt to version and no chain to trace into, and for a text-to-SQL
+agent the entire observable surface is one tuple: the question, the SQL it wrote,
+the rows it got back, and the prose it wrote about them.
+
+That is less than you would have for your own agent, and it is enough, because
+the failure that matters is not an exception. It is a **clean, well-formatted,
+wrong answer**: the SQL parses, the warehouse runs it, the paragraph reads like
+an analyst wrote it, and the number is not the one that was asked for. Nothing
+raises. Only scoring catches it.
+
+A Genie space is a target shape like any other:
+
+```yaml
+# agentkit.yaml
+version: 1
+agent: genie:/01ef2b3c4d5e        # the space id from the space URL
+dataset: evals/data/questions.jsonl
+scorers:
+  add: [sql_read_only, sql_claim_scope]
+thresholds:
+  correctness: ">=0.8"
+```
+
+```bash
+agentkit compare --agent genie:/01ef2b3c4d5e
+```
+
+The comparison, baseline, statistics, integrity checks, evidence record and exit
+codes are the ones described above — a managed agent is comparable with the
+agents you build, on one scale, in one experiment. Calling a space needs the
+`databricks` extra and `CAN RUN` on the space; resolution, preflight, scorer
+selection and the gate all work without either, so credential-free CI still
+covers every path that decides anything.
+
+The answer a Genie target returns is a mapping, not a string, because a
+text-to-SQL answer is not just its prose:
+
+```python
+{"response": "...", "generated_sql": "...", "query_result": [[...]],
+ "truncated": False, "error": None}
+```
+
+`response` is a recognised text field, so the prose scorers above read it
+unchanged. The statement is what the two text-to-SQL registry scorers grade:
+
+- **`sql_read_only`** — any SQL the answer shows is a single read-only statement.
+  An analytics agent pointed at a warehouse it can write to is a governance
+  defect visible nowhere else; the prose will not mention it and nothing will
+  error. Gates at `>=1.0` by default.
+- **`sql_claim_scope`** — a trend claim in the prose is backed by SQL that
+  filters or groups on time. "Revenue grew" over a query with no time predicate
+  asserts a comparison the query never made. **Reports by default**, with no
+  threshold: the trigger is a heuristic over prose, so calibrate on your own
+  answers before gating.
+
+Both are code, not judges — whether a statement scopes to time is a fact the SQL
+records — so they cost nothing to run and belong in `smoke` as much as in a full
+suite. Neither is auto-selected: they are meaningless for an agent that never
+writes SQL, so a project opts in through `scorers.add`.
+
+**Use the platform's own evaluation too.** A Genie space has native benchmark
+eval runs that score curated questions correct/incorrect inside the workspace.
+That is the better tool for "is my space still right on my curated questions",
+and it needs no harness. What it does not give you is dimension-level scores with
+rationales, domain rules expressed as gate-able floors, or comparability with
+every other agent you evaluate. Treat them as complementary.
+
+Rationale, and what this deliberately does not do, is in
+`docs/decisions/2026-09-04-genie-is-an-evaluation-target.md`.
+
 ## Escape hatches
 
 This toolkit wraps ceremony, not capability. Underneath it is ordinary
