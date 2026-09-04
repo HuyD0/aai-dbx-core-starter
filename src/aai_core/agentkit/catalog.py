@@ -30,6 +30,8 @@ from aai_core.scorers import (
     keyword_coverage,
     refusal_compliance,
     response_length_ok,
+    sql_claim_scope,
+    sql_read_only,
 )
 
 if TYPE_CHECKING:  # circular-free: config validates names against this module
@@ -271,6 +273,29 @@ CATALOG: tuple[ScorerSpec, ...] = (
         needs_expectations=("expected_tool_order",),
         needs_trace=TraceNeed.TOOLS,
         default_threshold=">=1.0",
+        judge_overhead_tokens=0,
+    ),
+    ScorerSpec(
+        name="sql_read_only",
+        version=1,
+        kind=ScorerKind.CODE,
+        summary=("Code: any SQL the answer shows is a single read-only statement."),
+        metric="sql_read_only/mean",
+        default_threshold=">=1.0",
+        judge_overhead_tokens=0,
+    ),
+    ScorerSpec(
+        name="sql_claim_scope",
+        version=1,
+        kind=ScorerKind.CODE,
+        summary=(
+            "Code: a trend claim is backed by SQL that filters or groups on time."
+        ),
+        metric="sql_claim_scope/mean",
+        # No default threshold: the trend-language trigger is a heuristic over
+        # prose, so it reports until a project has calibrated it on its own
+        # answers. Omitting the key is how this registry says "measure, do not
+        # gate, yet".
         judge_overhead_tokens=0,
     ),
     ScorerSpec(
@@ -819,6 +844,16 @@ def render_plan(plan: ScorerPlan, *, judge_model_uri: str | None = None) -> str:
 
 CodeScorer = Callable[[Any, dict[Any, Any] | None], float]
 
+# Text-to-SQL integrity scorers. Kept OUT of CODE_SCORER_FUNCTIONS on purpose:
+# score_all hands its scorers extracted answer text, which discards the
+# structured SQL field these read, and computing them for every project would
+# report a vacuous 1.0 for agents that never write SQL.
+_SQL_SCORER_FUNCTIONS: Mapping[str, CodeScorer] = {
+    "sql_read_only": sql_read_only,
+    "sql_claim_scope": sql_claim_scope,
+}
+
+
 CODE_SCORER_FUNCTIONS: Mapping[str, CodeScorer] = {
     "keyword_coverage": keyword_coverage,
     "refusal_compliance": refusal_compliance,
@@ -891,6 +926,26 @@ def build_scorer(
     return _build_prompt_judge(spec, mlflow, judge_model_uri, prompt_loader)
 
 
+def _build_sql_scorer(spec: ScorerSpec, scorer_decorator: Any) -> Any:
+    """Wrap a text-to-SQL integrity scorer for MLflow.
+
+    Extracted from :func:`_build_code_scorer` to keep that dispatcher under the
+    complexity limit, and because these scorers differ from the generic code
+    path in one load-bearing way: they read the RAW output rather than extracted
+    answer text. On a text-to-SQL answer the statement lives in its own field,
+    which the tier-1 text extraction in :func:`score_all` discards — which is
+    also why these two stay out of ``CODE_SCORER_FUNCTIONS``.
+    """
+
+    implementation = _SQL_SCORER_FUNCTIONS[spec.name]
+
+    @scorer_decorator(name=spec.name)
+    def sql_scorer(outputs: Any = None) -> float:
+        return implementation(outputs, None)
+
+    return sql_scorer
+
+
 def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
     # The inner return is Any-shaped because a code scorer may return a
     # float or the empty feedback list that marks a row unscorable.
@@ -955,6 +1010,9 @@ def _build_code_scorer(spec: ScorerSpec, mlflow: Any) -> Any:
             return float(duration_ms) / 1000.0
 
         return latency_scorer
+
+    if spec.name in _SQL_SCORER_FUNCTIONS:
+        return _build_sql_scorer(spec, scorer_decorator)
 
     function = CODE_SCORER_FUNCTIONS[spec.name]
 

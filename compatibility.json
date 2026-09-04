@@ -155,6 +155,11 @@
       "support": "preview",
       "owner": "aai-core",
       "note": "agentkit CLI: comparison-first evaluation, shared scorer registry, promotion gate"
+    },
+    "managed_agent_evaluation": {
+      "support": "preview",
+      "owner": "aai-core",
+      "note": "Genie spaces are an agentkit target shape (genie:/<space_id>) graded by the existing comparison, gate and evidence machinery; sql_read_only and sql_claim_scope are registry code scorers. Calling a space needs the databricks extra; resolution, preflight and gating do not."
     }
   }
 }
